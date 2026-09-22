@@ -56,7 +56,7 @@ fn provider(
                 config.clone(),
                 worker_type.as_str(),
                 filters,
-                vec![Box::new(ActiveRequestsScorer::default())],
+                vec![Box::new(ActiveRequestsScorer)],
                 Box::new(RequestAwarePicker),
             )
         },

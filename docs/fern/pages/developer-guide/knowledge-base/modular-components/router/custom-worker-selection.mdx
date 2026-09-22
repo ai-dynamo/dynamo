@@ -152,26 +152,7 @@ use dynamo_kv_router::plugins::worker_selection::{
 };
 
 /// Scores active requests above the least-loaded surviving candidate.
-#[derive(Default)]
-struct ActiveRequestsScorer {
-    minimum: usize,
-}
-impl ActiveRequestsScorer {
-    fn prepare(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        candidates: WorkerCandidates<'_>,
-    ) -> Result<(), WorkerSelectionPolicyError> {
-        self.minimum = usize::MAX;
-        for candidate in candidates.iter() {
-            let load = candidate
-                .load()
-                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-            self.minimum = self.minimum.min(load.active_requests());
-        }
-        Ok(())
-    }
-}
+struct ActiveRequestsScorer;
 
 impl WorkerScorer for ActiveRequestsScorer {
     /// Requests load inputs for the active-request count.
@@ -179,26 +160,32 @@ impl WorkerScorer for ActiveRequestsScorer {
         WorkerInputs::LOAD
     }
 
-    /// Prepare the batch minimum and write one relative load cost per worker.
+    /// Find the batch minimum and write one relative load cost per worker.
     fn score(
         &mut self,
-        context: &WorkerSelectionContext<'_>,
+        _context: &WorkerSelectionContext<'_>,
         candidates: WorkerCandidates<'_>,
         costs: &mut [f64],
     ) -> Result<(), WorkerSelectionPolicyError> {
-        self.prepare(context, candidates)?;
+        let mut minimum = usize::MAX;
+        for candidate in candidates.iter() {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
+            minimum = minimum.min(load.active_requests());
+        }
         for (candidate, cost) in candidates.iter().zip(costs) {
             let load = candidate
                 .load()
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-            *cost = (load.active_requests() - self.minimum) as f64;
+            *cost = (load.active_requests() - minimum) as f64;
         }
         Ok(())
     }
 }
 ```
 
-Dynamo calls `score` once per scorer after filtering. The `WorkerCandidates` view borrows a fixed request snapshot; its order is unspecified and it cannot be retained. Use `iter()` to visit workers, `get(row)` to read one worker, and `len()` or `is_empty()` to inspect the batch. Each returned `WorkerCandidate` borrows the stored row and exposes only that scorer's declared inputs. Creating the view does not copy the worker table. The output slice has the same length and starts with NaN in every slot. Write every cost; an unwritten slot or a non-finite contribution or total stops selection before picking or booking. Empty sets skip scoring. Any preparation helper belongs to the scorer implementation and runs inside its `score` call.
+Dynamo calls `score` once per scorer after filtering. The `WorkerCandidates` view borrows a fixed request snapshot; its order is unspecified and it cannot be retained. Use `iter()` to visit workers, `get(row)` to read one worker, and `len()` or `is_empty()` to inspect the batch. Each returned `WorkerCandidate` borrows the stored row and exposes only that scorer's declared inputs. Creating the view does not copy the worker table. The output slice has the same length and starts with NaN in every slot. Write every cost; an unwritten slot or a non-finite contribution or total stops selection before picking or booking. Empty sets skip scoring. Compute request-wide values, such as the minimum load, inside `score` before filling the output slice.
 
 A policy can stack multiple scorers. Dynamo calls them in declaration order and adds their costs. Dynamo rejects a non-finite contribution or total.
 
@@ -270,7 +257,7 @@ fn provider(
         let filters: Vec<Box<dyn WorkerFilter>> = vec![
             Box::new(MinimumDeviceOverlapFilter { minimum_blocks }),
         ];
-        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer::default())];
+        let scorers: Vec<Box<dyn WorkerScorer>> = vec![Box::new(ActiveRequestsScorer)];
         WorkerSelectionPolicy::new_with_filters(
             config.clone(),
             worker_type.as_str(),
@@ -668,6 +655,6 @@ The provider also accepts `overlap_score_credit_decay`, `decode_active_request_w
 
 `WorkerCacheInput::accounting_cache_estimate()` returns the host's weighted block estimate and rounded token estimate. Missing estimates are zero. These estimates are not clamped to prompt length and do not measure physical GPU residency. The plugin can use them without changing the load that the host records. `WorkerLoadInput::is_available()` distinguishes a missing load observation from an observed idle worker. Both values describe the current selection snapshot.
 
-The default scorer owns the cache and load formula, including preferred-taint costs. Its private `prepare` helper finds the minimum prefill load used to reduce cache credit on busier workers. The picker reads only the final costs and owns temperature sampling and tie-breaking. The host checks scorer costs and the selected row before booking; diagnostics use the selected row's summed scorer cost. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
+The default scorer owns the cache and load formula, including preferred-taint costs. Inside `score`, it finds the minimum prefill load used to reduce cache credit on busier workers. The picker reads only the final costs and owns temperature sampling and tie-breaking. The host checks scorer costs and the selected row before booking; diagnostics use the selected row's summed scorer cost. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
 
-Preparation reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.
+Scoring reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.

@@ -31,7 +31,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
-The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap, receives all surviving workers in one `score` call, and scores active requests above the least-loaded worker. A private preparation helper computes the minimum from that batch. The scorer writes one finite contribution per row into the host-owned output slice. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap, receives all surviving workers in one `score` call, and scores active requests above the least-loaded worker. The scorer computes the minimum inside `score` and keeps it local to that call. The scorer writes one finite contribution per row into the host-owned output slice. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 
@@ -110,7 +110,7 @@ fn provider(
             config.clone(),
             worker_type.as_str(),
             filters,
-            vec![Box::new(ActiveRequestsScorer::default())],
+            vec![Box::new(ActiveRequestsScorer)],
             Box::new(RequestAwarePicker),
         )
     }))
