@@ -11,14 +11,14 @@ generic Dynamo frontend
      ▼
 bespoke orchestrator worker
      ├── inline VisionEncoderBackend
-     ├── CPU/MsgPack encoder_result
+     ├── ExternalEncoderHandoff
      └── LLMUnaryClient
                  │
                  ▼
        stock aggregated dynamo.vllm
 ```
 
-The encoder remains transport-agnostic. The orchestrator concatenates its ordered CPU tensors, calls `encode_request_plane_tensor`, adds the versioned result to `GenerateRequest.encoder_result`, and removes the raw media fields before invoking vLLM. The remote vLLM endpoint streams token chunks internally; `LLMUnaryClient.complete()` folds them into the single terminal result returned by the orchestrator.
+The encoder remains transport-agnostic: users implement only `VisionEncoderBackend`. Dynamo's `ExternalEncoderHandoff` drives that backend, extracts image inputs, packages its ordered CPU tensors into the versioned `GenerateRequest.encoder_result`, and removes source-side multimodal fields before invoking vLLM. The application orchestrator only selects the generator model and forwards the prepared request. The remote vLLM endpoint streams token chunks internally; `LLMUnaryClient.complete()` folds them into the single terminal result returned by the orchestrator.
 
 The initial handoff supports contiguous two-dimensional CPU `bfloat16`, `float16`, and `float32` linear embeddings. It requires a text-only aggregated generator configured with `--enable-prompt-embeds`. The payload travels through the ordinary MsgPack request plane; it does not use NIXL.
 

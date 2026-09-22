@@ -11,11 +11,10 @@ from dynamo.experimental.endpoint import serve_unary_endpoint
 from dynamo.experimental.llm import LLMUnaryClient
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.vllm.multimodal_utils.custom_encoder import ExternalEncoderHandoff
 
 from .config import RemoteEncoderConfig
-from .encoder import InlineEncoder
 from .orchestrator import ExternalEncoderOrchestrator
-from .request import EncoderResultRequestBuilder
 
 
 @dynamo_worker()
@@ -28,8 +27,12 @@ async def worker(runtime: DistributedRuntime) -> None:
     await generator_client.wait_for_instances()
 
     backend_class = config.resolve_backend_class()
-    encoder = InlineEncoder.from_backend(backend_class(), model=config.model)
+    handoff = ExternalEncoderHandoff(
+        backend_class(),
+        name="remote-custom-encoder",
+    )
     try:
+        handoff.load(config.model)
         endpoint = runtime.endpoint(config.orchestrator_endpoint)
         await register_model(
             ModelInput.Tokens,
@@ -42,14 +45,13 @@ async def worker(runtime: DistributedRuntime) -> None:
             ignore_weights=True,
         )
         orchestrator = ExternalEncoderOrchestrator(
-            encoder,
+            handoff,
             LLMUnaryClient(generator_client),
             config.generator_model_name,
-            EncoderResultRequestBuilder(),
         )
         await serve_unary_endpoint(endpoint, orchestrator)
     finally:
-        encoder.close()
+        handoff.shutdown()
 
 
 def main() -> None:
