@@ -4,6 +4,7 @@
 //! HTTP regressions for validation performed by protocol adapters.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_llm::{
     discovery::UNKNOWN_METRIC_MODEL,
@@ -44,13 +45,20 @@ fn nvext_disabled_env() -> Vec<(&'static str, Option<&'static str>)> {
     env
 }
 
-async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
-    svc.client
-        .post(format!("{}{path}", svc.base_url))
-        .json(&body)
-        .send()
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn bounded<F: std::future::Future>(future: F) -> F::Output {
+    tokio::time::timeout(HTTP_TIMEOUT, future)
         .await
-        .unwrap()
+        .expect("HTTP operation exceeded HTTP_TIMEOUT")
+}
+
+async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Response {
+    let request = svc
+        .client
+        .post(format!("{}{path}", svc.base_url))
+        .json(&body);
+    bounded(request.send()).await.unwrap()
 }
 
 #[derive(Clone, Copy)]
@@ -361,7 +369,7 @@ async fn strict_tool_schema_rejected_before_dispatch() {
                     body["tool_choice"] = choice;
                     let response = post_json(&svc, path, body).await;
                     assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-                    let error: Value = response.json().await.unwrap();
+                    let error: Value = bounded(response.json()).await.unwrap();
                     assert_eq!(error["code"], 400);
                     assert_eq!(error["type"], "Bad Request");
                     let message = error["message"].as_str().unwrap();
@@ -416,7 +424,7 @@ async fn strict_tool_schema_acceptance_preserves_submitted_functions() {
                     body["stream"] = json!(stream);
                     let response = post_json(&svc, path, body).await;
                     assert_eq!(response.status(), reqwest::StatusCode::OK);
-                    response.bytes().await.unwrap();
+                    bounded(response.bytes()).await.unwrap();
                     let requests = svc.engine.take_requests().await;
                     assert_eq!(requests.len(), 1);
                     let tools = requests[0].inner.tools.as_ref().unwrap();
