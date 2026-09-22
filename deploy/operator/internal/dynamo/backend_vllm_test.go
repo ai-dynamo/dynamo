@@ -1094,7 +1094,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			role:          RoleWorker,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 				}},
 			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
@@ -1230,7 +1230,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			role:          RoleWorker,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 				}},
 			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
@@ -1252,7 +1252,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			role:          RoleWorker,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.4.0",
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
 				}},
 			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
@@ -1272,7 +1272,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			role:          RoleWorker,
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
-					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 				}},
 			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
