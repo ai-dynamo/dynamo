@@ -13,7 +13,7 @@ Use this path for aggregated serving through `dynamo.frontend`. It requires a Dy
 
 Custom catalogs that already register `thunderagent` must remove that registration; duplicate type names fail startup.
 
-Save the following as `thunderagent.yaml`, or use the [example configuration](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/thunderagent.yaml):
+Save the following as `thunderagent.yaml`:
 
 ```yaml
 request_classifier:
