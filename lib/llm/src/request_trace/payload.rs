@@ -41,8 +41,7 @@ pub fn capture_http_headers(headers: &HeaderMap) -> Option<BTreeMap<String, Stri
     )
 }
 
-/// True when `entry` ends in `*`, which is the one form that cannot be resolved by a
-/// direct name lookup.
+/// The one entry form that cannot be resolved by a direct name lookup.
 fn is_prefix_pattern(entry: &str) -> bool {
     entry.len() > 1 && entry.ends_with('*')
 }
@@ -75,7 +74,6 @@ fn denied(deny_list: &[String], name: &str) -> bool {
         .any(|entry| is_star_sentinel(entry) || entry_matches(entry, name))
 }
 
-/// Comma-join the non-empty values recorded under `name`.
 fn joined_values(headers: &HeaderMap, name: &str) -> Option<String> {
     let joined = headers
         .get_all(name)
@@ -109,7 +107,6 @@ fn capture_http_headers_with_lists(
             }
         }
     } else {
-        // Every entry is a literal name, so keep the direct per-entry lookup.
         for name in capture_list {
             if denied(deny_list, name) {
                 continue;
