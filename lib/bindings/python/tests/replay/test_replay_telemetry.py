@@ -85,9 +85,7 @@ def test_telemetry_capture_callback_and_jsonl_share_one_sample_stream(
     assert callback_samples == samples
     assert [json.loads(line) for line in jsonl_path.read_text().splitlines()] == samples
     assert samples[0]["kind"] == "baseline"
-    assert [sample["sample_ordinal"] for sample in samples] == list(
-        range(len(samples))
-    )
+    assert [sample["sample_ordinal"] for sample in samples] == list(range(len(samples)))
     assert sum(sample["traffic"]["arriving_requests"] for sample in samples) == 6
     assert sum(sample["traffic"]["completed_requests"] for sample in samples) == 6
 
@@ -152,9 +150,7 @@ def test_callback_and_jsonl_only_do_not_retain_telemetry(tmp_path):
     lines = jsonl_path.read_text().splitlines()
     assert lines
     samples = [json.loads(line) for line in lines]
-    assert [sample["sample_ordinal"] for sample in samples] == list(
-        range(len(samples))
-    )
+    assert [sample["sample_ordinal"] for sample in samples] == list(range(len(samples)))
     assert jsonl_result.telemetry is None
 
 
@@ -343,9 +339,7 @@ def test_native_rejects_report_alias_of_input_without_telemetry(tmp_path):
 
 
 @pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
-def test_callback_cannot_redirect_telemetry_sink_into_input_trace(
-    tmp_path, alias_kind
-):
+def test_callback_cannot_redirect_telemetry_sink_into_input_trace(tmp_path, alias_kind):
     trace_path = _write_multiturn_trace(tmp_path)
     original = trace_path.read_text()
     telemetry = tmp_path / "telemetry.jsonl"

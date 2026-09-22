@@ -217,12 +217,16 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
         goal={"target": "throughput"},
     )
 
-    report = simulation.DynamoReplayRunnerFactory().create(2).run(
-        spec,
-        output_requirements=ReplayOutputRequirements(
-            capture_telemetry=True,
-            telemetry_sample_interval_ms=2_500.0,
-        ),
+    report = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(2)
+        .run(
+            spec,
+            output_requirements=ReplayOutputRequirements(
+                capture_telemetry=True,
+                telemetry_sample_interval_ms=2_500.0,
+            ),
+        )
     )
 
     assert seen["capture_telemetry"] is True
