@@ -372,6 +372,26 @@ mod tests {
             worker(B),
             "an absent target falls back to normal two-tier selection"
         );
+
+        let rank_sensitive_workers = [(A, 0, 0), (B, 0, 4)];
+        assert_eq!(
+            select_with(
+                respecting,
+                rank_sensitive_workers,
+                Some(WorkerAffinityTarget::new(B, Some(0))),
+            ),
+            worker(B),
+            "a matching rank-specific target is retained"
+        );
+        assert_eq!(
+            select_with(
+                respecting,
+                rank_sensitive_workers,
+                Some(WorkerAffinityTarget::new(B, Some(1))),
+            ),
+            worker(A),
+            "a missing target rank falls back instead of retaining another rank"
+        );
     }
 
     #[test]
