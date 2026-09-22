@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Extract image URLs and build sanitized decoder requests."""
+"""Extract image URLs and build sanitized generator requests."""
 
 from __future__ import annotations
 
@@ -71,14 +71,14 @@ class ImageUrlExtractor:
 
 
 class EncoderResultRequestBuilder:
-    """Produce a decoder request from an encoder result and the original request."""
+    """Produce a generator request from an encoder result and the original request."""
 
     def build(
         self,
         request_value: Mapping[str, Any],
         encoder_result: Mapping[str, Any],
         *,
-        decoder_model_name: str,
+        generator_model_name: str,
     ) -> GenerateRequest:
         """Return a sanitized GenerateRequest with encoder_result set."""
 
@@ -91,7 +91,7 @@ class EncoderResultRequestBuilder:
             )
 
         request["encoder_result"] = dict(encoder_result)
-        request["model"] = decoder_model_name
+        request["model"] = generator_model_name
         for field_name in _RAW_MULTIMODAL_FIELDS:
             request.pop(field_name, None)
 

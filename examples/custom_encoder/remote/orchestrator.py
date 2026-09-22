@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coordinate a local encoder with a remote decoder."""
+"""Coordinate a local encoder with a remote generator."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class Encoder(Protocol):
         ...
 
 
-class DecoderClient(Protocol):
+class GeneratorClient(Protocol):
     async def complete(
         self,
         request: Mapping[str, Any],
@@ -32,15 +32,15 @@ class ExternalEncoderOrchestrator:
     def __init__(
         self,
         encoder: Encoder,
-        decoder: DecoderClient,
-        decoder_model_name: str,
+        generator: GeneratorClient,
+        generator_model_name: str,
         request_builder: EncoderResultRequestBuilder | None = None,
     ) -> None:
-        if not decoder_model_name:
-            raise ValueError("decoder_model_name must not be empty")
+        if not generator_model_name:
+            raise ValueError("generator_model_name must not be empty")
         self._encoder = encoder
-        self._decoder = decoder
-        self._decoder_model_name = decoder_model_name
+        self._generator = generator
+        self._generator_model_name = generator_model_name
         self._request_builder = request_builder or EncoderResultRequestBuilder()
 
     async def __call__(
@@ -50,9 +50,9 @@ class ExternalEncoderOrchestrator:
         context: Any,
     ) -> dict[str, Any]:
         encoder_result = await self._encoder.encode(request)
-        decoder_request = self._request_builder.build(
+        generator_request = self._request_builder.build(
             request,
             encoder_result,
-            decoder_model_name=self._decoder_model_name,
+            generator_model_name=self._generator_model_name,
         )
-        return await self._decoder.complete(decoder_request, context=context)
+        return await self._generator.complete(generator_request, context=context)
