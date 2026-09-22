@@ -572,7 +572,6 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 		image       string
 		args        []string
 		env         []corev1.EnvVar
-		envFrom     []corev1.EnvFromSource
 		wantPayload string
 		wantEnv     bool
 		wantSourced bool
@@ -625,20 +624,7 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 					Key:                  "embedding-worker",
 				}},
 			}},
-			wantErr: sglangEmbeddingWorkerEnv + " may be supplied through valueFrom or envFrom",
-		},
-		{
-			name:    "embedding worker envFrom requires explicit payload",
-			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}},
-			wantErr: sglangEmbeddingWorkerEnv + " may be supplied through valueFrom or envFrom",
-		},
-		{
-			name:    "payload envFrom is not shadowed",
-			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:    []string{sglangEmbeddingWorkerFlag},
-			envFrom: []corev1.EnvFromSource{{SecretRef: &corev1.SecretEnvSource{}}},
-			wantErr: healthCheckPayloadEnv + " may be supplied through envFrom",
+			wantErr: sglangEmbeddingWorkerEnv + " is supplied through valueFrom",
 		},
 		{
 			name:  "explicit sourced payload resolves unknown embedding mode",
@@ -674,18 +660,12 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 				}},
 			}},
 		},
-		{
-			name:    "negative CLI flag resolves unknown envFrom mode",
-			image:   "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:    []string{sglangNoEmbeddingWorkerFlag},
-			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{}}},
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("apply the SGLang container compatibility settings")
-			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env, EnvFrom: tt.envFrom}
+			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env}
 			err := backend.UpdateContainer(
 				container,
 				1,

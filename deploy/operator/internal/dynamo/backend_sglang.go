@@ -61,19 +61,13 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		!sglangHealthCheckPayloadConfigured(container) {
 		switch sglangEmbeddingWorkerModeForContainer(container) {
 		case sglangEmbeddingWorkerEnabled:
-			if envFromMayDefine(container.EnvFrom, healthCheckPayloadEnv) {
-				return fmt.Errorf(
-					"%s may be supplied through envFrom, so the operator cannot inject the Dynamo 1.5.0 embedding payload without shadowing a user override; set %s explicitly in env or %s in args",
-					healthCheckPayloadEnv, healthCheckPayloadEnv, healthCheckPayloadFlag)
-			}
-
 			container.Env = append(container.Env, corev1.EnvVar{
 				Name:  healthCheckPayloadEnv,
 				Value: sglang15EmbeddingHealthCheckPayload,
 			})
 		case sglangEmbeddingWorkerUnknown:
 			return fmt.Errorf(
-				"%s may be supplied through valueFrom or envFrom, so the operator cannot determine whether this Dynamo 1.5.0 worker needs the embedding health-check payload; set %s explicitly in env or %s in args, or configure %s as a literal env value or CLI flag",
+				"%s is supplied through valueFrom, so the operator cannot determine whether this Dynamo 1.5.0 worker needs the embedding health-check payload; set %s explicitly in env or %s in args, or configure %s as a literal env value or CLI flag",
 				sglangEmbeddingWorkerEnv, healthCheckPayloadEnv, healthCheckPayloadFlag, sglangEmbeddingWorkerEnv)
 		}
 	}
@@ -124,8 +118,6 @@ func sglangEmbeddingWorkerModeForContainer(container *corev1.Container) sglangEm
 				mode = sglangEmbeddingWorkerEnabled
 			}
 		}
-	} else if envFromMayDefine(container.EnvFrom, sglangEmbeddingWorkerEnv) {
-		mode = sglangEmbeddingWorkerUnknown
 	}
 
 	// CLI flags override the environment-derived default in their original order.
@@ -141,7 +133,6 @@ func sglangEmbeddingWorkerModeForContainer(container *corev1.Container) sglangEm
 	return mode
 }
 
-// sglangHealthCheckPayloadConfigured reports whether an explicit env entry or CLI flag already owns the payload.
 func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {
 	if findEnvVar(container.Env, healthCheckPayloadEnv) != nil {
 		return true
@@ -150,17 +141,6 @@ func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {
 	// Argparse accepts the payload in both separated and --flag=value forms.
 	for _, arg := range getExpandedCommandLine(container) {
 		if arg == healthCheckPayloadFlag || strings.HasPrefix(arg, healthCheckPayloadFlag+"=") {
-			return true
-		}
-	}
-
-	return false
-}
-
-// envFromMayDefine reports whether a source prefix can produce the requested environment variable name.
-func envFromMayDefine(envFrom []corev1.EnvFromSource, name string) bool {
-	for _, source := range envFrom {
-		if strings.HasPrefix(name, source.Prefix) {
 			return true
 		}
 	}
