@@ -109,7 +109,7 @@ spec:
           resources:
             claims:
               - name: intel-gpu-rdma-resource
-    VllmDecodeWorker:
+    decode:
       componentType: worker
       envFromSecret: hf-token-secret
       replicas: 1

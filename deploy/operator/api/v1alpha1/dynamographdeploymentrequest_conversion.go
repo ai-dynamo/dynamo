@@ -31,8 +31,9 @@
 //     v1beta1 Overrides.ProfilingJob pod fields.
 //   - v1alpha1-only spec fields are saved sparsely in annDGDRSpec.
 //   - v1beta1-only spec fields such as Hardware, Workload Concurrency/RequestRate,
-//     SLA E2ELatency, Overrides.DGD, hub-only ProfilingJob leaves, disabled Mocker,
-//     KVRouter, and SearchStrategy are saved sparsely in annDGDRSpec.
+//     SLA E2ELatency, Overrides.DGD, Overrides.TrustRemoteCode, hub-only
+//     ProfilingJob leaves, disabled Mocker, KVRouter, and SearchStrategy are
+//     saved sparsely in annDGDRSpec.
 //
 // Status follows the same rules: common fields are converted from live source,
 // while alpha-only status and hub-only status such as ProfilingPhase,
@@ -755,6 +756,7 @@ func saveDGDRHubOnlyOverrides(src *v1beta1.OverridesSpec, save *v1beta1.DynamoGr
 	if src.DGD != nil {
 		overrides.DGD = src.DGD.DeepCopy()
 	}
+	overrides.TrustRemoteCode = src.TrustRemoteCode
 	if profilingJob := dgdrHubOnlyProfilingJob(src.ProfilingJob); profilingJob != nil {
 		overrides.ProfilingJob = profilingJob
 	}
@@ -773,6 +775,7 @@ func restoreDGDRHubOnlyOverrides(restored *v1beta1.OverridesSpec, dst *v1beta1.D
 	if restored.DGD != nil {
 		dst.Overrides.DGD = restored.DGD.DeepCopy()
 	}
+	dst.Overrides.TrustRemoteCode = restored.TrustRemoteCode
 	if restored.ProfilingJob != nil {
 		if dst.Overrides.ProfilingJob == nil {
 			dst.Overrides.ProfilingJob = restored.ProfilingJob.DeepCopy()

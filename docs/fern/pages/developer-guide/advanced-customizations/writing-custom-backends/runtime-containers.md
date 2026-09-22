@@ -74,9 +74,9 @@ ENTRYPOINT ["my-backend"]
 When you deploy a custom image with a `DynamoGraphDeployment` (DGD) or standalone
 `DynamoComponentDeployment` (DCD), admission determines the Dynamo runtime compatibility version
 from the component's main-container image tag. The tag itself must be a semantic version. Tags such
-as `1.4.0`, `v1.4.0`, and `1.4.0-cuda13` can provide the version. Set
+as `1.5.0`, `v1.5.0`, and `1.5.0-cuda13` can provide the version. Set
 `runtimeVersionOverride` when the image is tagless, digest-only, uses a tag such as `latest`,
-`main`, `sha-abc`, or `cuda13-1.4.0`, or when a semantic-version tag does not identify the Dynamo
+`main`, `sha-abc`, or `cuda13-1.5.0`, or when a semantic-version tag does not identify the Dynamo
 runtime version packaged in the image.
 
 Set the override to the canonical `MAJOR.MINOR.PATCH` Dynamo runtime version without a `v` prefix,
@@ -90,7 +90,7 @@ spec:
   backendFramework: vllm
   components:
     - name: worker
-      runtimeVersionOverride: "1.4.0"
+      runtimeVersionOverride: "1.5.0"
       podTemplate:
         spec:
           containers:
