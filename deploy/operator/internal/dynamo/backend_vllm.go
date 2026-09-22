@@ -267,7 +267,17 @@ func GetWaitLeaderConfigMapName(dgdName string) string {
 
 // GenerateWaitLeaderConfigMap creates a ConfigMap containing the wait-for-leader
 // scripts. One ConfigMap is created per DGD and owned by the DGD.
-func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
+func GenerateWaitLeaderConfigMap(dgdName, namespace string, rayWorkerGCSReadinessEnabled bool) *corev1.ConfigMap {
+	// Preserve the legacy ConfigMap exactly unless the origin-version gate enables Ray readiness.
+	data := map[string]string{
+		waitLeaderScriptKey: WaitLeaderScript,
+	}
+
+	// Add the Ray script only for newly created, compatibility-gated DGDs.
+	if rayWorkerGCSReadinessEnabled {
+		data[waitRayLeaderScriptKey] = WaitRayLeaderScript
+	}
+
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      GetWaitLeaderConfigMapName(dgdName),
@@ -276,10 +286,7 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 				commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
 			},
 		},
-		Data: map[string]string{
-			waitLeaderScriptKey:    WaitLeaderScript,
-			waitRayLeaderScriptKey: WaitRayLeaderScript,
-		},
+		Data: data,
 	}
 }
 
@@ -289,12 +296,13 @@ type leaderWaitInitConfig struct {
 	scriptCommand string
 }
 
-// UpdatePodSpec injects backend-specific pod settings. podSpec and
+// UpdatePodSpec injects backend-specific pod settings. podSpec, component, and
 // multinodeDeployer must be non-nil.
-func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
 	// Select a wait contract only for operator-generated multinode workers.
 	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-	waitConfig, ok := b.resolveLeaderWaitInitConfig(podSpec, numberOfNodes, role, leaderHostname)
+	rayWorkerGCSReadinessEnabled := compatibility.VLLMRayWorkerGCSReadiness.Enabled(GetPodTemplateAnnotations(component))
+	waitConfig, ok := b.resolveLeaderWaitInitConfig(podSpec, numberOfNodes, role, leaderHostname, rayWorkerGCSReadinessEnabled)
 	if !ok {
 		return
 	}
@@ -341,7 +349,7 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 
 // resolveLeaderWaitInitConfig returns the wait contract for an operator-generated
 // multinode worker. podSpec must be non-nil.
-func (b *VLLMBackend) resolveLeaderWaitInitConfig(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, leaderHostname string) (leaderWaitInitConfig, bool) {
+func (b *VLLMBackend) resolveLeaderWaitInitConfig(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, leaderHostname string, rayWorkerGCSReadinessEnabled bool) (leaderWaitInitConfig, bool) {
 	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
 		return leaderWaitInitConfig{}, false
 	}
@@ -360,7 +368,8 @@ func (b *VLLMBackend) resolveLeaderWaitInitConfig(podSpec *corev1.PodSpec, numbe
 	// injectRayDistributedLaunchFlags. This excludes custom Ray addresses,
 	// data-parallel Ray, and elastic-EP workers with their own /live gate.
 	expectedRayArgs := fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)
-	if slices.Equal(container.Command, []string{"/bin/sh", "-c"}) &&
+	if rayWorkerGCSReadinessEnabled &&
+		slices.Equal(container.Command, []string{"/bin/sh", "-c"}) &&
 		len(container.Args) == 1 && strings.TrimSpace(container.Args[0]) == expectedRayArgs {
 		return leaderWaitInitConfig{
 			name:          "wait-for-leader-ray",

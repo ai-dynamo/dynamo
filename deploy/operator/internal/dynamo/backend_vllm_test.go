@@ -1026,9 +1026,14 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectedScript:      "exec python3 /scripts/wait-for-leader.py",
 		},
 		{
-			name:              "plain Ray TP/PP worker injects Ray GCS wait init container",
-			numberOfNodes:     2,
-			role:              RoleWorker,
+			name:          "plain Ray TP/PP worker injects Ray GCS wait init container",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+				}},
+			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
@@ -1117,9 +1122,14 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: false,
 		},
 		{
-			name:              "Ray worker with custom address does not inject init container",
-			numberOfNodes:     2,
-			role:              RoleWorker,
+			name:          "Ray worker with custom address does not inject init container",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+				}},
+			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
@@ -1134,9 +1144,34 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: false,
 		},
 		{
-			name:              "elastic-EP Ray worker with health gate does not inject second init container",
-			numberOfNodes:     2,
-			role:              RoleWorker,
+			name:          "legacy Ray worker preserves pod template across operator upgrade",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.4.0",
+				}},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{Containers: []corev1.Container{{
+				Name:    "main",
+				Image:   "vllm:ray",
+				Command: []string{"/bin/sh", "-c"},
+				Args: []string{
+					"ray start --address=$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-test-service-ldr-0.$(GROVE_HEADLESS_SERVICE):6379 --block",
+				},
+			}}},
+			expectInitContainer: false,
+		},
+		{
+			name:          "elastic-EP Ray worker with health gate does not inject second init container",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ExtraPodMetadata: &v1alpha1.ExtraPodMetadata{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+				}},
+			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
 				Containers: []corev1.Container{
@@ -1233,7 +1268,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 func TestGenerateWaitLeaderConfigMap(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns")
+	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns", true)
 
 	g.Expect(cm.Name).To(gomega.Equal("my-dgd-wait-leader-script"))
 	g.Expect(cm.Namespace).To(gomega.Equal("my-ns"))
@@ -1257,6 +1292,12 @@ func TestGenerateWaitLeaderConfigMap(t *testing.T) {
 	g.Expect(rayScript).To(gomega.ContainSubstring(`ray health-check --address "${address}"`))
 	g.Expect(rayScript).To(gomega.ContainSubstring("max_attempts=60"))
 	g.Expect(rayScript).To(gomega.ContainSubstring("did not become healthy within 300s"))
+
+	t.Log("Verify the legacy ConfigMap remains byte-for-byte limited to the MP script")
+	legacyCM := GenerateWaitLeaderConfigMap("my-dgd", "my-ns", false)
+	g.Expect(legacyCM.Data).To(gomega.Equal(map[string]string{
+		"wait-for-leader.py": WaitLeaderScript,
+	}))
 }
 
 func TestGetWaitLeaderConfigMapName(t *testing.T) {
