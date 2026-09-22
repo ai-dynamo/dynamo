@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import signal
+import threading
 import time as _time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -1300,8 +1301,12 @@ class WorkerFactory:
 
         loop = asyncio.get_running_loop()
         handler_ref = [handler]
+        rank_loss_started = threading.Event()
 
         def on_rank_lost(rank: int, reason: str) -> None:
+            if rank_loss_started.is_set():
+                return
+            rank_loss_started.set()
             active_handler = handler_ref[0]
             logger.warning(
                 "[GMS liveness] vLLM worker rank %d lost (%s); terminating "
@@ -1318,8 +1323,30 @@ class WorkerFactory:
             if shutdown_event is not None:
                 loop.call_soon_threadsafe(shutdown_event.set)
 
-            # The cohort is broken (a TP rank is gone); bring the leader down so it
-            # stops holding the GPU/KV. Kernel lock release then admits the shadow.
+            # The normal SIGTERM path can spend several seconds draining an
+            # engine that can no longer make progress. Fence the local
+            # EngineCore process tree first, using vLLM's supported bounded
+            # shutdown path, and only then kill the request-plane owner. The
+            # failover lock is intentionally never released explicitly: kernel
+            # release on owner death remains the handoff proof.
+            engine_client = getattr(active_handler, "engine_client", None)
+            engine_core = getattr(engine_client, "engine_core", None)
+            if engine_core is not None:
+                try:
+                    engine_core.shutdown(timeout=0)
+                except Exception:
+                    logger.exception(
+                        "[GMS liveness] failed to fence vLLM EngineCore; "
+                        "falling back to process-owned SIGTERM fencing"
+                    )
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return
+                os.kill(os.getpid(), signal.SIGKILL)
+                return
+
+            # During pre-init there may not be an EngineCore handle yet. Keep
+            # the conservative graceful path so construction unwinds before the
+            # process-owned lock is released.
             os.kill(os.getpid(), signal.SIGTERM)
 
         monitor_kwargs = {"expected_ranks": range(1, nnodes)}

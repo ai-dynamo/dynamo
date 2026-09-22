@@ -574,7 +574,7 @@ where
             self.abort_request_lifecycle(error.as_ref());
             return Err(error);
         }
-        let failover_deadline = migration_event
+        let mut failover_deadline = migration_event
             .as_ref()
             .map(|_| Instant::now() + self.failover_wait);
         while self.retries_left > 0 {
@@ -702,11 +702,16 @@ where
                 }
                 Err(err)
                     if is_migratable_for_request(&self.request, err.as_ref())
-                        || (migration_event.is_some()
-                            && request_allows_migration(&self.request)
+                        || (request_allows_migration(&self.request)
                             && is_failover_unavailable(err.as_ref(), self.failover_wait)) =>
                 {
                     let reason = error_type_from_chain(err.as_ref());
+                    if migration_event.is_none() {
+                        migration_event = Some(MigrationEvent::new(
+                            frontend_service::migration_type::NEW_REQUEST,
+                        ));
+                        failover_deadline = Some(Instant::now() + self.failover_wait);
+                    }
                     if matches!(reason, ErrorType::Unavailable)
                         && failover_deadline.is_some_and(|deadline| Instant::now() < deadline)
                     {
@@ -736,11 +741,6 @@ where
                             return Err(err);
                         }
                         continue;
-                    }
-                    if migration_event.is_none() {
-                        migration_event = Some(MigrationEvent::new(
-                            frontend_service::migration_type::NEW_REQUEST,
-                        ));
                     }
                     // Preserve the existing per-attempt metric contract.
                     self.metrics.inc_migration_new_request(&self.model_name);
@@ -1126,6 +1126,78 @@ mod tests {
 
         assert!(
             matches!(result, Err(ref err) if error_type_from_chain(err.as_ref()) == ErrorType::Cancelled)
+        );
+    }
+
+    #[tokio::test]
+    async fn new_request_waits_for_replacement_without_spending_retry_budget() {
+        struct DiscoveryGapEngine {
+            calls: AtomicU32,
+            ready_at: Instant,
+        }
+
+        #[async_trait]
+        impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+            for DiscoveryGapEngine
+        {
+            async fn generate(
+                &self,
+                request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    return Err(migratable_error(ErrorType::CannotConnect).into());
+                }
+                if Instant::now() < self.ready_at {
+                    return Err(migratable_error(ErrorType::Unavailable).into());
+                }
+                let child = request.context();
+                Ok(ResponseStream::new(Box::pin(stream::empty()), child))
+            }
+        }
+
+        let engine = Arc::new(DiscoveryGapEngine {
+            calls: AtomicU32::new(0),
+            ready_at: Instant::now() + Duration::from_millis(20),
+        });
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            engine.clone();
+        let metrics = Arc::new(Metrics::new());
+        let mut manager = RetryManager {
+            context: Arc::new(Controller::new("new-request-discovery-gap".into())),
+            metadata: BTreeMap::new(),
+            request: create_mock_request(5),
+            session_affinity: None,
+            next_generate,
+            next_stream: None,
+            // Initial dispatch plus one real retry. Unavailable discovery polls
+            // must not consume this final attempt.
+            retries_left: 2,
+            max_seq_len: None,
+            model_name: Arc::new(TEST_MODEL.to_string()),
+            metrics: metrics.clone(),
+            last_worker_link: None,
+            active_route_trace: None,
+            next_attempt: 0,
+            completed_tokens: 0,
+            pending_migration: None,
+            failover_wait: Duration::from_millis(200),
+        };
+
+        manager
+            .new_stream(None)
+            .await
+            .expect("replacement should register inside the failover window");
+
+        assert!(engine.calls.load(Ordering::SeqCst) >= 3);
+        assert!(manager.next_stream.is_some());
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            1
         );
     }
 

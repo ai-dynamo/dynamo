@@ -60,9 +60,23 @@ class _Directory:
         self.publish_error = publish_error
         self.adopted = []
         self.released = []
+        self.read_view_is_current_writer = False
+        self.read_view = []
 
     def start_async_read(self):
         return True
+
+    def freeze_current_writer_view(self):
+        return bool(self.read_view_is_current_writer)
+
+    def read_view_items(self, *, tier=None, state="ready", limit=None):
+        items = [
+            (content_hash, entry)
+            for content_hash, entry in self.read_view
+            if (tier is None or entry.get("tier") == tier)
+            and (not state or entry.get("state") == state)
+        ]
+        return items if limit is None else items[:limit]
 
     def publish_deferred(self, items):
         # The fake commits immediately so enqueue failures and compensation
@@ -195,7 +209,7 @@ def test_directory_hashes_support_legacy_key_without_cache_salt():
     ]
 
 
-def test_uses_native_unified_tree_and_hashes(monkeypatch):
+def test_uses_native_unified_tree_without_enabling_storage_hashing(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     key = _key(1, 2, 3, 4)
     inserted = cache.insert(InsertParams(key=key, value=torch.tensor([6, 7, 2, 3])))
@@ -207,7 +221,234 @@ def test_uses_native_unified_tree_and_hashes(monkeypatch):
 
     assert type(cache).__mro__[1].__name__ == "UnifiedRadixCache"
     assert result.device_indices.tolist() == [6, 7, 2, 3]
-    assert len(cache.tree_core.get_hash_values(inserted.last_device_node)) == 2
+    assert cache.tree_core.get_hash_values(inserted.last_device_node) == []
+
+
+def test_finished_publication_reuses_insert_result_without_second_match(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    lease = KVLease(3, 12)
+    allocator._gms_kv_leases_by_page = {3: lease}
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(adapter, "retain_hbm_pages", lambda *_args: [lease])
+    monkeypatch.setattr(
+        type(cache).__mro__[1],
+        "match_prefix",
+        lambda *_args, **_kwargs: pytest.fail(
+            "finished publication must reuse the native insert result"
+        ),
+    )
+    monkeypatch.setattr(
+        type(cache).__mro__[1],
+        "cache_finished_req",
+        lambda self, *_args, **_kwargs: self.insert(
+            InsertParams(key=_key(1, 2), value=torch.tensor([6, 7]))
+        ),
+    )
+
+    cache.cache_finished_req(SimpleNamespace(), kv_len_to_handle=2)
+
+    assert len(cache._gms_directory.published) == 1
+
+
+def test_finished_publication_uses_cpu_pages_without_device_collection(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    lease = KVLease(3, 12)
+    allocator._gms_kv_leases_by_page = {3: lease}
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(adapter, "retain_hbm_pages", lambda *_args: [lease])
+    monkeypatch.setattr(
+        cache.tree_core,
+        "collect_full_device_indices",
+        lambda *_args, **_kwargs: pytest.fail(
+            "CPU page metadata must avoid device index collection"
+        ),
+    )
+    monkeypatch.setattr(
+        type(cache).__mro__[1],
+        "cache_finished_req",
+        lambda self, *_args, **_kwargs: self.insert(
+            InsertParams(key=_key(1, 2), value=torch.tensor([6, 7]))
+        ),
+    )
+    req = SimpleNamespace(_gms_kv_page_ids=[3])
+
+    cache.cache_finished_req(req, kv_len_to_handle=2)
+
+    assert len(cache._gms_directory.published) == 1
+    assert cache._gms_directory.published[0]["slot_ids"] == [3]
+
+
+def test_empty_second_match_preserves_allocator_page_record(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    req = SimpleNamespace(_gms_kv_page_ids=[3, 4])
+    params = SimpleNamespace(req=req, key=_key())
+    result = SimpleNamespace(device_indices=torch.tensor([], dtype=torch.int64))
+
+    cache._attach_request_pages(params, result)
+
+    assert req._gms_kv_page_ids == [3, 4]
+
+
+def test_finished_free_hints_cpu_page_ids(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_finished_request_pages = [3, 4, 7]
+    allocator_calls = []
+    native_calls = []
+    monkeypatch.setattr(
+        adapter,
+        "hint_hbm_page_release",
+        lambda target, pages: allocator_calls.append((target, pages)) or True,
+    )
+    monkeypatch.setattr(
+        type(cache).__mro__[1],
+        "free_kv_row",
+        lambda self, kv, ranges: native_calls.append((kv, ranges)),
+    )
+    kv = SimpleNamespace(swa_evicted_seqlen=0)
+
+    cache.free_kv_row(kv, [(2, 5)])
+
+    assert allocator_calls == [(allocator, [4, 7])]
+    assert native_calls == [(kv, [(2, 5)])]
+
+
+def test_finished_prefix_ignores_request_partial_tail_page(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    allocator._gms_kv_leases_by_page = {
+        6: KVLease(6, 16),
+        7: KVLease(7, 17),
+        8: KVLease(8, 18),
+    }
+
+    _hashes, pages, items = cache._prepare_finished_prefix(
+        _key(1, 2, 3, 4), request_pages=[6, 7, 8]
+    )
+
+    assert pages == [6, 7]
+    assert [item["slot_ids"] for item in items] == [[6], [7]]
+
+
+def test_native_eviction_hints_pages_from_cpu_content_map(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    key = _key(1, 2, 3, 4)
+    inserted = cache.insert(InsertParams(key=key, value=torch.tensor([12, 13, 14, 15])))
+    hashes = cache._hashes_for_key(key, cache.page_size)
+    cache._remember_local_pages(hashes, [6, 7])
+    hints = []
+    native = []
+    monkeypatch.setattr(
+        adapter,
+        "hint_hbm_page_release",
+        lambda target, pages: hints.append((target, pages)) or True,
+    )
+    monkeypatch.setattr(
+        type(cache).__mro__[1],
+        "_evict_device_leaf",
+        lambda self, node_id, tracker: native.append((node_id, tracker)) or "result",
+    )
+
+    tracker = {}
+    result = cache._evict_device_leaf(inserted.last_device_node, tracker)
+
+    assert result == "result"
+    assert hints == [(allocator, [6, 7])]
+    assert native == [(inserted.last_device_node, tracker)]
+
+
+def test_steady_state_requires_common_current_writer_inventory(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    common_hash = b"c" * 32
+    local_only_hash = b"l" * 32
+    directory = _Directory()
+    directory.read_view_is_current_writer = True
+    directory.read_view = [
+        (common_hash, {"tier": "hbm", "state": "ready"}),
+        (local_only_hash, {"tier": "hbm", "state": "ready"}),
+    ]
+    cache._gms_directory = directory
+    calls = []
+
+    class Cohort:
+        def all_true(self, stage, value):
+            calls.append((stage, value))
+            return True
+
+        def run_intersection(self, stage, operation):
+            local = operation()
+            calls.append((stage, local))
+            return local, [common_hash]
+
+    cache._gms_tp = Cohort()
+
+    assert cache._maybe_enter_steady_state() is True
+    assert cache._gms_steady_state is True
+    assert cache._gms_recovery_candidates == {common_hash}
+    assert calls[0] == ("steady:writer-ready", True)
+    assert calls[-1] == ("steady:writer-recheck", True)
+
+    # The transition is one-shot for the writer epoch. Ordinary lookups do not
+    # re-enter a TP collective after it has completed.
+    calls.clear()
+    assert cache._maybe_enter_steady_state() is True
+    assert calls == []
+    state = install_kv_leases._STATE.get(id(allocator))
+    if state is not None:
+        assert state["steady_state"] is True
+
+
+def test_steady_state_definite_miss_avoids_directory_and_tp_vote(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    cache._gms_steady_state = True
+    cache._gms_recovery_candidates = set()
+    key = _key(10, 11)
+    cache._gms_directory = _Directory(
+        [{"state": "ready", "tier": "hbm", "slot_ids": [4], "generations": [8]}]
+    )
+    cache._gms_tp = SimpleNamespace(
+        leader_true=lambda *_args: pytest.fail(
+            "steady native misses must not enter TP consensus"
+        )
+    )
+    cache._gms_directory.lookup_and_claim = lambda *_args: pytest.fail(
+        "a definite steady-state miss must not call the directory"
+    )
+
+    result = cache.match_prefix(MatchPrefixParams(key=key))
+
+    assert result.device_indices.numel() == 0
+
+
+def test_steady_state_publication_skips_digest_vote(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    key = _key(1, 2)
+    cache.insert(InsertParams(key=key, value=torch.tensor([6, 7])))
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    content_hash = cache._hashes_for_key(key, cache.page_size)[0]
+    lease = KVLease(3, 12)
+    allocator._gms_kv_leases_by_page = {3: lease}
+    cache._gms_tp = SimpleNamespace(
+        transact_digest=lambda *_args: pytest.fail(
+            "steady publication must not enter TP consensus"
+        )
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_logical_layout_digest",
+        lambda *_args: pytest.fail("steady publication must not compute a TP digest"),
+    )
+    monkeypatch.setattr(adapter, "retain_hbm_pages", lambda *_args: [lease])
+
+    cache._publish_finished_prefix(key)
+
+    assert cache._gms_directory.published[0]["content_hash"] == content_hash
+    # The recovery-candidate set is a one-time predecessor snapshot. Current
+    # writer publications already live in the native tree and must not make
+    # ordinary native misses consult the directory.
+    assert content_hash not in cache._gms_recovery_candidates
 
 
 @pytest.mark.parametrize("operation", ["publish", "adopt"])
@@ -253,7 +494,7 @@ def test_tp_logical_layout_agrees_with_rank_local_generations(monkeypatch, opera
 
     monkeypatch.setattr(
         adapter,
-        "retain_hbm_indices",
+        "retain_hbm_pages",
         lambda allocator, _: list(allocator._gms_kv_leases_by_page.values()),
     )
     monkeypatch.setattr(
@@ -310,7 +551,7 @@ def test_publication_preserves_native_physical_page_order(monkeypatch):
     leases = {1: KVLease(1, 12), 3: KVLease(3, 34)}
     allocator._gms_kv_leases_by_page = leases
     monkeypatch.setattr(
-        adapter, "retain_hbm_indices", lambda *_args: list(leases.values())
+        adapter, "retain_hbm_pages", lambda *_args: list(leases.values())
     )
 
     cache._publish_finished_prefix(key)
@@ -318,6 +559,67 @@ def test_publication_preserves_native_physical_page_order(monkeypatch):
     assert [item["slot_ids"] for item in directory.published] == [[3], [1]]
     assert [item["generations"] for item in directory.published] == [[34], [12]]
     assert all(item["active"] is False for item in directory.published)
+
+
+def test_publication_retires_oldest_page_with_batched_generation_tombstone(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 8
+    cache._gms_steady_state = True
+    directory = _Directory()
+    cache._gms_directory = directory
+    old_hashes = [bytes([value]) * 32 for value in (1, 2, 3)]
+    new_hash = b"n" * 32
+    allocator._gms_kv_leases_by_page = {
+        page: KVLease(page, 10 + page) for page in (1, 2, 3, 4)
+    }
+    allocator._gms_retained_pages.update((1, 2, 3))
+    for page, content_hash in zip((1, 2, 3), old_hashes):
+        cache._gms_local_pages_by_hash[content_hash] = page
+        cache._gms_local_hashes_by_page[page] = {content_hash}
+        cache._gms_retained_order[page] = None
+        cache._gms_recovery_candidates.add(content_hash)
+
+    def retain(_allocator, pages):
+        allocator._gms_retained_pages.update(pages)
+        return [allocator._gms_kv_leases_by_page[page] for page in pages]
+
+    def demote(_allocator, pages):
+        old = [allocator._gms_kv_leases_by_page[page] for page in pages]
+        allocator._gms_retained_pages.difference_update(pages)
+        return old
+
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
+    monkeypatch.setattr(adapter, "demote_hbm_pages_local", demote)
+    item = {
+        "content_hash": new_hash,
+        "engine_id": "0",
+        "slot_ids": [4],
+        "generations": [14],
+        "tier": "hbm",
+        "active": False,
+    }
+
+    cache._commit_finished_prefixes([([new_hash], [4], [item])])
+
+    assert directory.published == [
+        {
+            "content_hash": old_hashes[0],
+            "engine_id": cache._gms_engine_id,
+            "slot_ids": [1],
+            "generations": [11],
+            "tier": "hbm",
+            "sealed": False,
+        },
+        item,
+    ]
+    assert allocator._gms_retained_pages == {2, 3, 4}
+    assert list(cache._gms_retained_order) == [2, 3, 4]
+    # Demotion ends crash-recovery retention, not SGLang's native residency.
+    # Keep content identity until the allocator actually releases the page so
+    # native LRU eviction does not need a GPU -> CPU synchronization.
+    assert cache._gms_local_pages_by_hash[old_hashes[0]] == 1
+    assert cache._gms_local_hashes_by_page[1] == {old_hashes[0]}
+    assert old_hashes[0] not in cache._gms_recovery_candidates
 
 
 def test_publication_validates_layout_before_retaining_pages(monkeypatch):
@@ -333,7 +635,7 @@ def test_publication_validates_layout_before_retaining_pages(monkeypatch):
     retained = []
     monkeypatch.setattr(
         adapter,
-        "retain_hbm_indices",
+        "retain_hbm_pages",
         lambda *_args: retained.append(True),
     )
 
@@ -358,7 +660,7 @@ def test_unverifiable_publication_failure_retains_all_leases(monkeypatch):
         allocator._gms_retained_pages.update(leases)
         return list(leases.values())
 
-    monkeypatch.setattr(adapter, "retain_hbm_indices", retain)
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
 
     with pytest.raises(RuntimeError, match="retaining leases and failing closed"):
         cache._publish_finished_prefix(key)
@@ -379,7 +681,7 @@ def test_retention_failure_rolls_back_partial_flags_before_publication(monkeypat
         allocator._gms_retained_pages.update(leases)
         raise RuntimeError("seal failed")
 
-    monkeypatch.setattr(adapter, "retain_hbm_indices", fail_retain)
+    monkeypatch.setattr(adapter, "retain_hbm_pages", fail_retain)
 
     with pytest.raises(RuntimeError, match="seal failed"):
         cache._publish_finished_prefix(key)
@@ -400,7 +702,7 @@ def test_incomplete_publication_rolls_back_retention(monkeypatch):
         allocator._gms_retained_pages.update(leases)
         return list(leases.values())
 
-    monkeypatch.setattr(adapter, "retain_hbm_indices", retain)
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
 
     with pytest.raises(RuntimeError, match="incomplete.*publication"):
         cache._publish_finished_prefix(key)
@@ -961,3 +1263,85 @@ def test_configure_rejects_unsupported_server_mode(
         install_gms_unified_cache.configure(args)
 
     assert install_calls == []
+
+
+@pytest.mark.parametrize("requested,expected", [(0, 0), (2, 64), (100, 100)])
+def test_pressure_headroom_delegates_to_native_eviction(
+    monkeypatch, requested, expected
+):
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 1024
+    cache._gms_directory = _Directory()
+    observed = []
+    monkeypatch.setattr(
+        UnifiedRadixCache,
+        "evict_for_alloc",
+        lambda self, params: observed.append(params) or "native-result",
+    )
+    params = EvictParams(num_tokens=requested)
+    assert cache.evict_for_alloc(params) == "native-result"
+    assert observed[0].num_tokens == expected
+    assert params.num_tokens == requested
+
+
+def test_steady_state_eviction_keeps_native_quota(monkeypatch):
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 1024
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    monkeypatch.setattr(
+        UnifiedRadixCache, "evict_for_alloc", lambda self, params: params
+    )
+    params = EvictParams(num_tokens=2)
+    assert cache.evict_for_alloc(params) is params
+
+
+def test_steady_state_eviction_uses_activated_recovery_capacity(monkeypatch):
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams, EvictResult
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 1024
+    cache._gms_directory = _Directory()
+    cache._gms_steady_state = True
+    monkeypatch.setattr(
+        install_kv_leases,
+        "activate_hidden_recovery_capacity",
+        lambda observed, required: (
+            64
+            if observed is allocator and required == 64
+            else pytest.fail("unexpected recovery activation")
+        ),
+    )
+    observed = []
+    monkeypatch.setattr(
+        UnifiedRadixCache,
+        "evict_for_alloc",
+        lambda self, params: observed.append(params) or EvictResult(),
+    )
+
+    result = cache.evict_for_alloc(EvictParams(num_tokens=64))
+
+    assert observed[0].num_tokens == 0
+    assert result.num_tokens_evicted == 64
+
+
+def test_non_authoritative_eviction_keeps_native_quota(monkeypatch):
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
+
+    cache, allocator = _cache(monkeypatch)
+    allocator.size = 1024
+    cache._gms_directory = _Directory()
+    cache._gms_directory.authoritative = False
+    monkeypatch.setattr(
+        UnifiedRadixCache, "evict_for_alloc", lambda self, params: params
+    )
+    params = EvictParams(num_tokens=2)
+    assert cache.evict_for_alloc(params) is params
