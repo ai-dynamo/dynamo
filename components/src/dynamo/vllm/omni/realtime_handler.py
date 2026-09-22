@@ -52,6 +52,7 @@ from dynamo._core import Context
 
 from ..realtime import events as realtime_events
 from ..realtime.connection import RealtimeConnection, RealtimeTurn, drain_queue
+from ..realtime.handler import MAX_AUDIO_CHUNK_BYTES
 from ..realtime.serving import StreamingInputFactory
 
 logger = logging.getLogger(__name__)
@@ -390,9 +391,22 @@ class RealtimeOmniHandler:
                 connection.emit(realtime_events.session_updated_event(session))
             elif event_type == "input_audio_buffer.append":
                 turn = await connection.ensure_turn(new_turn)
-                waveform = decode_pcm16(client_event.get("audio", ""))
+                audio_b64 = client_event.get("audio", "")
+                waveform = decode_pcm16(audio_b64)
                 if waveform is not None:
                     turn.audio_queue.put_nowait(waveform)
+                elif audio_b64:
+                    # A non-empty payload that decoded to nothing was rejected.
+                    # Say so: a silently dropped chunk leaves the client with a
+                    # session that completes and produces no audio.
+                    connection.emit(
+                        realtime_events.invalid_request_error_event(
+                            "invalid_audio",
+                            "audio must be a base64-encoded PCM16 chunk of at "
+                            f"most {MAX_AUDIO_CHUNK_BYTES} bytes",
+                            client_event_id=client_event.get("event_id"),
+                        )
+                    )
             elif event_type == "input_audio_buffer.commit":
                 turn = await connection.ensure_turn(new_turn)
                 # A bare commit closes the input; final=false keeps it open.
@@ -438,11 +452,34 @@ def decode_pcm16(audio_b64: str) -> np.ndarray | None:
     """Decode a base64 PCM16 chunk to a float32 waveform in [-1, 1].
 
     Mirrors vLLM's realtime connection decode (int16 / 32768). Empty / blank
-    payloads yield ``None`` so they are not queued as audio.
+    payloads yield ``None`` so they are not queued as audio, and so does any
+    payload this cannot turn into aligned PCM16 -- one bad frame must not tear
+    down the session. The caller reports a non-empty payload that yields
+    ``None`` back to the client.
     """
     if not audio_b64:
         return None
-    raw = base64.b64decode(audio_b64)
+    if not isinstance(audio_b64, str):
+        # b64decode raises TypeError, not ValueError, for a non-string; without
+        # this the exception escapes handle_event and kills the connection.
+        logger.warning(
+            "realtime omni: dropping non-string audio chunk (%s)",
+            type(audio_b64).__name__,
+        )
+        return None
+    try:
+        raw = base64.b64decode(audio_b64, validate=True)
+    except ValueError:
+        logger.warning("realtime omni: dropping malformed base64 audio chunk")
+        return None
+    if len(raw) > MAX_AUDIO_CHUNK_BYTES:
+        # Matches the cap the non-omni realtime handler applies. Each chunk is
+        # decoded and widened to float32, so an unbounded one is ~3x its own
+        # size in resident memory with no backpressure behind it.
+        logger.warning(
+            "realtime omni: dropping oversized (%d-byte) audio chunk", len(raw)
+        )
+        return None
     if len(raw) % 2:
         # PCM16 is 2-byte aligned; np.frombuffer would raise. Drop the malformed
         # chunk rather than let one bad frame tear down the whole session.

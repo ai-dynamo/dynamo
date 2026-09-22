@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	admissionv1 "k8s.io/api/admission/v1"
 	authenticationv1 "k8s.io/api/authentication/v1"
@@ -82,10 +83,16 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD := oldDGD.DeepCopy()
 		now := metav1.Now()
 		newDGD.DeletionTimestamp = &now
-		if _, err := handler.ValidateUpdate(ctx, nil, newDGD); err != nil {
+		// Admission always supplies the old object on UPDATE, and the
+		// terminating path now reads it to enforce durable metadata rules.
+		if _, err := handler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
 			t.Fatalf("ValidateUpdate() error = %v", err)
 		}
 	})
+
+	// The terminating contract is covered as admission-table rows in
+	// dynamographdeployment_validation_envtest_test.go, against a deletionTimestamp
+	// the API server owns.
 
 	t.Run("stateless validation failure", func(t *testing.T) {
 		invalid := newBetaDGDForValidation()
@@ -101,6 +108,18 @@ func TestDynamoGraphDeploymentHandlerValidateUpdate(t *testing.T) {
 		newDGD.Spec.BackendFramework = sglangBackendFramework
 		_, err := handler.ValidateUpdate(ctx, oldDGD, newDGD)
 		assertBetaValidationErrors(t, err, []string{`spec.backendFramework: Invalid value: "sglang": is immutable and cannot be changed after creation`})
+	})
+
+	t.Run("missing operator identity does not block legacy provider materialization", func(t *testing.T) {
+		oldDGD := newBetaDGDForValidation()
+		newDGD := oldDGD.DeepCopy()
+		newDGD.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+		}
+		unconfiguredHandler := NewDynamoGraphDeploymentHandler(newGroveTopologyTestManager(t), "")
+		if _, err := unconfiguredHandler.ValidateUpdate(ctx, oldDGD, newDGD); err != nil {
+			t.Fatalf("ValidateUpdate() error = %v, want optional operator identity to remain permissive", err)
+		}
 	})
 }
 

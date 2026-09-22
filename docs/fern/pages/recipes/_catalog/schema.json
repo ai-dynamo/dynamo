@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\nSPDX-License-Identifier: Apache-2.0",
   "$id": "https://github.com/ai-dynamo/dynamo/docs/recipes/_catalog/schema.json",
   "title": "Dynamo recipe catalog entry",
   "description": "JSON Schema (draft 2020-12) for ONE recipe object, i.e. the contents of docs/recipes/_catalog/recipes/<id>.yaml. Derived from the data in the former recipes.yaml. Active recipes carry a rendered `page`; deferred recipes carry a `deferred_reason` and have no rendered page.",
@@ -46,6 +47,81 @@
     "status": {
       "type": "string",
       "enum": ["validated", "experimental"]
+    },
+    "artifacts": {
+      "type": "object",
+      "description": "Recipe-owned published artifacts used for exact adoption attribution.",
+      "required": ["recipe_specific_image_periods"],
+      "properties": {
+        "recipe_specific_images": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^nvcr\\.io/nvidia/ai-dynamo/[A-Za-z0-9._-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+          }
+        },
+        "recipe_specific_image_periods": {
+          "type": "array",
+          "description": "Inclusive ownership windows during which an image tag was exclusively attributable to this recipe. An omitted effective_from includes all retained telemetry before effective_to.",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "required": ["image", "source_revision"],
+            "properties": {
+              "image": {
+                "type": "string",
+                "pattern": "^nvcr\\.io/nvidia/ai-dynamo/[A-Za-z0-9._-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
+              },
+              "effective_from": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "effective_to": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+              },
+              "source_revision": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{40}$"
+              },
+              "source_kind": {
+                "type": "string",
+                "enum": ["deploy-asset", "github-release"]
+              },
+              "release_tag": {
+                "type": "string",
+                "minLength": 1
+              },
+              "release_state": {
+                "type": "string",
+                "enum": ["draft", "prerelease", "release"]
+              }
+            },
+            "dependentRequired": {
+              "release_tag": ["release_state"],
+              "release_state": ["release_tag"]
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "source_kind": { "const": "github-release" }
+                  },
+                  "required": ["source_kind"]
+                },
+                "then": {
+                  "required": ["release_tag", "release_state"]
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     },
     "targets": {
       "type": "array",

@@ -9,8 +9,12 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::config::RouterQueuePolicy;
-use super::worker_selection_config::RawWorkerSelectionConfig;
-pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
+use crate::plugins::request_classifier::RawRequestClassifierConfig;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::request_classifier::RequestClassifierConfig;
+use crate::plugins::worker_selection::RawWorkerSelectionConfig;
+// TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
+pub use crate::plugins::worker_selection::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -47,6 +51,15 @@ pub struct PolicyClassConfig {
 impl PolicyClassConfig {
     pub fn queueing_enabled(&self) -> bool {
         self.prefill_busy_threshold.is_some() || self.prefill_busy_threshold_frac.is_some()
+    }
+
+    /// Any zero per-worker limit means `queue_rejection` rejects every queued
+    /// entry (`current >= limit` holds at zero usage), so the class can never
+    /// hold a queued request and must keep the direct admission path.
+    pub fn never_queues(&self) -> bool {
+        self.request_queue_limit_per_worker == Some(0)
+            || self.raw_isl_token_queue_limit_per_worker == Some(0)
+            || self.cached_token_queue_limit_per_worker == Some(0)
     }
 
     pub fn worker_is_busy(&self, active_tokens: usize, max_batched_tokens: u64) -> bool {
@@ -101,6 +114,21 @@ impl FamilyBucketClassifier {
         let family_index = requested
             .and_then(|name| self.family_indices.get(name).copied())
             .unwrap_or(self.default_family_index);
+        self.class_index_for_family(family_index, uncached_tokens)
+    }
+
+    fn strict_class_index(&self, requested: &str, uncached_tokens: usize) -> Option<usize> {
+        self.explicit_class_indices
+            .get(requested)
+            .copied()
+            .or_else(|| {
+                self.family_indices
+                    .get(requested)
+                    .map(|family_index| self.class_index_for_family(*family_index, uncached_tokens))
+            })
+    }
+
+    fn class_index_for_family(&self, family_index: usize, uncached_tokens: usize) -> usize {
         let bucket_index = self
             .buckets
             .partition_point(|bucket| bucket.min_tokens <= uncached_tokens)
@@ -160,6 +188,21 @@ impl PolicyProfile {
     pub fn class(&self, index: usize) -> &PolicyClassConfig {
         &self.classes[index]
     }
+
+    pub(crate) fn resolve_class_index_strict(
+        &self,
+        requested: &str,
+        uncached_tokens: usize,
+    ) -> Option<usize> {
+        match &self.classifier {
+            PolicyClassifier::SyntheticSingle { class_index } => {
+                (self.classes[*class_index].name == requested).then_some(*class_index)
+            }
+            PolicyClassifier::FamilyBucket(classifier) => {
+                classifier.strict_class_index(requested, uncached_tokens)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -167,6 +210,7 @@ pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
     worker_selection: Option<WorkerSelectionConfig>,
+    request_classifier: Option<RequestClassifierConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -215,6 +259,11 @@ impl RouterPolicyConfig {
         self.worker_selection.as_ref()
     }
 
+    /// Returns the process-wide request-classifier plugin configuration, if present.
+    pub fn request_classifier(&self) -> Option<&RequestClassifierConfig> {
+        self.request_classifier.as_ref()
+    }
+
     /// Whether this document configures queue policy profiles.
     pub fn has_routing_profiles(&self) -> bool {
         self.root.is_some() || !self.models.is_empty()
@@ -224,16 +273,13 @@ impl RouterPolicyConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawRouterPolicyConfig {
-    #[serde(default)]
     default_policy_family: Option<String>,
-    #[serde(default)]
     policy_classes: Option<Vec<RawPolicyClassConfig>>,
-    #[serde(default)]
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
-    #[serde(default)]
     worker_selection: Option<RawWorkerSelectionConfig>,
+    request_classifier: Option<RawRequestClassifierConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -277,9 +323,17 @@ impl RawRouterPolicyConfig {
             None => None,
         };
 
-        if root.is_none() && models.is_empty() && worker_selection.is_none() {
+        let request_classifier = self
+            .request_classifier
+            .map(|config| config.resolve())
+            .transpose()?;
+        if root.is_none()
+            && models.is_empty()
+            && worker_selection.is_none()
+            && request_classifier.is_none()
+        {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
+                "router policy config must define a root profile, at least one model profile, worker_selection, or request_classifier".to_string(),
             ));
         }
 
@@ -287,6 +341,7 @@ impl RawRouterPolicyConfig {
             root,
             models,
             worker_selection,
+            request_classifier,
         })
     }
 }
@@ -310,22 +365,15 @@ struct RawUncachedIslBucket {
 #[serde(deny_unknown_fields)]
 struct RawPolicyClassConfig {
     name: String,
-    #[serde(default)]
     policy_family: Option<String>,
-    #[serde(default)]
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
     quantum: usize,
-    #[serde(default)]
     prefill_busy_threshold: Option<usize>,
-    #[serde(default)]
     prefill_busy_threshold_frac: Option<f64>,
-    #[serde(default)]
     request_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     raw_isl_token_queue_limit_per_worker: Option<usize>,
-    #[serde(default)]
     cached_token_queue_limit_per_worker: Option<usize>,
 }
 
@@ -576,7 +624,7 @@ fn resolve_uncached_isl_buckets(
     })
 }
 
-pub(super) fn validate_identifier(
+pub(crate) fn validate_identifier(
     name: &str,
     kind: &str,
     location: &str,
@@ -603,7 +651,7 @@ mod tests {
         let config = RouterPolicyConfig::from_yaml(
             r#"
 worker_selection:
-  default: example
+  aggregated: example
   instances:
     - name: example
       type: example-policy
@@ -614,7 +662,7 @@ worker_selection:
         .unwrap();
 
         let selection = config.worker_selection().unwrap();
-        assert_eq!(selection.default_instance(), Some("example"));
+        assert_eq!(selection.aggregated_instance(), Some("example"));
         let instance = selection.instance("example").unwrap();
         assert_eq!(instance.policy_type(), "example-policy");
         assert!(matches!(
@@ -631,6 +679,76 @@ worker_selection:
     }
 
     #[test]
+    fn request_classifier_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters:
+    pause_threshold: 0.9
+"#,
+        )
+        .unwrap();
+
+        let classifier = config.request_classifier().unwrap();
+        assert_eq!(classifier.classifier_type(), "thunderagent");
+        assert!(matches!(
+            classifier.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_request_classifier_config() {
+        for yaml in [
+            r#"
+request_classifier:
+  type: default
+"#,
+            r#"
+request_classifier:
+  type: thunderagent
+  parameters: 1
+"#,
+            r#"
+request_classifier:
+  type: ""
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_selection_accepts_every_worker_type() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  prefill: prefill-policy
+  decode: default
+  encode: encode-policy
+  instances:
+    - name: prefill-policy
+      type: cache-aware
+      parameters: {}
+    - name: encode-policy
+      type: media-aware
+      parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated_instance(), None);
+        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
+        assert_eq!(selection.decode_instance(), Some("default"));
+        assert_eq!(selection.encode_instance(), Some("encode-policy"));
+    }
+
+    #[test]
     fn rejects_invalid_worker_selection_config() {
         for yaml in [
             r#"
@@ -638,7 +756,35 @@ worker_selection: {}
 "#,
             r#"
 worker_selection:
-  default: missing
+  aggregated: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  prefill: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  decode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  encode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  default: present
   instances:
     - name: present
       type: alpha

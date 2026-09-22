@@ -105,7 +105,7 @@ impl TrackerEntry {
         replica_config: Option<&ReplicaSyncConfig>,
     ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size);
+        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size, None);
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
@@ -309,9 +309,15 @@ impl SlotTrackerRegistry {
         request_id: &str,
     ) -> Result<(), ServiceError> {
         let entry = self.entry(key)?;
-        entry
+        let request_id = request_id.to_string();
+        let worker = entry.tracker.request_worker(&request_id);
+        let outcome = entry
             .tracker
-            .mark_prefill_completed(&request_id.to_string(), Instant::now())?;
+            .mark_prefill_completed(&request_id, Instant::now())?;
+        if worker.is_none() && !outcome.is_applied() {
+            return Err(SequenceError::RequestNotFound { request_id }.into());
+        }
+        entry.tracker.publish_prefill_completed(&request_id);
         Ok(())
     }
 

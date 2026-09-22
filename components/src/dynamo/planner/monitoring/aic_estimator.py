@@ -24,7 +24,7 @@ logger.addHandler(console_handler)
 
 
 def _try_import_aiconfigurator_core():
-    """Load the optional standalone AIC core SDK modules on demand."""
+    """Load the AIC compatibility SDK shipped by AISimulate on demand."""
     # Lazy-import aiconfigurator-core because it is an optional dependency.
     import aiconfigurator_core.sdk.backends.factory
     import aiconfigurator_core.sdk.config

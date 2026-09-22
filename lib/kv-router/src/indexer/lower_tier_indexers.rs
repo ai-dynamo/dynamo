@@ -21,8 +21,11 @@ use crate::indexer::{
     KvIndexerMetrics, LowerTierContinuation, LowerTierIndexer, LowerTierMatchDetails, MatchDetails,
     ThreadPoolIndexer, WireTieredMatchDetails, record_unsupported_residency_event,
 };
-use crate::protocols::{LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank};
-use crate::router_hint::RouterHintRootCandidates;
+use crate::kv_hints::{KvTransferCandidateSource, KvTransferCandidates};
+use crate::protocols::{
+    LocalBlockHash, ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, StorageTier,
+};
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
 /// Holds one per-tier [`ThreadPoolIndexer<LowerTierIndexer>`] for every
@@ -32,6 +35,7 @@ pub struct LowerTierIndexers {
     metrics: Option<Arc<KvIndexerMetrics>>,
     num_threads: usize,
     block_size: u32,
+    routing_snapshot: Arc<ArcSwap<ResidencyRoutingSnapshot>>,
     indexers: Arc<RwLock<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
 }
 
@@ -59,8 +63,20 @@ impl LowerTierIndexers {
             num_threads,
             block_size,
             metrics,
+            routing_snapshot: Arc::new(ArcSwap::from_pointee(ResidencyRoutingSnapshot::default())),
             indexers: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Replace the immutable owner-to-worker projection used by future
+    /// lookups. Discovery and liveness reconciliation happen outside this
+    /// crate; the indexer only consumes the already-resolved snapshot.
+    pub fn set_residency_projection(&self, projection: ResidencyProjection) {
+        self.set_residency_routing_snapshot(ResidencyRoutingSnapshot::from_projection(projection));
+    }
+
+    pub fn set_residency_routing_snapshot(&self, snapshot: ResidencyRoutingSnapshot) {
+        self.routing_snapshot.store(Arc::new(snapshot));
     }
 
     /// Return the per-tier indexer for `storage_tier`, lazily allocating it
@@ -105,6 +121,10 @@ impl LowerTierIndexers {
             .collect()
     }
 
+    fn is_empty(&self) -> bool {
+        self.indexers.read().unwrap().is_empty()
+    }
+
     /// Lookup without allocation; returns `None` if the tier is unseen.
     pub fn get(
         &self,
@@ -128,11 +148,11 @@ pub struct TieredMatchDetails {
 }
 
 impl TieredMatchDetails {
-    pub fn router_hint_root_candidates(&self) -> Option<&RouterHintRootCandidates> {
+    pub fn kv_transfer_candidates(&self) -> Option<&KvTransferCandidates> {
         self.lower_tier
             .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref())
-            .or(self.device.router_hint_root_candidates.as_ref())
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
+            .or(self.device.kv_transfer_candidates.as_ref())
     }
 }
 
@@ -184,44 +204,28 @@ pub fn lower_tier_query_order() -> [StorageTier; 3] {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LowerTierQueryOptions {
-    pub retain_router_hint_chain: bool,
+    pub retain_kv_transfer_chain: bool,
 }
 
-/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
-/// per-tier match map seeded from `device_matches`. Per-worker continuations
-/// flow forward: a worker that matched N device blocks starts the host walk
-/// at block N (anchored on its last device hash), and so on.
-pub fn query_lower_tiers(
-    indexers: &LowerTierIndexers,
-    sequence: &[LocalBlockHash],
-    device_matches: &MatchDetails,
-) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    query_lower_tiers_with_options(
-        indexers,
-        sequence,
-        device_matches,
-        LowerTierQueryOptions::default(),
-    )
-}
-
-fn merge_router_hint_tier_candidates(
-    device_candidates: Option<&RouterHintRootCandidates>,
+fn merge_kv_transfer_tier_candidates(
+    device_candidates: Option<&KvTransferCandidates>,
     tier_matches: &LowerTierMatchDetails,
-) -> Option<RouterHintRootCandidates> {
+    routing_snapshot: Arc<ResidencyRoutingSnapshot>,
+) -> Option<KvTransferCandidates> {
     let mut block_hashes = device_candidates
         .map(|candidates| candidates.block_hashes.clone())
         .unwrap_or_default();
-    let mut owner_prefix_blocks: FxHashMap<WorkerWithDpRank, usize> = FxHashMap::default();
+    let mut owner_prefix_blocks: FxHashMap<KvTransferCandidateSource, usize> = FxHashMap::default();
 
     if let Some(candidates) = device_candidates {
         owner_prefix_blocks.extend(candidates.owner_prefix_blocks.iter().copied());
     }
 
-    let Some(extensions) = tier_matches.router_hint_extensions.as_ref() else {
+    let Some(extensions) = tier_matches.kv_transfer_extensions.as_ref() else {
         return device_candidates.cloned();
     };
 
-    // Router hints intentionally retain one compact root-aligned chain. The
+    // KV transfer hints intentionally retain one compact root-aligned chain. The
     // lower-tier walk records each matched child hash once at its request-block
     // position and tracks per-owner depths separately, avoiding per-worker hash
     // copies on the lookup hot path. Positional equality assumes
@@ -258,26 +262,44 @@ fn merge_router_hint_tier_candidates(
     }
     owner_prefix_blocks.sort_unstable_by_key(|(worker, _)| *worker);
 
-    Some(RouterHintRootCandidates {
+    Some(KvTransferCandidates {
         block_hashes,
         owner_prefix_blocks,
+        routing_snapshot: Some(routing_snapshot),
     })
 }
 
+/// Walk every allocated lower tier in [`lower_tier_query_order`] and build a
+/// per-tier match map seeded from `device_matches`. Per-worker continuations
+/// flow forward: a worker that matched N device blocks starts the host walk
+/// at block N (anchored on its last device hash), and so on.
 pub fn query_lower_tiers_with_options(
     indexers: &LowerTierIndexers,
     sequence: &[LocalBlockHash],
     device_matches: &MatchDetails,
     options: LowerTierQueryOptions,
 ) -> HashMap<StorageTier, LowerTierMatchDetails> {
-    // No lower-tier indexers are allocated, so there is no continuation
-    // work to perform. Return before validating device score/hash lockstep;
-    // that invariant only matters when a lower tier will consume the
-    // continuations.
-    if indexers.indexers.read().unwrap().is_empty() {
+    if indexers.is_empty() {
         return HashMap::new();
     }
+    let snapshot = indexers.routing_snapshot.load_full();
+    query_lower_tiers_with_options_and_snapshot(
+        indexers,
+        sequence,
+        device_matches,
+        options,
+        snapshot,
+    )
+}
 
+pub fn query_lower_tiers_with_options_and_snapshot(
+    indexers: &LowerTierIndexers,
+    sequence: &[LocalBlockHash],
+    device_matches: &MatchDetails,
+    options: LowerTierQueryOptions,
+    snapshot: Arc<ResidencyRoutingSnapshot>,
+) -> HashMap<StorageTier, LowerTierMatchDetails> {
+    let projection = snapshot.projection();
     let mut continuations = LowerTierMatchDetails::default().next_continuations;
     for (worker, matched_blocks) in &device_matches.overlap_scores.scores {
         let Some(last_hash) = device_matches.last_matched_hashes.get(worker).copied() else {
@@ -302,7 +324,7 @@ pub fn query_lower_tiers_with_options(
         };
 
         if let Some(&first_hash) = sequence.first() {
-            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash);
+            let root_workers: Vec<_> = indexer.backend().root_workers(first_hash, projection);
             for worker in root_workers.iter() {
                 continuations
                     .entry(*worker)
@@ -310,17 +332,21 @@ pub fn query_lower_tiers_with_options(
             }
         }
 
-        let retain_router_hint_chain =
-            options.retain_router_hint_chain && storage_tier == StorageTier::HostPinned;
-        let mut tier_matches = indexer.backend().query_match_details_with_options(
-            sequence,
-            &continuations,
-            retain_router_hint_chain,
-        );
-        if retain_router_hint_chain {
-            tier_matches.router_hint_root_candidates = merge_router_hint_tier_candidates(
-                device_matches.router_hint_root_candidates.as_ref(),
+        let retain_kv_transfer_chain =
+            options.retain_kv_transfer_chain && storage_tier == StorageTier::HostPinned;
+        let mut tier_matches = indexer
+            .backend()
+            .query_match_details_with_options_and_snapshot(
+                sequence,
+                &continuations,
+                retain_kv_transfer_chain,
+                &snapshot,
+            );
+        if retain_kv_transfer_chain {
+            tier_matches.kv_transfer_candidates = merge_kv_transfer_tier_candidates(
+                device_matches.kv_transfer_candidates.as_ref(),
                 &tier_matches,
+                snapshot.clone(),
             );
         }
         let matched_workers = tier_matches.hits.values().filter(|&&hits| hits > 0).count();
@@ -340,15 +366,61 @@ pub fn query_lower_tiers_with_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
     use crate::indexer::KvIndexerInterface;
     use crate::protocols::{
-        ExternalSequenceBlockHash, KvCacheEventData, KvCacheStoreData, LocalBlockHash,
-        OverlapScores, WorkerWithDpRank,
+        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+        LocalBlockHash, OverlapScores, RouterEvent, WorkerWithDpRank,
     };
     use crate::test_utils::{router_event, stored_blocks_with_sequence_hashes};
 
+    #[test]
+    fn tiered_matches_json_round_trip_preserves_device_and_lower_tier_scores() {
+        let worker = WorkerWithDpRank::new(7, 1);
+        let mut original = TieredMatchDetails::default();
+        original.device.overlap_scores.scores.insert(worker, 2);
+        original.device.overlap_scores.frequencies = vec![1, 1];
+        let mut lower = LowerTierMatchDetails::default();
+        lower.hits.insert(worker, 1);
+        original.lower_tier.insert(StorageTier::HostPinned, lower);
+
+        let json = serde_json::to_vec(&WireTieredMatchDetails::from(&original)).unwrap();
+        let wire: WireTieredMatchDetails = serde_json::from_slice(&json).unwrap();
+        let restored = TieredMatchDetails::from(wire);
+
+        assert_eq!(
+            restored.device.overlap_scores.scores,
+            original.device.overlap_scores.scores
+        );
+        assert_eq!(
+            restored.device.overlap_scores.frequencies,
+            original.device.overlap_scores.frequencies
+        );
+        assert_eq!(restored.lower_tier.len(), 1);
+        assert_eq!(
+            restored.lower_tier[&StorageTier::HostPinned].hits,
+            original.lower_tier[&StorageTier::HostPinned].hits
+        );
+    }
+
     fn local_hashes(values: &[u64]) -> Vec<LocalBlockHash> {
         values.iter().copied().map(LocalBlockHash).collect()
+    }
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
     }
 
     fn store_event(
@@ -374,6 +446,74 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn cache_owner_lane_survives_worker_reprojection_and_clears_once() {
+        let owner = cache_owner_id();
+        let indexers = LowerTierIndexers::new(2, 4);
+        let lower = indexers.get_or_create(StorageTier::HostPinned);
+        let store =
+            |worker_id: u64, event_id: u64, parent_hash: Option<u64>, local: u64, external: u64| {
+                RouterEvent::with_cache_owner(
+                    worker_id,
+                    KvCacheEvent {
+                        event_id,
+                        dp_rank: 3,
+                        data: KvCacheEventData::Stored(KvCacheStoreData {
+                            parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                            start_position: None,
+                            blocks: stored_blocks_with_sequence_hashes(
+                                &[LocalBlockHash(local)],
+                                &[external],
+                            ),
+                        }),
+                    },
+                    StorageTier::HostPinned,
+                    owner,
+                )
+            };
+
+        lower
+            .apply_event_and_wait(store(17, 1, None, 11, 101))
+            .await
+            .unwrap();
+        lower
+            .apply_event_and_wait(store(29, 2, Some(101), 12, 102))
+            .await
+            .unwrap();
+
+        let dumped = lower.dump_events().await.unwrap();
+        assert!(dumped.iter().all(|event| event.state_source == Some(owner)));
+
+        let replacement = WorkerWithDpRank::new(29, 3);
+        let projection = ResidencyProjection::new([(owner, replacement)]).unwrap();
+        assert_eq!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection),
+            vec![replacement]
+        );
+
+        lower
+            .apply_event_and_wait(RouterEvent::with_cache_owner(
+                replacement.worker_id,
+                KvCacheEvent {
+                    event_id: 3,
+                    dp_rank: replacement.dp_rank,
+                    data: KvCacheEventData::Cleared,
+                },
+                StorageTier::HostPinned,
+                owner,
+            ))
+            .await
+            .unwrap();
+        assert!(
+            lower
+                .backend()
+                .root_workers(LocalBlockHash(11), &projection)
+                .is_empty()
+        );
+    }
+
     #[test]
     fn query_lower_tiers_returns_empty_when_no_tiers_allocated() {
         let indexers = LowerTierIndexers::new(1, 4);
@@ -388,16 +528,21 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes: Default::default(),
-            router_hint_root_candidates: None,
+            kv_transfer_candidates: None,
         };
 
         let sequence = vec![LocalBlockHash(1), LocalBlockHash(2)];
-        let result = query_lower_tiers(&indexers, &sequence, &device_matches);
+        let result = query_lower_tiers_with_options(
+            &indexers,
+            &sequence,
+            &device_matches,
+            LowerTierQueryOptions::default(),
+        );
         assert!(result.is_empty());
     }
 
     #[tokio::test]
-    async fn query_lower_tiers_extends_router_hint_chain_from_device_prefix() {
+    async fn query_lower_tiers_extends_kv_transfer_chain_from_device_prefix() {
         let indexers = LowerTierIndexers::new(1, 4);
         let worker = WorkerWithDpRank::new(7, 0);
         let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
@@ -413,9 +558,10 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes,
-            router_hint_root_candidates: Some(RouterHintRootCandidates {
+            kv_transfer_candidates: Some(KvTransferCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
-                owner_prefix_blocks: vec![(worker, 1)],
+                owner_prefix_blocks: vec![(worker.into(), 1)],
+                routing_snapshot: None,
             }),
         };
 
@@ -425,12 +571,12 @@ mod tests {
             &sequence,
             &device_matches,
             LowerTierQueryOptions {
-                retain_router_hint_chain: true,
+                retain_kv_transfer_chain: true,
             },
         );
         let candidates = result
             .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
             .unwrap();
 
         assert_eq!(
@@ -440,7 +586,7 @@ mod tests {
                 ExternalSequenceBlockHash(102),
             ]
         );
-        assert_eq!(candidates.owner_prefix_blocks, vec![(worker, 2)]);
+        assert_eq!(candidates.owner_prefix_blocks, vec![(worker.into(), 2)]);
     }
 
     #[tokio::test]
@@ -466,9 +612,10 @@ mod tests {
         let device_matches = MatchDetails {
             overlap_scores,
             last_matched_hashes,
-            router_hint_root_candidates: Some(RouterHintRootCandidates {
+            kv_transfer_candidates: Some(KvTransferCandidates {
                 block_hashes: vec![ExternalSequenceBlockHash(101)],
-                owner_prefix_blocks: vec![(worker_1, 1), (worker_2, 1)],
+                owner_prefix_blocks: vec![(worker_1.into(), 1), (worker_2.into(), 1)],
+                routing_snapshot: None,
             }),
         };
 
@@ -478,12 +625,12 @@ mod tests {
             &sequence,
             &device_matches,
             LowerTierQueryOptions {
-                retain_router_hint_chain: true,
+                retain_kv_transfer_chain: true,
             },
         );
         let candidates = result
             .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
             .unwrap();
 
         assert_eq!(
@@ -495,12 +642,12 @@ mod tests {
         );
         assert_eq!(
             candidates.owner_prefix_blocks,
-            vec![(worker_1, 2), (worker_2, 1)]
+            vec![(worker_1.into(), 2), (worker_2.into(), 1)]
         );
     }
 
     #[tokio::test]
-    async fn query_lower_tiers_retains_router_hint_chain_when_enabled() {
+    async fn query_lower_tiers_retains_kv_transfer_chain_when_enabled() {
         let indexers = LowerTierIndexers::new(1, 4);
         let lower_tier = indexers.get_or_create(StorageTier::HostPinned);
         lower_tier
@@ -514,12 +661,12 @@ mod tests {
             &sequence,
             &MatchDetails::default(),
             LowerTierQueryOptions {
-                retain_router_hint_chain: true,
+                retain_kv_transfer_chain: true,
             },
         );
         let candidates = result
             .get(&StorageTier::HostPinned)
-            .and_then(|details| details.router_hint_root_candidates.as_ref())
+            .and_then(|details| details.kv_transfer_candidates.as_ref())
             .unwrap();
 
         assert_eq!(
@@ -531,7 +678,7 @@ mod tests {
         );
         assert_eq!(
             candidates.owner_prefix_blocks,
-            vec![(WorkerWithDpRank::new(7, 0), 2)]
+            vec![(WorkerWithDpRank::new(7, 0).into(), 2)]
         );
     }
 }

@@ -414,6 +414,16 @@ class PlannerConfig(BaseModel):
             "throughput_adjustment_interval",
         ),
     )
+    max_throughput_scaling_replicas: int = Field(
+        default=SLAPlannerDefaults.max_throughput_scaling_replicas,
+        gt=0,
+        description=(
+            "Maximum replica-count change per component produced by one "
+            "throughput-scaling observation. The same limit applies to scale-up "
+            "and scale-down. Hard endpoint, GPU-budget, and power-budget recovery "
+            "may override this limit."
+        ),
+    )
     max_gpu_budget: int = SLAPlannerDefaults.max_gpu_budget
     min_gpu_budget: int = SLAPlannerDefaults.min_gpu_budget
     """Per-DGD GPU floor enforced by the local planner. -1 disables (default).
@@ -422,9 +432,10 @@ class PlannerConfig(BaseModel):
     planner pins the per-DGD total and only redistributes replicas between
     prefill and decode. Tolerance band:
     ``[min_gpu_budget - tolerance, max_gpu_budget + tolerance]`` where
-    ``tolerance = max(prefill_engine_num_gpu, decode_engine_num_gpu)`` —
-    needed because integer worker steps from pools with different per-replica
-    GPU counts can't always exactly cancel.
+    ``tolerance`` is the largest effective per-replica GPU cost among the
+    pools being adjusted. It can exceed the inference-engine width when a
+    replica contains independently allocated GPU sidecars. Integer worker
+    steps from pools with different costs cannot always exactly cancel.
 
     This is per-DGD scope. The GlobalPlanner has a separate cluster-wide
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
@@ -462,7 +473,7 @@ class PlannerConfig(BaseModel):
         ge=0,
         le=65535,
         description=(
-            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Port for the localhost-only runtime endpoint and GPU-budget API. "
             "Set to 0 to disable the API."
         ),
     )
@@ -577,6 +588,23 @@ class PlannerConfig(BaseModel):
             "Path to a CA bundle for verifying the upstream Prometheus TLS certificate. "
             "Setting this field enables TLS verification against the given bundle, "
             "regardless of ssl_verify."
+        ),
+    )
+    metric_pulling_prometheus_request_timeout_seconds: float = Field(
+        default_factory=lambda: float(
+            os.environ.get(
+                "DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS",
+                SLAPlannerDefaults.metric_pulling_prometheus_request_timeout_seconds,
+            )
+        ),
+        validate_default=True,
+        gt=0,
+        exclude=True,
+        description=(
+            "Connection and read inactivity timeout in seconds for each Prometheus "
+            "API request. This is not a total wall-clock deadline: a response that "
+            "continues delivering data can run longer. Failed requests are not "
+            "retried within the same collection cycle."
         ),
     )
 

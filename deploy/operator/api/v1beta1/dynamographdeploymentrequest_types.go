@@ -48,18 +48,17 @@ const (
 	ConditionTypeDeploymentReady = "DeploymentReady"
 
 	// Event reasons
-	EventReasonInitialized          = "Initialized"
-	EventReasonValidationFailed     = "ValidationFailed"
-	EventReasonProfilingJobCreated  = "ProfilingJobCreated"
-	EventReasonProfilingJobFailed   = "ProfilingJobFailed"
-	EventReasonAIConfiguratorFailed = "AIConfiguratorFailed"
-	EventReasonSpecGenerated        = "SpecGenerated"
-	EventReasonSpecChangeRejected   = "SpecChangeRejected"
-	EventReasonDeploymentCreated    = "DeploymentCreated"
-	EventReasonDeploymentReady      = "DeploymentReady"
-	EventReasonDeploymentDegraded   = "DeploymentDegraded"
-	EventReasonDeploymentDeleted    = "DeploymentDeleted"
-	EventReasonImagePullFailed      = "ImagePullFailed"
+	EventReasonInitialized         = "Initialized"
+	EventReasonValidationFailed    = "ValidationFailed"
+	EventReasonProfilingJobCreated = "ProfilingJobCreated"
+	EventReasonProfilingJobFailed  = "ProfilingJobFailed"
+	EventReasonSpecGenerated       = "SpecGenerated"
+	EventReasonSpecChangeRejected  = "SpecChangeRejected"
+	EventReasonDeploymentCreated   = "DeploymentCreated"
+	EventReasonDeploymentReady     = "DeploymentReady"
+	EventReasonDeploymentDegraded  = "DeploymentDegraded"
+	EventReasonDeploymentDeleted   = "DeploymentDeleted"
+	EventReasonImagePullFailed     = "ImagePullFailed"
 
 	// Label keys
 	LabelApp           = "app"
@@ -70,7 +69,6 @@ const (
 
 	// Label values
 	LabelValueDynamoProfiler = "dynamo-profiler"
-	LabelValueAICProfiler    = "aic-profiler"
 	LabelValueDynamoOperator = "dynamo-operator"
 )
 
@@ -298,8 +296,33 @@ type ModelCacheSpec struct {
 type OverridesSpec struct {
 	// ProfilingJob allows overriding the profiling Job specification.
 	// Fields set here are merged into the controller-generated Job spec.
+	//
+	// Security: creating a DGDR is workload-creation authority in its namespace —
+	// these overrides carry the same blast radius as creating a Job or Pod directly
+	// there, by design. Pod security is enforced centrally by Kubernetes Pod Security
+	// Admission on the resulting Pods once the namespace is labeled (see
+	// pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards —
+	// covering privileged, host namespaces, and hostPath, not only securityContext —
+	// not this API. ServiceAccount identity is a separate layer: these overrides can
+	// set serviceAccountName and automountServiceAccountToken, which are bounded by
+	// RBAC and namespace membership rather than PSA — the same authority any Pod author
+	// in the namespace already holds. Grant create/update on DGDRs only to principals
+	// trusted to create Pods in the namespace. The profiling Job always runs in the
+	// DGDR's own namespace and overrides cannot change that — but namespace containment
+	// is not node or cross-tenant isolation. Dynamo's workloads, including this Job,
+	// satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting
+	// Pod to close the privileged, host-namespace, host-device, and hostPath paths.
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
+
+	// TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+	// execute custom code from the configured model repository. When enabled,
+	// the profiler adds --trust-remote-code to every generated worker component
+	// after the deployment topology has been generated. Enable this setting only
+	// for model repositories you trust.
+	// +optional
+	// +kubebuilder:default=false
+	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
 
 	// DGD provides a partial, versioned DynamoGraphDeployment override for the
 	// profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
@@ -356,8 +379,13 @@ type FeaturesSpec struct {
 	// +kubebuilder:validation:Type=object
 	Planner *runtime.RawExtension `json:"planner,omitempty"`
 
-	// TODO: KVRouter support is not yet implemented in the operator.
-	// KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
+	// KVRouter configures KV-cache-aware routing for the generated deployment.
+	// When enabled, DGDR sets DYN_ROUTER_MODE=kv on the generated Frontend.
+	// Settings in spec.overrides.dgd take precedence: an override can replace
+	// DYN_ROUTER_MODE or pass --router-mode. The flag takes precedence over the
+	// environment variable when both are present.
+	// +optional
+	KVRouter *KVRouterSpec `json:"kvRouter,omitempty"`
 
 	// Mocker configures the simulated (mocker) backend for testing without GPUs.
 	// +optional
@@ -459,7 +487,7 @@ type DynamoGraphDeploymentRequestSpec struct {
 	Backend BackendType `json:"backend,omitempty"`
 
 	// Image is the container image reference for the profiling job (planner image).
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1".
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0".
 	// For Dynamo < 1.1.0, use dynamo-frontend.
 	// +optional
 	Image string `json:"image,omitempty"`

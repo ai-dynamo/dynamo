@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -17,9 +18,11 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,8 +35,26 @@ import (
 const (
 	admissionOperatorPrincipal = "system:serviceaccount:dynamo-system:dynamo-operator"
 	customRuntimeImage         = "registry.example/runtime:custom"
+	frontendImage150           = "registry.example/dynamo-frontend:1.5.0"
+	legacyEPPImage140          = "registry.example/epp-image:1.4.0"
 	legacySeedUsername         = "operatorenv-legacy-seeder"
 )
+
+func groveProviderOverride(target, value string) *nvidiacomv1beta1.ProviderOverride {
+	return &nvidiacomv1beta1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Target:     target,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
+	}
+}
+
+func alphaGroveProviderOverride(target, value string) *nvidiacomv1alpha1.ProviderOverride {
+	return &nvidiacomv1alpha1.ProviderOverride{
+		APIVersion: provideroverride.GroveAPIVersion,
+		Target:     target,
+		Value:      apiextensionsv1.JSON{Raw: []byte(value)},
+	}
+}
 
 var (
 	// Admission cases must remain sequential because they share this gate and a cluster-scoped topology fixture.
@@ -90,6 +111,7 @@ type admissionTestCase struct {
 	seedGates          *features.Gates
 	seedWithoutWebhook bool
 	withoutTopology    bool
+	terminating        bool
 	username           string
 
 	wantSchemaError   string
@@ -135,10 +157,15 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 			seedClient = newAdmissionResourceClient(t, env, test.oldObject, legacySeedUsername, warnings)
 		}
 		old := seedAdmissionObject(t, seedClient, test, env.Namespace())
+		if test.terminating {
+			old = beginTermination(t, seedClient, old)
+		}
 
 		t.Log("Submit the update request through the Kubernetes API server")
 		admissionGate.set(test.gates)
 		warnings.clear()
+		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
+		current = applyAdmissionFixtureChanges(old, oldFixture, current)
 		current.SetResourceVersion(old.GetResourceVersion())
 		result, err = resourceClient.Update(t.Context(), current, metav1.UpdateOptions{})
 	}
@@ -152,6 +179,37 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 		t.Fatalf("warnings = %v, want %v", got, wantWarnings)
 	}
 	return result
+}
+
+// beginTermination deletes the seeded resource and reloads it, so the update
+// under test runs against a deletionTimestamp the API server owns and reports on
+// both the old and the new object. Manufacturing that timestamp on the new object
+// alone does not reach the same request: a client cannot set it, and the old
+// object carries it too once deletion is pending.
+//
+// The seeded object must already hold a finalizer, otherwise the delete removes
+// it outright and there is no terminating state left to update.
+func beginTermination(
+	t *testing.T,
+	resourceClient dynamic.ResourceInterface,
+	seeded *unstructured.Unstructured,
+) *unstructured.Unstructured {
+	t.Helper()
+	if len(seeded.GetFinalizers()) == 0 {
+		t.Fatalf("terminating case needs a finalizer on the seeded object, or the delete completes immediately")
+	}
+	t.Log("Delete the seeded resource so the API server marks it terminating")
+	if err := resourceClient.Delete(t.Context(), seeded.GetName(), metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete seeded resource: %v", err)
+	}
+	terminating, err := resourceClient.Get(t.Context(), seeded.GetName(), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("reload terminating resource: %v", err)
+	}
+	if terminating.GetDeletionTimestamp() == nil {
+		t.Fatalf("API server left %s without a deletionTimestamp", seeded.GetName())
+	}
+	return terminating
 }
 
 func newAdmissionResourceClient(
@@ -269,7 +327,9 @@ func seedAdmissionObject(
 		t.Fatalf("create old resource state: %v", err)
 	}
 	if test.oldBeforeUpdate != nil {
-		old, _ := admissionObject(t, test.oldObject, namespace, nil)
+		before, _ := admissionObject(t, test.oldBeforeUpdate, namespace, nil)
+		oldFixture, _ := admissionObject(t, test.oldObject, namespace, nil)
+		old := applyAdmissionFixtureChanges(created, before, oldFixture)
 		old.SetResourceVersion(created.GetResourceVersion())
 		created, err = resourceClient.Update(t.Context(), old, metav1.UpdateOptions{})
 		if err != nil {
@@ -291,6 +351,64 @@ func seedAdmissionObject(
 		}
 	}
 	return created
+}
+
+func applyAdmissionFixtureChanges(
+	live *unstructured.Unstructured,
+	oldFixture *unstructured.Unstructured,
+	newFixture *unstructured.Unstructured,
+) *unstructured.Unstructured {
+	updated := live.DeepCopy()
+	updated.Object = applyAdmissionFixtureValueChanges(
+		updated.Object,
+		oldFixture.Object,
+		newFixture.Object,
+	).(map[string]any)
+	return updated
+}
+
+func applyAdmissionFixtureValueChanges(live, oldFixture, newFixture any) any {
+	if reflect.DeepEqual(oldFixture, newFixture) {
+		return runtime.DeepCopyJSONValue(live)
+	}
+
+	oldMap, oldIsMap := oldFixture.(map[string]any)
+	newMap, newIsMap := newFixture.(map[string]any)
+	liveMap, liveIsMap := live.(map[string]any)
+	if oldIsMap && newIsMap && liveIsMap {
+		updated := runtime.DeepCopyJSONValue(liveMap).(map[string]any)
+		for key := range oldMap {
+			if _, exists := newMap[key]; !exists {
+				delete(updated, key)
+			}
+		}
+		for key, newValue := range newMap {
+			oldValue, existed := oldMap[key]
+			if !existed {
+				updated[key] = runtime.DeepCopyJSONValue(newValue)
+				continue
+			}
+			updated[key] = applyAdmissionFixtureValueChanges(updated[key], oldValue, newValue)
+		}
+		return updated
+	}
+
+	oldList, oldIsList := oldFixture.([]any)
+	newList, newIsList := newFixture.([]any)
+	liveList, liveIsList := live.([]any)
+	if oldIsList && newIsList && liveIsList {
+		updated := make([]any, len(newList))
+		for i, newValue := range newList {
+			if i < len(oldList) && i < len(liveList) {
+				updated[i] = applyAdmissionFixtureValueChanges(liveList[i], oldList[i], newValue)
+				continue
+			}
+			updated[i] = runtime.DeepCopyJSONValue(newValue)
+		}
+		return updated
+	}
+
+	return runtime.DeepCopyJSONValue(newFixture)
 }
 
 func pruneZeroValues(value any) (any, bool) {

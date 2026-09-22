@@ -192,17 +192,6 @@ func ToAlphaCheckpointConfig(src *v1beta1.ComponentCheckpointConfig) *v1alpha1.S
 	return dst
 }
 
-// ToAlphaCheckpointIdentity converts a v1beta1 checkpoint identity into the
-// controller's v1alpha1 compatibility shape.
-func ToAlphaCheckpointIdentity(src *v1beta1.DynamoCheckpointIdentity) *v1alpha1.DynamoCheckpointIdentity {
-	if src == nil {
-		return nil
-	}
-	dst := &v1alpha1.DynamoCheckpointIdentity{}
-	v1alpha1.ConvertToDynamoCheckpointIdentity(src, dst)
-	return dst
-}
-
 // ToBetaSharedMemorySize converts the v1alpha1 shared-memory compatibility
 // shape into the v1beta1 scalar field.
 func ToBetaSharedMemorySize(src *v1alpha1.SharedMemorySpec) *resource.Quantity {

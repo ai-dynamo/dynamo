@@ -17,7 +17,10 @@ import asyncio
 import json
 import logging
 import os
+from threading import Lock
 from typing import Optional
+
+from kubernetes.client import ApiException
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.connectors.base import PlannerConnector
@@ -32,17 +35,21 @@ from dynamo.planner.connectors.mdc import (
     select_entry,
     worker_info_from_mdc,
 )
+from dynamo.planner.core.types import WorkerCounts
 from dynamo.planner.errors import (
     DeploymentModelNameMismatchError,
     DeploymentValidationError,
     DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
+    GPUShapeUnavailableError,
     ModelNameNotFoundError,
     PlannerError,
     UserProvidedModelNameMismatchError,
 )
 from dynamo.planner.monitoring.dgd_services import (
+    ComponentGPUShape,
     ComponentPowerConfig,
+    Service,
     get_component_from_type_or_name,
     get_component_type,
     get_components_by_name,
@@ -94,6 +101,12 @@ class KubernetesConnector(PlannerConnector):
         # For backwards compatibility
         self.graph_deployment_name = self.parent_dgd_name
         self.raise_not_ready = raise_not_ready
+        # DGDSA application and DGD status are asynchronous. Hold subsequent
+        # writes until a startup reversal has actually finished, not just until
+        # the pre-write Ready condition is observed again.
+        self._startup_scale_down_lock = Lock()
+        self._startup_scale_down_targets: dict[str, int] = {}
+        self._startup_read_warnings: set[str] = set()
 
     async def async_init(self):
         """No-op asynchronous lifecycle hook."""
@@ -362,26 +375,50 @@ class KubernetesConnector(PlannerConnector):
         require_decode: bool = True,
         deployment: Optional[dict] = None,
     ) -> tuple[int, int]:
-        """Get the GPU counts for prefill and decode components.
+        """Get per-engine GPU counts for prefill and decode components."""
+        prefill_shape, decode_shape = self.get_gpu_shapes(
+            require_prefill=require_prefill,
+            require_decode=require_decode,
+            deployment=deployment,
+        )
+        errors = []
+        if require_prefill and prefill_shape is None:
+            errors.append("Prefill mocker requires a configured logical GPU count")
+        if require_decode and decode_shape is None:
+            errors.append("Decode mocker requires a configured logical GPU count")
+        if errors:
+            raise DeploymentValidationError(errors)
+        return (
+            prefill_shape.gpus_per_engine if prefill_shape is not None else 0,
+            decode_shape.gpus_per_engine if decode_shape is not None else 0,
+        )
+
+    def get_gpu_shapes(
+        self,
+        require_prefill: bool = True,
+        require_decode: bool = True,
+        deployment: Optional[dict] = None,
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Get per-engine performance width and per-replica GPU cost.
 
         Pass ``deployment`` to reuse an already-fetched DGD (avoids a second
         GET when the environment also resolves power configs on the same tick).
         """
         if deployment is None:
             deployment = self.get_graph_deployment()
-        return self._get_gpu_counts_from_deployment(
+        return self._get_gpu_shapes_from_deployment(
             deployment,
             require_prefill=require_prefill,
             require_decode=require_decode,
         )
 
-    def _get_gpu_counts_from_deployment(
+    def _get_gpu_shapes_from_deployment(
         self,
         deployment: dict,
         require_prefill: bool = True,
         require_decode: bool = True,
-    ) -> tuple[int, int]:
-        """Get GPU counts from an already-fetched deployment.
+    ) -> tuple[Optional[ComponentGPUShape], Optional[ComponentGPUShape]]:
+        """Get GPU shapes from an already-fetched deployment.
 
         Args:
             deployment: Deployment dict to inspect
@@ -389,13 +426,15 @@ class KubernetesConnector(PlannerConnector):
             require_decode: Whether to require a decode component
 
         Returns:
-            Tuple of (prefill_gpu_count, decode_gpu_count)
+            Tuple of (prefill_gpu_shape, decode_gpu_shape)
 
         Raises:
-            DeploymentValidationError: If GPU counts cannot be determined from DGD
+            DeploymentValidationError: If GPU shapes cannot be determined from DGD
+            GPUShapeUnavailableError: If an authoritative shape is stale, missing,
+                or explicitly zero for a required Planner worker
         """
-        prefill_gpu_count = 0
-        decode_gpu_count = 0
+        prefill_gpu_shape = None
+        decode_gpu_shape = None
         errors = []
 
         if require_prefill:
@@ -404,9 +443,14 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.PREFILL,
                 )
-                prefill_gpu_count = prefill_service.get_gpu_count()
+                prefill_gpu_shape = prefill_service.get_gpu_shape(deployment)
+                prefill_gpu_shape = self._validate_required_gpu_shape(
+                    prefill_service, prefill_gpu_shape
+                )
+            except GPUShapeUnavailableError:
+                raise
             except (PlannerError, ValueError) as e:
-                errors.append(f"Failed to get prefill GPU count: {e}")
+                errors.append(f"Failed to get prefill GPU shape: {e}")
 
         if require_decode:
             try:
@@ -414,14 +458,39 @@ class KubernetesConnector(PlannerConnector):
                     deployment,
                     SubComponentType.DECODE,
                 )
-                decode_gpu_count = decode_service.get_gpu_count()
+                decode_gpu_shape = decode_service.get_gpu_shape(deployment)
+                decode_gpu_shape = self._validate_required_gpu_shape(
+                    decode_service, decode_gpu_shape
+                )
+            except GPUShapeUnavailableError:
+                raise
             except (PlannerError, ValueError) as e:
-                errors.append(f"Failed to get decode GPU count: {e}")
+                errors.append(f"Failed to get decode GPU shape: {e}")
 
         if errors:
             raise DeploymentValidationError(errors)
 
-        return prefill_gpu_count, decode_gpu_count
+        return prefill_gpu_shape, decode_gpu_shape
+
+    @staticmethod
+    def _validate_required_gpu_shape(
+        service: Service, shape: ComponentGPUShape
+    ) -> Optional[ComponentGPUShape]:
+        """Fail closed on zero physical GPUs except for simulated workers."""
+
+        if shape.gpus_per_replica != 0:
+            return shape
+        if service.is_mocker():
+            logger.info(
+                "Component %s runs Dynamo mocker with zero physical GPUs; "
+                "using the configured logical GPU shape",
+                service.name,
+            )
+            return None
+        raise GPUShapeUnavailableError(
+            service.name,
+            "operator published an authoritative zero-GPU shape",
+        )
 
     def get_component_power_configs(
         self,
@@ -434,10 +503,10 @@ class KubernetesConnector(PlannerConnector):
         """Resolve DGD-owned per-role power configs from worker podTemplate annotations.
 
         One DGD GET unless ``deployment`` is provided (shared with
-        ``get_gpu_counts`` on the same tick). ``watts_per_replica`` on each
+        ``get_gpu_shapes`` on the same tick). ``watts_per_replica`` on each
         config uses the replica-wide GPU total (nodeCount × per-pod) via
-        ``Service.get_total_gpu_count()``, independent of the per-pod
-        ``num_gpus`` the GPU-budget math consumes.
+        ``Service.get_total_gpu_count()``. GPU-budget math independently uses
+        the operator-projected ``gpusPerReplica``.
 
         The typed parser errors (``PowerAnnotationMissingError`` /
         ``PowerAnnotationInvalidError`` / ``SubComponentNotFoundError`` /
@@ -622,8 +691,8 @@ class KubernetesConnector(PlannerConnector):
     ) -> tuple[Optional[str], str]:
         """Return (dgd_service_name, component_name_for_filter).
 
-        ``dgd_service_name`` is the stable DGD component name (typically
-        PascalCase, e.g. ``"VllmPrefillWorker"``) and is used for Kubernetes
+        ``dgd_service_name`` is the DGD ``spec.services`` dict key (typically
+        PascalCase, e.g. ``"prefill"``) and is used for Kubernetes
         operations like patching replica counts.
 
         ``component_name_for_filter`` is the component name that the Rust
@@ -637,8 +706,8 @@ class KubernetesConnector(PlannerConnector):
            :func:`build_worker_info_from_defaults` (e.g. ``"prefill"`` /
            ``"backend"``).
 
-        Note: the DGD component name (``service.name``) must NOT be used for
-        filtering -- it is typically PascalCase (``"VllmPrefillWorker"``) and
+        Note: the DGD services dict key (``service.name``) must NOT be used
+        here -- it is typically PascalCase (``"prefill"``) and
         would never match the lowercase value the worker writes to MDC.
         """
         defaults = build_worker_info_from_defaults(backend, sub_component_type)
@@ -722,7 +791,140 @@ class KubernetesConnector(PlannerConnector):
         )
         return info
 
-    # todo -> how are we handling 3 active 2 more new workers pending?
+    def _list_startup_pods(self) -> Optional[list]:
+        """Return lifecycle Pods, or None when legacy RBAC forbids listing them."""
+        try:
+            pods = self.kube_api.list_pods_for_graph(self.graph_deployment_name)
+        except ApiException as exc:
+            if exc.status != 403:
+                raise
+            with self._startup_scale_down_lock:
+                warn = "pods" not in self._startup_read_warnings
+                self._startup_read_warnings.add("pods")
+            if warn:
+                logger.warning(
+                    "Pod list forbidden for %s; startup cancellation is disabled "
+                    "until pods/list is granted",
+                    self.graph_deployment_name,
+                )
+            return None
+        with self._startup_scale_down_lock:
+            self._startup_read_warnings.discard("pods")
+        return KubernetesAPI.exclude_checkpoint_capture_pods(pods)
+
+    def _startup_scale_down_in_progress(self, deployment: dict, pods: list) -> bool:
+        # Snapshot under the lock, then do Kubernetes I/O without holding it.
+        # Writers replace the dictionary so identity detects even a concurrent
+        # request for the same target, not only a different replica count.
+        with self._startup_scale_down_lock:
+            previous_targets = self._startup_scale_down_targets
+            targets = previous_targets.copy()
+        if not targets:
+            return False
+        if not self.kube_api.is_spec_generation_observed(deployment):
+            return True
+        if self.kube_api.has_terminating_pods(pods):
+            return True
+        if not self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods):
+            return True
+        components = get_components_by_name(deployment)
+        startup = self.kube_api.pending_startup_replicas(deployment, pods)
+        remaining: dict[str, int] = {}
+        for name, target in targets.items():
+            desired = Service(
+                name=name, service=components.get(name, {})
+            ).number_replicas()
+            _, stable = self.kube_api.get_service_replica_status(deployment, name)
+            if desired != target:
+                try:
+                    authoritative_target = self.kube_api.get_service_replica_target(
+                        self.graph_deployment_name, name
+                    )
+                except ApiException as exc:
+                    if exc.status != 403:
+                        raise
+                    # GET may be revoked after admission. Retain this request
+                    # until its DGD target arrives; do not guess that an
+                    # unobserved write was superseded or drop the latch.
+                    with self._startup_scale_down_lock:
+                        warn = "scale" not in self._startup_read_warnings
+                        self._startup_read_warnings.add("scale")
+                    if warn:
+                        logger.warning(
+                            "Scale get forbidden for %s; holding startup scale-down "
+                            "until its DGD target is observed",
+                            self.graph_deployment_name,
+                        )
+                    remaining[name] = target
+                    continue
+                with self._startup_scale_down_lock:
+                    self._startup_read_warnings.discard("scale")
+                if authoritative_target == target or desired != authoritative_target:
+                    remaining[name] = target
+                # A superseding DGDSA target has reached the observed DGD spec.
+                # Retire our old request; ordinary inventory guards its state.
+            elif not stable and name not in startup:
+                remaining[name] = target
+            # Once excess/terminating replicas are gone, a survivor becoming
+            # unready is startup capacity again, not an unfinished drain.
+        with self._startup_scale_down_lock:
+            if self._startup_scale_down_targets is previous_targets:
+                self._startup_scale_down_targets = remaining
+            return bool(self._startup_scale_down_targets)
+
+    async def get_worker_inventory(
+        self,
+        prefill_component_name: Optional[str] = None,
+        decode_component_name: Optional[str] = None,
+    ) -> Optional[WorkerCounts]:
+        """Read selected roles' serving/pending inventory off the event loop.
+
+        DGD status and Pods supply startup, drain, and rollout checks, including
+        the power-aware readiness guarantees. An omitted component name reports
+        zero counts for that role; pending counts never include draining workers.
+        Return None on a Pod-list 403 so callers can retain legacy behavior.
+        """
+        return await asyncio.to_thread(
+            self._get_worker_inventory_sync,
+            prefill_component_name,
+            decode_component_name,
+        )
+
+    def _get_worker_inventory_sync(
+        self,
+        prefill_component_name: Optional[str],
+        decode_component_name: Optional[str],
+    ) -> Optional[WorkerCounts]:
+        deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+        pods = self._list_startup_pods()
+        if pods is None:
+            return None
+        p, d, stable = self._worker_counts_from_snapshot(
+            deployment,
+            prefill_component_name=prefill_component_name,
+            decode_component_name=decode_component_name,
+            pods_by_component=self.kube_api.partition_pods_by_component(pods),
+            power_aware=True,
+        )
+        stable = (
+            stable
+            and self.kube_api.is_spec_generation_observed(deployment)
+            and self.kube_api.pcsg_pods_within_desired_replicas(deployment, pods)
+        )
+        pending = self.kube_api.pending_startup_replicas(deployment, pods)
+        if self._startup_scale_down_in_progress(deployment, pods):
+            stable, pending = False, {}
+        return WorkerCounts(
+            ready_num_prefill=p,
+            ready_num_decode=d,
+            expected_num_prefill=p if stable else None,
+            expected_num_decode=d if stable else None,
+            prefill_scaling_in_progress=not stable,
+            decode_scaling_in_progress=not stable,
+            pending_num_prefill=pending.get(prefill_component_name or "", 0),
+            pending_num_decode=pending.get(decode_component_name or "", 0),
+        )
+
     async def get_actual_worker_counts(
         self,
         prefill_component_name: Optional[str] = None,
@@ -857,7 +1059,106 @@ class KubernetesConnector(PlannerConnector):
 
         deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
 
-        if not self.kube_api.is_deployment_ready(deployment):
+        ready = self.kube_api.is_deployment_ready(deployment)
+        startup_reduction = False
+        reducing = any(
+            target.desired_replicas
+            < get_component_from_type_or_name(
+                deployment,
+                target.sub_component_type,
+                component_name=target.component_name,
+            ).number_replicas()
+            for target in target_replicas
+        )
+        with self._startup_scale_down_lock:
+            scale_down_pending = bool(self._startup_scale_down_targets)
+        if not ready or scale_down_pending or reducing:
+            pods = self._list_startup_pods()
+            if pods is None:
+                # Keep ordinary Ready-deployment scaling working with old RBAC.
+                # Never release an accepted startup reversal without observing
+                # its drain, or use the startup exception to scale an unready DGD.
+                ready = (
+                    ready
+                    and not scale_down_pending
+                    and self.kube_api.non_planner_components_stable(deployment)[0]
+                )
+            else:
+                if self._startup_scale_down_in_progress(deployment, pods):
+                    logger.info("Startup scale-down still converging, ignoring scaling")
+                    return
+                pending = self.kube_api.pending_startup_replicas(deployment, pods)
+                # Ready can still describe the state before a Pod deletion or the
+                # latest spec change. Recheck lifecycle before issuing a reduction.
+                phase = (deployment.get("status", {}).get("rollingUpdate") or {}).get(
+                    "phase"
+                )
+                ready = (
+                    ready
+                    and self.kube_api.is_spec_generation_observed(deployment)
+                    and not self.kube_api.has_terminating_pods(pods)
+                    and self.kube_api.pcsg_pods_within_desired_replicas(
+                        deployment, pods
+                    )
+                    and self.kube_api.non_planner_components_stable(deployment)[0]
+                    and phase in (None, "", "Completed")
+                    and not pending
+                )
+                startup_reduction = bool(pending)
+                any_reduction = False
+                for target in target_replicas:
+                    if not startup_reduction:
+                        break
+                    service = get_component_from_type_or_name(
+                        deployment,
+                        target.sub_component_type,
+                        component_name=target.component_name,
+                    )
+                    serving, _ = self.kube_api.get_service_replica_status(
+                        deployment, service.name
+                    )
+                    desired = service.number_replicas()
+                    if target.desired_replicas != desired:
+                        startup_reduction &= (
+                            0 <= target.desired_replicas <= serving
+                            and target.desired_replicas < desired
+                        )
+                        any_reduction = True
+                startup_reduction &= any_reduction
+
+        if startup_reduction:
+            # Reconciliation needs Scale GET to recognize superseding writers.
+            # Check every changed component before the first PATCH, so partial
+            # RBAC cannot admit a cancellation we cannot subsequently track.
+            try:
+                for target in target_replicas:
+                    service = get_component_from_type_or_name(
+                        deployment,
+                        target.sub_component_type,
+                        component_name=target.component_name,
+                    )
+                    if service.number_replicas() != target.desired_replicas:
+                        self.kube_api.get_service_replica_target(
+                            self.graph_deployment_name, service.name
+                        )
+            except ApiException as exc:
+                if exc.status != 403:
+                    raise
+                startup_reduction = False
+                with self._startup_scale_down_lock:
+                    warn = "scale" not in self._startup_read_warnings
+                    self._startup_read_warnings.add("scale")
+                if warn:
+                    logger.warning(
+                        "Scale get forbidden for %s; startup cancellation is "
+                        "disabled until Scale get is granted",
+                        self.graph_deployment_name,
+                    )
+            else:
+                with self._startup_scale_down_lock:
+                    self._startup_read_warnings.discard("scale")
+
+        if not ready and not startup_reduction:
             if self.raise_not_ready:
                 logger.warning(
                     "Deployment %s is not ready, rejecting this scaling",
@@ -889,6 +1190,12 @@ class KubernetesConnector(PlannerConnector):
                     service.name,
                     target_replica.desired_replicas,
                 )
+                if startup_reduction:
+                    with self._startup_scale_down_lock:
+                        self._startup_scale_down_targets = {
+                            **self._startup_scale_down_targets,
+                            service.name: target_replica.desired_replicas,
+                        }
             else:
                 logger.info(
                     f"{target_replica.sub_component_type.value} component {service.name} already at desired replica count {target_replica.desired_replicas}, skipping"

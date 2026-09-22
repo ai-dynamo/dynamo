@@ -15,6 +15,8 @@ use pyo3_async_runtimes::TaskLocals;
 
 use dynamo_kv_router::TrackingHashAlgorithm as RsTrackingHashAlgorithm;
 use dynamo_kv_router::config::{
+    ApproximateCachePolicyKind as RsApproximateCachePolicyKind,
+    ConditionalDisaggPolicyKind as RsConditionalDisaggPolicyKind,
     KvRouterConfig as RsKvRouterConfig, RouterPrefillLoadModel as RsRouterPrefillLoadModel,
     apply_deprecated_overlap_score_weight_override,
 };
@@ -30,6 +32,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::make_mocker_engine;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::reasoning_field::ReasoningField;
+use dynamo_llm::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
 use dynamo_mocker::common::perf_model::PerfModel;
 
@@ -239,7 +242,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -254,19 +257,29 @@ impl KvRouterConfig {
         router_track_prefill_tokens: bool,
         router_prefill_load_model: &str,
         router_ttl_secs: f64,
+        router_approximate_cache_policy: &str,
         router_queue_threshold: Option<f64>,
         router_event_threads: u32,
         router_queue_policy: &str,
         use_remote_indexer: bool,
         serve_indexer: bool,
+        enable_session_prefix_index: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
+        conditional_disagg_enabled: bool,
+        conditional_disagg_policy: &str,
+        conditional_disagg_eff_isl_threshold: usize,
+        conditional_disagg_eff_isl_ratio_threshold: f64,
+        conditional_disagg_prefill_busy_threshold: Option<f64>,
+        conditional_disagg_decode_busy_threshold: Option<f64>,
         mut overlap_score_credit: f64,
         overlap_score_credit_decay: f64,
         mut prefill_load_scale: f64,
         decode_active_request_weight: f64,
         router_policy_config: Option<String>,
+        router_prefill_policy: Option<String>,
+        router_decode_policy: Option<String>,
         router_tracking_hash: &str,
         router_tracking_key_file: Option<PathBuf>,
         router_tracking_key_id: Option<String>,
@@ -302,8 +315,13 @@ impl KvRouterConfig {
                 .parse::<RsRouterPrefillLoadModel>()
                 .map_err(PyValueError::new_err)?,
             router_ttl_secs,
+            router_approximate_cache_policy: router_approximate_cache_policy
+                .parse::<RsApproximateCachePolicyKind>()
+                .map_err(PyValueError::new_err)?,
             router_queue_threshold,
             router_policy_config,
+            router_prefill_policy,
+            router_decode_policy,
             policy_model_name: None,
             policy_config_cache: Default::default(),
             router_event_threads,
@@ -311,10 +329,18 @@ impl KvRouterConfig {
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
             use_remote_indexer,
             serve_indexer,
+            enable_session_prefix_index,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
+            conditional_disagg_enabled,
+            conditional_disagg_policy: conditional_disagg_policy
+                .parse::<RsConditionalDisaggPolicyKind>()
+                .map_err(PyValueError::new_err)?,
+            conditional_disagg_eff_isl_threshold,
+            conditional_disagg_eff_isl_ratio_threshold,
+            conditional_disagg_prefill_busy_threshold,
+            conditional_disagg_decode_busy_threshold,
             router_predicted_ttl_secs,
-            ..Default::default()
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
@@ -457,12 +483,14 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens as fraction of max_num_batched_tokens
     active_prefill_tokens_threshold_frac: Option<f64>,
     session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: RsSessionAffinityMode,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, active_prefill_tokens_threshold_frac=None, enforce_disagg=false, session_affinity_ttl_secs=None, session_affinity_mode="hard"))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
@@ -471,6 +499,7 @@ impl RouterConfig {
         active_prefill_tokens_threshold_frac: Option<f64>,
         enforce_disagg: bool,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if enforce_disagg {
             static WARN_ONCE: std::sync::Once = std::sync::Once::new();
@@ -480,11 +509,7 @@ impl RouterConfig {
                 );
             });
         }
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
-        }
+        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
@@ -492,6 +517,9 @@ impl RouterConfig {
         }
         .validate()
         .map_err(PyValueError::new_err)?;
+        let session_affinity_mode = session_affinity_mode
+            .parse()
+            .map_err(PyValueError::new_err)?;
         Ok(Self {
             router_mode: mode,
             kv_router_config: config.unwrap_or_default(),
@@ -499,6 +527,7 @@ impl RouterConfig {
             active_prefill_tokens_threshold,
             active_prefill_tokens_threshold_frac,
             session_affinity_ttl_secs,
+            session_affinity_mode,
         })
     }
 }
@@ -515,6 +544,7 @@ impl From<RouterConfig> for RsRouterConfig {
             },
             enforce_disagg: false,
             session_affinity_ttl_secs: rc.session_affinity_ttl_secs,
+            session_affinity_mode: rc.session_affinity_mode,
         }
     }
 }
@@ -551,6 +581,7 @@ pub(crate) struct EntrypointArgs {
     frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     mocker_engine_args: Option<PyMockEngineArgs>,
     runtime_config: ModelRuntimeConfig,
@@ -568,7 +599,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -594,6 +625,7 @@ impl EntrypointArgs {
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
+        tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
@@ -601,6 +633,7 @@ impl EntrypointArgs {
         enable_streaming_reasoning_dispatch: Option<bool>,
         reasoning_field_name: Option<String>,
         tokenizer_backend: Option<String>,
+        tokenizer_fallback: Option<bool>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = endpoint_id.as_deref().map(EndpointId::from);
         if (tls_cert_path.is_some() && tls_key_path.is_none())
@@ -608,6 +641,12 @@ impl EntrypointArgs {
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
+        if tls_client_ca_cert_path.is_some() && (tls_cert_path.is_none() || tls_key_path.is_none())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tls_client_ca_cert_path requires tls_cert_path and tls_key_path",
             ));
         }
 
@@ -647,6 +686,11 @@ impl EntrypointArgs {
                 .inner
                 .set_tokenizer_backend(Some(tokenizer_backend));
         }
+        if let Some(tokenizer_fallback) = tokenizer_fallback {
+            runtime_config
+                .inner
+                .set_tokenizer_fallback_enabled(Some(tokenizer_fallback));
+        }
         runtime_config.validate_config()?;
 
         Ok(EntrypointArgs {
@@ -670,6 +714,7 @@ impl EntrypointArgs {
             ),
             tls_cert_path,
             tls_key_path,
+            tls_client_ca_cert_path,
             extra_engine_args,
             mocker_engine_args,
             runtime_config,
@@ -725,12 +770,13 @@ pub fn make_engine<'p>(
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
+        .tls_client_ca_cert_path(args.tls_client_ca_cert_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
         .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
                 model_path
@@ -972,7 +1018,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
         super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
-    let worker_selection_policy_factory = crate::worker_selection_policy_factory(
+    let plugins = crate::router_plugins(
         &engine_config
             .inner
             .local_model()
@@ -980,7 +1026,8 @@ pub fn run_input<'p>(
             .kv_router_config,
     )
     .map_err(to_pyerr)?;
-    if worker_selection_policy_factory.is_some()
+    let has_router_plugin = !plugins.is_empty();
+    if has_router_plugin
         && !engine_config
             .inner
             .local_model()
@@ -989,21 +1036,19 @@ pub fn run_input<'p>(
             .is_kv_routing()
     {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require --router-mode kv",
+            "linked router plugins require --router-mode kv",
         ));
     }
-    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
+    if has_router_plugin && !matches!(&input_enum, Input::Http) {
         return Err(PyValueError::new_err(
-            "linked worker-selection policies require HTTP frontend input",
+            "linked router plugins require HTTP frontend input",
         ));
     }
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        if let Some(factory) = worker_selection_policy_factory {
+    crate::future_into_py(py, async move {
+        if has_router_plugin {
             HttpFrontend::default()
                 .frontend_route_extensions(frontend_route_extensions)
-                .worker_selection_policy_factory(move |config, worker_type, partition| {
-                    factory(config, worker_type, partition)
-                })
+                .plugins(plugins)
                 .run(distributed_runtime.inner.clone(), engine_config.inner)
                 .await
                 .map_err(to_pyerr)?;

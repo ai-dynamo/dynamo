@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# uv dependency overrides for the planner image.
+#
+# The planner installs the ai-dynamo wheel alongside aiperf in a single resolve.
+# aiperf declares aiohttp~=3.13.3 on every published version, which holds the
+# whole image below the floor requirements.common.txt targets for the other
+# images. An override keeps the planner on the same aiohttp as everything else
+# without editing aiperf.
+#
+# Verified: with this file the resolve produces an identical package set, 130
+# packages either way, differing only in aiohttp (3.13.5 -> 3.14.3). Drop this
+# entry once aiperf widens its own constraint.
+#
+# The upper bound is required, not decorative: a uv override REPLACES every other
+# constraint on the package, so the <4.0 cap carried by pyproject.toml and the
+# requirements files does not apply here. Without it this image would be the only
+# one that accepts a 4.x release.
+aiohttp>=3.14.3,<4.0
+
+# Same story for pillow. aiperf declares pillow~=12.2.0, which pins the patch
+# series and so forbids 12.3.0, the floor requirements.common.txt already
+# targets. The planner installs aiperf for the thorough profiler path, so
+# without this override the image resolves back to 12.2.0 no matter what the
+# requirements files ask for.
+#
+# The upper bound is required for the same reason as above: a uv override
+# REPLACES every other constraint on the package, so nothing else caps this at
+# the 12.x series once the override is in force. Drop this entry once aiperf
+# widens its own constraint.
+pillow>=12.3.0,<13

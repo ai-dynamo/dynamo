@@ -148,7 +148,7 @@ pub(crate) enum InnerShape {
 ///
 /// This trait enables direct access to entire blocks as contiguous memory,
 /// without requiring layer/outer indexing. It is implemented by
-/// [`FullyContiguousLayout`] but NOT by [`LayerSeparateLayout`] (which
+/// `FullyContiguousLayout` but NOT by `LayerSeparateLayout` (which
 /// stores each layer separately).
 ///
 /// Use this trait when you need to:

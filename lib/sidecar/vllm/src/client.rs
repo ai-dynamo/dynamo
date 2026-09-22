@@ -1,18 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
+use std::future::Future;
 use std::time::Duration;
 
 use dynamo_backend_common::DynamoError;
-use dynamo_sidecar_common::{
-    DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, GrpcEndpoint, GrpcTransportConfig,
-};
+use dynamo_sidecar_common::v14::GrpcChannelPool;
+use dynamo_sidecar_common::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcEndpoint, GrpcTransportConfig};
 use tokio::time::{Instant, sleep_until, timeout_at};
 use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
 use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::{HealthCheckRequest, health_client::HealthClient};
 
-pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument, status_to_dynamo};
+pub(crate) use dynamo_sidecar_common::v14::status_to_dynamo;
+pub(crate) use dynamo_sidecar_common::{engine_shutdown, invalid_argument};
 
 use crate::proto as pb;
 
@@ -25,14 +30,18 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
+    /// `bootstrap`: see `GrpcChannelPool::connect`. True from the
+    /// `bootstrap_discover` call site (before the tracing subscriber is
+    /// installed), false from `LLMEngine::start` (after it).
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
         startup_deadline: Instant,
+        bootstrap: bool,
     ) -> Result<Self, DynamoError> {
         let pool = timeout_at(
             startup_deadline,
-            GrpcChannelPool::connect("vLLM", endpoint, transport),
+            GrpcChannelPool::connect("vLLM", endpoint, transport, bootstrap),
         )
         .await
         .map_err(|_| {
@@ -45,6 +54,12 @@ impl VllmClient {
 
     pub(crate) fn connection_count(&self) -> usize {
         self.pool.len()
+    }
+
+    pub(crate) fn control_client(&self) -> pb::control_client::ControlClient<Channel> {
+        pb::control_client::ControlClient::new(self.pool.next_channel())
+            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
+            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
     }
 
     pub(crate) async fn wait_for_services(
@@ -115,10 +130,7 @@ impl VllmClient {
         &self,
         startup_deadline: Instant,
     ) -> Result<(pb::ModelInfo, pb::ServerInfo), DynamoError> {
-        let channel = self.pool.next_channel();
-        let mut client = pb::control_client::ControlClient::new(channel)
-            .max_encoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE)
-            .max_decoding_message_size(DEFAULT_MAX_GRPC_MESSAGE_SIZE);
+        let mut client = self.control_client();
         let model = timeout_at(
             startup_deadline,
             client.get_model_info(pb::GetModelInfoRequest {}),
@@ -178,6 +190,41 @@ impl VllmClient {
             .map(|response| response.sources)
             .map_err(|status| status_to_dynamo("GetKvEventSources", status))
     }
+
+    pub(crate) async fn load_lora(
+        &self,
+        lora_name: String,
+        source_path: String,
+    ) -> Result<pb::LoadLoraResponse, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc(
+            "LoadLora",
+            client.load_lora(pb::LoadLoraRequest {
+                lora_name,
+                source_path,
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn unload_lora(
+        &self,
+        lora_name: String,
+    ) -> Result<pb::UnloadLoraResponse, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc(
+            "UnloadLora",
+            client.unload_lora(pb::UnloadLoraRequest { lora_name }),
+        )
+        .await
+    }
+
+    pub(crate) async fn list_loras(&self) -> Result<Vec<pb::LoraAdapter>, LoraRpcError> {
+        let mut client = self.control_client();
+        lora_rpc("ListLoras", client.list_loras(pb::ListLorasRequest {}))
+            .await
+            .map(|response| response.adapters)
+    }
 }
 
 pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoError> {
@@ -190,4 +237,56 @@ pub(crate) fn startup_deadline(duration: Duration) -> Result<Instant, DynamoErro
 
 pub(crate) fn protocol_error(message: impl Into<String>) -> DynamoError {
     dynamo_sidecar_common::protocol_error("vLLM", message)
+}
+
+// Bound how long a stalled RPC can hold the lifecycle lock.
+pub(crate) const LORA_RPC_DEADLINE: Duration = Duration::from_secs(60);
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoraRpcError {
+    pub(crate) rpc: &'static str,
+    pub(crate) code: tonic::Code,
+    pub(crate) message: String,
+}
+
+impl LoraRpcError {
+    // Other errors may follow a committed mutation; reconcile them with ListLoras.
+    pub(crate) fn is_definitive(&self) -> bool {
+        matches!(
+            self.code,
+            tonic::Code::InvalidArgument
+                | tonic::Code::AlreadyExists
+                | tonic::Code::NotFound
+                | tonic::Code::FailedPrecondition
+        )
+    }
+
+    pub(crate) fn into_dynamo(self) -> DynamoError {
+        status_to_dynamo(self.rpc, tonic::Status::new(self.code, self.message))
+    }
+}
+
+impl std::fmt::Display for LoraRpcError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {} ({:?})", self.rpc, self.message, self.code)
+    }
+}
+
+async fn lora_rpc<T>(
+    rpc: &'static str,
+    call: impl Future<Output = Result<tonic::Response<T>, tonic::Status>>,
+) -> Result<T, LoraRpcError> {
+    match tokio::time::timeout(LORA_RPC_DEADLINE, call).await {
+        Ok(Ok(response)) => Ok(response.into_inner()),
+        Ok(Err(status)) => Err(LoraRpcError {
+            rpc,
+            code: status.code(),
+            message: status.message().to_string(),
+        }),
+        Err(_) => Err(LoraRpcError {
+            rpc,
+            code: tonic::Code::DeadlineExceeded,
+            message: format!("{rpc} exceeded the {LORA_RPC_DEADLINE:?} lifecycle deadline"),
+        }),
+    }
 }

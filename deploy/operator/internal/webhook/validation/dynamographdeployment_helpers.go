@@ -20,6 +20,7 @@ package validation
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -133,10 +134,44 @@ func readGroveClusterTopology(ctx context.Context, mgr ctrl.Manager, name string
 	return info, nil
 }
 
+// supportedWorkloadProviders lists the workload programs the controller
+// implements. Both the create-side and update-side metadata rules read this so
+// the set is stated once.
+func supportedWorkloadProviders() []string {
+	return []string{consts.WorkloadProviderComponent, consts.WorkloadProviderGrove}
+}
+
+// isSupportedWorkloadProvider reports whether value names a workload program
+// the controller implements.
+func isSupportedWorkloadProvider(value string) bool {
+	return slices.Contains(supportedWorkloadProviders(), value)
+}
+
 func grovePathwayForDynamoGraphDeployment(
 	groveEnabled bool,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, string) {
+	// A durable selection takes precedence over current capabilities and the
+	// original routing annotation. Availability is reported by the selected
+	// workload program, while admission retains that program's API semantics.
+	if provider, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+		switch provider {
+		case consts.WorkloadProviderGrove:
+			return true, ""
+		case consts.WorkloadProviderComponent:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
+		default:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but annotation %q has unsupported value %q",
+				consts.KubeAnnotationWorkloadProvider,
+				provider,
+			)
+		}
+	}
+
 	if !groveEnabled {
 		return false, "requires the Grove pathway, but Grove is disabled in the operator configuration"
 	}

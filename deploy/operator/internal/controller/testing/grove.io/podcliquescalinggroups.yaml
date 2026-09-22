@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: podcliquescalinggroups.grove.io
+spec:
+  group: grove.io
+  names:
+    kind: PodCliqueScalingGroup
+    listKind: PodCliqueScalingGroupList
+    plural: podcliquescalinggroups
+    singular: podcliquescalinggroup
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        x-kubernetes-preserve-unknown-fields: true
