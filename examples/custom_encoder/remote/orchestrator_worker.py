@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import asyncio
 
-from dynamo.experimental.endpoint import serve_unary_endpoint
-from dynamo.experimental.llm import LLMUnaryClient
-from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.llm import LLMUnaryClient, ModelInput, ModelType, WorkerType, register_model
+from dynamo.runtime import DistributedRuntime, dynamo_worker, serve_unary_endpoint
 from dynamo.vllm.multimodal_utils.custom_encoder import ExternalEncoderHandoff
 
 from .config import RemoteEncoderConfig
