@@ -219,6 +219,53 @@ fn ineligible_affinity_falls_back_without_relaxing_host_constraints() {
 }
 
 #[test]
+fn affinity_fallback_uses_final_availability_regardless_of_builder_order() {
+    let workers = workers();
+    let bound = WorkerWithDpRank::new(7, 5);
+    let fallback = WorkerWithDpRank::new(8, 1);
+    let available = HashSet::from([8]);
+    let all_available = HashSet::from([7, 8]);
+    let mut request = request(fallback);
+    request.affinity_target = Some(bound.into());
+    let eligibility = request.eligibility();
+    let before = eligibility
+        .with_available_workers(Some(&available))
+        .with_eligible_affinity_target(&workers, bound.into());
+    let after = eligibility
+        .with_eligible_affinity_target(&workers, bound.into())
+        .with_available_workers(Some(&available));
+    for (case, eligibility, expected) in [
+        ("availability first", before, fallback),
+        ("affinity first", after, fallback),
+        (
+            "availability restored after filtering",
+            before.with_available_workers(Some(&all_available)),
+            bound,
+        ),
+        (
+            "availability restored after binding",
+            after.with_available_workers(Some(&all_available)),
+            bound,
+        ),
+        (
+            "availability removed after filtering",
+            before.with_available_workers(None),
+            bound,
+        ),
+    ] {
+        let selected = WorkerSelectionPolicy::default(KvRouterConfig::default(), "decode")
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                eligibility,
+                BLOCK_SIZE,
+            ))
+            .unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(selected.worker, expected, "{case}");
+    }
+}
+
+#[test]
 fn affinity_fallback_does_not_override_an_invalid_explicit_pin() {
     let workers = workers();
     let mut request = request(WorkerWithDpRank::new(8, 1));
@@ -259,7 +306,6 @@ fn sibling_groups_share_a_binding_without_inheriting_the_parent_binding() {
     let selected = select(WorkerType::Aggregated, &workers, &request(child_worker));
     assert_eq!(selected.worker, child_worker);
     let first_child = table.commit(child_a, selected.worker.into()).unwrap();
-    // A different conversation with this immediate parent uses the same key.
     let child_b = hold(&table, &subagent_group_affinity_id("parent"));
     let mut sibling_request = request(parent_worker);
     sibling_request.affinity_target = child_b.target();

@@ -76,8 +76,9 @@ impl<'a> RoutingEligibility<'a> {
     /// the request's target without this additional constraint.
     ///
     /// The target is checked against the supplied worker snapshot, DP ranks,
-    /// availability, overload, caller allowlist, and routing constraints. An
-    /// ineligible target leaves eligibility unchanged, preserving normal
+    /// availability, overload, caller allowlist, and routing constraints.
+    /// Availability uses the final set supplied by [`Self::with_available_workers`],
+    /// regardless of builder order. An ineligible target preserves normal
     /// selection fallback. This does not validate an explicit request pin or
     /// acquire, commit, release, or invalidate an affinity binding; the host
     /// retains those responsibilities.
@@ -87,7 +88,10 @@ impl<'a> RoutingEligibility<'a> {
         workers: &HashMap<WorkerId, C>,
         target: WorkerAffinityTarget,
     ) -> Self {
-        if self.affinity_target_is_eligible(workers, target) {
+        if self
+            .with_available_workers(None)
+            .affinity_target_is_eligible(workers, target)
+        {
             self.with_affinity_target(target)
         } else {
             self
@@ -123,8 +127,14 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
-    fn matches_affinity_target(&self, worker_id: WorkerId) -> bool {
+    fn available_affinity_target(&self) -> Option<WorkerAffinityTarget> {
         self.affinity_target
+            .filter(|target| self.is_worker_available(target.worker_id))
+    }
+
+    #[inline]
+    fn matches_affinity_target(&self, worker_id: WorkerId) -> bool {
+        self.available_affinity_target()
             .is_none_or(|target| target.worker_id == worker_id)
     }
 
@@ -214,7 +224,7 @@ impl<'a> RoutingEligibility<'a> {
         }
         if !self.matches_affinity_target(worker.worker_id)
             || self
-                .affinity_target
+                .available_affinity_target()
                 .and_then(|target| target.dp_rank)
                 .is_some_and(|rank| rank != worker.dp_rank)
         {
@@ -264,7 +274,7 @@ impl<'a> RoutingEligibility<'a> {
             return predicate(worker, config);
         }
 
-        if let Some(target) = self.affinity_target {
+        if let Some(target) = self.available_affinity_target() {
             let Some(config) = workers.get(&target.worker_id) else {
                 return false;
             };

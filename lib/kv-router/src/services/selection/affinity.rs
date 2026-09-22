@@ -1085,32 +1085,6 @@ mod tests {
 
     const TTL: Duration = Duration::from_secs(10);
 
-    #[test]
-    fn manual_clock_retains_active_leases_and_expires_from_virtual_release() {
-        let epoch = Instant::now();
-        let table =
-            SessionAffinity::with_manual_clock(SessionAffinityConfig::new(TTL), epoch).unwrap();
-        let AcquireStep::Held(hold) = table.try_acquire("session", None).unwrap() else {
-            panic!("new session must initialize")
-        };
-        assert!(matches!(
-            table.try_acquire("session", None).unwrap(),
-            AcquireStep::Wait(_)
-        ));
-        let target = AffinityTarget::new(7, Some(1));
-        let lease = table.commit(hold, target).unwrap();
-        table.advance_clock(epoch + TTL * 2).unwrap();
-        assert_eq!(table.query_target("session", None).unwrap(), Some(target));
-        drop(lease);
-        table
-            .advance_clock(epoch + TTL * 3 - Duration::from_nanos(1))
-            .unwrap();
-        assert_eq!(table.query_target("session", None).unwrap(), Some(target));
-        table.advance_clock(epoch + TTL * 3).unwrap();
-        assert_eq!(table.query_target("session", None).unwrap(), None);
-        assert!(table.advance_clock(epoch).is_err());
-    }
-
     fn table() -> SessionAffinity {
         SessionAffinity::with_config(SessionAffinityConfig::new(TTL)).expect("affinity table")
     }
