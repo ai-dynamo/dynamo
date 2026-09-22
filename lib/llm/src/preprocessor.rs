@@ -3191,6 +3191,36 @@ impl OpenAIPreprocessor {
             return Ok(None);
         };
         if !continue_final {
+            // M2 templates unconditionally open <think>, even when the caller
+            // disables thinking. For a named call, close that empty span so the
+            // prompt and the backend's JSON guidance agree from token zero.
+            let disabled_minimax_named_call = matches!(
+                self.runtime_config.reasoning_parser.as_deref(),
+                Some("minimax_m2" | "minimax_append_think")
+            ) && dynamo_renderer::thinking_bool_from_args(
+                request.chat_template_args(),
+            ) == Some(false)
+                && request.should_add_generation_prompt()
+                && !request
+                    .nvext()
+                    .is_some_and(|ext| ext.use_raw_prompt == Some(true))
+                && request.tool_choice().is_some_and(|choice| {
+                    choice
+                        .get_attr("type")
+                        .is_ok_and(|kind| kind.as_str() == Some("function"))
+                });
+            if disabled_minimax_named_call && prompt.as_str().trim_end().ends_with("<think>") {
+                let prompt = if let Some(segments) = prompt.segments() {
+                    let mut segments = segments.to_vec();
+                    segments.push(dynamo_renderer::RenderedSegment::new("</think>\n", true));
+                    RenderedPrompt::segmented(segments)
+                } else {
+                    let mut text = prompt.into_text();
+                    text.push_str("</think>\n");
+                    RenderedPrompt::text(text)
+                };
+                return Ok(Some(prompt));
+            }
             return Ok(Some(prompt));
         }
         apply_continue_final_message(prompt)
@@ -6242,6 +6272,15 @@ impl OpenAIPreprocessor {
         reasoning_parser: Option<&str>,
         formatted_prompt: Option<&str>,
     ) -> Option<bool> {
+        // A closed M2 thinking span must enable the guided-output grammar
+        // immediately, including when a native vLLM reasoner is configured.
+        if matches!(
+            reasoning_parser,
+            Some("minimax_m2" | "minimax_append_think")
+        ) && formatted_prompt.is_some_and(|prompt| prompt.trim_end().ends_with("</think>"))
+        {
+            return Some(true);
+        }
         let should_forward = matches!(
             reasoning_parser,
             Some(
@@ -10776,6 +10815,233 @@ mod tests {
         {
             dynamo_renderer::PromptFormatter::OAI(formatter) => formatter,
         }
+    }
+
+    // The published M2.7 template always opens thinking, irrespective of kwargs.
+    // This minimal template reproduces that behavior without downloading a model.
+    const MINIMAX_M27_TEST_TEMPLATE: &str = "\
+{%- for message in messages -%}{{ ']~b]' + message.role + '\n' + message.content + '[e~[\n' }}{%- endfor -%}\
+{%- if add_generation_prompt -%}{{ ']~b]ai\n<think>\n' }}{%- endif -%}";
+
+    fn minimax_m2_test_preprocessor(parser: &str) -> OpenAIPreprocessor {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.reasoning_parser = Some(parser.to_string());
+        mdc.runtime_config.tool_call_parser = Some("minimax_m2".to_string());
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        preprocessor.formatter = test_prompt_formatter(MINIMAX_M27_TEST_TEMPLATE);
+        preprocessor
+    }
+
+    fn minimax_m2_named_request(args: serde_json::Value) -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Use the calculator tool for 937 * 18 + 42."}],
+            "max_tokens": 128,
+            "chat_template_kwargs": args,
+            "tools": [{"type": "function", "function": {
+                "name": "calculate",
+                "parameters": {"type": "object", "properties": {
+                    "expression": {"type": "string"}
+                }, "required": ["expression"]}
+            }}],
+            "tool_choice": {"type": "function", "function": {"name": "calculate"}}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_disabled_named_prompt_and_backend_gate() {
+        for parser in ["minimax_m2", "minimax_append_think"] {
+            let preprocessor = minimax_m2_test_preprocessor(parser);
+            for key in ["thinking", "enable_thinking"] {
+                let mut request = minimax_m2_named_request(serde_json::json!({key: false}));
+                OpenAIPreprocessor::normalize_thinking_arg(
+                    &mut request,
+                    Some(parser),
+                    Some("minimax_m2"),
+                );
+                let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(
+                    prompt.as_str().trim_end().ends_with("</think>"),
+                    "{parser}/{key}: disabled named tool call must close thinking: {:?}",
+                    prompt.as_str(),
+                );
+                let (mut prepared, _, injected) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert!(!injected);
+                assert_eq!(
+                    prepared.extra_args.as_ref().unwrap()["reasoning_ended"],
+                    true
+                );
+                assert_eq!(
+                    prepared.extra_args.as_ref().unwrap()["reasoning_parser_kwargs"]["chat_template_kwargs"]
+                        ["thinking"],
+                    false
+                );
+                preprocessor
+                    .apply_tool_choice_guided_decoding(&request, &mut prepared, injected)
+                    .unwrap();
+                assert!(
+                    prepared
+                        .sampling_options
+                        .guided_decoding
+                        .as_ref()
+                        .unwrap()
+                        .json
+                        .is_some()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_named_default_and_enabled_keep_reasoning() {
+        for parser in ["minimax_m2", "minimax_append_think"] {
+            let preprocessor = minimax_m2_test_preprocessor(parser);
+            for args in [serde_json::json!({}), serde_json::json!({"thinking": true})] {
+                let request = minimax_m2_named_request(args);
+                let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+                assert!(prompt.as_str().trim_end().ends_with("<think>"));
+                let (prepared, _, injected) = preprocessor
+                    .preprocess_request(&request, None)
+                    .await
+                    .unwrap();
+                assert!(injected);
+                assert_ne!(
+                    prepared.extra_args.as_ref().unwrap().get("reasoning_ended"),
+                    Some(&serde_json::json!(true))
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn minimax_m2_disabled_named_json_returns_tool_call() {
+        for parser in ["minimax_m2", "minimax_append_think"] {
+            let preprocessor = minimax_m2_test_preprocessor(parser);
+            for fragmented in [false, true] {
+                let request = minimax_m2_named_request(serde_json::json!({"thinking": false}));
+                let pieces = if fragmented {
+                    vec!["{\"expression\":", "\"937 * 18 + 42\"}"]
+                } else {
+                    vec!["{\"expression\":\"937 * 18 + 42\"}"]
+                };
+                let mut chunks: Vec<_> = pieces
+                    .iter()
+                    .map(|piece| {
+                        let mut chunk = chat_stream_chunk(0, None);
+                        chunk.data.as_mut().unwrap().inner.choices[0].delta.content =
+                            Some(ChatCompletionMessageContent::Text(piece.to_string()));
+                        chunk
+                    })
+                    .collect();
+                let mut terminal = chat_stream_chunk(0, None);
+                terminal.data.as_mut().unwrap().inner.choices[0]
+                    .delta
+                    .content = None;
+                terminal.data.as_mut().unwrap().inner.choices[0].finish_reason =
+                    Some(dynamo_protocols::types::FinishReason::Stop);
+                chunks.push(terminal);
+                let output = preprocessor
+                    .postprocessor_parsing_stream(stream::iter(chunks), &request, false, false)
+                    .unwrap()
+                    .collect::<Vec<_>>()
+                    .await;
+                let mut arguments = String::new();
+                let mut name = String::new();
+                let mut finishes = Vec::new();
+                for item in output {
+                    assert!(item.error.is_none(), "{item:?}");
+                    if let Some(data) = item.data {
+                        for choice in data.inner.choices {
+                            if let Some(ChatCompletionMessageContent::Text(text)) =
+                                choice.delta.content
+                            {
+                                assert!(text.is_empty(), "unexpected content: {text}");
+                            }
+                            assert!(
+                                choice
+                                    .delta
+                                    .reasoning_content
+                                    .as_deref()
+                                    .unwrap_or_default()
+                                    .is_empty()
+                            );
+                            for call in choice.delta.tool_calls.unwrap_or_default() {
+                                if let Some(function) = call.function {
+                                    name.push_str(function.name.as_deref().unwrap_or_default());
+                                    arguments.push_str(
+                                        function.arguments.as_deref().unwrap_or_default(),
+                                    );
+                                }
+                            }
+                            if let Some(finish) = choice.finish_reason {
+                                finishes.push(finish);
+                            }
+                        }
+                    }
+                }
+                assert_eq!(name, "calculate");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&arguments).unwrap(),
+                    serde_json::json!({"expression": "937 * 18 + 42"})
+                );
+                assert_eq!(
+                    finishes,
+                    vec![dynamo_protocols::types::FinishReason::ToolCalls]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn minimax_m2_disabled_named_fix_preserves_other_requests() {
+        let preprocessor = minimax_m2_test_preprocessor("minimax_m2");
+        for choice in ["auto", "none", "required"] {
+            let mut request = minimax_m2_named_request(serde_json::json!({"thinking": false}));
+            request.inner.tool_choice =
+                Some(serde_json::from_value(serde_json::json!(choice)).unwrap());
+            let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+            assert!(prompt.as_str().trim_end().ends_with("<think>"), "{choice}");
+        }
+        let mut request = minimax_m2_named_request(serde_json::json!({"thinking": false}));
+        request.common.add_generation_prompt = Some(false);
+        let prompt = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert!(!prompt.as_str().contains("</think>"));
+
+        let other = minimax_m2_test_preprocessor("qwen3");
+        let request = minimax_m2_named_request(serde_json::json!({"thinking": false}));
+        assert!(
+            other
+                .apply_template(&request)
+                .unwrap()
+                .unwrap()
+                .as_str()
+                .trim_end()
+                .ends_with("<think>")
+        );
+
+        let raw: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "raw<think>"}],
+            "nvext": {"use_raw_prompt": true},
+            "chat_template_kwargs": {"thinking": false},
+            "tool_choice": {"type": "function", "function": {"name": "calculate"}}
+        }))
+        .unwrap();
+        // Chat requests currently fall back to the formatter when raw_prompt()
+        // returns None. Preserve that existing output when raw mode is requested.
+        assert_eq!(
+            preprocessor.apply_template(&raw).unwrap().unwrap(),
+            preprocessor.formatter.render_prompt(&raw).unwrap()
+        );
     }
 
     fn assistant_only_request() -> NvCreateChatCompletionRequest {
