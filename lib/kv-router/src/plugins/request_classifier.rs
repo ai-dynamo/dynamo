@@ -92,6 +92,7 @@ impl ClassifyRequest {
         self
     }
 
+    /// Copy tracking hashes into storage owned by this classification attempt.
     pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
         self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
         self
@@ -133,6 +134,8 @@ impl ClassifyRequest {
     /// The slice lives with this request, including while its classification
     /// future is pending. It is not extended by generation progress. Reading it
     /// neither computes hashes nor changes scheduling cost or worker selection.
+    /// Building the snapshot copies eight bytes per supplied hash; retaining
+    /// multiple classification inputs retains each copy independently.
     pub fn sequence_hashes(&self) -> Option<&[SequenceHash]> {
         self.sequence_hashes.as_deref()
     }

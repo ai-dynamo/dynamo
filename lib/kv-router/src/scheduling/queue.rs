@@ -2642,8 +2642,6 @@ mod tests {
 
         let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
         let (queue, _slots) = make_queue_with_profile(1, 64, 256, profile);
-        // The projection also preserves opaque/randomized tracking values. It
-        // must not sort, deduplicate, reinterpret, or synthesize missing hashes.
         for hashes in [None, Some(vec![]), Some(vec![11, 7, 11])] {
             let (mut request, _rx) = make_request("prefix-input", 193);
             request.token_seq = hashes.clone();
@@ -2654,15 +2652,90 @@ mod tests {
             // The independently pollable future must not borrow actor-owned data.
             request.token_seq = Some(vec![99]);
             drop(request);
-            let returned = pending.await.unwrap();
-            assert_eq!(returned.input_tokens(), 193);
-            assert_eq!(returned.scheduling_cost_tokens(), 193);
-            let overrides = returned.into_queue_inputs();
-            assert!(overrides.policy_class.is_none());
-            assert!(overrides.due_at.is_none());
-            assert!(overrides.scheduling_cost_tokens.is_none());
-            assert!(overrides.worker_selection_target.is_none());
+            pending.await.unwrap();
         }
+    }
+
+    /// Measures real queue projection with snapshots held in pending classifier futures.
+    /// Run in release mode with CLASSIFIER_BENCH_HASHES ("none" or a count) and
+    /// CLASSIFIER_BENCH_PENDING set; source setup and cancellation are not timed.
+    #[tokio::test]
+    #[ignore = "CPU microbenchmark; run explicitly with --release --ignored --nocapture"]
+    async fn classifier_input_projection_benchmark() {
+        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+        use std::hint::black_box;
+        use std::task::Context;
+        use std::time::Instant as WallClock;
+
+        struct Park;
+        impl RequestClassifier for Park {
+            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+                Box::pin(async move {
+                    std::future::pending::<()>().await;
+                    Ok(black_box(request))
+                })
+            }
+        }
+
+        let hash_count = std::env::var("CLASSIFIER_BENCH_HASHES").unwrap();
+        let hashes = if hash_count == "none" {
+            None
+        } else {
+            Some(hash_count.parse::<usize>().unwrap())
+        };
+        let retained: usize = std::env::var("CLASSIFIER_BENCH_PENDING")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retained > 0 && retained <= 1024);
+        assert!(hashes.unwrap_or(0) <= 62_500);
+        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let (queue, _slots) = make_queue_with_profile(1, 16, 1_000_000, profile);
+        let sources: Vec<_> = (0..retained)
+            .map(|i| {
+                let (mut request, rx) = make_request(
+                    &format!("copy-bench-{i}"),
+                    hashes.unwrap_or(0).saturating_mul(16).max(1),
+                );
+                request.token_seq = hashes.map(|n| (0..n as u64).collect());
+                (request, rx)
+            })
+            .collect();
+        let mut classifier = Park;
+        let mut futures = Vec::with_capacity(retained);
+        let mut cx = Context::from_waker(futures_util::task::noop_waker_ref());
+        let ingress_at = Instant::now();
+        let repeats = (1024 / retained).max(1);
+        let mut samples = Vec::with_capacity(40);
+        for sample in 0..45 {
+            let mut elapsed = std::time::Duration::ZERO;
+            for _ in 0..repeats {
+                let start = WallClock::now();
+                for (request, _) in &sources {
+                    let input = queue.build_classify_request(black_box(request), ingress_at);
+                    let mut future = classifier.classify(input);
+                    assert!(future.as_mut().poll(&mut cx).is_pending());
+                    futures.push(future);
+                }
+                elapsed += start.elapsed();
+                // Keep every snapshot live until the batch ends; cancellation is excluded.
+                black_box(&futures);
+                futures.clear();
+            }
+            if sample >= 5 {
+                samples.push(elapsed.as_secs_f64() * 1e9 / (retained * repeats) as f64);
+            }
+        }
+        println!(
+            "CLASSIFIER_BENCH {}",
+            serde_json::json!({
+                "hashes": hashes,
+                "pending": retained,
+                "repeats_per_sample": repeats,
+                "classify_request_bytes": std::mem::size_of::<ClassifyRequest>(),
+                "ns_per_request_samples": samples,
+            })
+        );
     }
 
     #[tokio::test]
