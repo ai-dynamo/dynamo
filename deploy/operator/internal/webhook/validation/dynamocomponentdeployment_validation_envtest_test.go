@@ -117,6 +117,14 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar requires engine main", deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 			c.PodTemplate.Spec.Containers[0].Name = "engine"
 		}), wantWebhookErrs: []string{`spec.podTemplate.spec.containers: Required value: main engine container is required for component "worker" with dynamoSidecar`}},
+		{name: "native sidecar rejects non-worker component type",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.ComponentType = nvidiacomv1beta1.ComponentTypeFrontend
+			}), wantWebhookErrs: []string{`spec.dynamoSidecar: Forbidden: is supported only for worker, prefill, and decode components`}},
+		{name: "native sidecar rejects empty selector",
+			deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				c.DynamoSidecar = k8sptr.To("")
+			}), wantWebhookErrs: []string{`spec.dynamoSidecar: Invalid value: "": must not be empty`}},
 		// Native-sidecar admission, including alpha conversion and unchanged update invariants.
 		{name: "native sidecar beta create", deployment: nativeDCDForAdmission(t, false, nil)},
 		{name: "native sidecar beta update", oldDeployment: nativeDCDForAdmission(t, false, nil), deployment: nativeDCDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
