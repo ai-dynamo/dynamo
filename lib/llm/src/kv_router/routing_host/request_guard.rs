@@ -74,7 +74,9 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
-/// Raw cached-prefix estimate captured for one tracked routing attempt (F0/F2/F3).
+/// Router-side cached-prefix estimate captured for one tracked routing attempt: the prompt
+/// length, the best cached prefix among eligible workers, and the cached prefix on the
+/// selected worker (all raw tokens).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RouteObservation {
     pub(super) prompt_tokens: u64,
@@ -96,28 +98,38 @@ struct WorkerCacheHitReport {
     cpu_lookup_tokens: u64,
 }
 
-/// Outer `None`: not a usable report (incomplete, or a different prompt length).
-/// `Some(None)`: a valid report whose token sums overflow, which counts as incomplete.
-/// `Some(Some([F4 lookup, F5 reused]))`: a valid report.
+/// Worker cache-hit report latched for one tracked attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerReport {
+    /// `[lookup tokens, reused tokens]` from a valid report.
+    Tokens([u64; 2]),
+    /// A valid report whose token sums overflow `u64`; finalizes as incomplete.
+    Overflowed,
+}
+
+/// `None` when the report is not usable (incomplete, or describes a different prompt
+/// length); otherwise the latched report.
 fn worker_cache_hit_tokens(
     route: RouteObservation,
     value: &serde_json::Value,
-) -> Option<Option<[u64; 2]>> {
+) -> Option<WorkerReport> {
     let report = <WorkerCacheHitReport as serde::Deserialize>::deserialize(value).ok()?;
     if !report.complete || report.prompt_tokens != route.prompt_tokens {
         return None;
     }
     let lookup = report.gpu_hit_tokens.checked_add(report.cpu_lookup_tokens);
     let reused = report.gpu_hit_tokens.checked_add(report.cpu_hit_tokens);
-    Some(lookup.zip(reused).map(|(lookup, reused)| [lookup, reused]))
+    Some(match lookup.zip(reused) {
+        Some((lookup, reused)) => WorkerReport::Tokens([lookup, reused]),
+        None => WorkerReport::Overflowed,
+    })
 }
 
-/// The F4/F5 emission for an attempt: the latched report only if the stream completed.
-fn kv_worker_hit_for(stream_completed: bool, report: Option<Option<[u64; 2]>>) -> Option<[u64; 2]> {
-    if stream_completed {
-        report.flatten()
-    } else {
-        None
+/// The worker-side emission for an attempt: the latched tokens only if the stream completed.
+fn kv_worker_hit_for(stream_completed: bool, report: Option<WorkerReport>) -> Option<[u64; 2]> {
+    match report {
+        Some(WorkerReport::Tokens(tokens)) if stream_completed => Some(tokens),
+        _ => None,
     }
 }
 
@@ -637,7 +649,8 @@ where
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
     kv_route: Option<RouteObservation>,
-    kv_worker_report: Option<Option<[u64; 2]>>,
+    kv_worker_report: Option<WorkerReport>,
+    kv_model: String,
     kv_worker_recorded: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
@@ -692,6 +705,7 @@ where
                 .unwrap_or_default();
             request_metrics.observe_kv_route_estimate(
                 phase,
+                &request.model,
                 route.best_router_tokens,
                 route.selected_router_tokens,
             );
@@ -717,6 +731,7 @@ where
             kv_route,
             kv_worker_report: None,
             kv_worker_recorded: false,
+            kv_model: request.model.clone(),
             _lora_load: None,
         }
     }
@@ -749,6 +764,7 @@ where
             kv_route: None,
             kv_worker_report: None,
             kv_worker_recorded: false,
+            kv_model: request.model.clone(),
             _lora_load: lora_load,
         }
     }
@@ -901,7 +917,7 @@ where
         self.cleanup.finish().await;
     }
 
-    /// Latch the first valid worker cache-hit report for this attempt (F4/F5 inputs).
+    /// Latch the first valid worker cache-hit report for this attempt.
     fn capture_kv_worker_hit(&mut self, item: &Annotated<LLMEngineOutput>) {
         if self.kv_worker_recorded || self.kv_worker_report.is_some() {
             return;
@@ -917,8 +933,8 @@ where
             .and_then(|value| worker_cache_hit_tokens(route, value));
     }
 
-    /// Emit F4/F5 once per tracked attempt: complete only when the stream finished
-    /// with a valid worker report, otherwise incomplete.
+    /// Emit the worker-side series once per tracked attempt: lookup/reused tokens plus a
+    /// complete outcome when the stream finished with a valid report, otherwise incomplete.
     fn record_kv_worker_outcome(&mut self, stream_completed: bool) {
         if self.kv_route.is_none() || std::mem::replace(&mut self.kv_worker_recorded, true) {
             return;
@@ -927,8 +943,8 @@ where
         let phase = self.observability.phase();
         let metrics = self.observability.request_metrics();
         match hit {
-            Some(tokens) => metrics.observe_kv_worker_hit(phase, tokens),
-            None => metrics.observe_kv_worker_incomplete(phase),
+            Some(tokens) => metrics.observe_kv_worker_hit(phase, &self.kv_model, tokens),
+            None => metrics.observe_kv_worker_incomplete(phase, &self.kv_model),
         }
     }
 }
@@ -971,7 +987,7 @@ mod kv_cache_hit_tests {
     fn worker_outcomes_can_exceed_router_observations() {
         assert_eq!(
             worker_cache_hit_tokens(route(), &report(70, 15, 20)),
-            Some(Some([90, 85]))
+            Some(WorkerReport::Tokens([90, 85]))
         );
     }
 
@@ -979,7 +995,7 @@ mod kv_cache_hit_tests {
     fn worker_values_may_exceed_router_estimate_and_prompt_length() {
         assert_eq!(
             worker_cache_hit_tokens(route(), &report(120, 15, 20)),
-            Some(Some([140, 135]))
+            Some(WorkerReport::Tokens([140, 135]))
         );
     }
 
@@ -999,21 +1015,30 @@ mod kv_cache_hit_tests {
         // A valid report whose sums overflow is latched (blocking later reports) and
         // finalizes as incomplete — same as the PR head.
         let overflowing = report(u64::MAX, 0, 1);
-        assert_eq!(worker_cache_hit_tokens(route(), &overflowing), Some(None));
-        assert_eq!(kv_worker_hit_for(true, Some(None)), None);
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &overflowing),
+            Some(WorkerReport::Overflowed)
+        );
+        assert_eq!(
+            kv_worker_hit_for(true, Some(WorkerReport::Overflowed)),
+            None
+        );
     }
 
     #[test]
     fn successful_stream_emits_the_latched_hit() {
         assert_eq!(
-            kv_worker_hit_for(true, Some(Some([90, 85]))),
+            kv_worker_hit_for(true, Some(WorkerReport::Tokens([90, 85]))),
             Some([90, 85])
         );
     }
 
     #[test]
     fn stream_error_discards_a_buffered_hit() {
-        assert_eq!(kv_worker_hit_for(false, Some(Some([90, 85]))), None);
+        assert_eq!(
+            kv_worker_hit_for(false, Some(WorkerReport::Tokens([90, 85]))),
+            None
+        );
         assert_eq!(kv_worker_hit_for(true, None), None);
     }
 }

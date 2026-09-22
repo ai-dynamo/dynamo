@@ -52,12 +52,6 @@ impl RequestPhase {
             RequestPhase::Aggregated => "aggregated",
         }
     }
-
-    pub const ALL: [RequestPhase; 3] = [
-        RequestPhase::Prefill,
-        RequestPhase::Decode,
-        RequestPhase::Aggregated,
-    ];
 }
 
 impl std::fmt::Display for RequestPhase {

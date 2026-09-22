@@ -725,8 +725,9 @@ struct KvHitSnapshot {
 fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
     // The fixture request carries no tracker, so the guard labels it `aggregated`.
     let phase = RequestPhase::Aggregated.as_str();
+    let model = "test";
     let hist = |h: &prometheus::HistogramVec| {
-        let child = h.with_label_values(&[phase]);
+        let child = h.with_label_values(&[phase, model]);
         (child.get_sample_sum(), child.get_sample_count())
     };
     KvHitSnapshot {
@@ -736,11 +737,11 @@ fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) ->
         reused: hist(&metrics.kv_worker_reused_tokens),
         complete: metrics
             .kv_worker_outcomes_total
-            .with_label_values(&[phase, "complete"])
+            .with_label_values(&[phase, model, "complete"])
             .get(),
         incomplete: metrics
             .kv_worker_outcomes_total
-            .with_label_values(&[phase, "incomplete"])
+            .with_label_values(&[phase, model, "incomplete"])
             .get(),
     }
 }
@@ -800,7 +801,7 @@ async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
         ..Default::default()
     })
     .await;
-    // F2/F3 at selection, F4/F5 at completion, each exactly once across finish + Drop.
+    // Router estimates at selection, worker tokens at completion, each exactly once across finish + Drop.
     assert_eq!(after.best.0 - before.best.0, 75.0);
     assert_eq!(after.best.1 - before.best.1, 1);
     assert_eq!(after.selected.0 - before.selected.0, 60.0);
