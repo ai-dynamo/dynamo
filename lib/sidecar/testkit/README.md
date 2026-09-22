@@ -203,3 +203,22 @@ A Mocker can share a protocol misunderstanding with a sidecar. Real-engine
 compatibility, model inference, and actual KV-cache transfer remain separate
 integration/nightly concerns. Their results cannot be inferred from this CPU-only
 suite.
+
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+## Isolated unit increment
+
+[#15089](https://github.com/ai-dynamo/dynamo/pull/15089) adds isolated units for
+shared production code and vLLM on this foundation. The existing four wire
+families still run for both vLLM and SGLang; both retained Mocker suites and
+existing E2E scheduling remain. Only vLLM's before-start/repeated-cleanup wire
+subsection moves to its isolated unit replacement; SGLang's checks remain.
+
+The unit runner selects `unit_` modules only and runs common code once. Its
+historical 62-case result does not certify the restacked revision: collection,
+execution and current-head CI remain pending. See [UNITS.md](UNITS.md) for the
+full matrix and commands, [COVERAGE.md](COVERAGE.md) for retained and upcoming
+coverage, and [DEVIATIONS.md](DEVIATIONS.md) for departures from the read-only DEP.
+Additional vLLM wire, process and native-engine work belongs to
+[#15091](https://github.com/ai-dynamo/dynamo/pull/15091).

@@ -18,3 +18,7 @@ pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../testkit/tests/unit/fixtures.rs"]
+mod unit_fixtures;
