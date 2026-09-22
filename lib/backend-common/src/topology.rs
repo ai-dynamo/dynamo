@@ -179,6 +179,8 @@ fn invalid_config(message: impl Into<String>) -> DynamoError {
 
 #[cfg(test)]
 mod tests {
+    use tracing_test::traced_test;
+
     use super::*;
 
     #[tokio::test]
@@ -318,10 +320,11 @@ mod tests {
         }
     }
 
+    #[traced_test]
     #[tokio::test]
-    async fn invalid_enabled_values_disable_without_error() {
+    async fn invalid_enabled_values_disable_and_warn() {
         // Unrecognized values ("maybe", "2") must not crash the worker;
-        // they disable topology and log a warning.
+        // they disable topology and emit a tracing warning.
         for value in ["maybe", "2", "enabled", "truthy"] {
             let mut config = ModelRuntimeConfig::default();
             apply_from_env(
@@ -338,6 +341,10 @@ mod tests {
             assert!(
                 config.topology_domains.is_empty(),
                 "expected topology disabled for DYN_TOPOLOGY_ENABLED={value:?}"
+            );
+            assert!(
+                logs_contain("Unrecognized DYN_TOPOLOGY_ENABLED"),
+                "expected warning log for DYN_TOPOLOGY_ENABLED={value:?}"
             );
         }
     }
