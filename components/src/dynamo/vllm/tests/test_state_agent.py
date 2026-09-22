@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from dynamo.vllm import state_agent
+from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY
 
 pytestmark = [
     pytest.mark.unit,
@@ -186,16 +187,21 @@ async def test_attachment_owner_preserves_global_rank_and_resolved_endpoint(
             "control_ports": ["23284", "23285", "23286", "23287"],
         }
     ]
+    vllm_config = _vllm_config(4, 4)
+    vllm_config.cache_config.block_size = 16
+    vllm_config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] = 32
     owner = await state_agent.start_attachment_owner(
         config,
         endpoint,
-        _vllm_config(4, 4),
+        vllm_config,
         image_token_id=99,
         video_token_id=100,
     )
 
     assert owner is not None
     assert captured["worker_id"] == 17
+    assert [item["kv_block_size"] for item in captured["descriptors"]] == [32] * 4
+    assert vllm_config.cache_config.block_size == 16
     assert [item["global_dp_rank"] for item in captured["descriptors"]] == [4, 5, 6, 7]
     assert [item["raw_zmq_endpoint"] for item in captured["descriptors"]] == [
         "tcp://worker-a.example:5561",

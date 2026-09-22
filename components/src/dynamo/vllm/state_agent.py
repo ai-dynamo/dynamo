@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from dynamo.llm import KvStateAttachmentOwner, WorkerType
 from dynamo.runtime import Endpoint
 
+from .cache_info import get_configured_kv_event_block_size
 from .constants import DisaggregationMode
 from .dp_topology import get_dp_range_for_worker
 from .kv_hints import resolve_kv_transfer_hint_sources
@@ -162,7 +163,7 @@ async def start_attachment_owner(
         )
 
     events = config.engine_args.kv_events_config
-    block_size = int(vllm_config.cache_config.block_size)
+    block_size = get_configured_kv_event_block_size(vllm_config)
     kv_transfer_hint_sources = resolve_kv_transfer_hint_sources(
         config.engine_args,
         _state_agent_worker_type(config),
