@@ -51,9 +51,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
+from pytest_markers import ALLOWED_AREA_MARKERS, SELECTIVE_FEATURE_MARKERS
+
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
 # ----------------------------------------------------------------------
+
+
+class PytestSpec(TypedDict, total=False):
+    """Pytest selection metadata attached to an ownership area."""
+
+    markers: list[str]
 
 
 class Area(TypedDict, total=False):
@@ -62,6 +70,7 @@ class Area(TypedDict, total=False):
     label: str
     github_team: str
     path_globs: list[str]
+    pytest: PytestSpec
 
 
 class SharedSpec(TypedDict):
@@ -89,6 +98,8 @@ class ResolvedArea:
     label: str
     github_team: str
     path_globs: list[str]
+    pytest_markers: list[str] = field(default_factory=list)
+    pytest_configured: bool = False
 
 
 @dataclass
@@ -117,6 +128,38 @@ class ResolvedModel:
 
     def label_to_team(self) -> dict[str, str]:
         return {a.label: a.github_team for a in self.areas}
+
+    def matching_areas(self, path: str) -> list[ResolvedArea]:
+        """Return every semantic area matching ``path``.
+
+        This intentionally differs from rendered CODEOWNERS resolution. GitHub
+        uses last-match-wins to choose reviewers, while test selection needs the
+        union of all matching semantic areas. Explicit ``shared`` ownership is
+        included so a co-owned path carries both areas' pytest metadata.
+        """
+        labels = {
+            area.label
+            for area in self.areas
+            if any(match(anchor(glob), path) for glob in area.path_globs)
+        }
+        for shared in self.shared:
+            if match(anchor(shared["glob"]), path):
+                labels.update(shared["owners"])
+        return [area for area in self.areas if area.label in labels]
+
+    def pytest_markers_for_path(self, path: str) -> set[str]:
+        """Return effective pytest markers for a path's ownership areas.
+
+        ``core`` is the residual feature. A more specific feature mapping
+        replaces a broad area's residual ``core`` mapping unless the path is
+        explicitly listed in the ``core-tests`` area as a mixed-feature test.
+        """
+        areas = self.matching_areas(path)
+        markers = {marker for area in areas for marker in area.pytest_markers}
+        non_core_features = (markers & SELECTIVE_FEATURE_MARKERS) - {"core"}
+        if non_core_features and not any(area.label == "core-tests" for area in areas):
+            markers.discard("core")
+        return markers
 
     def owned_patterns(self) -> list[str]:
         """Every glob that contributes to explicit (non-catch-all) ownership.
@@ -504,14 +547,45 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
                 "'advisory' key; shared entries always block -- remove it"
             )
 
-    areas = [
-        ResolvedArea(
-            label=a["label"],
-            github_team=a["github_team"],
-            path_globs=sorted(set(a.get("path_globs", []) or [])),
+    areas: list[ResolvedArea] = []
+    marker_name = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    for area in raw_areas:
+        pytest_spec = area["pytest"] if "pytest" in area else {}
+        if not isinstance(pytest_spec, dict):
+            raise SystemExit(
+                f"areas.yaml: area {area['label']!r} pytest must be a mapping"
+            )
+        unknown_pytest_keys = set(pytest_spec) - {"markers"}
+        if unknown_pytest_keys:
+            raise SystemExit(
+                f"areas.yaml: area {area['label']!r} pytest has unsupported key "
+                f"{min(unknown_pytest_keys)!r}"
+            )
+        markers = pytest_spec.get("markers", [])
+        if not isinstance(markers, list) or not all(
+            isinstance(marker, str) and marker_name.fullmatch(marker)
+            for marker in markers
+        ):
+            raise SystemExit(
+                f"areas.yaml: area {area['label']!r} pytest.markers must be a "
+                "list of pytest marker names"
+            )
+        unsupported_markers = set(markers) - ALLOWED_AREA_MARKERS
+        if unsupported_markers:
+            raise SystemExit(
+                f"areas.yaml: area {area['label']!r} pytest marker "
+                f"{min(unsupported_markers)!r} is not a framework or selective "
+                "feature marker"
+            )
+        areas.append(
+            ResolvedArea(
+                label=area["label"],
+                github_team=area["github_team"],
+                path_globs=sorted(set(area.get("path_globs", []) or [])),
+                pytest_markers=sorted(set(markers)),
+                pytest_configured="pytest" in area,
+            )
         )
-        for a in raw_areas
-    ]
 
     # A CODEOWNERS row always replaces earlier rows, so every owner rule
     # declares its COMPLETE final owner set. Additive intent is machine-

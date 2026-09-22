@@ -46,6 +46,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.core,
     pytest.mark.e2e,
+    pytest.mark.pre_merge,
     pytest.mark.gpu_1,
     pytest.mark.integration,
     pytest.mark.model(MODEL_NAME),

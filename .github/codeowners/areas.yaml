@@ -3,6 +3,9 @@ meta:
 areas:
 - label: frontend
   github_team: '@ai-dynamo/dynamo-frontend-codeowners'
+  pytest:
+    markers:
+    - core
   path_globs:
   - components/src/dynamo/common/http/
   - components/src/dynamo/common/protocols/
@@ -41,9 +44,14 @@ areas:
   - tests/frontend/grpc/
 - label: agents
   github_team: '@ai-dynamo/dynamo-agents-codeowners'
+  pytest:
+    markers: []
   path_globs: []
 - label: router
   github_team: '@ai-dynamo/dynamo-router-codeowners'
+  pytest:
+    markers:
+    - router
   path_globs:
   - components/src/dynamo/kv_dc_relay/
   - components/src/dynamo/squeeze_evolve/
@@ -64,6 +72,9 @@ areas:
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
+  - tests/serve/test_sglang.py
+  - tests/serve/test_trtllm.py
+  - tests/serve/test_vllm_xpu.py
   - tests/router/
   - tests/router/configs/
   - lib/router-plugins/
@@ -71,13 +82,25 @@ areas:
   - examples/router/custom-policy-example/
 - label: backend-vllm
   github_team: '@ai-dynamo/dynamo-backend-vllm-codeowners'
+  pytest:
+    markers:
+    - vllm
   path_globs:
   - components/src/dynamo/vllm/
   - components/src/dynamo/vllm/tests/
   - examples/backends/vllm/
   - lib/sidecar/vllm/
+  - tests/basic/test_cuda_version_consistency.py
+  - tests/frontend/test_realtime_omni_bridge.py
+  - tests/frontend/test_vllm_prepost_integration.py
+  - tests/serve/test_token_budget_parity.py
+  - tests/serve/test_vllm_xpu.py
+  - tests/test_predownload_models.py
 - label: backend-trtllm
   github_team: '@ai-dynamo/dynamo-backend-trtllm-codeowners'
+  pytest:
+    markers:
+    - trtllm
   path_globs:
   - components/src/dynamo/trtllm/
   - components/src/dynamo/trtllm/configs/
@@ -89,8 +112,15 @@ areas:
   - components/src/dynamo/trtllm/workers/
   - examples/backends/trtllm/
   - lib/sidecar/trtllm/
+  - tests/basic/test_cuda_version_consistency.py
+  - tests/serve/test_token_budget_parity.py
+  - tests/serve/test_trtllm.py
+  - tests/test_predownload_models.py
 - label: backend-sglang
   github_team: '@ai-dynamo/dynamo-backend-sglang-codeowners'
+  pytest:
+    markers:
+    - sglang
   path_globs:
   - components/src/dynamo/sglang/
   - components/src/dynamo/sglang/request_handlers/
@@ -98,13 +128,25 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+  - tests/basic/test_cuda_version_consistency.py
+  - tests/frontend/test_frontend_api_surface_compliance.py
+  - tests/frontend/test_tool_calling_sglang.py
+  - tests/serve/test_sglang.py
+  - tests/serve/test_token_budget_parity.py
+  - tests/test_predownload_models.py
 - label: backend-triton
   github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - components/src/dynamo/triton/**
   - docs/fern/pages/developer-guide/knowledge-base/modular-components/backends/triton/
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
+  pytest:
+    markers:
+    - kvbm
+    - lmcache
   path_globs:
   - deploy/pre-deployment/nixl/
   - lib/bindings/kvbm/
@@ -185,10 +227,14 @@ areas:
   - tests/lmcache/
 - label: multimodal
   github_team: '@ai-dynamo/dynamo-multimodal-codeowners'
+  pytest:
+    markers:
+    - multimodal
   path_globs:
   - benchmarks/multimodal/
   - benchmarks/omni/
   - components/src/dynamo/common/multimodal/
+  - components/src/dynamo/vllm/tests/multimodal_utils/
   - examples/custom_encoder/
   - components/src/dynamo/trtllm/multimodal/
   - components/src/dynamo/vllm/multimodal_handlers/
@@ -197,15 +243,25 @@ areas:
   - lib/llm/src/preprocessor/media.rs
   - lib/llm/src/preprocessor/media/
   - tests/benchmarks/multimodal/
+  - tests/frontend/test_realtime_omni_bridge.py
   - tests/mm_router/
+  - tests/serve/test_sglang.py
+  - tests/serve/test_trtllm.py
+  - tests/serve/test_vllm_xpu.py
 - label: diffusion
   github_team: '@ai-dynamo/dynamo-diffusion-codeowners'
+  pytest:
+    markers:
+    - multimodal
   path_globs:
   - components/src/dynamo/sglang/request_handlers/image_diffusion/
   - components/src/dynamo/trtllm/request_handlers/diffusion/
   - examples/diffusers/
 - label: planner
   github_team: '@ai-dynamo/dynamo-planner-codeowners'
+  pytest:
+    markers:
+    - planner
   path_globs:
   - components/src/dynamo/global_planner/
   - components/src/dynamo/global_planner/tests/
@@ -221,8 +277,30 @@ areas:
   - components/src/dynamo/profiler/utils/
   - examples/global_planner/
   - examples/power-aware-budget/
+- label: core-tests
+  github_team: '@ai-dynamo/dynamo-runtime-codeowners'
+  pytest:
+    markers:
+    - core
+  path_globs:
+  - tests/basic/test_cuda_version_consistency.py
+  - tests/frontend/test_frontend_api_surface_compliance.py
+  - tests/frontend/test_tool_calling_sglang.py
+  - tests/frontend/test_vllm_prepost_integration.py
+  - tests/report_pytest_markers.py
+  - tests/serve/test_sample.py
+  - tests/serve/test_sglang.py
+  - tests/serve/test_token_budget_parity.py
+  - tests/serve/test_trtllm.py
+  - tests/serve/test_vllm.py
+  - tests/serve/test_vllm_xpu.py
+  - tests/test_predownload_models.py
+  - tests/vllm_self_benchmark/
 - label: runtime
   github_team: '@ai-dynamo/dynamo-runtime-codeowners'
+  pytest:
+    markers:
+    - core
   path_globs:
   - components/src/dynamo/common/
   - components/src/dynamo/common/backend/
@@ -295,6 +373,9 @@ areas:
   - tests/utils/
 - label: observability
   github_team: '@ai-dynamo/dynamo-observability-codeowners'
+  pytest:
+    markers:
+    - core
   path_globs:
   - deploy/observability/
   - deploy/operator/internal/observability/
@@ -306,6 +387,9 @@ areas:
   - lib/runtime/src/metrics/
 - label: fault-tolerance
   github_team: '@ai-dynamo/dynamo-fault-tolerance-codeowners'
+  pytest:
+    markers:
+    - fault_tolerance
   path_globs:
   - tests/fault_tolerance/
   - tests/fault_tolerance/cancellation/
@@ -313,8 +397,11 @@ areas:
   - tests/fault_tolerance/etcd_ha/
   - tests/fault_tolerance/hardware/
   - tests/fault_tolerance/migration/
+  - tests/gpu_memory_service/
 - label: ops
   github_team: '@ai-dynamo/dynamo-ops-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - .cargo/
   - .clang-format
@@ -355,8 +442,46 @@ areas:
   - rust-toolchain.toml
   - scripts/
   - tests/wheels/
+- label: backend-ci
+  github_team: '@ai-dynamo/dynamo-ops-codeowners'
+  pytest:
+    markers:
+    - sglang
+    - trtllm
+    - vllm
+  path_globs:
+  - .github/actions/changed-files/
+  - .github/actions/docker-build/
+  - .github/actions/docker-remote-build/
+  - .github/actions/pytest/
+  - .github/actions/pytest-local/
+  - .github/codeowners/areas.yaml
+  - .github/codeowners/codeowners_match.py
+  - .github/codeowners/pytest_markers.py
+  - .github/codeowners/select_pytest.py
+  - .github/filters.yaml
+  - .github/workflows/pr.yaml
+  - .github/workflows/shared-build-image.yml
+  - .github/workflows/shared-test.yml
+  - Cargo.lock
+  - Cargo.toml
+  - conftest.py
+  - container/Dockerfile.template
+  - container/Dockerfile.test
+  - container/compliance/
+  - container/context.yaml
+  - container/deps/
+  - container/templates/args.Dockerfile
+  - container/templates/compliance.Dockerfile
+  - container/templates/dynamo_*
+  - container/templates/wheel_builder.Dockerfile
+  - pyproject.toml
+  - rust-toolchain.toml
+  - tests/report_pytest_markers.py
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - README.md
   - README.zh-CN.md
@@ -366,6 +491,8 @@ areas:
   - examples/__init__.py
 - label: process
   github_team: '@ai-dynamo/dynamo-process-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - .agents/
   - .ai/
@@ -384,6 +511,8 @@ areas:
   - skills
 - label: operator
   github_team: '@ai-dynamo/dynamo-operator-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - deploy/CONTRIBUTING.md
   - deploy/__init__.py
@@ -427,6 +556,8 @@ areas:
   - tests/deploy/
 - label: gms
   github_team: '@ai-dynamo/dynamo-gms-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - benchmarks/cuda_custom_storage/
   - components/src/dynamo/common/snapshot/
@@ -447,16 +578,23 @@ areas:
   - tests/gpu_memory_service/common/
 - label: epp
   github_team: '@ai-dynamo/dynamo-epp-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - deploy/inference-gateway/
   - deploy/inference-gateway/scripts/
 - label: tokenspeed
   github_team: '@ai-dynamo/dynamo-tokenspeed-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - components/src/dynamo/tokenspeed/
   - components/src/dynamo/tokenspeed/tests/
 - label: rl
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
+  pytest:
+    markers:
+    - core
   path_globs:
   - components/src/dynamo/common/rl/
   - examples/rl/
@@ -464,6 +602,9 @@ areas:
   - tests/rl/
 - label: performance
   github_team: '@ai-dynamo/dynamo-performance-codeowners'
+  pytest:
+    markers:
+    - core
   path_globs:
   - benchmarks/README.md
   - benchmarks/__init__.py
@@ -521,6 +662,8 @@ areas:
   - tests/vllm_self_benchmark/
 - label: xpu
   github_team: '@ai-dynamo/dynamo-xpu-codeowners'
+  pytest:
+    markers: []
   path_globs:
   - .github/workflows/pr-xpu.yaml
   - .github/workflows/xpu-ci.yaml
@@ -540,6 +683,27 @@ required_owners:
   owners:
   - operator
 shared:
+- glob: components/src/dynamo/common/tests/memory/*multimodal*
+  owners:
+  - runtime
+  - multimodal
+- glob: components/src/dynamo/common/tests/multimodal/
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/runtime/test_sample_multimodal_smoke.py
+  owners:
+  - runtime
+  - multimodal
+- glob: tests/serve/test_sample.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/vllm_self_benchmark/
+  owners:
+  - runtime
+  - backend-vllm
+  - performance
 - glob: .github/review-prompts/README.md
   owners:
   - ops
@@ -1122,6 +1286,8 @@ shared:
   owners:
   - runtime
   - backend-vllm
+  - router
+  - multimodal
 - glob: tests/serve/test_vllm_omni.py
   owners:
   - runtime
@@ -1130,6 +1296,8 @@ shared:
   owners:
   - runtime
   - backend-sglang
+  - router
+  - multimodal
 - glob: tests/serve/test_sglang_mm_hashes_protocol.py
   owners:
   - runtime
@@ -1138,6 +1306,8 @@ shared:
   owners:
   - runtime
   - backend-trtllm
+  - router
+  - multimodal
 - glob: tests/serve/test_trtllm_mm_hashes_protocol.py
   owners:
   - runtime

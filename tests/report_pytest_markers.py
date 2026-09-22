@@ -27,6 +27,7 @@ from types import ModuleType
 from typing import List, Optional, Set
 
 import pytest
+import yaml
 
 try:
     import tomllib  # Python >=3.11
@@ -72,6 +73,8 @@ STUB_MODULES = [
     "google",
     "google.protobuf",
     "google.protobuf.message",
+    "aisimulate",
+    "aisimulate.aic",
     # msgspec — used by FPM encoding in engine_adapter and by perf metric
     # ingestion in monitoring/perf_metrics; not in the pre-commit env.
     "msgspec",
@@ -103,6 +106,10 @@ STUB_MODULES = [
     "nats",
     "dynamo._core",
     "psutil",
+    # Imported with pytest.importorskip at module scope by the SGLang tool
+    # calling tests. Stub it for collection so dependency resolution cannot
+    # silently remove that entire file from the marker audit.
+    "jsonschema",
     "requests",
     "numpy",
     "aiconfigurator",
@@ -115,6 +122,9 @@ STUB_MODULES = [
     "botocore.exceptions",
     "pynvml",
     "gpu_memory_service",
+    "gpu_memory_service.cli",
+    "gpu_memory_service.cli.runner",
+    "gpu_memory_service.cli.server",
     "gpu_memory_service.client",
     "gpu_memory_service.client.memory_manager",
     "gpu_memory_service.client.rpc",
@@ -142,6 +152,9 @@ STUB_MODULES = [
     "gpu_memory_service.integrations.sglang.patches",
     "gpu_memory_service.integrations.sglang.memory_saver",
     "gpu_memory_service.integrations.vllm",
+    "gpu_memory_service.integrations.vllm.model_loader",
+    "gpu_memory_service.integrations.vllm.patches",
+    "gpu_memory_service.integrations.vllm.utils",
     "gpu_memory_service.integrations.vllm.worker",
     "gpu_memory_service.server",
     "gpu_memory_service.server.allocations",
@@ -149,6 +162,28 @@ STUB_MODULES = [
     "gpu_memory_service.server.gms",
     "gpu_memory_service.server.rpc",
     "gpu_memory_service.server.session",
+    "gpu_memory_service.snapshot",
+    "gpu_memory_service.snapshot.disk",
+    "gpu_memory_service.v1",
+    "gpu_memory_service.v1.checkpoint",
+    "gpu_memory_service.v1.cli",
+    "gpu_memory_service.v1.client",
+    "gpu_memory_service.v1.client.mapping",
+    "gpu_memory_service.v1.client.memory_manager",
+    "gpu_memory_service.v1.client.mempool",
+    "gpu_memory_service.v1.client.parameter_storage",
+    "gpu_memory_service.v1.client.session",
+    "gpu_memory_service.v1.device",
+    "gpu_memory_service.v1.integrations",
+    "gpu_memory_service.v1.integrations.sglang",
+    "gpu_memory_service.v1.integrations.sglang.plugin",
+    "gpu_memory_service.v1.protocol",
+    "gpu_memory_service.v1.server",
+    "gpu_memory_service.v1.server.rpc",
+    "gpu_memory_service.v1.snapshot",
+    "gpu_memory_service.v1.snapshot.loader",
+    "gpu_memory_service.v1.snapshot.saver",
+    "gpu_memory_service.v1.snapshot.weight_artifact",
     "prometheus_client",
     "prometheus_client.parser",
     "sklearn",
@@ -175,6 +210,8 @@ STUB_MODULES = [
     "sglang.srt.parser.conversation",
     "sglang.srt.parser.jinja_template_utils",
     "sglang.srt.parser.reasoning_parser",
+    "sglang.srt.plugins",
+    "sglang.srt.plugins.hook_registry",
     "sglang.srt.sampling",
     "sglang.srt.sampling.custom_logit_processor",
     "sglang.srt.utils",
@@ -187,6 +224,8 @@ STUB_MODULES = [
     "sglang.srt.disaggregation.utils",
     "sglang.srt.server_args",
     "sglang.srt.server_args_config_parser",
+    "sglang.srt.speculative",
+    "sglang.srt.speculative.spec_info",
     "vllm",
     "vllm.config",
     "vllm.distributed",
@@ -314,14 +353,48 @@ FORCE_STUB_MODULES = {
 # Project paths for local imports
 PROJECT_PATHS = [
     os.getcwd(),
+    os.path.join(os.getcwd(), ".github", "codeowners"),
     os.path.join(os.getcwd(), "components", "src"),
     os.path.join(os.getcwd(), "lib", "bindings", "python", "src"),
+    os.path.join(os.getcwd(), "lib", "gpu_memory_service"),
+    os.path.join(os.getcwd(), "lib", "gpu_memory_service", "tests"),
+    os.path.join(os.getcwd(), "tests", "wheels"),
+    os.path.join(os.getcwd(), "components", "src", "dynamo", "frontend", "tests"),
+    os.path.join(
+        os.getcwd(), "components", "src", "dynamo", "planner", "tests", "unit"
+    ),
 ]
 sys.path[:0] = PROJECT_PATHS  # prepend to sys.path
+
+# Match the repository-wide collection scope used by backend CI. Keep the
+# standalone or duplicate module trees aligned with the root pytest policy.
+DEFAULT_TEST_PATHS = [
+    "tests",
+    "components/src",
+    "lib/bindings/python/tests",
+    "lib/gpu_memory_service/tests",
+]
+COLLECTION_IGNORE_GLOBS = [
+    "*model.py",
+    "*vllm_integration*",
+    "*trtllm_integration*",
+    "*kvbm/python/kvbm*",
+    "*_inc.py",
+    "*/llm/tensorrtllm*",
+    "docs/fern/*",
+    "deploy/power-agent/tests/*",
+    "components/src/dynamo/sglang/request_handlers/*",
+    "components/src/dynamo/sglang/multimodal_utils/*",
+    "components/src/dynamo/vllm/multimodal_utils/*",
+    "examples/backends/sglang/slurm_jobs/*",
+]
 
 # Must follow the sys.path bootstrap above: this file runs as
 # `python3 tests/report_pytest_markers.py`, so sys.path[0] is tests/, not the
 # repo root, and the `tests` package is not importable any earlier.
+from codeowners_match import ResolvedModel, compute_resolution  # noqa: E402
+from pytest_markers import FRAMEWORK_MARKERS, SELECTIVE_FEATURE_MARKERS  # noqa: E402
+
 from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -329,17 +402,26 @@ from tests.marker_categories import REQUIRED_CATEGORIES  # noqa: E402
 # --------------------------------------------------------------------------- #
 
 
-def sanitize(s: str, max_len: int = 200) -> str:
+def sanitize(s: str, max_len: Optional[int] = 200) -> str:
     """Safe, trimmed string for output."""
     s = re.sub(r"[^\x20-\x7E\n\t]", "", str(s))
-    return s if len(s) <= max_len else s[: max_len - 3] + "..."
+    if max_len is None or len(s) <= max_len:
+        return s
+    return s[: max_len - 3] + "..."
 
 
 def missing_categories(markers: Set[str]) -> List[str]:
     """Return required categories missing in a test's markers."""
-    return [
+    missing = [
         cat for cat, allowed in REQUIRED_CATEGORIES.items() if not (markers & allowed)
     ]
+    if (
+        "unit" not in markers
+        and markers & FRAMEWORK_MARKERS
+        and not markers & SELECTIVE_FEATURE_MARKERS
+    ):
+        missing.append("Selective Feature")
+    return missing
 
 
 # --------------------------------------------------------------------------- #
@@ -494,13 +576,25 @@ class TestRecord:
 
 
 @dataclass
+class PathMarkerMismatch:
+    nodeid: str
+    mapped_features: List[str]
+    actual_features: List[str]
+    mapped_frameworks: List[str]
+    actual_frameworks: List[str]
+
+
+@dataclass
 class Report:
     total_checked: int
     total_skipped_mypy: int
     total_missing: int
     tests: List[TestRecord]
+    collected_tests: List[TestRecord]
     undeclared_markers: Optional[List[str]] = None
     missing_in_project_config: Optional[List[str]] = None
+    unused_selective_markers: Optional[List[str]] = None
+    path_marker_mismatches: Optional[List[PathMarkerMismatch]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -511,18 +605,23 @@ class Report:
 class MarkerReportPlugin:
     def __init__(self):
         self.records: List[TestRecord] = []
+        self.collected_records: List[TestRecord] = []
         self.checked = 0
         self.skipped_mypy = 0
 
     def pytest_collection_modifyitems(self, session, config, items):
         for item in items:
             markers = {m.name for m in item.iter_markers()}
-            if markers & {"mypy", "skip", "skipif"}:
+            nodeid = sanitize(item.nodeid, max_len=None)
+            self.collected_records.append(
+                TestRecord(nodeid=nodeid, markers=sorted(markers), missing=[])
+            )
+            if markers & {"mypy", "skip"}:
                 self.skipped_mypy += 1
                 continue
 
             record = TestRecord(
-                nodeid=sanitize(item.nodeid),
+                nodeid=nodeid,
                 markers=sorted(markers),
                 missing=missing_categories(markers),
             )
@@ -535,6 +634,7 @@ class MarkerReportPlugin:
             total_skipped_mypy=self.skipped_mypy,
             total_missing=sum(bool(r.missing) for r in self.records),
             tests=self.records,
+            collected_tests=self.collected_records,
         )
 
 
@@ -589,6 +689,59 @@ def validate_marker_definitions(report: Report, declared: Set[str]) -> None:
     report.missing_in_project_config = sorted(required - declared) or None
 
 
+def validate_selective_marker_coverage(
+    report: Report, configured: Set[str] = SELECTIVE_FEATURE_MARKERS
+) -> None:
+    """Require every configured feature to select an audited, runnable test."""
+    used = {marker for test in report.tests for marker in test.markers}
+    report.unused_selective_markers = sorted(configured - used) or None
+
+
+def load_codeowners_model(
+    areas_path: Path = Path(".github/codeowners/areas.yaml"),
+) -> ResolvedModel:
+    """Load the path-to-marker policy used by selective pytest routing."""
+    return compute_resolution(yaml.safe_load(areas_path.read_text(encoding="utf-8")))
+
+
+def validate_path_feature_alignment(report: Report, model: ResolvedModel) -> None:
+    """Require non-unit tests to intersect their path's mapped marker axes."""
+    mismatches: List[PathMarkerMismatch] = []
+    for test in report.tests:
+        markers = set(test.markers)
+        if "unit" in markers:
+            continue
+
+        test_path = test.nodeid.split("::", 1)[0]
+        mapped_markers = model.pytest_markers_for_path(test_path)
+        mapped_features = {
+            marker for marker in mapped_markers if marker in SELECTIVE_FEATURE_MARKERS
+        }
+        mapped_frameworks = mapped_markers & FRAMEWORK_MARKERS
+        actual_features = markers & SELECTIVE_FEATURE_MARKERS
+        actual_frameworks = markers & FRAMEWORK_MARKERS
+        feature_mismatch = bool(actual_frameworks) and (
+            not mapped_features or not mapped_features & actual_features
+        )
+        framework_mismatch = (
+            bool(mapped_frameworks)
+            and bool(actual_frameworks)
+            and not mapped_frameworks & actual_frameworks
+        )
+        if feature_mismatch or framework_mismatch:
+            mismatches.append(
+                PathMarkerMismatch(
+                    nodeid=test.nodeid,
+                    mapped_features=sorted(mapped_features),
+                    actual_features=sorted(actual_features),
+                    mapped_frameworks=sorted(mapped_frameworks),
+                    actual_frameworks=sorted(actual_frameworks),
+                )
+            )
+
+    report.path_marker_mismatches = mismatches or None
+
+
 class MarkerStrictValidator:
     """Strict validation for marker definitions and naming conventions."""
 
@@ -640,8 +793,8 @@ def parse_args():
     parser.add_argument(
         "--tests",
         nargs="*",
-        default=["tests", "components/src"],
-        help="Paths to test directories (default: tests components/src)",
+        default=DEFAULT_TEST_PATHS,
+        help="Paths to test directories (default: repository-wide CI roots)",
     )
     parser.add_argument(
         "--verbose",
@@ -660,7 +813,25 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
 
         stubber = DependencyStubber()
         for module in STUB_MODULES:
-            stubber.ensure_available(module, force=module in FORCE_STUB_MODULES)
+            stubber.ensure_available(
+                module,
+                force=(
+                    module in FORCE_STUB_MODULES
+                    or module.startswith("gpu_memory_service")
+                ),
+            )
+
+        # The GMS tests otherwise skip their complete modules when optional
+        # native dependencies are absent. Expose deterministic availability
+        # flags so marker collection audits the CPU-visible test inventory.
+        gms_test_deps = ModuleType("_deps")
+        gms_test_deps.HAS_GMS = True  # type: ignore[attr-defined]
+        gms_test_deps.HAS_TORCH = False  # type: ignore[attr-defined]
+        gms_test_deps.HAS_CUDA = False  # type: ignore[attr-defined]
+        gms_test_deps.HAS_XPU = False  # type: ignore[attr-defined]
+        gms_test_deps.HAS_GPU = False  # type: ignore[attr-defined]
+        gms_test_deps.HAS_PYNVML = False  # type: ignore[attr-defined]
+        sys.modules["_deps"] = gms_test_deps
 
         # Special case: pytest-benchmark needs a real Warning subclass
         try:
@@ -698,6 +869,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
     exitcode = pytest.main(
         [
             "--collect-only",
+            "--import-mode=importlib",
             "-qq",
             "--disable-warnings",
             # Override config from pyproject.toml to avoid picking up options
@@ -706,6 +878,7 @@ def run_collection(test_paths: list[str], use_stubbing: bool) -> tuple[int, Repo
             "addopts=",
             "-o",
             "filterwarnings=",
+            *(f"--ignore-glob={pattern}" for pattern in COLLECTION_IGNORE_GLOBS),
             *test_paths,
         ],
         plugins=[plugin],
@@ -736,11 +909,33 @@ def print_human_report(report: Report, *, verbose: bool = False) -> None:
             print(f"{rec.nodeid}")
             print(f"  Missing: {', '.join(rec.missing)}")
 
+    if report.unused_selective_markers:
+        print("\n" + "=" * 80)
+        print("SELECTIVE MARKERS WITH NO AUDITED TESTS")
+        print("=" * 80)
+        for marker in report.unused_selective_markers:
+            print(f"  {marker}")
+
+    if report.path_marker_mismatches:
+        print("\n" + "=" * 80)
+        print("TESTS WITHOUT THEIR PATH-MAPPED FEATURE MARKER")
+        print("=" * 80)
+        for mismatch in report.path_marker_mismatches:
+            print(mismatch.nodeid)
+            if mismatch.mapped_features:
+                print(f"  Path features: {', '.join(mismatch.mapped_features)}")
+                actual = ", ".join(mismatch.actual_features) or "none"
+                print(f"  Test features: {actual}")
+            if mismatch.mapped_frameworks:
+                print(f"  Path frameworks: {', '.join(mismatch.mapped_frameworks)}")
+                actual = ", ".join(mismatch.actual_frameworks) or "none"
+                print(f"  Test frameworks: {actual}")
+
     print("\n" + "=" * 80)
     print("SUMMARY")
     print("=" * 80)
     print(f"  Tests checked: {report.total_checked}")
-    print(f"  Mypy skipped:  {report.total_skipped_mypy}")
+    print(f"  Audit-exempt:  {report.total_skipped_mypy} (mypy or unconditional skip)")
     print(f"  Missing sets:  {report.total_missing}")
     print("=" * 80)
 
@@ -753,6 +948,8 @@ def main() -> int:
     # Load and validate marker definitions
     declared = load_declared_markers(Path("."))
     validate_marker_definitions(report, declared)
+    validate_selective_marker_coverage(report)
+    validate_path_feature_alignment(report, load_codeowners_model())
 
     print_human_report(report, verbose=args.verbose)
 
@@ -771,7 +968,13 @@ def main() -> int:
         LOG.info("Wrote JSON report to %s", args.json)
 
     # Fail if any tests are missing required markers
-    return 1 if report.total_missing > 0 else exitcode
+    return (
+        1
+        if report.total_missing > 0
+        or report.unused_selective_markers
+        or report.path_marker_mismatches
+        else exitcode
+    )
 
 
 if __name__ == "__main__":
