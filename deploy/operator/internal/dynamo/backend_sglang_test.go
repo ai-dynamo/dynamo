@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -556,6 +557,72 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 					t.Errorf("Expected StartupProbe to be preserved, but it was removed")
 				}
 			}
+		})
+	}
+}
+
+func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
+	backend := &SGLangBackend{}
+	customPayload := `{"model":"custom","input":"probe"}`
+
+	t.Log("define the runtime, worker mode, and user-override compatibility cases")
+	tests := []struct {
+		name        string
+		image       string
+		args        []string
+		env         []corev1.EnvVar
+		wantPayload string
+		wantEnv     bool
+	}{
+		{
+			name:        "Dynamo 1.5 embedding worker gets compatible payload",
+			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:        []string{"--embedding-worker"},
+			wantPayload: sglang15EmbeddingHealthCheckPayload,
+			wantEnv:     true,
+		},
+		{
+			name:  "Dynamo 1.5 chat worker is unchanged",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+		},
+		{
+			name:  "newer embedding worker is unchanged",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0",
+			args:  []string{"--embedding-worker"},
+		},
+		{
+			name:        "user payload takes precedence",
+			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:        []string{"--embedding-worker"},
+			env:         []corev1.EnvVar{{Name: healthCheckPayloadEnv, Value: customPayload}},
+			wantPayload: customPayload,
+			wantEnv:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("apply the SGLang container compatibility settings")
+			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env}
+			err := backend.UpdateContainer(
+				container,
+				1,
+				RoleMain,
+				&v1beta1.DynamoComponentDeploymentSharedSpec{},
+				"test-service",
+				&GroveMultinodeDeployer{},
+				staticContainerGPUCount(0),
+			)
+			require.NoError(t, err)
+
+			t.Log("verify the payload is injected only for the affected compatibility case")
+			payload := findEnvVar(container.Env, healthCheckPayloadEnv)
+			if !tt.wantEnv {
+				require.Nil(t, payload)
+				return
+			}
+			require.NotNil(t, payload)
+			require.Equal(t, tt.wantPayload, payload.Value)
 		})
 	}
 }

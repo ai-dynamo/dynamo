@@ -8,6 +8,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -16,6 +17,10 @@ const (
 	SglangPort = "29500"
 
 	maxTCPPort = 65535
+
+	sglangEmbeddingWorkerFlag           = "--embedding-worker"
+	healthCheckPayloadEnv               = "DYN_HEALTH_CHECK_PAYLOAD"
+	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
 )
 
 type SGLangBackend struct{}
@@ -36,6 +41,17 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// is exactly the case that co-locates every rank in one container.
 	if err := reserveNixlExporterPorts(container, containerGPUCount); err != nil {
 		return err
+	}
+
+	// Supply the embedding request shape that Dynamo 1.5.0 cannot derive for its active canary.
+	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
+		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
+		hasFlag(getExpandedCommandLine(container), sglangEmbeddingWorkerFlag) &&
+		findEnvVar(container.Env, healthCheckPayloadEnv) == nil {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  healthCheckPayloadEnv,
+			Value: sglang15EmbeddingHealthCheckPayload,
+		})
 	}
 
 	if component.CompilationCache != nil {
