@@ -132,7 +132,7 @@ Trace replay with AIPerf against the Mooncake 8K/1K/70%-reuse chat trace. See [`
 
 <div data-variant="agg">
 
-Mooncake chat trace replay, 1,805 requests, at the highest concurrency meeting a joint gate of E2E ≥ 50 tok/s/user **and** TTFT p50 < 5 s, where `E2E = OSL / (TTFT_p50 + OSL × ITL)`.
+Mooncake chat trace replay, 1,805 requests, at the highest concurrency meeting both E2E ≥ 50 tok/s/user and TTFT p50 < 5 s.
 
 | Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -140,13 +140,13 @@ Mooncake chat trace replay, 1,805 requests, at the highest concurrency meeting a
 
 ITL p50 is 19.15 ms.
 
-Measured KV reuse on this workload is 8.8%. That is not a misconfiguration — the trace's working set is roughly 42x oversubscribed against TP4's KV capacity, so blocks are evicted before they can be reused.
+Measured KV reuse on this workload is 8.8%: the trace's working set far exceeds TP4's KV capacity, so blocks are evicted before they can be reused.
 
 </div>
 
 <div data-variant="disagg">
 
-Mooncake chat trace replay, 1,805 requests. Concurrency 14 is this target's operating point — the highest concurrency meeting both legs of the gate.
+Mooncake chat trace replay, 1,805 requests, at the highest concurrency meeting the same gate.
 
 | Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -154,9 +154,9 @@ Mooncake chat trace replay, 1,805 requests. Concurrency 14 is this target's oper
 
 ITL p50 is 15.98 ms.
 
-This is level with the aggregated target's 87 tok/s/GPU under the same gate, so disaggregation is an SLA and scaling choice for this model rather than a throughput win or loss. It buys per-token latency (ITL 15.98 ms against the aggregated recipe's 19.15 ms) and lets prefill and decode scale independently, for twice the GPUs. Lowering concurrency trades throughput for interactivity — at C=7 the same deployment gives 55 tok/s/GPU but E2E 70.6 tok/s/user and TTFT p50 1,018 ms.
+Throughput per GPU is level with the aggregated target, for twice the GPUs. Choose this target for lower per-token latency and independent prefill/decode scaling, not for throughput.
 
-38 of the trace's 1,805 requests are rejected in every run, at every concurrency: the trace is multi-turn and its accumulated prompts reach 614,440 tokens against this checkpoint's 262,144-token ceiling, so they return HTTP 400 and are excluded from the metrics.
+38 of the trace's 1,805 requests exceed the 262,144-token context ceiling and return HTTP 400; they are excluded from the metrics.
 
 </div>
 
@@ -180,13 +180,13 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
 | Disaggregated serving | ✅ | NIXL over UCX; needs an RDMA device plugin |
 | KV-aware routing | ✅ | wired end to end; inert at the shipped `replicas: 1`, correct when you scale out |
 | 262,144-token context | ✅ | the checkpoint's native window, served in full with no rope scaling |
-| Expert parallelism | ➖ | measured within noise at TP4; not enabled |
+| Expert parallelism | ➖ | no measurable gain at TP4; not enabled |
 
 ## Notes
 
 - **The MoE backend pin is a correctness requirement.** vLLM's `auto` selection picks FLASHINFER_TRTLLM, which silently corrupts long-form output on this checkpoint — fluent, plausible, wrong, with no error. Both manifests pin `--kernel-config '{"moe_backend":"FLASHINFER_CUTLASS"}'`; the pinned kernel is slower and that cost is inside the figures above.
 - **Use the `--dyn-*` parser flags.** Plain `--reasoning-parser` and `--tool-call-parser` configure the engine only and never reach the Dynamo frontend, so tool calling silently does nothing.
-- **TP4 is both the floor and the optimum.** ~530 GB of weights does not fit TP2 on 180 GB B200s, and TP8 — despite 5.7x the KV capacity — is slower per GPU, because this model is communication-bound rather than KV-capacity-bound.
+- **TP4 is both the floor and the optimum.** ~530 GB of weights does not fit TP2 on 180 GB B200s, and TP8 is slower per GPU: this model is communication-bound rather than KV-capacity-bound.
 - **Disaggregated: prefill and decode must agree** on speculative decoding and block size. A mismatch changes KV block geometry and produces silent garbage rather than an error. `--max-num-seqs` is the deliberate exception: 32 on prefill, 256 on decode.
 - **`deploy-ib.yaml` already carries the InfiniBand settings, and they are cluster-specific.** Check both against your cluster before deploying, and do not add your own fabric configuration on top. The RDMA extended resource is requested as `rdma/shared_ib`; other clusters expose `rdma/ib` or `rdma/rdma_shared_device_a`, and a shared flavour is preferable — with an exclusive-mode resource, two co-located workers each claiming HCAs can deadlock NCCL bootstrap. `UCX_TLS` is set to `rc_x,rc,cuda_copy,cuda_ipc`, which are the InfiniBand verbs transports and are wrong on a RoCE or EFA fabric; `tcp` is omitted deliberately so a misconfigured fabric fails loudly instead of silently falling back to a slow transport. Verify the transport engaged before trusting any measurement:
 
@@ -196,7 +196,7 @@ This is level with the aggregated target's 87 tok/s/GPU under the same gate, so 
   ```
 
   Divide `_sum` by `_count`: a ~1 GB KV transfer should take milliseconds, not seconds.
-- **KV-aware routing does nothing until you scale out — but scaling out is all it takes.** The frontend ships `--router-mode kv --router-kv-events` and the worker (prefill, in the disaggregated recipe) ships `--kv-events-config`, so the block index is published and consumed. Both halves are inert at `replicas: 1`, because one worker is one destination. Raising `replicas` is sufficient; no flag edit is needed. Measured on a 2 x TP4 deployment this workload sees no throughput gain from it — a 9.494% prefix hit rate against round-robin's 9.458% — because achieved reuse is capacity-capped, so it is shipped for correct scale-out behaviour rather than for throughput.
+- **KV-aware routing is wired end to end but inert at `replicas: 1`.** The frontend ships `--router-mode kv --router-kv-events` and the worker (prefill, in the disaggregated recipe) ships `--kv-events-config`, so the block index is published and consumed. One worker is one destination, so raising `replicas` is all that is needed — no flag edit. On this workload achieved reuse is capacity-capped, so expect correct scale-out behaviour rather than a throughput gain.
 - **There is no cache-clearing endpoint.** `dynamo.vllm` runs the Dynamo worker rather than vLLM's OpenAI server, so `POST /reset_prefix_cache` is not served anywhere and `VLLM_SERVER_DEV_MODE` has no effect. `perf.yaml` runs one `CONCURRENCY` value and does not salt its requests, so restart the workers between points to clear engine KV — otherwise each point inherits the previous point's cache.
 - **Context length is 262,144**, the model's native maximum. The checkpoint uses unscaled rope, so longer contexts would require a rope-scaling override with unvalidated accuracy.
 
