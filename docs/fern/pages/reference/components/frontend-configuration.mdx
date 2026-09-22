@@ -69,6 +69,14 @@ The Rust HTTP server also reads these environment variables, which are not expos
   See [Runtime Configuration](runtime-configuration.mdx) for `DYN_TCP_MAX_MESSAGE_SIZE`.
 </ParamField>
 
+<ParamField path="DYN_HTTP_LISTEN_BACKLOG" type="integer" default="4096">
+  Listen backlog of the frontend socket, for both plain HTTP and TLS, capped by
+  the kernel at `net.core.somaxconn`. Raise it when many clients open connections
+  within a few seconds (for example a load client with one connection per
+  session): connections that arrive while the accept queue is full are delayed
+  or, depending on the host's TCP settings, fail.
+</ParamField>
+
 <ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">
   Maximum time the Frontend waits for admitted HTTP response bodies and `/v1/realtime` WebSocket
   tasks to finish after shutdown begins. New inference requests are rejected while draining.
