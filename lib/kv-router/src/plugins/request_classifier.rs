@@ -24,6 +24,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dynamo_tokens::SequenceHash;
 use tokio::time::Instant;
 
 use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
@@ -38,6 +39,7 @@ pub struct ClassifyRequest {
     ingress_at: Instant,
     input_tokens: usize,
     initial_cached_tokens: usize,
+    sequence_hashes: Option<Vec<SequenceHash>>,
     pub(crate) progress: RequestProgress,
     session_context: Option<SessionContext>,
 }
@@ -69,6 +71,7 @@ impl ClassifyRequest {
             ingress_at,
             input_tokens,
             initial_cached_tokens,
+            sequence_hashes: None,
             progress: RequestProgress::new(input_tokens).0,
             session_context: None,
         }
@@ -89,6 +92,11 @@ impl ClassifyRequest {
         self
     }
 
+    pub(crate) fn with_sequence_hashes(mut self, hashes: Option<&[SequenceHash]>) -> Self {
+        self.sequence_hashes = hashes.map(<[SequenceHash]>::to_vec);
+        self
+    }
+
     pub fn request_id(&self) -> Option<&str> {
         self.request_id.as_deref()
     }
@@ -106,6 +114,27 @@ impl ClassifyRequest {
 
     pub fn input_tokens(&self) -> usize {
         self.input_tokens
+    }
+
+    /// Return the request's ordered active-tracking sequence hashes.
+    ///
+    /// This is an owned snapshot of the host's existing scheduling input, taken
+    /// before classification. Each entry represents a complete tracking block;
+    /// use the factory's [`RequestClassifierContext::block_size`] for its token
+    /// unit. A partial trailing block is not covered. `None` preserves missing
+    /// tracking data; `Some(&[])` preserves a present, empty sequence.
+    ///
+    /// Values retain the host's public/keyed hashing and reuse configuration.
+    /// With KV reuse disabled they are randomized tracking identities, not
+    /// reusable content hashes. Compare only within the same tracking domain
+    /// and configuration. These are not physical block IDs, cache-hit evidence,
+    /// or a guarantee that requests share resident KV.
+    ///
+    /// The slice lives with this request, including while its classification
+    /// future is pending. It is not extended by generation progress. Reading it
+    /// neither computes hashes nor changes scheduling cost or worker selection.
+    pub fn sequence_hashes(&self) -> Option<&[SequenceHash]> {
+        self.sequence_hashes.as_deref()
     }
 
     /// Live context high-water mark, initialized from `input_tokens()` and raised

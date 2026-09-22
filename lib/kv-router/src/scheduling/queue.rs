@@ -804,7 +804,8 @@ impl<
             .with_available_workers(available.as_deref())
             .best_cached_tokens();
         let mut classification =
-            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at);
+            ClassifyRequest::with_timing(request.isl_tokens, cached_tokens, ingress_at)
+                .with_sequence_hashes(request.token_seq.as_deref());
         if let Some(request_id) = request.mode.request_id() {
             classification = classification.with_request_id(request_id);
         }
@@ -2621,6 +2622,47 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn classifier_sequence_hashes_preserve_absence_empty_and_order() {
+        use crate::plugins::request_classifier::{ClassifyFuture, RequestClassifier};
+
+        struct InspectHashes(Option<Vec<u64>>);
+        impl RequestClassifier for InspectHashes {
+            fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+                let expected = self.0.clone();
+                Box::pin(async move {
+                    tokio::task::yield_now().await;
+                    assert_eq!(request.sequence_hashes(), expected.as_deref());
+                    Ok(request)
+                })
+            }
+        }
+
+        let profile = PolicyProfile::synthetic(None, crate::config::RouterQueuePolicy::Fcfs);
+        let (queue, _slots) = make_queue_with_profile(1, 64, 256, profile);
+        // The projection also preserves opaque/randomized tracking values. It
+        // must not sort, deduplicate, reinterpret, or synthesize missing hashes.
+        for hashes in [None, Some(vec![]), Some(vec![11, 7, 11])] {
+            let (mut request, _rx) = make_request("prefix-input", 193);
+            request.token_seq = hashes.clone();
+            let classified = queue.build_classify_request(&request, Instant::now());
+            assert_eq!(request.token_seq, hashes);
+            let mut classifier = InspectHashes(hashes);
+            let pending = classifier.classify(classified);
+            // The independently pollable future must not borrow actor-owned data.
+            request.token_seq = Some(vec![99]);
+            drop(request);
+            let returned = pending.await.unwrap();
+            assert_eq!(returned.input_tokens(), 193);
+            assert_eq!(returned.scheduling_cost_tokens(), 193);
+            let overrides = returned.into_queue_inputs();
+            assert!(overrides.policy_class.is_none());
+            assert!(overrides.due_at.is_none());
+            assert!(overrides.scheduling_cost_tokens.is_none());
+            assert!(overrides.worker_selection_target.is_none());
+        }
     }
 
     #[tokio::test]
