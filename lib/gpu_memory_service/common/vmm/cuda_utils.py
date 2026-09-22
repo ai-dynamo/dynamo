@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 
 from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.common.utils import fail
+from gpu_memory_service.common.utils import fail, nvml_handle_for_cuda_device
 from gpu_memory_service.common.vmm.device import VMMDevice
 
 try:
@@ -77,7 +77,7 @@ def cuda_device_memory_info(device: int) -> tuple[int, int]:
 
     pynvml.nvmlInit()
     try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+        handle = nvml_handle_for_cuda_device(pynvml, device)
         info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         return int(info.free), int(info.total)
     finally:
@@ -389,7 +389,7 @@ class CudaVMM(VMMDevice):
     # ----- discovery / sizing -----------------------------------------------
 
     def list_devices(self) -> list[int]:
-        return list_cuda_devices()
+        return list_devices()
 
     def device_memory_info(self, device: int) -> tuple[int, int]:
         return cuda_device_memory_info(device)

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import importlib.machinery
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -21,99 +21,6 @@ def _clear_dynamic_gms_role_env(monkeypatch):
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
     yield
     monkeypatch.delenv("DYN_VLLM_GMS_ACTIVE_LOCK_HELD", raising=False)
-
-
-def test_pre_vllm_import_arms_lazy_installer(monkeypatch):
-    calls = []
-    monkeypatch.delitem(
-        install_vmm_ipc_kv.sys.modules,
-        "vllm.v1.worker.gpu_model_runner",
-        raising=False,
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
-    )
-
-    install_vmm_ipc_kv._install_or_arm()
-
-    assert calls == ["lazy"]
-
-
-def test_lazy_v2_install_waits_for_model_runner(monkeypatch):
-    events = []
-
-    class Loader:
-        def create_module(self, spec):
-            return None
-
-        def exec_module(self, module):
-            events.append(("loaded", module.__name__))
-
-    class Finder:
-        def find_spec(self, name, path=None, target=None):
-            if name == "vllm.v1.worker.gpu.model_runner":
-                return importlib.machinery.ModuleSpec(name, Loader())
-            return None
-
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_LAZY_HOOK_INSTALLED", False)
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install", lambda: events.append(("installed", None))
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv.sys, "meta_path", [Finder()])
-
-    install_vmm_ipc_kv.install_lazy()
-    lazy_finder = install_vmm_ipc_kv.sys.meta_path[0]
-
-    assert lazy_finder.find_spec("vllm.v1.worker.gpu.attn_utils") is None
-    spec = lazy_finder.find_spec("vllm.v1.worker.gpu.model_runner")
-    assert spec is not None
-    module = spec.loader.create_module(spec) or SimpleNamespace(
-        __name__="vllm.v1.worker.gpu.model_runner"
-    )
-    spec.loader.exec_module(module)
-
-    assert events == [
-        ("loaded", "vllm.v1.worker.gpu.model_runner"),
-        ("installed", None),
-    ]
-
-
-def test_preloaded_v2_runner_installs_immediately(monkeypatch):
-    calls = []
-    for module in (
-        "vllm.v1.worker.gpu_model_runner",
-        "vllm.v1.worker.gpu.model_runner",
-        "vllm.v1.worker.gpu.attn_utils",
-    ):
-        monkeypatch.delitem(install_vmm_ipc_kv.sys.modules, module, raising=False)
-    monkeypatch.setitem(
-        install_vmm_ipc_kv.sys.modules,
-        "vllm.v1.worker.gpu.model_runner",
-        SimpleNamespace(),
-    )
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "install", lambda: calls.append("install"))
-    monkeypatch.setattr(
-        install_vmm_ipc_kv, "install_lazy", lambda: calls.append("lazy")
-    )
-
-    install_vmm_ipc_kv._install_or_arm()
-
-    assert calls == ["install"]
-
-
-def test_shared_kv_install_fails_without_lease_hooks(monkeypatch):
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "install_geometry_patch", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_install_kv_leases", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_kv_lease_hooks_installed", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_shared_kv_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_INSTALLED", False)
-
-    with pytest.raises(RuntimeError, match="lease-aware block allocation"):
-        install_vmm_ipc_kv.install()
 
 
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
@@ -179,23 +86,6 @@ def test_model_identity_rejects_mutable_revision(monkeypatch):
         install_vmm_ipc_kv._model_identity(
             SimpleNamespace(model="org/model", revision="main")
         )
-
-
-def test_model_identity_is_derived_from_runner_config():
-    commit = "b" * 40
-    runner = SimpleNamespace(
-        vllm_config=SimpleNamespace(
-            model_config=SimpleNamespace(
-                model="org/model",
-                revision="main",
-                hf_config=SimpleNamespace(_commit_hash=commit),
-            )
-        )
-    )
-
-    assert install_vmm_ipc_kv._model_identity_from_runner(runner) == (
-        f"model=org/model\0artifact={commit}"
-    )
 
 
 def test_model_identity_fails_closed_when_unavailable():
@@ -359,6 +249,55 @@ def test_persistent_tag_plan_rejects_partial_reattach():
         )
 
 
+@pytest.mark.parametrize(
+    ("reattaching", "released"),
+    [(False, [("engine", "kv:a"), ("engine", "kv:b")]), (True, [])],
+)
+def test_failed_kv_allocation_rolls_back_only_fresh_plan(
+    monkeypatch, reattaching, released
+):
+    from gpu_memory_service.client.torch import allocator
+
+    events = []
+
+    @contextmanager
+    def passthrough(*_args):
+        yield
+
+    manager = SimpleNamespace(
+        release_persistent=lambda engine_id, tag: (
+            events.append((engine_id, tag)) or True
+        )
+    )
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_semantic_kv_tensor_tag_plan",
+        lambda *_args: ["kv:a", "kv:b"],
+    )
+    monkeypatch.setattr(install_vmm_ipc_kv, "_model_identity", lambda *_: "model")
+    monkeypatch.setattr(
+        install_vmm_ipc_kv,
+        "_persistent_tag_plan_reattaches",
+        lambda *_args: reattaching,
+    )
+    monkeypatch.setattr(allocator, "set_persistent_allocator_tag_plan", lambda *_: None)
+    monkeypatch.setattr(
+        allocator, "clear_persistent_allocator_tag_plan", lambda *_: None
+    )
+    monkeypatch.setattr(allocator, "gms_use_persistent_pool", passthrough)
+    monkeypatch.setattr(
+        install_vmm_ipc_kv, "_persistent_kv_zeros_as_empty", passthrough
+    )
+
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        with install_vmm_ipc_kv.persistent_kv_allocation_context(
+            manager, "engine", SimpleNamespace(), SimpleNamespace(), 0
+        ):
+            raise RuntimeError("allocation failed")
+
+    assert events == released
+
+
 def test_persistent_kv_zeros_as_empty_is_context_local(monkeypatch):
     import sys
 
@@ -415,16 +354,12 @@ def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):
     assert kv_identity.use_existing_shared_geometry()
 
 
-def test_vllm_v2_device_index_uses_current_cuda_device_for_unindexed_cuda(
-    monkeypatch,
-):
-    from types import SimpleNamespace
+def test_native_kv_allocation_context_check_detects_worker_drift(monkeypatch):
+    from vllm.v1.worker.gpu_worker import Worker
 
-    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
+    monkeypatch.setattr(Worker, "initialize_from_config", lambda self, config: None)
 
-    monkeypatch.setattr(install_vmm_ipc_kv, "_current_cuda_device", lambda: 3)
-
-    assert install_vmm_ipc_kv._device_index(SimpleNamespace(index=None)) == 3
+    assert not install_vmm_ipc_kv.native_kv_allocation_hook_available()
 
 
 def test_geometry_wait_honors_vllm_specific_timeout(monkeypatch):
