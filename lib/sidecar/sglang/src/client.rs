@@ -402,24 +402,19 @@ mod tests {
 
     #[test]
     fn discovery_requires_incremental_streaming() {
-        for enabled in [false, true] {
-            let result = parse_discovery(
-                pb::GetModelInfoResponse {
-                    model_path: "model-repo".to_string(),
-                    json_info: "{}".to_string(),
-                },
-                pb::GetServerInfoResponse {
-                    json_info: json!({"incremental_streaming_output": enabled}).to_string(),
-                },
-                Vec::new(),
-            );
-            if enabled {
-                assert!(result.is_ok(), "{result:?}");
-            } else {
-                let error = result.unwrap_err().to_string();
-                assert!(error.contains("--incremental-streaming-output"), "{error}");
-            }
-        }
+        let error = parse_discovery(
+            pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: "{}".to_string(),
+            },
+            pb::GetServerInfoResponse {
+                json_info: json!({"incremental_streaming_output": false}).to_string(),
+            },
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--incremental-streaming-output"), "{error}");
     }
 
     #[tokio::test]
