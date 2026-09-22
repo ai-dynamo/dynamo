@@ -4,6 +4,15 @@
 name: DeepSeek V4 Pro Nightly Smoke
 
 on:
+  # Temporary pre-merge validation trigger. Remove after the branch run.
+  push:
+    branches:
+      - saperiyasamy/ops-8599-move-dynamo-ci-to-github-nightly
+    paths:
+      - .github/ci/deepseek-v4-pro/**
+      - .github/scripts/run_deepseek_v4_pro_smoke.sh
+      - .github/workflows/deepseek-v4-pro-nightly.yml
+      - recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/**
   schedule:
     - cron: '0 10 * * *'
   workflow_dispatch:
@@ -18,8 +27,11 @@ concurrency:
 jobs:
   smoke:
     # Keep schedules inert until the isolated GCP runner is provisioned. Manual
-    # dispatch remains available for bring-up on the dedicated runner.
-    if: github.event_name == 'workflow_dispatch' || vars.DEEPSEEK_V4_PRO_NIGHTLY_ENABLED == 'true'
+    # dispatch and this branch-only push are for dedicated-runner bring-up.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      vars.DEEPSEEK_V4_PRO_NIGHTLY_ENABLED == 'true'
     runs-on: dynamo-gcp-dev-02-nightly-v1
     timeout-minutes: 150
     env:
