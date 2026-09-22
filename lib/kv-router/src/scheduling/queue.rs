@@ -1628,9 +1628,8 @@ impl<
                 .with_available_workers(available_worker_ids.as_deref());
             if self.selector.uses_exclusive_affinity_target()
                 && let Some(target) = request.affinity_target
-                && eligibility.affinity_target_is_eligible(&workers, target)
             {
-                eligibility = eligibility.with_affinity_target(target);
+                eligibility = eligibility.with_eligible_affinity_target(&workers, target);
             }
             self.selector
                 .select_worker(WorkerSelectionInput::configured(

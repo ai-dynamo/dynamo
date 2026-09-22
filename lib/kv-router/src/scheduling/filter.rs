@@ -68,6 +68,32 @@ impl<'a> RoutingEligibility<'a> {
         self
     }
 
+    /// Constrain selection to a bound target only while that target is eligible.
+    ///
+    /// Embedding hosts apply this when their
+    /// [`WorkerSelector::uses_exclusive_affinity_target`](super::selector::WorkerSelector::uses_exclusive_affinity_target)
+    /// returns `true`. Custom policies that treat affinity as advisory receive
+    /// the request's target without this additional constraint.
+    ///
+    /// The target is checked against the supplied worker snapshot, DP ranks,
+    /// availability, overload, caller allowlist, and routing constraints. An
+    /// ineligible target leaves eligibility unchanged, preserving normal
+    /// selection fallback. This does not validate an explicit request pin or
+    /// acquire, commit, release, or invalidate an affinity binding; the host
+    /// retains those responsibilities.
+    #[must_use]
+    pub fn with_eligible_affinity_target<C: WorkerConfigLike>(
+        self,
+        workers: &HashMap<WorkerId, C>,
+        target: WorkerAffinityTarget,
+    ) -> Self {
+        if self.affinity_target_is_eligible(workers, target) {
+            self.with_affinity_target(target)
+        } else {
+            self
+        }
+    }
+
     /// Attach hard availability. Unlike transient overload, unavailability is
     /// enforced on every path, including affinity-derived pins.
     #[inline]

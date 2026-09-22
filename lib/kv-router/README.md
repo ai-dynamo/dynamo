@@ -35,11 +35,16 @@ assert!(scores.scores.is_empty());
 For end-to-end routing, pair the indexers with `LocalScheduler` and the worker/config protocol
 types re-exported from the crate root.
 
+For an embedded host that owns its simulation clock, see
+[Native routing policy in a simulation host](simulation-policy.md). The public worker selector
+and session-affinity table can be composed directly; the host owns dispatch and completion.
+
 ## Features
 
 - `metrics`: Prometheus metrics for router internals
 - `runtime-protocols`: integration points with `dynamo-runtime`
 - `standalone-indexer`: standalone indexer service support
+- `standalone-selection`: selection-service APIs, including the native session-affinity table
 - `bench`: internal benchmarking helpers
 
 ## Further Reading

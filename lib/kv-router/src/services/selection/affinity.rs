@@ -29,6 +29,13 @@ pub const MAX_SESSION_AFFINITY_TTL_SECS: u64 = 31_536_000;
 pub const MAX_SESSION_AFFINITY_ENTRIES: usize = 65_536;
 pub const MAX_SESSION_AFFINITY_ID_BYTES: usize = 256;
 
+/// Binding key shared by a parent's child conversations. The parent itself
+/// retains its independent session binding. Shared by routing and simulation hosts.
+pub fn subagent_group_affinity_id(parent_session_id: &str) -> String {
+    let digest = blake3::hash(parent_session_id.as_bytes());
+    format!("\u{1}sg:{}", digest.to_hex())
+}
+
 /// How a bound session treats a dispatch that landed elsewhere.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -129,6 +136,7 @@ impl SessionAffinityConfig {
 }
 
 struct Inner {
+    manual_now: Option<std::sync::Mutex<Instant>>,
     entries: DashMap<String, AffinityEntry>,
     ttl: Duration,
     mode: SessionAffinityMode,
@@ -218,8 +226,26 @@ impl SessionAffinity {
     }
 
     pub fn with_config(config: SessionAffinityConfig) -> Result<Self, AffinityError> {
+        Self::build(config, None)
+    }
+
+    /// Use the host's monotonic simulation clock. No wall-clock reaper is
+    /// spawned; the host must call `advance_clock` before policy operations and
+    /// lease release. Native binding, expiry, and lease semantics are unchanged.
+    pub fn with_manual_clock(
+        config: SessionAffinityConfig,
+        now: Instant,
+    ) -> Result<Self, AffinityError> {
+        Self::build(config, Some(now))
+    }
+
+    fn build(
+        config: SessionAffinityConfig,
+        manual_now: Option<Instant>,
+    ) -> Result<Self, AffinityError> {
         Self::validate_ttl(config.ttl)?;
         let inner = Arc::new(Inner {
+            manual_now: manual_now.map(std::sync::Mutex::new),
             entries: DashMap::new(),
             ttl: config.ttl,
             mode: config.mode,
@@ -227,12 +253,14 @@ impl SessionAffinity {
             max_session_id_bytes: config.max_session_id_bytes,
             entry_count: AtomicUsize::new(0),
             next_revision: AtomicU64::new(1),
-            next_sequence: AtomicU64::new(
+            next_sequence: AtomicU64::new(if manual_now.is_some() {
+                1
+            } else {
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
-                    .as_nanos() as u64,
-            ),
+                    .as_nanos() as u64
+            }),
             writer_id: AtomicU64::new(0),
             cancel: CancellationToken::new(),
             replica: OnceLock::new(),
@@ -241,7 +269,9 @@ impl SessionAffinity {
             #[cfg(any(test, feature = "testing"))]
             waiter_observed: Arc::new(Notify::new()),
         });
-        Self::spawn_reaper(&inner);
+        if manual_now.is_none() {
+            Self::spawn_reaper(&inner);
+        }
         tracing::debug!(
             ttl_secs = config.ttl.as_secs(),
             mode = ?config.mode,
@@ -249,6 +279,26 @@ impl SessionAffinity {
             "Session affinity enabled"
         );
         Ok(Self { inner })
+    }
+
+    /// Advance manual time, lazily collecting idle bindings at their native TTL.
+    /// Active leases are retained, and moving time backwards is an error.
+    pub fn advance_clock(&self, now: Instant) -> Result<(), AffinityError> {
+        let Some(clock) = &self.inner.manual_now else {
+            return Err(AffinityError::InvalidArgument(
+                "affinity table uses the runtime clock".into(),
+            ));
+        };
+        let mut current = clock.lock().expect("affinity clock poisoned");
+        if now < *current {
+            return Err(AffinityError::InvalidArgument(
+                "affinity clock cannot move backwards".into(),
+            ));
+        }
+        *current = now;
+        drop(current);
+        self.inner.expire_idle(now);
+        Ok(())
     }
 
     fn spawn_reaper(inner: &Arc<Inner>) {
@@ -268,21 +318,7 @@ impl SessionAffinity {
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
-                let now = Instant::now();
-                let mut removed = 0;
-                inner.entries.retain(|_, entry| {
-                    let retain = !matches!(
-                        entry,
-                        AffinityEntry::Bound {
-                            active_leases: 0,
-                            idle_deadline,
-                            ..
-                        } if *idle_deadline <= now
-                    );
-                    removed += usize::from(!retain);
-                    retain
-                });
-                inner.entry_count.fetch_sub(removed, Ordering::Relaxed);
+                inner.expire_idle(inner.now());
             }
         });
     }
@@ -320,7 +356,7 @@ impl SessionAffinity {
         requested_target: Option<AffinityTarget>,
     ) -> Result<AcquireStep, AffinityError> {
         self.validate_session_id(session_id)?;
-        let now = Instant::now();
+        let now = self.inner.now();
         match self.inner.entries.entry(session_id.to_string()) {
             Entry::Vacant(entry) => {
                 self.reserve_entry()?;
@@ -449,7 +485,7 @@ impl SessionAffinity {
             version,
             // Reserve the initializer's use until it commits or cancels.
             active_leases: 2,
-            idle_deadline: Instant::now() + self.inner.ttl,
+            idle_deadline: self.inner.now() + self.inner.ttl,
         };
         drop(entry);
         notify.notify_waiters();
@@ -514,7 +550,7 @@ impl SessionAffinity {
         else {
             return Ok(None);
         };
-        if *active_leases == 0 && *idle_deadline <= Instant::now() {
+        if *active_leases == 0 && *idle_deadline <= self.inner.now() {
             return Ok(None);
         }
         validate_bound_target(session_id, *target, requested_target)?;
@@ -589,7 +625,7 @@ impl SessionAffinity {
             panic!("session affinity entry is not bound");
         };
         assert_eq!(*active_leases, 0);
-        *idle_deadline = Instant::now();
+        *idle_deadline = self.inner.now();
     }
 
     pub fn next_version(&self) -> AffinityVersion {
@@ -607,6 +643,21 @@ impl SessionAffinity {
 }
 
 impl Inner {
+    fn now(&self) -> Instant {
+        self.manual_now.as_ref().map_or_else(Instant::now, |clock| {
+            *clock.lock().expect("affinity clock poisoned")
+        })
+    }
+
+    fn expire_idle(&self, now: Instant) {
+        let mut removed = 0;
+        self.entries.retain(|_, entry| {
+            let retain = !matches!(entry, AffinityEntry::Bound { active_leases: 0, idle_deadline, .. } if *idle_deadline <= now);
+            removed += usize::from(!retain);
+            retain
+        });
+        self.entry_count.fetch_sub(removed, Ordering::Relaxed);
+    }
     fn reserve_entry(&self) -> bool {
         self.entry_count
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -649,7 +700,7 @@ impl Inner {
         }
         self.observe_replica_sequence(version.sequence);
 
-        let now = Instant::now();
+        let now = self.now();
         match self.entries.entry(session_id) {
             Entry::Vacant(entry) => {
                 if !self.reserve_entry() {
@@ -775,7 +826,7 @@ impl AffinityInitialization {
             revision: self.revision,
             version,
             active_leases: 1,
-            idle_deadline: Instant::now() + inner.ttl,
+            idle_deadline: inner.now() + inner.ttl,
         };
         drop(entry);
         self.active = false;
@@ -914,7 +965,7 @@ impl AffinityLease {
             if *version != self.version {
                 return;
             }
-            *idle_deadline = Instant::now() + inner.ttl;
+            *idle_deadline = inner.now() + inner.ttl;
             (*target, *version)
         };
         inner.publish_replica_update(&self.session_id, target, version);
@@ -1033,6 +1084,32 @@ mod tests {
     use super::*;
 
     const TTL: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn manual_clock_retains_active_leases_and_expires_from_virtual_release() {
+        let epoch = Instant::now();
+        let table =
+            SessionAffinity::with_manual_clock(SessionAffinityConfig::new(TTL), epoch).unwrap();
+        let AcquireStep::Held(hold) = table.try_acquire("session", None).unwrap() else {
+            panic!("new session must initialize")
+        };
+        assert!(matches!(
+            table.try_acquire("session", None).unwrap(),
+            AcquireStep::Wait(_)
+        ));
+        let target = AffinityTarget::new(7, Some(1));
+        let lease = table.commit(hold, target).unwrap();
+        table.advance_clock(epoch + TTL * 2).unwrap();
+        assert_eq!(table.query_target("session", None).unwrap(), Some(target));
+        drop(lease);
+        table
+            .advance_clock(epoch + TTL * 3 - Duration::from_nanos(1))
+            .unwrap();
+        assert_eq!(table.query_target("session", None).unwrap(), Some(target));
+        table.advance_clock(epoch + TTL * 3).unwrap();
+        assert_eq!(table.query_target("session", None).unwrap(), None);
+        assert!(table.advance_clock(epoch).is_err());
+    }
 
     fn table() -> SessionAffinity {
         SessionAffinity::with_config(SessionAffinityConfig::new(TTL)).expect("affinity table")
