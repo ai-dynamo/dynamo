@@ -449,6 +449,8 @@ def test_vllm_responses_processor_forwards_max_thinking_tokens(
     captured = _read_captured_request(capture_path)
 
     assert captured["stop_conditions"]["max_thinking_tokens"] == 16
+
+
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
 def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
