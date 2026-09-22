@@ -432,7 +432,7 @@ def test_engine_generate_preserves_native_fields_and_overrides_worker_state(
 
 def test_native_generate_rejects_salt_without_engine_support(monkeypatch):
     monkeypatch.delitem(GenerateReqInput.__dataclass_fields__, "cache_salt")
-    kwargs = {"input_ids": [1], "fallback_rid": "request", "priority": None}
+    kwargs = {"input_ids": [1], "request_id": "request", "priority": None}
 
     with pytest.raises(ValueError, match="cache_salt is not supported"):
         build_native_generate_request({"cache_salt": "tenant-a"}, **kwargs)
