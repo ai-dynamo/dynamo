@@ -16,7 +16,8 @@ import (
 const (
 	SglangPort = "29500"
 
-	maxTCPPort = 65535
+	maxTCPPort       = 65535
+	booleanTrueValue = "true"
 
 	sglangEmbeddingWorkerFlag           = "--embedding-worker"
 	sglangNoEmbeddingWorkerFlag         = "--no-embedding-worker"
@@ -95,7 +96,7 @@ func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
 	// A literal environment value supplies argparse's default; valueFrom remains unknown until container startup.
 	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil && env.ValueFrom == nil {
 		switch strings.ToLower(strings.TrimSpace(env.Value)) {
-		case "true", "1", "yes", "on":
+		case booleanTrueValue, "1", "yes", "on":
 			enabled = true
 		}
 	}
@@ -143,7 +144,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if prometheusOn {
 		switch strings.ToLower(enabled.Value) {
 		case "y":
-		case "1", "yes", "on", "true", "enable":
+		case "1", "yes", "on", booleanTrueValue, "enable":
 			return nil
 		case "n", "0", "no", "off", "false", "disable":
 			return nil
