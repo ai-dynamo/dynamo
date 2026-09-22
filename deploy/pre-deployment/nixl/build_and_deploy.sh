@@ -305,8 +305,7 @@ main() {
             continue
         fi
 
-        SELECTED_ARCH=$(validate_architecture "$arch_input")
-        if [ $? -eq 0 ]; then
+        if SELECTED_ARCH=$(validate_architecture "$arch_input"); then
             break
         else
             echo "Error: Invalid architecture. Please select 1, 2, x86_64, or aarch64"
