@@ -4,12 +4,13 @@
 """Tests for tool call parsing in SglangStreamingPostProcessor.
 
 Covers the interaction between SGLang's FunctionCallParser, ReasoningParser,
-and our post-processor's accumulate-and-emit-on-finish logic, including the
-parse_non_stream fallback for the chunking-sensitivity issue in
-BaseFormatDetector.parse_streaming_increment.
+and our post-processor's incremental tool-call delta streaming plus
+finish-time reconciliation, including the parse_non_stream fallback for the
+chunking-sensitivity issue in BaseFormatDetector.parse_streaming_increment.
 """
 
 import json
+from typing import Any
 
 import pytest
 from sglang.srt.entrypoints.openai.protocol import Function as SglangFunction
@@ -105,12 +106,35 @@ def _run_postprocessor(tokenizer, full_text, batch_size, *, use_reasoning=True):
 
 
 def _extract_tool_calls(results):
-    """Extract tool_calls from the list of choices."""
+    """Assemble tool_calls across frames the way an OpenAI client does.
+
+    Tool-call deltas stream incrementally: the frame that first carries a
+    call provides ``id``/``type``/``name`` and every frame contributes an
+    ``arguments`` fragment that clients concatenate per ``index``.
+    """
+    calls: dict[int, dict[str, Any]] = {}
+    order: list[int] = []
     for r in results:
-        tc = r.get("delta", {}).get("tool_calls")
-        if tc:
-            return tc
-    return []
+        for entry in r.get("delta", {}).get("tool_calls") or []:
+            idx = entry.get("index", 0)
+            if idx not in calls:
+                calls[idx] = {
+                    "index": idx,
+                    "id": None,
+                    "type": "function",
+                    "function": {},
+                }
+                order.append(idx)
+            call = calls[idx]
+            if entry.get("id"):
+                call["id"] = entry["id"]
+            fn = entry.get("function") or {}
+            if fn.get("name"):
+                call["function"].setdefault("name", fn["name"])
+            call["function"]["arguments"] = call["function"].get("arguments", "") + (
+                fn.get("arguments") or ""
+            )
+    return [calls[idx] for idx in order]
 
 
 # ---------------------------------------------------------------------------
@@ -685,3 +709,244 @@ class TestJsonArrayParserReparse:  # FRONTEND.4 — JSON-array parser reparse pa
         # No tool calls, plain content preserved, no crash.
         tc = (choice or {}).get("delta", {}).get("tool_calls", [])
         assert tc == []
+
+
+# ---------------------------------------------------------------------------
+# Incremental delta streaming (no withholding until finish)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingToolCallDeltas:  # FRONTEND.4 — incremental tool-call delta streaming
+    """Argument deltas must stream as the parser produces them.
+
+    The SGLang path used to accumulate every tool-call delta and emit one
+    frame with the fully assembled call at ``finish_reason``, so a pure
+    tool-call response delivered nothing until generation completed
+    (client-observed TTFT == E2E).  Mirrors the vLLM-side regression
+    ``test_streaming_tool_call_arguments_are_not_withheld``.
+    """
+
+    TEXT = TestSingleToolCall.TEXT
+
+    def test_argument_fragments_arrive_before_finish(self, tokenizer):
+        results = _run_postprocessor(tokenizer, self.TEXT, 3)
+        tool_frames = [i for i, r in enumerate(results) if r["delta"].get("tool_calls")]
+        finish_frames = [i for i, r in enumerate(results) if r.get("finish_reason")]
+        assert tool_frames, "no frame ever carried tool_calls"
+        assert len(tool_frames) > 1, (
+            "The whole tool call arrived in a single frame; argument deltas "
+            "must stream the way plain content does."
+        )
+        assert min(tool_frames) < max(
+            finish_frames
+        ), "The first tool-call frame must precede the finish frame."
+
+    def test_header_fields_emitted_exactly_once(self, tokenizer):
+        results = _run_postprocessor(tokenizer, self.TEXT, 3)
+        entries = [e for r in results for e in r["delta"].get("tool_calls", [])]
+        with_name = [e for e in entries if e["function"].get("name")]
+        with_id = [e for e in entries if e.get("id")]
+        assert len(with_name) == 1, "function name must be emitted exactly once"
+        assert len(with_id) == 1, "tool-call id must be emitted exactly once"
+        assert with_name[0]["function"]["name"] == "search_gutenberg_books"
+        assert with_name[0]["type"] == "function"
+        # OpenAI's streamed chunks always carry `arguments` (empty on the
+        # name-only delta of a call).
+        assert "arguments" in with_name[0]["function"]
+
+    def test_fragments_assemble_to_complete_arguments(self, tokenizer):
+        """Client-side concatenation across frames yields the complete arguments."""
+        tc = _extract_tool_calls(_run_postprocessor(tokenizer, self.TEXT, 3))
+        assert len(tc) == 1
+        assert tc[0]["function"]["name"] == "search_gutenberg_books"
+        assert json.loads(tc[0]["function"]["arguments"]) == {
+            "search_terms": ["James Joyce"]
+        }
+
+
+# ---------------------------------------------------------------------------
+# Finish-time reconciliation of streamed fragments
+# ---------------------------------------------------------------------------
+
+
+class TestFinishRecoveryReconciliation:  # FRONTEND.4 — recovery completes, never duplicates
+    """Finish-time recovery completes streamed fragments without duplicating them."""
+
+    def test_recovered_suffix_completes_streamed_fragments(self):
+        """The re-parse tail arrives as prefix-anchored suffix, not a full re-send."""
+
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            def __init__(self, tool_index, name, parameters):
+                self.tool_index = tool_index
+                self.name = name
+                self.parameters = parameters
+
+        class DummyParser:
+            tool_call_parser = "hermes"
+            detector = type("Detector", (), {"_buffer": ""})()
+
+            def __init__(self):
+                self.streamed = False
+
+            def parse_stream_chunk(self, text):
+                # Detects the name and streams a partial argument; the
+                # trailing value only appears in the full re-parse.
+                if not self.streamed:
+                    self.streamed = True
+                    return "", [DummyToolCall(0, "get_weather", '{"ci')]
+                return "", []
+
+            def has_tool_call(self, text):
+                return True
+
+            def parse_non_stream(self, text):
+                return "", [DummyToolCall(0, "get_weather", '{"city": "Paris"}')]
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=DummyParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+
+        first = post.process_output({"token_ids": [ord("x")], "finish_reason": None})
+        assert first is not None
+        entry = first["delta"]["tool_calls"][0]
+        assert entry["function"]["name"] == "get_weather"
+        assert entry["function"]["arguments"] == '{"ci'
+        assert entry["id"].startswith("call_")
+
+        # Finish: the malformed partial args are discarded and recovered by
+        # the re-parse; only the missing suffix may follow, so a client
+        # concatenating fragments sees each argument character exactly once.
+        final = post.process_output({"token_ids": [ord("x")], "finish_reason": "stop"})
+        assert final is not None
+        assembled_args = '{"ci'
+        for e in final["delta"].get("tool_calls", []):
+            assembled_args += e["function"].get("arguments", "")
+        assert assembled_args == '{"city": "Paris"}'
+        assert final["finish_reason"] == "tool_calls"
+
+    def test_reshuffled_reparse_does_not_duplicate_calls(self):
+        """A re-parse that re-indexes calls must not re-emit a full duplicate."""
+
+        class DummyTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "".join(chr(x) for x in token_ids)
+
+        class DummyToolCall:
+            def __init__(self, tool_index, name, parameters):
+                self.tool_index = tool_index
+                self.name = name
+                self.parameters = parameters
+
+        class DummyParser:
+            tool_call_parser = "hermes"
+            detector = type("Detector", (), {"_buffer": ""})()
+
+            def parse_stream_chunk(self, text):
+                # A misidentified call at index 0 plus the real call at
+                # index 1, re-reported on every chunk; the double-accumulated
+                # arguments go malformed and trigger the finish re-parse.
+                return "", [
+                    DummyToolCall(0, "nonexistent_tool", '{"x": 1}'),
+                    DummyToolCall(1, "get_weather", '{"city": "Paris"}'),
+                ]
+
+            def has_tool_call(self, text):
+                return True
+
+            def parse_non_stream(self, text):
+                # The finish re-parse sees only the real call and re-indexes
+                # it sequentially.
+                return "", [DummyToolCall(5, "get_weather", '{"city": "Paris"}')]
+
+        post = SglangStreamingPostProcessor(
+            tokenizer=DummyTokenizer(),
+            tool_call_parser=DummyParser(),
+            reasoning_parser=None,
+            sglang_tools=TOOLS,
+        )
+
+        # Mid-stream: only the known tool passes the stream-time name gate.
+        first = post.process_output({"token_ids": [ord("x")], "finish_reason": None})
+        assert first is not None
+        entries = first["delta"]["tool_calls"]
+        assert [e["index"] for e in entries] == [1]
+        assert entries[0]["function"]["name"] == "get_weather"
+
+        # Finish: without the reshuffle guard the reconciliation would emit
+        # the re-indexed call in full, duplicating the fragments the client
+        # already holds at index 1.
+        final = post.process_output({"token_ids": [ord("x")], "finish_reason": "stop"})
+        delivered_args = ""
+        for e in entries:
+            delivered_args += e["function"].get("arguments", "")
+        for e in (final or {}).get("delta", {}).get("tool_calls", []):
+            delivered_args += e["function"].get("arguments", "")
+        assert delivered_args == '{"city": "Paris"}'
+        assert final is not None
+        assert final["finish_reason"] == "tool_calls"
+
+
+# ---------------------------------------------------------------------------
+# tool_stream opt-out (legacy single-frame delivery, DYN_SGLANG_TOOL_STREAM)
+# ---------------------------------------------------------------------------
+
+
+class TestToolStreamDisabled:  # FRONTEND.4 — legacy delivery opt-out
+    """``tool_stream=False`` restores the legacy hold-until-finish delivery.
+
+    The fully assembled call arrives in the single finish frame, exactly
+    as pre-fix dynamo did, while reasoning keeps streaming incrementally.
+    The processor wires this from ``DYN_SGLANG_TOOL_STREAM``.
+    """
+
+    TEXT = TestSingleToolCall.TEXT
+
+    def _run(self, tokenizer, batch_size):
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=FunctionCallParser(tools=TOOLS, tool_call_parser="hermes"),
+            reasoning_parser=ReasoningParser(model_type="qwen3", stream_reasoning=True),
+            tool_stream=False,
+        )
+        token_ids = tokenizer.encode(self.TEXT)
+        results = []
+        for i in range(0, len(token_ids), batch_size):
+            batch = token_ids[i : i + batch_size]
+            is_last = i + batch_size >= len(token_ids)
+            choice = post.process_output(
+                {"token_ids": batch, "finish_reason": "stop" if is_last else None}
+            )
+            if choice:
+                results.append(choice)
+        return results
+
+    def test_tool_calls_arrive_in_single_finish_frame(self, tokenizer):
+        results = self._run(tokenizer, 3)
+        tool_frames = [r for r in results if r["delta"].get("tool_calls")]
+        assert tool_frames, "expected a tool_calls frame"
+        assert len(tool_frames) == 1, (
+            "tool_stream=False must deliver the assembled call in exactly "
+            f"one frame; got {len(tool_frames)}"
+        )
+        frame = tool_frames[0]
+        assert frame["finish_reason"] == "tool_calls"
+        tc = frame["delta"]["tool_calls"]
+        assert len(tc) == 1
+        assert tc[0]["function"]["name"] == "search_gutenberg_books"
+        assert json.loads(tc[0]["function"]["arguments"]) == {
+            "search_terms": ["James Joyce"]
+        }
+
+    def test_reasoning_still_streams(self, tokenizer):
+        results = self._run(tokenizer, 3)
+        reasoning_frames = [r for r in results if r["delta"].get("reasoning_content")]
+        assert reasoning_frames, "reasoning must still stream incrementally"
+        reasoning = "".join(r["delta"].get("reasoning_content", "") for r in results)
+        assert "search for books" in reasoning

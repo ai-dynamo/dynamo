@@ -67,6 +67,12 @@ class SglangPreprocessResult:
 # A static, per-server boolean is plenty: per-request decoding of prompt
 # tails adds latency on the hot path with nothing to show for it. The
 # per-request reasoning knobs live downstream, matching sglang's API.
+# A guided tool-call array whose first element is an object: '[', optional
+# whitespace, then '{'. The earliest streaming evidence that a
+# bracket-leading guided output is a bare JSON call and not a tagless
+# reasoning preamble that happens to start with '['.
+_GUIDED_BARE_JSON_RE = re.compile(r"\[\s*\{")
+
 _FORCE_REASONING_PATTERNS = (
     # qwen3-family: <|im_start|>assistant\n<think>\n
     re.compile(r"<\|im_start\|>assistant\\n<think>\\n"),
@@ -1046,6 +1052,7 @@ class SglangStreamingPostProcessor:
         stop_strings: set[str] | None = None,
         stop_token_ids: set[int] | None = None,
         skip_special_tokens: bool | None = None,
+        tool_stream: bool = True,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1056,6 +1063,11 @@ class SglangStreamingPostProcessor:
             tool_call_parser_name
         )
         self._named_zero_arg_tool = named_zero_arg_tool
+        # tool_stream=False restores the legacy delivery shape: argument
+        # deltas are withheld and the fully assembled call is emitted in
+        # the single finish frame.  Wired from DYN_SGLANG_TOOL_STREAM in
+        # the processor.
+        self._tool_stream = tool_stream
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -1069,6 +1081,10 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
+        # Set once a guided prefix starting with '['/'{' has diverged from
+        # every think-tag prefix: from then on the guided output bypasses the
+        # reasoning parser and streams straight to the tool-call pipeline.
+        self._guided_bare_json_released: bool = False
         # The frontend owns text shaping. Keep every stop token in the raw
         # engine stream, but exclude a matched stop suffix when decoding
         # user-visible text.
@@ -1101,6 +1117,15 @@ class SglangStreamingPostProcessor:
         self._tool_call_args: dict[int, list[str]] = {}  # tool_index -> arg chunks
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
+        # Wire-emission bookkeeping.  Name and argument deltas are streamed
+        # as the parser produces them (SGLang native semantics); these
+        # track what already reached the client so the finish-time
+        # reconciliation only sends what is missing, instead of
+        # re-sending the whole assembled call after streaming it.
+        # tool_index -> name carried by the emitted header entry
+        self._streamed_tool_headers: dict[int, str] = {}
+        # tool_index -> arguments already delivered (concatenated)
+        self._streamed_tool_args: dict[int, str] = {}
 
     def _strip_matched_stop_token_ids(
         self, token_ids: list[int], stop_reason: Any
@@ -1140,6 +1165,53 @@ class SglangStreamingPostProcessor:
             index,
             self.history_tool_calls_count,
         )
+
+    def _known_tool_names(self) -> set[str]:
+        """Tool names the request actually offered, for stream-time validation."""
+        if self._named_zero_arg_tool is not None:
+            return {self._named_zero_arg_tool}
+        if self._sglang_tools:
+            return {t.function.name for t in self._sglang_tools}
+        return set()
+
+    def _streaming_tool_delta_entry(
+        self, idx: int, tc: ToolCallItem
+    ) -> dict[str, Any] | None:
+        """Build the wire entry for one streamed tool-call parser delta.
+
+        Mirrors SGLang native serving: the delta that carries the function
+        name also carries the call id and ``type``; argument-only deltas
+        carry just ``index`` plus the fragment.  A call whose name is not a
+        requested tool (or whose name has not been resolved yet) is held
+        back — the finish-time purge discards such calls, and frames
+        already on the wire cannot be recalled.
+        """
+        known_names = self._known_tool_names()
+        if known_names:
+            name = tc.name or self._tool_call_names.get(idx) or ""
+            if not name or name not in known_names:
+                return None
+
+        entry: dict[str, Any] = {"index": idx}
+        function: dict[str, Any] = {}
+        if tc.name and self._streamed_tool_headers.get(idx) != tc.name:
+            entry["id"] = self._tool_call_ids[idx]
+            entry["type"] = "function"
+            function["name"] = tc.name
+            # OpenAI's streamed tool-call chunks always carry `arguments`
+            # (empty string on the name-only delta), as does native SGLang.
+            function["arguments"] = tc.parameters or ""
+            self._streamed_tool_headers[idx] = tc.name
+        if tc.parameters:
+            function["arguments"] = tc.parameters
+            self._streamed_tool_args[idx] = (
+                self._streamed_tool_args.get(idx, "") + tc.parameters
+            )
+        elif not function:
+            # Neither a new name nor a new argument fragment.
+            return None
+        entry["function"] = function
+        return entry
 
     def _decode_ids(self, token_ids: list[int]) -> str:
         if not token_ids:
@@ -1395,6 +1467,10 @@ class SglangStreamingPostProcessor:
         if pending is None:
             if not delta_text:
                 return None, ""
+            if self._guided_bare_json_released:
+                # Bare-JSON already confirmed: keep streaming the guided
+                # output straight to the tool-call pipeline.
+                return None, delta_text
             reasoning_text, normal_text = self.reasoning_parser.parse_stream_chunk(
                 delta_text
             )
@@ -1408,19 +1484,33 @@ class SglangStreamingPostProcessor:
         detector = getattr(self.reasoning_parser, "detector", None)
         think_start = getattr(detector, "think_start_token", "")
         starts_reasoning = bool(think_start and stripped.startswith(think_start))
-        could_be_partial_start = bool(
-            stripped
-            and think_start
-            and len(stripped) < len(think_start)
-            and think_start.startswith(stripped)
+        # The prefix only stays ambiguous while it can still grow into the
+        # think tag (any-length prefix match). A bracket-leading guided
+        # output is also ambiguous until the JSON-array shape is
+        # unmistakable: reasoning without an open tag can itself start
+        # with '[' (e.g. "[check the request]"), so only '[\s*{' — a
+        # call array opening with its first object — identically settles
+        # it as bare JSON. Once settled, release the buffer straight to
+        # the tool-call pipeline (NOT through the reasoning parser, which
+        # force_reasoning would filter as reasoning) so a long guided call
+        # streams argument deltas instead of one giant first frame at
+        # finish (client-observed TTFT == E2E).
+        could_grow_into_think = bool(
+            stripped and think_start and think_start.startswith(stripped)
         )
+        bare_json_shape = bool(_GUIDED_BARE_JSON_RE.match(stripped))
 
         if not finish_reason and (
             not stripped
-            or could_be_partial_start
-            or (stripped[0] in "[{" and not starts_reasoning)
+            or could_grow_into_think
+            or (stripped[0] in "[{" and not bare_json_shape)
         ):
             return None, ""
+
+        if not finish_reason and bare_json_shape:
+            self._pending_guided_reasoning_parts = None
+            self._guided_bare_json_released = True
+            return None, buffered
 
         self._pending_guided_reasoning_parts = None
         if finish_reason and _try_parse_json_array(buffered) is not None:
@@ -1513,6 +1603,7 @@ class SglangStreamingPostProcessor:
 
         # -- Tool call parsing (accumulate deltas) --
         content_text = normal_text
+        tool_stream_deltas: list[dict[str, Any]] = []
 
         if self.tool_call_parser and normal_text:
             # Accumulate raw text for finish-time re-parse.
@@ -1540,6 +1631,19 @@ class SglangStreamingPostProcessor:
                     self._tool_call_names[idx] = tc.name
                 if tc.parameters:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
+                # Stream every parser delta as it arrives, the way plain
+                # content and native SGLang do.  Only the finish chunk is
+                # exempt: its deltas go through the finish-time
+                # reconciliation below, which re-validates them against
+                # the re-parsed call so malformed or misidentified calls
+                # are never emitted on the same wire path they are dropped.
+                # tool_stream=False keeps the legacy shape instead: hold
+                # everything and let the reconciliation emit the complete
+                # assembled call at finish.
+                if self._tool_stream and not finish_reason:
+                    entry = self._streaming_tool_delta_entry(idx, tc)
+                    if entry is not None:
+                        tool_stream_deltas.append(entry)
 
         # -- Assemble delta --
         delta: dict[str, Any] = {}
@@ -1550,6 +1654,9 @@ class SglangStreamingPostProcessor:
             has_content = True
         if reasoning_text:
             delta["reasoning_content"] = reasoning_text
+            has_content = True
+        if tool_stream_deltas:
+            delta["tool_calls"] = tool_stream_deltas
             has_content = True
 
         # On finish, re-parse the full accumulated text to recover tool
@@ -1574,18 +1681,24 @@ class SglangStreamingPostProcessor:
             # When guided decoding is not enforced the streaming parser
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
-            known_names = (
-                {self._named_zero_arg_tool}
-                if self._named_zero_arg_tool is not None
-                else (
-                    {t.function.name for t in self._sglang_tools}
-                    if self._sglang_tools
-                    else set()
-                )
-            )
+            known_names = self._known_tool_names()
             if known_names:
                 for idx in list(self._tool_call_names):
                     if self._tool_call_names[idx] not in known_names:
+                        if (
+                            idx in self._streamed_tool_headers
+                            or idx in self._streamed_tool_args
+                        ):
+                            # This call already delivered frames to the
+                            # client; a discard cannot recall them.
+                            logger.warning(
+                                "Discarding streamed SGLang tool call %r at "
+                                "index %d: name is not among the requested "
+                                "tools; frames already delivered to the "
+                                "client cannot be recalled",
+                                self._tool_call_names[idx],
+                                idx,
+                            )
                         del self._tool_call_names[idx]
                         self._tool_call_ids.pop(idx, None)
                         self._tool_call_args.pop(idx, None)
@@ -1716,21 +1829,108 @@ class SglangStreamingPostProcessor:
                     has_content = True
 
         if finish_reason and self._tool_call_names:
+            # Reconcile what already reached the client with the assembled
+            # call state (streaming accumulation plus, when it fired, the
+            # authoritative finish-time re-parse above).  Frames already on
+            # the wire cannot be recalled, so a streamed call only gets the
+            # argument suffix it is missing — prefix-anchored, like SGLang
+            # native's _check_for_unstreamed_tool_args — which means a
+            # client concatenating fragments by index ends up with the
+            # complete re-assembled arguments and nothing is lost.  A call
+            # that never streamed is still emitted in full here, except
+            # when the wire was re-shaped by the purge/re-parse: a fresh
+            # complete call there could duplicate fragments the client
+            # already holds under a shifted index, so we log instead.
+            wire_reshaped = any(
+                idx not in self._tool_call_names
+                or self._tool_call_names[idx] != streamed_name
+                for idx, streamed_name in self._streamed_tool_headers.items()
+            )
             tool_calls_out: list[dict[str, Any]] = []
             for idx in sorted(self._tool_call_names):
-                tool_calls_out.append(
-                    {
-                        "index": idx,
-                        "id": self._tool_call_ids[idx],
-                        "type": "function",
-                        "function": {
-                            "name": self._tool_call_names[idx],
-                            "arguments": "".join(self._tool_call_args.get(idx, [])),
-                        },
-                    }
-                )
-            delta["tool_calls"] = tool_calls_out
-            has_content = True
+                full_args = "".join(self._tool_call_args.get(idx, []))
+                streamed_args = self._streamed_tool_args.get(idx, "")
+                streamed_name = self._streamed_tool_headers.get(idx)
+                if (
+                    idx not in self._streamed_tool_headers
+                    and idx not in self._streamed_tool_args
+                ):
+                    if wire_reshaped:
+                        # A streamed index changed identity (purge + sequential
+                        # rebuild); emitting this call in full would duplicate
+                        # fragments the client already holds under the old
+                        # index.
+                        logger.warning(
+                            "SGLang tool call indices were re-shaped by the "
+                            "finish-time re-parse; skipping full emission of "
+                            "call %r at index %d to avoid duplicating "
+                            "already-delivered fragments",
+                            self._tool_call_names[idx],
+                            idx,
+                        )
+                        continue
+                    tool_calls_out.append(
+                        {
+                            "index": idx,
+                            "id": self._tool_call_ids[idx],
+                            "type": "function",
+                            "function": {
+                                "name": self._tool_call_names[idx],
+                                "arguments": full_args,
+                            },
+                        }
+                    )
+                    continue
+                if (
+                    streamed_name is not None
+                    and self._tool_call_names[idx] != streamed_name
+                ):
+                    # A purge + sequential re-parse moved a different call
+                    # onto this index; emitting again would duplicate.
+                    logger.warning(
+                        "SGLang tool call index %d changed names between the "
+                        "streamed frame (%r) and the finish-time re-parse (%r);"
+                        " leaving the already-delivered frames untouched",
+                        idx,
+                        streamed_name,
+                        self._tool_call_names[idx],
+                    )
+                    continue
+                if streamed_name is None and self._tool_call_names[idx]:
+                    # Arguments streamed before the name was resolved; the
+                    # client still needs the header to identify the call.
+                    tool_calls_out.append(
+                        {
+                            "index": idx,
+                            "id": self._tool_call_ids[idx],
+                            "type": "function",
+                            "function": {
+                                "name": self._tool_call_names[idx],
+                                "arguments": "",
+                            },
+                        }
+                    )
+                if full_args == streamed_args:
+                    continue
+                if full_args.startswith(streamed_args):
+                    tool_calls_out.append(
+                        {
+                            "index": idx,
+                            "function": {
+                                "arguments": full_args[len(streamed_args) :],
+                            },
+                        }
+                    )
+                else:
+                    logger.warning(
+                        "SGLang tool-call argument recovery diverged from the "
+                        "streamed fragments for call index %d; leaving the "
+                        "streamed fragments as-is",
+                        idx,
+                    )
+            if tool_calls_out:
+                delta["tool_calls"] = tool_calls_out
+                has_content = True
 
         # Rewrite finish_reason "stop" → "tool_calls" when tool calls were
         # detected, matching the OpenAI API spec and official SGLang behaviour.
