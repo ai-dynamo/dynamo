@@ -584,9 +584,9 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 
 func TestApplyCompilationCache_VLLMCacheEnvVar(t *testing.T) {
 	tests := []struct {
-		name             string
-		component        *v1alpha1.DynamoComponentDeploymentSharedSpec
-		expectEnvVarVal  string
+		name            string
+		component       *v1alpha1.DynamoComponentDeploymentSharedSpec
+		expectEnvVarVal string
 	}{
 		{
 			name: "useAsCompilationCache sets VLLM_CACHE_ROOT",
