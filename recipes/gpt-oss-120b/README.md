@@ -49,21 +49,23 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
    `https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken` (SHA256
    `446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`). At roughly 3.5 MB it exceeds
    the 1 MiB ConfigMap limit, so copy it into the `model-cache` PVC as `tiktoken/o200k_base.tiktoken`
-   and point the Frontend at that directory:
+   and point the Frontend at that directory. Merge the fields below into the **existing** `Frontend`
+   component of `vllm/${TOPO}-${SKU}-agentic/deploy.yaml` — component names must be unique, so
+   appending a second `- name: Frontend` entry is rejected at admission:
    ```yaml
-   - name: Frontend
-     type: frontend
-     podTemplate:
-       spec:
-         containers:
-           - name: main
-             env:
-               - {name: TIKTOKEN_ENCODINGS_BASE, value: /model-cache/tiktoken}
-             volumeMounts:
-               - {name: model-cache, mountPath: /model-cache, readOnly: true}
-         volumes:
-           - name: model-cache
-             persistentVolumeClaim: {claimName: model-cache, readOnly: true}
+   components:
+     - name: Frontend            # existing entry — add the fields below to it
+       podTemplate:
+         spec:
+           containers:
+             - name: main
+               env:
+                 - {name: TIKTOKEN_ENCODINGS_BASE, value: /model-cache/tiktoken}
+               volumeMounts:
+                 - {name: model-cache, mountPath: /model-cache, readOnly: true}
+           volumes:
+             - name: model-cache
+               persistentVolumeClaim: {claimName: model-cache, readOnly: true}
    ```
    Without the file, `tool_calls` stays empty and reasoning text is not separated from the answer.
    Clusters with outbound internet access need no change.
