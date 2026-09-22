@@ -1,0 +1,71 @@
+Upstream: https://gitlab-master.nvidia.com/dler/vllm/-/merge_requests/1
+Author: Thinh Le (dler); backported here onto vLLM 0.29.1rc1.dev187.
+Runtime change only; upstream tests omitted (matching the PR-57505 patch).
+
+`<video>` is deliberately absent from this checkpoint's vocabulary, so it
+tokenizes as three ordinary tokens ['<', 'video', '>']. When the chat template
+places it directly after text, BPE merges the preceding character with '<'
+(e.g. '.<'), the PromptReplacement target no longer matches, and
+_validate_mm_placeholders raises:
+
+  "Expected there to be 1 prompt placeholders corresponding to 1 video items,
+   but instead found 0 prompt placeholders!"
+
+Normalising the prompt so `<video>` always follows whitespace restores the
+match. Validated by the author on SS 2.0.12 / vLLM 0.27.1: text-first and
+video-first, stream and non-stream, all returned 200 (nvbug 6715494).
+
+DEVIATION FROM UPSTREAM !1: on vLLM 0.27.1 ProcessorInputs.prompt accepts a
+str, and !1 assigns the normalized string directly. On vLLM 0.29.x the field is
+typed list[int], so that assignment yields HTTP 400 "must be str, not int" at
+request time. This backport keeps the str path and adds a token-id path that
+re-encodes after normalising. Verified by applying both container patches to a
+live 0.29.1rc1.dev187 image.
+
+Fixes the Dynamo-side occurrence tracked in nvbug 6820634.
+
+--- a/vllm/model_executor/models/nano_nemotron_vl.py
++++ b/vllm/model_executor/models/nano_nemotron_vl.py
+@@ -8,6 +8,7 @@
+ # --------------------------------------------------------
+ 
+ import math
++import re
+ import warnings
+ from collections.abc import Iterable, Mapping, Sequence
+ from functools import cached_property
+@@ -99,6 +100,12 @@
+ 
+ logger = init_logger(__name__)
+ 
++
++def _normalize_adjacent_video_placeholders(prompt: str) -> str:
++    """Separate video placeholders from preceding non-whitespace text."""
++    return re.sub(r"(?<=\S)<video>", "\n<video>", prompt)
++
++
+ MAX_AUDIO_LEN_S = 10 * 60  # 10 minutes
+ 
+ 
+@@ -669,6 +676,21 @@
+         inputs: ProcessorInputs,
+         timing_ctx: TimingContext,
+     ) -> MultiModalInput:
++        if "video" in inputs.mm_data_items:
++            prompt = inputs.prompt
++            if isinstance(prompt, str):
++                normalized_prompt = _normalize_adjacent_video_placeholders(prompt)
++                if normalized_prompt != prompt:
++                    inputs.prompt = normalized_prompt
++            else:
++                tokenizer = self.info.get_tokenizer()
++                decoded = tokenizer.decode(prompt, skip_special_tokens=False)
++                normalized_prompt = _normalize_adjacent_video_placeholders(decoded)
++                if normalized_prompt != decoded:
++                    inputs.prompt = tokenizer.encode(
++                        normalized_prompt, add_special_tokens=False
++                    )
++
+         mm_config = self.info.ctx.model_config.get_multimodal_config()
+         merged_kwargs = mm_config.merge_mm_processor_kwargs(
+             inputs.hf_processor_mm_kwargs
