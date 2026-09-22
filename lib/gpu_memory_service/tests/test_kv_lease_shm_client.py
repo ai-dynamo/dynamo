@@ -38,6 +38,7 @@ _LEASE_RECOVERY_OWNER_PID_OFFSET = int(gms_rust_ring.KV_LEASE_RECOVERY_OWNER_PID
 _LEASE_RECOVERY_BARRIER = int(gms_rust_ring.KV_LEASE_RECOVERY_BARRIER)
 _LEASE_RECORD_OFFSET = 64
 _LEASE_RECORD_SIZE = 16
+_LEASE_STATE_FREE = 0
 _LEASE_STATE_LEASED = 1
 _LEASE_STATE_SEALED = 2
 _LEASE_STATE_TRANSITION = 4
@@ -861,6 +862,28 @@ def test_shared_memory_lease_release_ignores_stale_generation(tmp_path):
     finally:
         client.close()
         shadow.close()
+
+
+def test_shared_memory_release_returns_sealed_lease_to_free_pool(tmp_path):
+    path = str(tmp_path / "release-sealed.shm")
+    client = SharedMemoryKVLeaseClient(
+        path,
+        namespace="release-sealed",
+        owner_id="primary",
+        total_blocks=2,
+        reserved_blocks=[0],
+    )
+    try:
+        lease = client.acquire(1)[0]
+        client.seal([lease])
+
+        client.release([lease])
+
+        assert client.raw_free_count() == 1
+        offset = _LEASE_RECORD_OFFSET + lease.block_id * _LEASE_RECORD_SIZE
+        assert struct.unpack_from("<I", client._mmap, offset)[0] == _LEASE_STATE_FREE
+    finally:
+        client.close()
 
 
 def test_shared_memory_lease_seal_is_atomic_and_idempotent(tmp_path):
