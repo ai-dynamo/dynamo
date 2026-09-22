@@ -35,7 +35,7 @@ pytestmark = [
     pytest.mark.pre_merge,
 ]
 
-_FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
+_FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_media_bytes"
 
 
 def _make_png_bytes() -> bytes:
@@ -65,7 +65,7 @@ def _mock_fetch_bytes(
     delay: float = 0.0,
     side_effect: Exception | None = None,
 ) -> AsyncMock:
-    """Return an AsyncMock drop-in for ``fetch_bytes(url, timeout, policy=...)``.
+    """Return an AsyncMock drop-in for ``fetch_media_bytes(url, policy=..., timeout=...)``.
 
     Args:
         content: Raw bytes returned as the fetch result.

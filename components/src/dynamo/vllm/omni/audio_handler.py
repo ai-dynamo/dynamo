@@ -20,6 +20,7 @@ try:
 except ImportError:
     Qwen3TTSPromptEmbedsBuilder = None  # type: ignore[assignment, misc]
 
+from dynamo.common.http import HttpConfigurationError, HttpError, fetch_media_bytes
 from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.media_source import decode_data_uri
 from dynamo.common.protocols import sanitize_media_passthrough
@@ -382,43 +383,34 @@ class AudioGenerationHandler:
         import soundfile as sf
 
         if ref_audio_str.startswith(("http://", "https://")):
-            import ipaddress
-            import socket
-            from urllib.parse import urlparse
-
-            import aiohttp
-
-            parsed = urlparse(ref_audio_str)
-            if not parsed.hostname:
-                raise ValueError("Invalid ref_audio URL")
-            for info in socket.getaddrinfo(
-                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
-            ):
-                ip_str = str(info[4][0]).split("%", 1)[0]
-                addr = ipaddress.ip_address(ip_str)
-                if addr.is_private or addr.is_loopback:
-                    raise ValueError(
-                        f"ref_audio URL resolves to blocked address: {addr}"
-                    )
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
+            # Fetch through the shared media path rather than a local client, so
+            # this inherits the destination policy every other media fetch uses:
+            # the full blocklist (link-local metadata, CGNAT, IPv6 ULA, blocked
+            # hostnames) instead of a private/loopback test, revalidated on every
+            # redirect hop rather than followed unchecked, and a bound applied
+            # while the body streams rather than after it is buffered whole.
+            # The TTS-specific knobs stay the bound and the deadline.
+            try:
+                audio_bytes = await fetch_media_bytes(
                     ref_audio_str,
-                    timeout=aiohttp.ClientTimeout(
-                        total=self.config.tts_ref_audio_timeout
-                    ),
-                ) as resp:
-                    if resp.status != 200:
-                        raise ValueError(
-                            f"Failed to download ref_audio: HTTP {resp.status}"
-                        )
-                    audio_bytes = await resp.read()
-                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
-                        raise ValueError(
-                            f"ref_audio too large "
-                            f"({len(audio_bytes)} bytes, "
-                            f"max {self.config.tts_ref_audio_max_bytes})"
-                        )
+                    timeout=self.config.tts_ref_audio_timeout,
+                    max_bytes=self.config.tts_ref_audio_max_bytes,
+                )
+            except HttpConfigurationError:
+                # An operator fault, not a verdict on the caller's URL. It must
+                # keep its type: this contract reports client faults as
+                # ValueError, which py_err_to_dynamo maps to InvalidArgument,
+                # and a misconfigured egress proxy is not the caller's bad
+                # request. Must precede HttpError, its base.
+                raise
+            except HttpError as exc:
+                # A blocked destination or an oversized body raises
+                # UrlValidationError, which is already a ValueError carrying a
+                # bounded message, so it stays the client error it is. The rest
+                # of the HttpError family is a status or transport fault against
+                # a caller-supplied URL, which this contract reports as
+                # ValueError; those messages are bounded by the fetch layer.
+                raise ValueError(f"Failed to download ref_audio: {exc}") from exc
         elif ref_audio_str.startswith("data:"):
             max_bytes = self.config.tts_ref_audio_max_bytes
             # Bound the *encoded* input separately from the decoded limit. A

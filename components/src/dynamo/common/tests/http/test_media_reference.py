@@ -20,6 +20,7 @@ from dynamo.common.http.media_reference import (
     DEFAULT_MAX_MEDIA_MB,
     DYN_MM_MAX_FILE_SIZE_MB,
     MAX_MEDIA_BYTES,
+    fetch_media_bytes,
     local_media_reference,
     max_media_bytes,
 )
@@ -234,3 +235,79 @@ async def test_an_explicit_max_bytes_still_wins_over_the_env(monkeypatch) -> Non
         pass
 
     assert seen["max_bytes"] == 512
+
+
+# --- fetch_media_bytes: the shared media policy applied on the caller's behalf ---
+
+
+async def test_fetch_media_bytes_defaults_policy_and_bound_from_env(
+    monkeypatch,
+) -> None:
+    """A caller that supplies neither must still get both media guarantees.
+
+    This is the point of the helper: a backend that forgets to pass a policy
+    gets the env one rather than an unchecked fetch, and gets the media bound
+    rather than an unbounded body.
+    """
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen["policy"] = policy
+        seen["max_bytes"] = max_bytes
+        return b"PNGDATA"
+
+    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+    monkeypatch.delenv("DYN_MM_ALLOW_INTERNAL", raising=False)
+
+    assert await fetch_media_bytes("https://example.com/img.png") == b"PNGDATA"
+
+    # Not merely non-None: the env policy is the restrictive one, so a missing
+    # argument fails closed rather than reaching a private address.
+    assert seen["policy"] == UrlValidationPolicy.from_env()
+    assert seen["policy"].allow_private_ips is False
+    assert seen["max_bytes"] == 128 * 1024 * 1024
+
+
+async def test_fetch_media_bytes_keeps_an_explicit_policy_and_bound(
+    monkeypatch,
+) -> None:
+    """Control: defaults fill a gap, they do not override a caller's choice.
+
+    A backend with its own bound (the TTS reference-audio knob) has to keep it.
+    """
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen["policy"] = policy
+        seen["max_bytes"] = max_bytes
+        seen["timeout"] = timeout
+        return b"PNGDATA"
+
+    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+    policy = UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+
+    await fetch_media_bytes(
+        "https://example.com/img.png", policy=policy, timeout=7.0, max_bytes=512
+    )
+
+    assert seen["policy"] is policy
+    assert seen["max_bytes"] == 512
+    assert seen["timeout"] == 7.0
+
+
+async def test_fetch_media_bytes_allows_disabling_the_bound(monkeypatch) -> None:
+    """``None`` is the explicit opt-out, distinct from "argument not supplied"."""
+    seen = {}
+
+    async def fake_fetch(url, timeout, *, policy=None, max_bytes=None):
+        seen["max_bytes"] = max_bytes
+        return b"PNGDATA"
+
+    monkeypatch.setattr("dynamo.common.http.fetch_bytes", fake_fetch)
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "128")
+
+    await fetch_media_bytes("https://example.com/img.png", max_bytes=None)
+
+    assert seen["max_bytes"] is None

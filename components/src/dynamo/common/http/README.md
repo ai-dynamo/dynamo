@@ -55,3 +55,14 @@ See
 `DYN_HTTP_*` env-var / `--http-*` CLI-flag reference (pool size,
 per-call timeout override, aiohttp keepalive, etc.). Legacy
 `DYN_MM_HTTP_*` env vars are still honored.
+
+`DYN_MM_MAX_FILE_SIZE_MB` bounds how much a single media download may
+buffer, in megabytes. It defaults to 64 — the same default as the SGLang
+`media_url_max_file_size_mb` arg it replaces — and applies to every fetch
+that goes through `fetch_media_bytes` or `local_media_reference`, which
+is every image, audio and video download. Raise it for workloads with
+legitimately larger media; a download past the bound is refused while it
+streams and reported as a client error, not buffered and then rejected.
+A backend that already exposes its own limit passes that instead: the
+TensorRT-LLM video path uses `--max-file-size-mb`, and the vLLM-Omni
+reference-audio path uses `--tts-ref-audio-max-bytes`.

@@ -21,7 +21,7 @@ from ..http import (
     HttpError,
     HttpStatusError,
     HttpTimeoutError,
-    fetch_bytes,
+    fetch_media_bytes,
 )
 from ..http.url_validator import (
     UrlValidationError,
@@ -134,8 +134,8 @@ class ImageLoader:
         """
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
-                content = await fetch_bytes(
-                    image_url, self._http_timeout, policy=self._url_policy
+                content = await fetch_media_bytes(
+                    image_url, policy=self._url_policy, timeout=self._http_timeout
                 )
                 if not content:
                     raise ValueError("Empty response content from image URL")
