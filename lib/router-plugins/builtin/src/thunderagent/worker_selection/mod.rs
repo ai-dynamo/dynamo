@@ -12,7 +12,7 @@ use dynamo_kv_router::plugins::worker_selection::{
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
 };
 
-use super::{THUNDERAGENT_CLASSIFIER_TYPE, ThunderAgentConfig};
+use super::THUNDERAGENT_CLASSIFIER_TYPE;
 
 struct ThunderAgentScorer;
 
@@ -67,13 +67,14 @@ impl WorkerPicker for ThunderAgentPicker {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThunderAgentSelectionParameters {}
+
 fn worker_selection_provider(
     parameters: &WorkerSelectionPolicyParameters,
 ) -> Result<WorkerSelectionPolicyFactory, WorkerSelectionPolicyProviderError> {
-    let config: ThunderAgentConfig = parameters.deserialize()?;
-    config
-        .validate()
-        .map_err(|error| WorkerSelectionPolicyProviderError::new(error.to_string()))?;
+    let _: ThunderAgentSelectionParameters = parameters.deserialize()?;
     Ok(Arc::new(
         move |router, worker_type: WorkerType, _partition| {
             WorkerSelectionPolicy::new(

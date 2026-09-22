@@ -32,6 +32,35 @@ fn shipping_plugins_does_not_enable_them_by_default() {
 }
 
 #[test]
+fn worker_selection_rejects_admission_parameters() {
+    for (parameters, accepted) in [
+        ("", true),
+        ("      parameters: {}\n", true),
+        ("      parameters: {pause_threshold: 0.9}\n", false),
+    ] {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), format!(
+            "worker_selection:\n  aggregated: thunderagent\n  instances:\n    - name: thunderagent\n      type: thunderagent\n{parameters}"
+        )).unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(file.path().display().to_string()),
+            ..Default::default()
+        };
+        let mut registry = RouterPluginRegistry::default();
+        dynamo_custom_policy_builtin::register(&mut registry).unwrap();
+        let result = registry.resolve_plugins(&config);
+        if accepted {
+            assert!(result.unwrap().worker_selection().is_some());
+        } else {
+            let Err(error) = result else {
+                panic!("misplaced admission settings must fail startup")
+            };
+            assert!(error.to_string().contains("pause_threshold"));
+        }
+    }
+}
+
+#[test]
 fn thunderagent_parameters_are_validated_at_startup() {
     for parameters in ["pause_target: 1.1", "unknown_parameter: 1"] {
         let file = tempfile::NamedTempFile::new().unwrap();

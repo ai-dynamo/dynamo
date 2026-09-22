@@ -65,7 +65,7 @@ Set admission parameters under `request_classifier.parameters`. Leave worker-sel
 | `acting_token_weight` | `1` | Capacity weight while the agent is doing tool work. |
 | `acting_decay_tau_seconds` | `1` | Acting-token decay half-life used for timeout fallback placement. |
 | `buffer_per_program` | `100` | Token headroom reserved for each active program. |
-| `max_tracked_requests` | `10000` | Independent limits on tracked requests and retained programs. |
+| `max_tracked_requests` | `10000` | Independent limits on tracked requests and retained programs. Requests fail classification at the request limit. New programs fail at the program limit if no idle program can be evicted. |
 
 The default deferral timeout permits waits of roughly 30 minutes under pressure. Set client deadlines to match the workload's acceptable wait. Router policy classes and queues still apply after classification releases a request.
 
