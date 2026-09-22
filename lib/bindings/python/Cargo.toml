@@ -23,7 +23,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["custom-policy"]
-# Links the worker-selection policies Dynamo ships plus the replaceable catalog selected by the
+# Links the router plugins Dynamo ships plus the replaceable catalog selected by the
 # dependency alias below. Enabled by default so a deployment can select a shipped policy through
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
 # its policies are added alongside the shipped ones rather than displacing them.
