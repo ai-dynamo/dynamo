@@ -416,6 +416,9 @@ jobs:
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt
+    - name: Set up model protection dependencies
+      if: matrix.dir == '.'
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libtss2-dev pkg-config
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -435,6 +438,10 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+    - name: Run model protection feature tests
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked -p dynamo-model-protection --all-targets --features packager,tpm2
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
@@ -529,9 +536,16 @@ jobs:
         restore-keys: ${{ runner.os }}-cargo-
     - name: Set up Rust Toolchain Components
       run: rustup component add clippy
+    - name: Set up model protection dependencies
+      if: matrix.dir == '.'
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libtss2-dev pkg-config
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --no-deps --all-targets -- -D warnings
+    - name: Lint model protection features
+      if: matrix.dir == '.'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps -p dynamo-model-protection --all-targets --features packager,tpm2 -- -D warnings
     - name: Run Python bindings AIC feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}

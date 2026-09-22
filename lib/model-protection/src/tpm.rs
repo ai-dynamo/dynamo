@@ -176,7 +176,7 @@ pub fn unwrap_tpm_dek(
 
     let auth_session = context
         .start_auth_session(
-            None,
+            Some(device_key),
             None,
             None,
             SessionType::Policy,
@@ -185,27 +185,30 @@ pub fn unwrap_tpm_dek(
         )
         .map_err(|_| ProtectionError::TpmUnavailable)?
         .ok_or(ProtectionError::TpmUnavailable)?;
-    let (attributes, mask) = SessionAttributesBuilder::new()
-        .with_continue_session(true)
-        .build();
-    context
-        .tr_sess_set_attributes(auth_session, attributes, mask)
-        .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
-    let policy_session = PolicySession::try_from(auth_session)
-        .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
+    let result = (|| {
+        let (attributes, mask) = SessionAttributesBuilder::new()
+            .with_continue_session(true)
+            .with_encrypt(true)
+            .build();
+        context
+            .tr_sess_set_attributes(auth_session, attributes, mask)
+            .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
+        let policy_session = PolicySession::try_from(auth_session)
+            .map_err(|_| ProtectionError::TpmAuthorizationFailed)?;
 
-    let result = authorize_and_unwrap(
-        context,
-        auth_session,
-        policy_session,
-        device_key,
-        &policy_authority_name,
-        approved_policy,
-        command_parameters_hash,
-        policy_ref,
-        ticket,
-        wrapped_dek,
-    );
+        authorize_and_unwrap(
+            context,
+            auth_session,
+            policy_session,
+            device_key,
+            &policy_authority_name,
+            approved_policy,
+            command_parameters_hash,
+            policy_ref,
+            ticket,
+            wrapped_dek,
+        )
+    })();
     context.set_sessions((None, None, None));
     let flush_result = context.flush_context(SessionHandle::from(auth_session).into());
     if flush_result.is_err() && result.is_ok() {

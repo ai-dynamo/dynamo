@@ -14,6 +14,6 @@ RUN apt-get update \
 COPY ai_dynamo_runtime-*.whl /tmp/
 RUN uv pip install --system --no-deps --reinstall /tmp/ai_dynamo_runtime-*.whl \
     && rm /tmp/ai_dynamo_runtime-*.whl \
-    && python3 -c "import vllm; from dynamo._core import model_protection_tpm_enabled; assert model_protection_tpm_enabled; assert vllm.__version__.startswith('0.29.'), vllm.__version__"
+    && python3 -c "import sys, vllm; from dynamo._core import model_protection_tpm_enabled; sys.exit(0 if model_protection_tpm_enabled and vllm.__version__.startswith('0.29.') else f'protected image check failed: tpm={model_protection_tpm_enabled} vllm={vllm.__version__}')"
 
 USER 1000
