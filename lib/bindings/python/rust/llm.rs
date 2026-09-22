@@ -29,6 +29,7 @@ pub mod fpm;
 pub mod frontend_routes;
 pub mod kv;
 pub mod kv_dc_relay;
+pub mod kv_state_agent;
 pub mod local_model;
 pub mod lora;
 pub mod model_card;

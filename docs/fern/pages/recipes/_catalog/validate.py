@@ -12,7 +12,9 @@ Checks, for BOTH catalogs:
   4. Each entry validates against schema.json (uses the `jsonschema` package
      if importable; otherwise falls back to a required-top-level-keys check).
   5. Every `page:` path resolves to a real file under docs/.
-  6. Every deploy / perf / benchmark asset path resolves in the repo tree.
+  6. Every deploy / perf / benchmark asset path resolves in the repo tree;
+     declared recipe-specific images are exact image fields in an owning
+     deploy asset and are not declared by another recipe.
   7. Cross-catalog referential integrity: recipe related_benchmarks ids exist
      in the benchmark index; benchmark related_recipes ids exist in the recipe
      index (active OR deferred); benchmark promotion_candidate.deferred_recipe_id
@@ -30,19 +32,26 @@ Runnable from the repo root as:
     python3 docs/fern/pages/recipes/_catalog/validate.py
 """
 
+import importlib.util
 import json
 import os
 import sys
 
 # --- Locate repo root relative to this script ---------------------------------
-# This script lives at <repo>/docs/fern/pages/recipes/_catalog/validate.py
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", ".."))
 DOCS_DIR = os.path.join(REPO_ROOT, "docs", "fern")
 RECIPES_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "_catalog")
 BENCH_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "feature-benchmarks", "_catalog")
 
-# --- Optional deps -------------------------------------------------------------
+_IMAGE_ATTRIBUTION_SPEC = importlib.util.spec_from_file_location(
+    "recipe_image_attribution", os.path.join(SCRIPT_DIR, "image_attribution.py")
+)
+if _IMAGE_ATTRIBUTION_SPEC is None or _IMAGE_ATTRIBUTION_SPEC.loader is None:
+    raise RuntimeError("Could not load recipe image attribution validator")
+_image_attribution = importlib.util.module_from_spec(_IMAGE_ATTRIBUTION_SPEC)
+_IMAGE_ATTRIBUTION_SPEC.loader.exec_module(_image_attribution)
+
 try:
     import yaml as _yaml  # type: ignore
 
@@ -426,12 +435,14 @@ def check_page(obj, label):
 
 
 def check_assets_recipe(obj, label):
+    deploy_assets = []
     for t in obj.get("targets") or []:
         if not isinstance(t, dict):
             continue
         dep = t.get("deploy") or {}
         asset = dep.get("asset") if isinstance(dep, dict) else None
         if asset:
+            deploy_assets.append(asset)
             if not os.path.isfile(resolve_repo_path(asset)):
                 err(
                     "[%s] target %s deploy asset missing: %s"
@@ -445,6 +456,23 @@ def check_assets_recipe(obj, label):
                     "[%s] target %s benchmark asset missing: %s"
                     % (label, t.get("id"), basset)
                 )
+    check_recipe_specific_images(obj, deploy_assets, label)
+
+
+def check_recipe_specific_images(obj, deploy_assets, label):
+    artifacts = obj.get("artifacts")
+    deploy_paths = [
+        resolve_repo_path(asset)
+        for asset in deploy_assets
+        if os.path.isfile(resolve_repo_path(asset))
+    ]
+    ERRORS.extend(
+        _image_attribution.recipe_image_errors(artifacts, deploy_paths, label)
+    )
+
+
+def check_recipe_specific_image_ownership(entries):
+    ERRORS.extend(_image_attribution.recipe_image_ownership_errors(entries))
 
 
 def check_assets_benchmark(obj, label):
@@ -501,6 +529,7 @@ def main():
         validate_against_schema(obj, rec_schema, label)
         check_page(obj, label)
         check_assets_recipe(obj, label)
+    check_recipe_specific_image_ownership(rec_entries)
 
     for fid, obj in sorted(ben_entries.items()):
         if not isinstance(obj, dict):

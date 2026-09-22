@@ -233,7 +233,7 @@ impl ConnectorTransferBatcher {
     }
 }
 
-/// A handler for all block transfers. Wraps a group of [`BlockTransferPoolManager`]s.
+/// A handler for all block transfers. Wraps a group of `BlockTransferPoolManager`s.
 #[derive(Clone)]
 pub struct BlockTransferHandler {
     device: Option<LocalBlockDataList<DeviceStorage>>,

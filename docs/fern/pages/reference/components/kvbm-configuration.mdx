@@ -10,7 +10,7 @@ The KV Block Manager (KVBM) is configured through two layers:
 - **`DYN_KVBM_*` runtime environment variables** — the primary, user-facing controls for cache tier sizing, offload behavior, object storage, distributed (leader/worker) mode, and metrics. Set these in the worker container `env`. This is what most deployments use.
 - **The `KVBM_*` / TOML figment system** — a lower-level, layered configuration for the KVBM runtime (Tokio/Rayon threads, messenger transport, NixL backends, offload policies, event publishing). Used for advanced tuning and for vLLM's `kv_connector_extra_config`.
 
-For the conceptual model and worked examples, see the [KVBM Guide](../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md). Names and defaults on this page come from [`environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs) and the [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config) crate.
+Names and defaults on this page come from [`environment_names.rs`](https://github.com/ai-dynamo/dynamo/blob/main/lib/runtime/src/config/environment_names.rs) and the [`kvbm-config`](https://github.com/ai-dynamo/dynamo/tree/main/lib/kvbm-config) crate.
 
 ## Cache tiers
 
@@ -244,11 +244,11 @@ subject = "kvbm.events"
 ## Related pages
 
 <CardGroup cols={2}>
-  <Card title="KVBM Guide" href="../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-guide.md" icon="book">
-    Concepts, cache-tier model, and worked deployment examples.
+  <Card title="Local KV Cache Offloading" href="../../cli/kv-cache-offloading/overview.mdx" icon="book">
+    Compare supported offloading backends for local deployments.
   </Card>
-  <Card title="KVBM Design" href="../../developer-guide/knowledge-base/modular-components/kvbm/kvbm-design.md" icon="compass">
-    Architecture of the block manager and the offload/onboard pipeline.
+  <Card title="Kubernetes KV Cache Offloading" href="../../kubernetes/kv-cache-offloading/overview.mdx" icon="compass">
+    Configure an offloading connector in a DynamoGraphDeployment.
   </Card>
   <Card title="Runtime Configuration" href="runtime-configuration.mdx" icon="gear">
     Shared Dynamo runtime flags parsed by every component.

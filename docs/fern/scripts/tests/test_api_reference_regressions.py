@@ -17,6 +17,7 @@ import kubernetes_api_discovery
 import kubernetes_api_rendering
 import markdown_rendering
 import pytest
+import rust_api_discovery
 import rust_api_rendering
 import yaml
 from griffe import Function, GriffeLoader
@@ -308,24 +309,62 @@ _UNMERGED_DOCS_LINK_RE = re.compile(
 )
 
 
-def _api_reference_pages() -> list[Path]:
-    """Every committed page this reference owns."""
-    pages = sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
-    pages.append(K8S_TARGET_MDX)
-    return pages
+@pytest.fixture(scope="session")
+def discovered_python_modules() -> list[api_discovery.Module]:
+    """One griffe pass for every check that inspects freshly rendered pages.
+
+    The Python/Rust pages are publish-time artifacts (not committed), so
+    content regressions must be asserted against a fresh render; reading the
+    tree would silently iterate zero files and pass vacuously."""
+    loader = api_discovery.build_loader()
+    return [
+        api_discovery.discover_module(loader, spec) for spec in api_discovery.MODULES
+    ]
 
 
-def test_api_pages_never_link_to_docs_paths_through_main() -> None:
+def _api_reference_sources(
+    modules: list[api_discovery.Module],
+) -> dict[str, str]:
+    """name -> page text for every page this reference owns.
+
+    Committed pages (the hand-written API landing, the Kubernetes output)
+    read from disk; the publish-time Python/Rust pages come from a fresh
+    render."""
+    sources = {
+        str(page.relative_to(REPO_ROOT)): page.read_text(encoding="utf-8")
+        for page in sorted((FERN_ROOT / "pages" / "reference" / "api").rglob("*.mdx"))
+    }
+    assert sources, "the committed API landing page has gone missing"
+    sources[str(K8S_TARGET_MDX.relative_to(REPO_ROOT))] = K8S_TARGET_MDX.read_text(
+        encoding="utf-8"
+    )
+    sources["<rendered> python/README.mdx"] = api_rendering.render_landing_page(modules)
+    for module in modules:
+        sources[
+            f"<rendered> python/{module.slug}.mdx"
+        ] = api_rendering.render_module_page(module)
+    rust_reference = rust_api_discovery.discover_rust_reference(
+        REPO_ROOT, FERN_ROOT / "components" / "releases.data.ts"
+    )
+    sources["<rendered> rust/README.mdx"] = rust_api_rendering.render_page(
+        rust_reference
+    )
+    return sources
+
+
+def test_api_pages_never_link_to_docs_paths_through_main(
+    discovered_python_modules: list[api_discovery.Module],
+) -> None:
     """These pages, their generator scripts, and the raw Kubernetes Markdown
     all arrive in the same change. A ``blob/main`` deep link to any of them
     resolves to a 404 until that change merges, so the link checker fails on
     exactly the commits that introduce the pages. Reference the repo path as
     inline code instead, or link the sibling page relatively."""
     offenders: dict[str, list[str]] = {}
-    for page in _api_reference_pages():
-        found = _UNMERGED_DOCS_LINK_RE.findall(page.read_text(encoding="utf-8"))
+    for name, text in _api_reference_sources(discovered_python_modules).items():
+        found = _UNMERGED_DOCS_LINK_RE.findall(text)
         if found:
-            offenders[str(page.relative_to(REPO_ROOT))] = found
+            offenders[name] = found
 
     assert not offenders, f"self-referential main links: {offenders}"
 
@@ -532,6 +571,28 @@ def test_pre_merge_gates_every_api_generator_input() -> None:
     assert "steps.filter.outputs.api_docs_any_modified" in action
 
 
+K8S_DRIFT_GATE_STEP = "Fail if the committed Kubernetes API reference was stale"
+
+
+def _publish_step_run(step_name: str) -> str:
+    """Return a fern-docs.yml step's `run` body, parsed rather than grepped.
+
+    Substring-matching the whole workflow cannot tell a real command from the
+    same text inside a comment, so an assertion can pass on prose while the
+    command it guards has changed underneath it.
+    """
+    document = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for job in document["jobs"].values():
+        for step in job.get("steps", []):
+            if step.get("name") == step_name:
+                return step.get("run", "")
+    raise AssertionError(f"fern-docs.yml has no step named {step_name!r}")
+
+
 def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "pre-merge.yml").read_text(
         encoding="utf-8"
@@ -548,8 +609,80 @@ def test_pre_merge_runs_all_api_generators_hermetically() -> None:
     assert "docs/fern/scripts/tests/test_gen_rust_api.py" in workflow
     assert "docs/fern/scripts/tests/test_gen_kubernetes_api.py" in workflow
     assert "-c /dev/null" not in workflow
-    for generator in ("python", "rust", "kubernetes"):
-        assert f"gen_{generator}_api.py --check" in workflow
+    # Python/Rust references are publish-time artifacts: pre-merge must run
+    # both generators in WRITE mode (proving a source PR cannot break
+    # generation) and never as a freshness diff against committed pages,
+    # which no longer exist. Kubernetes output stays committed, so its
+    # freshness gate stays.
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py\n" in workflow
+        assert f"gen_{generator}_api.py --check" not in workflow
+    assert "gen_kubernetes_api.py --check" in workflow
+    # The publish and preview paths must GENERATE the pages before syncing
+    # them to the docs-website branch (dev sync and version snapshots both).
+    # Asserted against the parsed `run` body, not the file text: the step's
+    # comment names these same commands, so a whole-file substring check would
+    # pass on prose after the command itself changed.
+    generate = _publish_step_run("Generate API references")
+    for generator in ("python", "rust"):
+        assert f"gen_{generator}_api.py --check" not in generate
+    # Kubernetes output stays committed, but publish REGENERATES it rather than
+    # gating on it. As `--check` this step failed, which skipped the sync and
+    # publish steps below, so a main left stale by merge skew silently froze the
+    # live site. The probe records drift and the gate below fails the run after
+    # the site is current.
+    assert re.search(r"gen_kubernetes_api\.py$", generate, re.MULTILINE)
+    assert "gen_kubernetes_api.py --check" in generate
+    assert "kubernetes_drift=true" in generate
+    gate = _publish_step_run(K8S_DRIFT_GATE_STEP)
+    assert "exit 1" in gate
+    # Wiring and polarity, not only shape. `steps.<id>` for an id that does
+    # not exist renders empty, so dropping or renaming `id: api_refs`, or
+    # inverting either the probe or the gate, leaves the gate permanently
+    # inert while every assertion above still passes. Nothing else in the repo
+    # catches a dangling step reference: no hook or workflow runs actionlint.
+    fern_docs = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "fern-docs.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    by_name = {
+        step.get("name"): step
+        for step in fern_docs["jobs"]["preview-or-publish-docs"]["steps"]
+    }
+    assert by_name[K8S_DRIFT_GATE_STEP]["if"] == (
+        "${{ !cancelled() && steps."
+        f"{by_name['Generate API references']['id']}"
+        ".outputs.kubernetes_drift == 'true' }}"
+    )
+    assert re.search(
+        r"--check[^\n]*then\n\s*echo \"kubernetes_drift=false\"[^\n]*\n"
+        r"\s*else\n\s*echo \"kubernetes_drift=true\"",
+        generate,
+    )
+    # The regenerated page is rsynced before the gate runs, so write mode needs
+    # its own floor: a generator that exits 0 on a gutted page must not publish.
+    assert "regenerated_bytes" in generate
+    assert "committed_bytes * 4 / 5" in generate
+    # The gate is only honest if it runs after the site has been published.
+    assert publish.index("Publish Docs") < publish.index(K8S_DRIFT_GATE_STEP)
+    assert "Generate API references" in publish
+    assert "Generate API references at the tag" in publish
+    # fern check validates nav paths, so the fern-check job must materialize
+    # the generated pages first.
+    assert "Generate API reference pages" in workflow
+    # Step names existing is not enough: generation must PRECEDE each
+    # consumer step, or a reorder ships snapshots (and runs fern check)
+    # against a tree with no pages.
+    assert publish.index("Generate API references") < publish.index(
+        "Sync dev content from main"
+    )
+    assert publish.index("Generate API references at the tag") < publish.index(
+        "Build versioned pages from tagged commit"
+    )
+    assert workflow.index("Generate API reference pages") < workflow.index(
+        "Validate Fern configuration"
+    )
     assert "griffe==2.1.0" in workflow
     assert "griffe==2.1.0" in publish
     assert '"griffe==2.1.0"' in project
@@ -754,15 +887,18 @@ def test_mdx_prose_keeps_unknown_colon_pairs_intact() -> None:
     assert "Timeout:30:" in rendered
 
 
-def test_generated_python_pages_carry_no_sphinx_roles() -> None:
+def test_generated_python_pages_carry_no_sphinx_roles(
+    discovered_python_modules: list[api_discovery.Module],
+) -> None:
     """Guards the published output, not just the helper: every curated page
-    is regenerated from docstrings that mix Google and Sphinx styles."""
-    for page in sorted(
-        (FERN_ROOT / "pages" / "reference" / "api" / "python").glob("*.mdx")
-    ):
-        text = page.read_text(encoding="utf-8")
+    renders from docstrings that mix Google and Sphinx styles. The pages are
+    publish-time artifacts, so the guard runs on a fresh render -- globbing
+    the (empty) tree would pass vacuously."""
+    assert discovered_python_modules
+    for module in discovered_python_modules:
+        text = api_rendering.render_module_page(module)
         for role in (":class:`", ":meth:`", ":func:`", ":attr:`", ":mod:`"):
-            assert role not in text, f"{page.name} still carries {role}"
+            assert role not in text, f"{module.slug}.mdx still carries {role}"
 
 
 def test_kubernetes_attributes_escape_source_metacharacters() -> None:

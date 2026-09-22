@@ -16,14 +16,12 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::component::{Component, Instance};
 use rand::Rng;
-use tokio::{
-    sync::{Mutex, Semaphore, watch},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex, Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 
+use super::recovery_lane::{RECOVERY_CONCURRENCY_LIMIT, RecoveryLane};
 use super::target::{IndexerRecoveryTarget, RecoveryResetReason, RecoveryTarget};
-use super::worker_query_state::{LiveEventAction, PendingDrainPlan, RankState, RecoveryKey};
+use super::worker_query_state::{LiveEventAction, RankState, RecoveryKey};
 use super::worker_query_transport::{RuntimeWorkerQueryTransport, WorkerQueryTransport};
 use crate::discovery::{
     KvEventSource, KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch, KvSourceStatus,
@@ -32,7 +30,6 @@ use crate::discovery::{
 
 const RECOVERY_MAX_RETRIES: u32 = 8;
 const RECOVERY_INITIAL_BACKOFF_MS: u64 = 200;
-const RECOVERY_CONCURRENCY_LIMIT: usize = 16;
 pub(crate) const DEFAULT_RECOVERY_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const KV_EVENT_TOPIC: &str = dynamo_kv_router::protocols::KV_EVENT_SUBJECT;
@@ -48,11 +45,6 @@ struct SourceBinding {
     source: KvEventSource,
     source_id: KvSourceId,
     lifetime: CancellationToken,
-}
-
-struct RecoveryTask {
-    cancel: CancellationToken,
-    handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -116,8 +108,7 @@ pub(crate) struct WorkerQueryClient<T = IndexerRecoveryTarget> {
     slots: DashMap<RecoveryKey, Arc<Mutex<SourceSlot>>>,
     /// Immutable publisher binding and rank slot lookup performed once per event envelope.
     publisher_bindings: DashMap<PublisherId, ActivePublisherBinding>,
-    recovery_tasks: DashMap<RecoveryKey, RecoveryTask>,
-    recovery_semaphore: Arc<Semaphore>,
+    recovery_lane: RecoveryLane<RecoveryKey>,
     recovery_attempt_timeout: Duration,
     cancellation_token: CancellationToken,
 }
@@ -158,8 +149,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token,
         });
@@ -198,8 +188,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             membership_sync: Mutex::new(()),
             slots: DashMap::new(),
             publisher_bindings: DashMap::new(),
-            recovery_tasks: DashMap::new(),
-            recovery_semaphore,
+            recovery_lane: RecoveryLane::with_semaphore(recovery_semaphore),
             recovery_attempt_timeout,
             cancellation_token: CancellationToken::new(),
         })
@@ -264,6 +253,19 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             .or_insert_with(|| Arc::new(Mutex::new(SourceSlot::default())))
             .clone();
         let mut slot = slot_handle.lock().await;
+
+        if matches!(status, KvSourceStatus::Suppressed) {
+            let deactivated = self.deactivate_locked(key, &mut slot).await;
+            let reset_source = slot.pending_reset.take().or(deactivated);
+            if let Some(source_id) = reset_source
+                && let Err(error) = self.reset_rank_or_fence(key, &source_id, &mut slot).await
+            {
+                tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear legacy KV state while suppressing its source; reset remains pending");
+                return;
+            }
+            slot.rank = RankState::default();
+            return;
+        }
 
         let selected = status.active_source().cloned();
         if let (Some(active), Some(selected)) = (&slot.active, &selected)
@@ -584,6 +586,18 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
         };
         let binding = active.binding;
         let expected = binding.source.worker;
+        if matches!(
+            self.membership_rx.borrow().status(&expected),
+            Some(KvSourceStatus::Suppressed)
+        ) {
+            tracing::debug!(
+                publisher_id,
+                worker_id = expected.worker_id,
+                dp_rank = expected.dp_rank,
+                "Dropping legacy KV events for a rank owned by the state-agent source mode"
+            );
+            return;
+        }
         if let Some(event) = events.iter().find(|event| {
             event.worker_id != expected.worker_id || event.event.dp_rank != expected.dp_rank
         }) {
@@ -648,18 +662,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 LiveEventAction::Recover {
                     start_event_id,
                     end_event_id,
-                    reset,
                 } => {
-                    if reset {
-                        self.cancel_recovery(key).await;
-                        if let Err(error) = self
-                            .reset_rank_or_fence(key, &binding.source_id, &mut slot)
-                            .await
-                        {
-                            tracing::error!(%error, worker_id = key.0, dp_rank = key.1, "Failed to clear KV state before gap recovery; rank remains fenced");
-                            return;
-                        }
-                    }
                     self.spawn_recovery(key, binding.clone(), start_event_id, end_event_id)
                         .await
                 }
@@ -702,14 +705,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
     }
 
     async fn cancel_recovery(&self, key: RecoveryKey) {
-        if let Some((_, task)) = self.recovery_tasks.remove(&key) {
-            task.cancel.cancel();
-            task.handle.abort();
-            if let Err(error) = task.handle.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
-            }
+        if let Some(error) = self.recovery_lane.cancel(key).await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, worker_id = key.0, dp_rank = key.1, "KV recovery task failed while joining cancellation");
         }
     }
 
@@ -765,40 +764,7 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 client.target.complete_initial_recovery(key.0, key.1).await;
             }
         });
-        self.recovery_tasks
-            .insert(key, RecoveryTask { cancel, handle });
-    }
-
-    fn schedule_recovery_after_current(
-        self: &Arc<Self>,
-        key: RecoveryKey,
-        binding: Arc<SourceBinding>,
-        start_event_id: u64,
-    ) {
-        let Some(target) = binding.recovery_target().cloned() else {
-            return;
-        };
-        let client = self.clone();
-        tokio::spawn(async move {
-            let Some(slot) = client.slots.get(&key).map(|entry| entry.clone()) else {
-                return;
-            };
-            let slot = slot.lock().await;
-            if binding.lifetime.is_cancelled()
-                || !slot.rank.recovery_inflight
-                || !slot
-                    .active
-                    .as_ref()
-                    .is_some_and(|active| Arc::ptr_eq(active, &binding))
-            {
-                return;
-            }
-            client.cancel_recovery(key).await;
-            if binding.lifetime.is_cancelled() {
-                return;
-            }
-            client.launch_recovery(key, binding, target, Some(start_event_id), None);
-        });
+        self.recovery_lane.insert(key, cancel, handle);
     }
 
     async fn finish_recovery(
@@ -824,6 +790,10 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             return false;
         }
 
+        // NOTE: KV RECOVERY CONTRACT: The server selects the response. Events updates the
+        // existing index; only a successful TreeDump replaces the rank. Do not move a reset
+        // ahead of this decision. See retained_gap_replays_without_reset and
+        // expired_gap_uses_server_selected_snapshot.
         let (recovered_events, recovered_cursor) = match result {
             Ok(WorkerKvQueryResponse::Events {
                 events,
@@ -922,16 +892,30 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             }
         };
 
-        // See RankState::cursor for the admission-based cursor contract. Planning against a clone
-        // preserves the old cursor and buffer until the complete recovery group is admitted.
+        // NOTE: KV RECOVERY CONTRACT: Catch up from the local pending buffer only. Warn and
+        // continue through missing IDs, including buffer overflow; never recursively query
+        // tail holes. This intentionally permits stale/missing advisory hints without relaxing
+        // source fencing or clear ordering. See local_catchup_warns_through_gaps_without_rpc.
+        // Plan against a clone so the cursor advances only after the entire group's admission
+        // (see RankState::cursor). The state-agent also uses this drain helper independently.
         let mut rank_after_admission = slot.rank.clone();
-        rank_after_admission.begin_successful_recovery_drain(recovered_cursor);
-        let PendingDrainPlan {
-            events: buffered_tail,
-            cursor,
-            next_recovery_start,
-        } = rank_after_admission.plan_pending_drain();
-        rank_after_admission.commit_pending_drain(cursor, next_recovery_start);
+        let recovered_through = recovered_cursor.last_applied_id().unwrap_or(0);
+        let tail_watermark = rank_after_admission
+            .pending_live_watermark()
+            .unwrap_or(recovered_through)
+            .max(recovered_through);
+        let buffered_tail = rank_after_admission.drain_advisory_tail_after(recovered_through);
+        let mut last_available = recovered_through;
+        for event in &buffered_tail {
+            self.warn_skipped_recovery_ids(
+                &binding.source_id,
+                last_available,
+                event.event.event_id - 1,
+            );
+            last_available = event.event.event_id;
+        }
+        // Arrival-order eviction can drop the highest observed ID before an older suffix.
+        self.warn_skipped_recovery_ids(&binding.source_id, last_available, tail_watermark);
 
         if let Err(error) = self
             .admit_events(
@@ -945,11 +929,19 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
             return true;
         }
         slot.rank = rank_after_admission;
-        drop(slot);
-        if let Some(start_event_id) = next_recovery_start {
-            self.schedule_recovery_after_current(key, binding, start_event_id);
-        }
         true
+    }
+
+    fn warn_skipped_recovery_ids(&self, source: &KvSourceId, after: u64, through: u64) {
+        if through > after {
+            tracing::warn!(
+                ?source,
+                skipped_start = after + 1,
+                skipped_end = through,
+                skipped_count = through - after,
+                "KV recovery local catch-up skipped event IDs; continuing with advisory hints"
+            );
+        }
     }
 
     async fn finish_degraded_locked(
@@ -999,8 +991,8 @@ impl<T: RecoveryTarget> WorkerQueryClient<T> {
                 // Limit only the in-flight RPC. The shared permit is deliberately released
                 // before retry backoff so unresponsive targets cannot starve unrelated pools.
                 let _permit = self
-                    .recovery_semaphore
-                    .clone()
+                    .recovery_lane
+                    .semaphore()
                     .acquire_owned()
                     .await
                     .context("recovery semaphore closed")?;
@@ -1089,11 +1081,15 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use dynamo_kv_router::{
-        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, WorkerKvQueryRequest},
+        identity::{
+            CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+            RoutingScopeId, StableDpSlotId,
+        },
+        indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer},
         protocols::{
-            DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-            KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier, WorkerId,
-            WorkerWithDpRank,
+            DpRank, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
+            KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, ResidencyDomain, StorageTier,
+            WorkerId, WorkerWithDpRank,
         },
     };
     use dynamo_runtime::{
@@ -1104,13 +1100,8 @@ mod tests {
             SharedMockRegistry,
         },
         distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-        pipeline::{
-            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
-            network::Ingress,
-        },
         protocols::EndpointId,
         storage::kv::Selector,
-        stream,
         transports::event_plane::{EventPublisher, EventScope},
     };
     use std::{
@@ -1118,7 +1109,7 @@ mod tests {
         path::Path,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     };
-    use tokio::sync::{Notify, watch};
+    use tokio::sync::{Notify, oneshot, watch};
 
     use crate::{
         discovery::{
@@ -1149,6 +1140,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingTarget {
         calls: Arc<Mutex<Vec<TargetCall>>>,
+        indexer: Option<IndexerRecoveryTarget>,
+        reject_event_id: Option<u64>,
     }
 
     #[derive(Clone)]
@@ -1182,34 +1175,51 @@ mod tests {
                 .lock()
                 .await
                 .push(TargetCall::Admit(publisher_id, event.event.event_id));
+            anyhow::ensure!(
+                self.reject_event_id != Some(event.event.event_id),
+                "injected queue admission failure"
+            );
+            if let Some(indexer) = &self.indexer {
+                return indexer.admit_event(publisher_id, event).await;
+            }
             Ok(())
         }
 
         async fn replace_rank(
             &self,
             publisher_id: PublisherId,
-            _worker_id: WorkerId,
-            _dp_rank: DpRank,
-            _events: Vec<RouterEvent>,
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            events: Vec<RouterEvent>,
         ) -> anyhow::Result<()> {
             self.calls
                 .lock()
                 .await
                 .push(TargetCall::Replace(publisher_id));
+            if let Some(indexer) = &self.indexer {
+                return indexer
+                    .replace_rank(publisher_id, worker_id, dp_rank, events)
+                    .await;
+            }
             Ok(())
         }
 
         async fn reset_rank(
             &self,
             publisher_id: PublisherId,
-            _worker_id: WorkerId,
-            _dp_rank: DpRank,
+            worker_id: WorkerId,
+            dp_rank: DpRank,
             reason: RecoveryResetReason,
         ) -> anyhow::Result<()> {
             self.calls
                 .lock()
                 .await
                 .push(TargetCall::Reset(publisher_id, reason));
+            if let Some(indexer) = &self.indexer {
+                return indexer
+                    .reset_rank(publisher_id, worker_id, dp_rank, reason)
+                    .await;
+            }
             Ok(())
         }
     }
@@ -1274,6 +1284,82 @@ mod tests {
                 .pop()
                 .context("missing mock recovery response")
         }
+    }
+
+    struct LocalIndexerTransport {
+        indexer: LocalKvIndexer,
+        requests: Mutex<Vec<(Option<u64>, Option<u64>)>>,
+        snapshots: Mutex<Vec<bool>>,
+        response_ready: Notify,
+        release_response: Semaphore,
+    }
+
+    impl LocalIndexerTransport {
+        fn new(buffer_size: usize) -> Self {
+            Self {
+                indexer: LocalKvIndexer::new(
+                    CancellationToken::new(),
+                    4,
+                    Arc::new(KvIndexerMetrics::new_unregistered()),
+                    buffer_size,
+                ),
+                requests: Mutex::new(Vec::new()),
+                snapshots: Mutex::new(Vec::new()),
+                response_ready: Notify::new(),
+                release_response: Semaphore::new(0),
+            }
+        }
+
+        async fn wait_for_response(&self) {
+            tokio::time::timeout(Duration::from_secs(5), self.response_ready.notified())
+                .await
+                .expect("worker should answer the recovery query");
+        }
+    }
+
+    #[async_trait]
+    impl WorkerQueryTransport for LocalIndexerTransport {
+        async fn query_worker(
+            &self,
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            _target: Instance,
+            start_event_id: Option<u64>,
+            end_event_id: Option<u64>,
+        ) -> Result<WorkerKvQueryResponse> {
+            assert_eq!((worker_id, dp_rank), (42, 4));
+            self.requests
+                .lock()
+                .await
+                .push((start_event_id, end_event_id));
+            // Use production classification, then hold delivery so tests can inject live arrivals.
+            let response = self
+                .indexer
+                .get_events_in_id_range(start_event_id, end_event_id)
+                .await;
+            self.snapshots
+                .lock()
+                .await
+                .push(matches!(response, WorkerKvQueryResponse::TreeDump { .. }));
+            self.response_ready.notify_one();
+            self.release_response.acquire().await.unwrap().forget();
+            Ok(response)
+        }
+    }
+
+    async fn finish_local_response(
+        client: &Arc<WorkerQueryClient<RecordingTarget>>,
+        transport: &LocalIndexerTransport,
+    ) {
+        let slot = client.slots.get(&(42, 4)).unwrap().clone();
+        transport.release_response.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while slot.lock().await.rank.recovery_inflight {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery should finish using only the local tail");
     }
 
     #[derive(Default)]
@@ -1343,6 +1429,7 @@ mod tests {
                 )),
                 nats_config: None,
                 request_plane: RequestPlaneMode::Tcp,
+                response_plane: None,
                 event_transport_kind: EventTransportKind::Zmq,
             },
         )
@@ -1362,12 +1449,26 @@ mod tests {
         let indexer = KvIndexer::new(CancellationToken::new(), 4, metrics);
         (
             indexer.clone(),
-            Indexer::KvIndexer {
+            Indexer::Single {
                 primary: indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
                 primary_records_routing_decisions: false,
+                session_updates: None,
             },
+        )
+    }
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
         )
     }
 
@@ -1474,6 +1575,45 @@ mod tests {
             .sync_membership_with_ready_sources(&HashSet::from([ready_source(&source)]))
             .await;
         assert!(client.publisher_bindings.contains_key(&source.publisher_id));
+    }
+
+    #[tokio::test]
+    async fn suppressing_an_active_legacy_source_resets_its_rank() {
+        let serving = EndpointId::from("test.router.generate");
+        let kv_endpoint = EndpointId::from("test.router.kv");
+        let worker = WorkerWithDpRank::new(42, 4);
+        let source = source_for(&kv_endpoint, worker, 100, None);
+        let initial = membership_view(
+            &serving,
+            &kv_endpoint,
+            [(worker, KvSourceStatus::ActiveLiveOnly(source.clone()))],
+        );
+        let (_tx, rx) = watch::channel(initial.clone());
+        let target = RecordingTarget::default();
+        let client = WorkerQueryClient::new_target_for_test(
+            target.clone(),
+            rx,
+            Arc::new(MockTransport::default()),
+        );
+        client.reconcile_view(initial).await;
+        client
+            .handle_live_batch(100, vec![store_for(worker, 1)])
+            .await;
+        target.calls.lock().await.clear();
+
+        client
+            .reconcile_view(membership_view(
+                &serving,
+                &kv_endpoint,
+                [(worker, KvSourceStatus::Suppressed)],
+            ))
+            .await;
+
+        assert_eq!(
+            target.calls.lock().await.as_slice(),
+            &[TargetCall::Reset(100, RecoveryResetReason::Lifecycle)]
+        );
+        assert!(!client.publisher_bindings.contains_key(&100));
     }
 
     #[tokio::test]
@@ -1759,7 +1899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_removal_resets_all_residency_domains() {
+    async fn discovery_removal_preserves_stable_cache_owner() {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -1774,7 +1914,7 @@ mod tests {
         let (_tx, rx) = watch::channel(initial.clone());
         let (_primary, indexer) = indexer();
         let lower_tier = match &indexer {
-            Indexer::KvIndexer { lower_tier, .. } => lower_tier.clone(),
+            Indexer::Single { lower_tier, .. } => lower_tier.clone(),
             _ => unreachable!(),
         };
         let client =
@@ -1782,24 +1922,33 @@ mod tests {
 
         client.reconcile_view(initial).await;
         let domain_store = |event_id, domain| {
-            RouterEvent::with_residency_domain(
-                worker.worker_id,
-                KvCacheEvent {
-                    event_id,
-                    data: KvCacheEventData::Stored(KvCacheStoreData {
-                        parent_hash: None,
-                        start_position: None,
-                        blocks: vec![KvCacheStoredBlockData {
-                            block_hash: ExternalSequenceBlockHash(event_id),
-                            tokens_hash: LocalBlockHash(event_id),
-                            mm_extra_info: None,
-                        }],
-                    }),
-                    dp_rank: worker.dp_rank,
-                },
-                StorageTier::HostPinned,
-                domain,
-            )
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: vec![KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(event_id),
+                        tokens_hash: LocalBlockHash(event_id),
+                        mm_extra_info: None,
+                    }],
+                }),
+                dp_rank: worker.dp_rank,
+            };
+            match domain {
+                ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    ResidencyDomain::Worker,
+                ),
+                ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                    worker.worker_id,
+                    event,
+                    StorageTier::HostPinned,
+                    cache_owner_id(),
+                ),
+            }
         };
         client
             .handle_live_batch(
@@ -1816,7 +1965,13 @@ mod tests {
         client
             .reconcile_view(membership_view(&serving, &kv_endpoint, std::iter::empty()))
             .await;
-        assert!(host_index.dump_events().await.unwrap().is_empty());
+        let retained = host_index.dump_events().await.unwrap();
+        assert_eq!(retained.len(), 1);
+        assert_eq!(
+            retained[0].residency_domain,
+            dynamo_kv_router::protocols::WireResidencyDomain::explicit(ResidencyDomain::CacheOwner)
+        );
+        assert_eq!(retained[0].state_source, Some(cache_owner_id()));
     }
 
     #[tokio::test]
@@ -2304,8 +2459,15 @@ mod tests {
         client.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn gap_recovery_resets_before_full_snapshot_and_ordered_live_drain() {
+    async fn start_local_recovery(
+        buffer_size: usize,
+        reject_event_id: Option<u64>,
+    ) -> (
+        Arc<WorkerQueryClient<RecordingTarget>>,
+        Arc<LocalIndexerTransport>,
+        KvIndexer,
+        RecordingTarget,
+    ) {
         let serving = EndpointId::from("test.router.generate");
         let kv_endpoint = EndpointId::from("test.router.kv");
         let worker = WorkerWithDpRank::new(42, 4);
@@ -2319,60 +2481,263 @@ mod tests {
         );
         let (_tx, rx) = watch::channel(view.clone());
         let (kv_indexer, indexer) = indexer();
-        let transport = Arc::new(MockTransport::default());
-        *transport.release.lock().await = Some(Arc::new(Notify::new()));
-        let client = WorkerQueryClient::new_for_test(indexer, rx, transport);
-        client.reconcile_view(view).await;
-        let binding = client.publisher_bindings.get(&100).unwrap().binding.clone();
-
-        client.handle_live_batch(100, vec![store(1)]).await;
-        client
-            .clone()
-            .finish_recovery(
-                (worker.worker_id, worker.dp_rank),
-                binding.clone(),
-                CancellationToken::new(),
-                Ok(WorkerKvQueryResponse::TreeDump {
-                    events: vec![store(1)],
-                    last_event_id: 1,
-                    reset_scope: ResetScope::All,
-                }),
-            )
-            .await;
-        assert!(contains_block(&kv_indexer.dump_events().await.unwrap(), 1));
-
-        client.handle_live_batch(100, vec![store(3)]).await;
-        client.handle_live_batch(100, vec![store(4)]).await;
-        let slot = client
-            .slots
-            .get(&(worker.worker_id, worker.dp_rank))
-            .unwrap()
-            .clone();
-        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(1));
-        assert!(kv_indexer.dump_events().await.unwrap().is_empty());
-
-        client
-            .clone()
-            .finish_recovery(
-                (worker.worker_id, worker.dp_rank),
-                binding,
-                CancellationToken::new(),
-                Ok(WorkerKvQueryResponse::TreeDump {
-                    events: vec![store(1), store(2)],
-                    last_event_id: 2,
-                    reset_scope: ResetScope::All,
-                }),
-            )
-            .await;
-
-        let events = kv_indexer.dump_events().await.unwrap();
-        for block in 1..=4 {
-            assert!(contains_block(&events, block));
+        let transport = Arc::new(LocalIndexerTransport::new(buffer_size));
+        for event in [store(1), store(2)] {
+            transport
+                .indexer
+                .apply_event_with_buffer(event)
+                .await
+                .unwrap();
         }
-        let slot = slot.lock().await;
-        assert_eq!(slot.rank.last_admitted_id(), Some(4));
-        assert!(!slot.rank.recovery_inflight);
-        drop(slot);
+        let target = RecordingTarget {
+            indexer: Some(IndexerRecoveryTarget::new(indexer)),
+            reject_event_id,
+            ..Default::default()
+        };
+        let client = WorkerQueryClient::new_target_for_test(target.clone(), rx, transport.clone());
+        client.reconcile_view(view).await;
+        transport.wait_for_response().await;
+        finish_local_response(&client, &transport).await;
+        assert_eq!(*transport.requests.lock().await, vec![(None, None)]);
+        assert_eq!(*transport.snapshots.lock().await, vec![true]);
+        assert_eq!(*target.calls.lock().await, vec![TargetCall::Replace(100)]);
+        target.calls.lock().await.clear();
+        (client, transport, kv_indexer, target)
+    }
+
+    fn dependent_store(event_id: u64, parent: u64) -> RouterEvent {
+        let mut event = store(event_id);
+        let KvCacheEventData::Stored(data) = &mut event.event.data else {
+            unreachable!();
+        };
+        data.parent_hash = Some(ExternalSequenceBlockHash(parent));
+        event
+    }
+
+    async fn assert_gap_recovery(buffer_size: usize, expect_snapshot: bool) {
+        let (client, transport, kv_indexer, target) = start_local_recovery(buffer_size, None).await;
+        let mut remove = store(3);
+        remove.event.data = KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: vec![ExternalSequenceBlockHash(2)],
+        });
+        for event in [remove, dependent_store(4, 1), dependent_store(5, 4)] {
+            transport
+                .indexer
+                .apply_event_with_buffer(event)
+                .await
+                .unwrap();
+        }
+
+        client
+            .handle_live_batch(100, vec![dependent_store(5, 4)])
+            .await;
+        transport.wait_for_response().await;
+        assert_eq!(
+            *transport.requests.lock().await,
+            vec![(None, None), (Some(3), None)]
+        );
+        assert_eq!(
+            *transport.snapshots.lock().await,
+            vec![true, expect_snapshot]
+        );
+        assert!(
+            target.calls.lock().await.is_empty(),
+            "gap must not pre-clear the rank"
+        );
+        let before = kv_indexer.dump_events().await.unwrap();
+        assert!(contains_block(&before, 1));
+        assert!(contains_block(&before, 2));
+        let slot = client.slots.get(&(42, 4)).unwrap().clone();
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(2));
+
+        // The response covers 5. Out-of-order and duplicate arrivals must replay as 6, 7.
+        client
+            .handle_live_batch(
+                100,
+                vec![
+                    dependent_store(7, 6),
+                    dependent_store(6, 5),
+                    dependent_store(7, 6),
+                    dependent_store(5, 4),
+                    dependent_store(4, 1),
+                ],
+            )
+            .await;
+        finish_local_response(&client, &transport).await;
+        let events = kv_indexer.dump_events().await.unwrap();
+        for block in [1, 4, 5, 6, 7] {
+            assert!(
+                contains_block(&events, block),
+                "missing dependent block {block}"
+            );
+        }
+        assert!(
+            !contains_block(&events, 2),
+            "missed remove must be recovered"
+        );
+        let mut expected_calls = if expect_snapshot {
+            vec![TargetCall::Replace(100)]
+        } else {
+            (3..=5).map(|id| TargetCall::Admit(100, id)).collect()
+        };
+        expected_calls.extend([TargetCall::Admit(100, 6), TargetCall::Admit(100, 7)]);
+        assert_eq!(*target.calls.lock().await, expected_calls);
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(7));
+        assert!(!slot.lock().await.rank.recovery_inflight);
+        assert_eq!(transport.requests.lock().await.len(), 2);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn retained_gap_replays_without_reset() {
+        assert_gap_recovery(16, false).await;
+    }
+
+    #[tokio::test]
+    async fn expired_gap_uses_server_selected_snapshot() {
+        assert_gap_recovery(2, true).await;
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_catchup_warns_through_gaps_without_rpc() {
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .finish(),
+        );
+        for (pending, expected_tail, final_cursor, skipped_end) in [
+            (vec![7, 6, 7, 4], vec![6, 7], 7, 5),
+            // Arrival-order eviction drops 5 and 6 beyond the response watermark of 4.
+            ((5..=1030).collect(), (7..=1030).collect(), 1030, 6),
+            // Even the highest observed event can be evicted by older duplicate arrivals.
+            ([vec![2000], vec![6; 1024]].concat(), vec![6], 6, 5),
+        ] {
+            logs.0.lock().unwrap().clear();
+            let (client, transport, kv_indexer, target) = start_local_recovery(16, None).await;
+            for id in [3, 4] {
+                transport
+                    .indexer
+                    .apply_event_with_buffer(store(id))
+                    .await
+                    .unwrap();
+            }
+            client.handle_live_batch(100, vec![store(4)]).await;
+            transport.wait_for_response().await;
+            client
+                .handle_live_batch(100, pending.into_iter().map(store).collect())
+                .await;
+            finish_local_response(&client, &transport).await;
+
+            let expected_calls: Vec<_> = [3, 4]
+                .into_iter()
+                .chain(expected_tail.iter().copied())
+                .map(|id| TargetCall::Admit(100, id))
+                .collect();
+            assert_eq!(*target.calls.lock().await, expected_calls);
+            let events = kv_indexer.dump_events().await.unwrap();
+            for block in expected_tail {
+                assert!(contains_block(&events, block));
+            }
+            let slot = client.slots.get(&(42, 4)).unwrap().clone();
+            assert_eq!(
+                slot.lock().await.rank.last_admitted_id(),
+                Some(final_cursor)
+            );
+            assert!(!slot.lock().await.rank.recovery_inflight);
+            assert_eq!(transport.requests.lock().await.len(), 2);
+            let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                captured.contains("KV recovery local catch-up skipped event IDs"),
+                "{captured}"
+            );
+            assert!(captured.contains("publisher_id: 100"), "{captured}");
+            assert!(captured.contains("skipped_start=5"), "{captured}");
+            assert!(
+                captured.contains(&format!("skipped_end={skipped_end}")),
+                "{captured}"
+            );
+            if final_cursor == 6 {
+                assert!(
+                    captured.contains("skipped_start=7 skipped_end=2000 skipped_count=1994"),
+                    "{captured}"
+                );
+            }
+
+            if final_cursor == 7 {
+                // A later independent live gap still issues the ordinary next-ID request.
+                for id in 5..=9 {
+                    transport
+                        .indexer
+                        .apply_event_with_buffer(store(id))
+                        .await
+                        .unwrap();
+                }
+                client.handle_live_batch(100, vec![store(9)]).await;
+                transport.wait_for_response().await;
+                finish_local_response(&client, &transport).await;
+                assert_eq!(
+                    *transport.requests.lock().await,
+                    vec![(None, None), (Some(3), None), (Some(8), None),]
+                );
+                assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(9));
+            }
+            client.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_recovery_admission_failure_preserves_cursor_and_fences_rank() {
+        let (client, transport, kv_indexer, target) = start_local_recovery(16, Some(6)).await;
+        for id in [3, 4] {
+            transport
+                .indexer
+                .apply_event_with_buffer(store(id))
+                .await
+                .unwrap();
+        }
+        client.handle_live_batch(100, vec![store(4)]).await;
+        transport.wait_for_response().await;
+        client
+            .handle_live_batch(100, vec![store(6), store(5)])
+            .await;
+        finish_local_response(&client, &transport).await;
+
+        assert_eq!(
+            *target.calls.lock().await,
+            (3..=6)
+                .map(|id| TargetCall::Admit(100, id))
+                .collect::<Vec<_>>()
+        );
+        let events = kv_indexer.dump_events().await.unwrap();
+        assert!(
+            contains_block(&events, 5),
+            "earlier admissions may have succeeded"
+        );
+        assert!(!contains_block(&events, 6));
+        let slot = client.slots.get(&(42, 4)).unwrap().clone();
+        assert_eq!(slot.lock().await.rank.last_admitted_id(), Some(2));
+        assert!(slot.lock().await.pending_reset.is_some());
+        assert!(!slot.lock().await.rank.recovery_inflight);
+        assert_eq!(transport.requests.lock().await.len(), 2);
         client.shutdown().await;
     }
 
@@ -2561,10 +2926,9 @@ mod tests {
         assert!(contains_rank_block(&events, rank_5, 1));
     }
 
-    struct ControlledRecoveryEngine {
+    struct ControlledRecoveryTransport {
         worker: WorkerWithDpRank,
         calls: AtomicUsize,
-        delayed_started: Notify,
         delayed_release: Notify,
         delayed_finished: Notify,
     }
@@ -2578,35 +2942,31 @@ mod tests {
     }
 
     #[async_trait]
-    impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
-        for ControlledRecoveryEngine
-    {
-        async fn generate(
+    impl WorkerQueryTransport for ControlledRecoveryTransport {
+        async fn query_worker(
             &self,
-            request: SingleIn<WorkerKvQueryRequest>,
-        ) -> Result<ManyOut<WorkerKvQueryResponse>> {
-            let (request, context) = request.into_parts();
-            assert_eq!(request.worker_id, self.worker.worker_id);
-            assert_eq!(request.dp_rank, self.worker.dp_rank);
-            let response = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                WorkerKvQueryResponse::TreeDump {
+            worker_id: WorkerId,
+            dp_rank: DpRank,
+            _target: Instance,
+            _start_event_id: Option<u64>,
+            _end_event_id: Option<u64>,
+        ) -> Result<WorkerKvQueryResponse> {
+            assert_eq!(worker_id, self.worker.worker_id);
+            assert_eq!(dp_rank, self.worker.dp_rank);
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(WorkerKvQueryResponse::TreeDump {
                     events: Vec::new(),
                     last_event_id: 0,
                     reset_scope: ResetScope::All,
-                }
+                })
             } else {
                 let _finished = NotifyOnDrop(&self.delayed_finished);
-                self.delayed_started.notify_waiters();
                 self.delayed_release.notified().await;
-                WorkerKvQueryResponse::Events {
+                Ok(WorkerKvQueryResponse::Events {
                     events: vec![store_for(self.worker, 2)],
                     last_event_id: 2,
-                }
-            };
-            Ok(ResponseStream::new(
-                Box::pin(stream::iter(vec![response])),
-                context.context(),
-            ))
+                })
+            }
         }
     }
 
@@ -2777,6 +3137,7 @@ mod tests {
             endpoint_resolution: KvStateEndpointResolution::Resolved(kv_state_endpoint.clone()),
             sources: statuses,
             kv_event_publishing_enabled: HashMap::new(),
+            kv_event_source_mode: HashMap::new(),
             recovery_expected: HashMap::new(),
         }
     }
@@ -2791,7 +3152,6 @@ mod tests {
             let old_node_1_drt = shared_drt(store.path()).await;
             let namespace = "test-direct-zmq-multi-node";
             let frontend = shared_component(&frontend_drt, namespace);
-            let old_node_1 = shared_component(&old_node_1_drt, namespace);
             let serving = frontend.endpoint("generate");
             let serving_id = serving.id();
             let kv_endpoint = EndpointId {
@@ -2847,27 +3207,32 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let mut configs = runtime_config_watch(&serving).await.unwrap();
+            let mut configs = runtime_config_watch(&serving, CancellationToken::new())
+                .await
+                .unwrap();
             configs
                 .wait_for(|configs| configs.contains_key(&logical_worker_id))
                 .await
                 .unwrap();
 
             let delayed_rank = WorkerWithDpRank::new(logical_worker_id, 4);
-            let recovery_engine = Arc::new(ControlledRecoveryEngine {
+            let recovery_transport = Arc::new(ControlledRecoveryTransport {
                 worker: delayed_rank,
                 calls: AtomicUsize::new(0),
-                delayed_started: Notify::new(),
                 delayed_release: Notify::new(),
                 delayed_finished: Notify::new(),
             });
-            let recovery_endpoint = old_node_1
-                .endpoint("controlled-kv-recovery")
-                .endpoint_builder()
-                .handler(Ingress::for_engine(recovery_engine.clone()).unwrap())
-                .start_with_registration()
-                .await
-                .unwrap();
+            // Recovery behavior is injected below. This instance only marks rank 4 recoverable;
+            // the direct-ZMQ lifecycle under test does not depend on the request-plane transport.
+            let recovery_target = Instance {
+                namespace: namespace.to_string(),
+                component: "router".to_string(),
+                endpoint: "controlled-kv-recovery".to_string(),
+                instance_id: old_node_1_drt.connection_id(),
+                transport: TransportType::Nats(String::new()),
+                device_type: None,
+                request_plane_codec: None,
+            };
 
             let mut node_0_sources = Vec::new();
             for dp_rank in 0..4 {
@@ -2885,8 +3250,7 @@ mod tests {
             let mut old_node_1_sources = Vec::new();
             for dp_rank in 4..8 {
                 let worker = WorkerWithDpRank::new(logical_worker_id, dp_rank);
-                let recovery_target =
-                    (worker == delayed_rank).then(|| recovery_endpoint.instance().clone());
+                let recovery_target = (worker == delayed_rank).then(|| recovery_target.clone());
                 old_node_1_sources.push(
                     register_test_source(
                         &old_node_1_drt,
@@ -2931,18 +3295,30 @@ mod tests {
             );
             let membership_watch = membership_coordinator.subscribe();
             let mut membership_observer = membership_watch.clone();
-            let subscription = crate::kv_router::indexer::recovery::subscriber::start_subscriber(
-                serving.clone(),
+            let client = WorkerQueryClient::new_for_test(
                 indexer,
+                watch::Receiver::clone(&membership_watch),
+                recovery_transport.clone(),
+            );
+            let (startup_tx, startup_rx) = oneshot::channel();
+            let supervisor = tokio::spawn(super::super::direct_zmq::run_direct_zmq_supervisor(
+                frontend.clone(),
+                serving_id.clone(),
+                client,
                 membership_watch,
                 "test-model".to_string(),
-                None,
-                crate::kv_router::KvEventSourceRequirement::Unknown,
                 "decode",
+                super::super::subscriber::MismatchMetricScope::Router(
+                    crate::kv_router::KvEventSourceRequirement::Unknown,
+                ),
                 cancel.child_token(),
-            )
-            .await
-            .unwrap();
+                Some(startup_tx),
+            ));
+            let _cancel_on_unwind = cancel.clone().drop_guard();
+            startup_rx
+                .await
+                .expect("direct-ZMQ supervisor exited before reporting readiness")
+                .expect("direct-ZMQ supervisor failed during startup");
 
             tokio::time::timeout(
                 Duration::from_secs(5),
@@ -3030,7 +3406,7 @@ mod tests {
                         .publish(&vec![store_block_for(delayed_rank, 5, 903)])
                         .await
                         .unwrap();
-                    if recovery_engine.calls.load(Ordering::SeqCst) >= 2 {
+                    if recovery_transport.calls.load(Ordering::SeqCst) >= 2 {
                         break;
                     }
                     tokio::task::yield_now().await;
@@ -3162,10 +3538,10 @@ mod tests {
             .await
             .expect("replacement node-1 state was not activated after the cold reset");
 
-            recovery_engine.delayed_release.notify_waiters();
+            recovery_transport.delayed_release.notify_waiters();
             tokio::time::timeout(
                 Duration::from_secs(5),
-                recovery_engine.delayed_finished.notified(),
+                recovery_transport.delayed_finished.notified(),
             )
             .await
             .expect("old node-1 recovery did not finish or cancel after release");
@@ -3236,7 +3612,7 @@ mod tests {
                 .with_label_values(&mismatch_labels)
                 .set(4);
             cancel.cancel();
-            subscription.shutdown().await;
+            supervisor.await.unwrap();
             assert_eq!(
                 status_metrics
                     .kv_event_source_mismatch_workers
@@ -3258,7 +3634,6 @@ mod tests {
             }
             discovery.unregister(model_instance).await.unwrap();
             discovery.unregister(serving_instance).await.unwrap();
-            recovery_endpoint.shutdown().await.unwrap();
         })
         .await
         .expect("direct ZMQ multi-node KV source lifecycle test timed out");

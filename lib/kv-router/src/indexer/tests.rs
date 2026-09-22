@@ -2494,6 +2494,8 @@ mod local_indexer_tests {
     fn make_local_clear_event(event_id: u64) -> RouterEvent {
         RouterEvent {
             worker_id: 0,
+            state_source: None,
+            session_id: None,
             storage_tier: StorageTier::Device,
             residency_domain: WireResidencyDomain::default(),
             event: KvCacheEvent {

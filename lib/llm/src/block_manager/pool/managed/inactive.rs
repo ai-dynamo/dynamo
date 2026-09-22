@@ -77,8 +77,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
     /// Returns the number of blocks currently available in the pool.
     ///
-    /// This is calculated dynamically based on the blocks in the [`uninitialized_set`]
-    /// and the [`lookup_map`].
+    /// This is calculated dynamically based on the blocks in the `uninitialized_set`
+    /// and the `lookup_map`.
     ///
     /// # Returns
     ///
@@ -305,7 +305,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
     /// Attempts to find and take multiple blocks matching a sequence of `TokenBlock`s.
     ///
-    /// Extracts sequence hashes from the [`TokenBlock`]s and calls [`take_with_sequence_hash`].
+    /// Extracts sequence hashes from the [`TokenBlock`]s and calls `take_with_sequence_hash`.
     /// Stops if a hash is not found.
     ///
     /// # Arguments
@@ -346,18 +346,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
     /// Acquires a single free block from the pool.
     ///
-    /// Prioritizes blocks from the [`uninitialized_set`] first, then takes the
-    /// lowest priority block from the [`priority_set`] (and [`lookup_map`]).
+    /// Prioritizes blocks from the `uninitialized_set` first, then takes the
+    /// lowest priority block from the `priority_set` (and `lookup_map`).
     /// If a block is taken from the priority set, it is reset.
     ///
     /// # Returns
     ///
-    /// An [`Option<Block<T, M>>`] containing a free block if available, otherwise `None`.
+    /// An `Option<Block<S, L, M>>` containing a free block if available, otherwise `None`.
     ///
     /// # Panics
     ///
-    /// This function can panic if there is an inconsistency between the [`priority_set`]
-    /// and [`lookup_map`] (i.e., a key exists in the set but not the map). This indicates
+    /// This function can panic if there is an inconsistency between the `priority_set`
+    /// and `lookup_map` (i.e., a key exists in the set but not the map). This indicates
     /// a bug in the pool's internal logic.
     #[instrument(level = "debug", skip(self))]
     pub fn acquire_free_block(&mut self) -> Option<Block<S, L, M>> {
@@ -397,7 +397,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
     /// Acquires a specified number of free blocks from the pool.
     ///
-    /// Checks if enough blocks are available and then calls [`acquire_free_block`] repeatedly.
+    /// Checks if enough blocks are available and then calls `acquire_free_block` repeatedly.
     ///
     /// # Arguments
     ///
@@ -412,7 +412,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     ///
     /// # Panics
     ///
-    /// This function can panic if [`acquire_free_block`] panics due to internal inconsistencies.
+    /// This function can panic if `acquire_free_block` panics due to internal inconsistencies.
     #[instrument(level = "debug", skip(self))]
     pub fn acquire_free_blocks(
         &mut self,
@@ -515,7 +515,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         Ok(())
     }
 
-    /// Returns the [`PoolStatus`] of the pool.
+    /// Returns `(inactive_blocks, empty_blocks)`: the number of blocks in the
+    /// priority set (previously-registered, reusable blocks) and the number of
+    /// blocks in the uninitialized set (never-registered, empty blocks), respectively.
     pub fn status(&self) -> (usize, usize) {
         let inactive_blocks = self.priority_set.len();
         let empty_blocks = self.uninitialized_set.len();

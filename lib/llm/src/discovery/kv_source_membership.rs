@@ -100,6 +100,9 @@ pub enum KvSourceAmbiguity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KvSourceStatus<S = KvEventSource> {
     Missing,
+    /// A recognized versioned source owns this logical rank. Legacy ingress is
+    /// disabled without interpreting the source-mode transition as rank death.
+    Suppressed,
     ActiveRecoverable(S),
     ActiveLiveOnly(S),
     Ambiguous(KvSourceAmbiguity),
@@ -109,7 +112,7 @@ impl<S> KvSourceStatus<S> {
     pub fn active_source(&self) -> Option<&S> {
         match self {
             Self::ActiveRecoverable(source) | Self::ActiveLiveOnly(source) => Some(source),
-            Self::Missing | Self::Ambiguous(_) => None,
+            Self::Missing | Self::Suppressed | Self::Ambiguous(_) => None,
         }
     }
 }
@@ -141,6 +144,8 @@ pub struct KvSourceMembershipView<S = KvEventSource> {
     /// `Some(true)` and `Some(false)` are explicit declarations. `None` is a legacy or otherwise
     /// unknown declaration.
     pub kv_event_publishing_enabled: HashMap<WorkerId, Option<bool>>,
+    /// Immutable source mode selected for one worker lifecycle.
+    pub kv_event_source_mode: HashMap<WorkerId, Option<String>>,
     /// Whether the serving runtime config expects a worker-local recovery target.
     /// This is expectation/readiness metadata only and never admits a serving worker.
     pub recovery_expected: HashMap<WorkerWithDpRank, bool>,
@@ -160,6 +165,12 @@ impl<S> KvSourceMembershipView<S> {
             .get(&worker_id)
             .copied()
             .flatten()
+    }
+
+    pub fn kv_event_source_mode(&self, worker_id: WorkerId) -> Option<&str> {
+        self.kv_event_source_mode
+            .get(&worker_id)
+            .and_then(Option::as_deref)
     }
 
     pub fn resolved_kv_state_endpoint(&self) -> Option<&EndpointId> {
@@ -393,12 +404,17 @@ where
             .iter()
             .map(|(&worker_id, config)| (worker_id, config.kv_event_publishing_enabled))
             .collect();
+        let kv_event_source_mode = runtime_configs
+            .iter()
+            .map(|(&worker_id, config)| (worker_id, config.kv_event_source_mode.clone()))
+            .collect();
 
         KvSourceMembershipView {
             serving_endpoint: serving_endpoint.clone(),
             endpoint_resolution,
             recovery_expected: workers,
             kv_event_publishing_enabled,
+            kv_event_source_mode,
             sources,
         }
     }

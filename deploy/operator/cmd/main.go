@@ -34,13 +34,9 @@ import (
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/client-go/discovery/cached/memory"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -79,6 +75,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
 	webhooksetup "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/setup"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
@@ -112,34 +109,6 @@ func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfigu
 	return cfg, nil
 }
 
-func createScalesGetter(mgr ctrl.Manager) (scale.ScalesGetter, error) {
-	config := mgr.GetConfig()
-
-	// Create kubernetes client for discovery
-	kubeClient, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create cached discovery client
-	cachedDiscovery := memory.NewMemCacheClient(kubeClient.Discovery())
-
-	// Create REST mapper
-	restMapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
-
-	scalesGetter, err := scale.NewForConfig(
-		config,
-		restMapper,
-		dynamic.LegacyAPIPathResolverFunc,
-		scale.NewDiscoveryScaleKindResolver(cachedDiscovery),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return scalesGetter, nil
-}
-
 func initCRDSchemes() {
 	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
 
@@ -152,6 +121,10 @@ func initCRDSchemes() {
 	utilruntime.Must(volcanoscheme.AddToScheme(crdScheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(crdScheme))
+
+	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
+	// operator only consumes them (creates/reads), it does not reconcile them.
+	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 
@@ -278,15 +251,9 @@ func main() {
 	}
 
 	restrictedNamespace := operatorCfg.Namespace.Restricted
-	isClusterWide := restrictedNamespace == ""
 	if restrictedNamespace != "" {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
-		}
-		// PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
-		// Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
-		mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
-			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
@@ -538,31 +505,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// CertManager.SetupAndRunOnce has already bootstrapped auto-mode TLS secrets.
-	// Auto mode patches admission and, for cluster-wide operators, conversion CAs.
-	// Manual mode patches only cluster-wide conversion CAs; admission stays out-of-band.
 	caInjector, err := internalcert.NewCABundleInjector(directClient, operatorCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to create CA bundle injector")
 		os.Exit(1)
 	}
-	if operatorCfg.Server.Webhook.CertProvisionMode == configv1alpha1.CertProvisionModeAuto {
-		if isClusterWide {
-			err = caInjector.InjectAll(mainCtx)
-		} else {
-			err = caInjector.InjectAdmission(mainCtx)
-		}
-		if err != nil {
-			setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
-			os.Exit(1)
-		}
-	} else if isClusterWide {
-		// Manual mode gets webhook CA material out-of-band. Missing ca.crt
-		// blocks startup instead of running with unauthenticated conversion.
-		if err := caInjector.InjectCRDConversionCA(mainCtx); err != nil {
-			setupLog.Error(err, "failed to inject CRD conversion CA bundle")
-			os.Exit(1)
-		}
+	if err := caInjector.Inject(mainCtx); err != nil {
+		setupLog.Error(err, "failed to inject CA bundles into webhook configurations")
+		os.Exit(1)
 	}
 
 	// mgr.Start reads tls.crt and tls.key from the projected Secret volume
@@ -635,17 +585,11 @@ func registerControllers(
 		return err
 	}
 
-	scaleClient, err := createScalesGetter(mgr)
-	if err != nil {
-		return fmt.Errorf("unable to create scale client: %w", err)
-	}
-
 	rbacManager := rbac.NewManager(mgr.GetClient())
 
 	if err := controller.SetupDynamoGraphDeployment(mgr, controller.DynamoGraphDeploymentSetupOptions{
 		SetupOptions:          setupOptions,
 		DockerSecretRetriever: dockerSecretRetriever,
-		ScaleClient:           scaleClient,
 		RBACManager:           rbacManager,
 		SSHKeyManager:         sshKeyManager,
 	}); err != nil {
@@ -667,12 +611,8 @@ func registerControllers(
 	}); err != nil {
 		return err
 	}
-	if err := controller.SetupDynamoCheckpoint(mgr, setupOptions); err != nil {
-		return err
-	}
-	if err := controller.SetupPodSnapshot(mgr, setupOptions); err != nil {
-		return err
-	}
+	// PodSnapshot/PodSnapshotContent reconciliation is owned by the external
+	// Snapshot operator (github.com/ai-dynamo/snapshot).
 
 	if runtimeConfig.Gate.Enabled(features.Grove) {
 		if err := controller.SetupFailoverCascade(mgr); err != nil {

@@ -14,13 +14,17 @@ use tokio_util::sync::CancellationToken;
 mod metadata;
 pub use metadata::{DiscoveryMetadata, MetadataSnapshot};
 
+mod registration;
+pub use registration::EndpointRegistrationLease;
+pub(crate) use registration::EndpointRegistrationManager;
+
 mod mock;
 pub use mock::{MockDiscovery, SharedMockRegistry};
 mod kv_store;
 pub use kv_store::KVStoreDiscovery;
 
 mod kube;
-pub use kube::{KubeDiscoveryClient, hash_pod_name};
+pub use kube::{KubeDiscoveryClient, hash_container_name, hash_pod_name};
 
 pub mod utils;
 use crate::{
@@ -52,7 +56,7 @@ impl EventTransportKind {
     /// Returns `Zmq` if the variable is not set or is empty: ZMQ is the default
     /// event plane for all backends. NATS remains available as an explicit opt-in
     /// (`DYN_EVENT_PLANE=nats`). When you have access to a runtime, prefer
-    /// [`DistributedRuntime::default_event_transport_kind`], which resolves the same
+    /// `DistributedRuntime::default_event_transport_kind`, which resolves the same
     /// default through the configured discovery backend.
     ///
     /// Returns an error for unrecognised values.
@@ -841,6 +845,81 @@ impl DiscoveryInstance {
             }),
         }
     }
+
+    /// Returns true if this instance satisfies `query`.
+    pub fn matches(&self, query: &DiscoveryQuery) -> bool {
+        match (self, query) {
+            (Self::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
+            (Self::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+                &i.namespace == namespace
+            }
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::ComponentEndpoints {
+                    namespace,
+                    component,
+                },
+            ) => &i.namespace == namespace && &i.component == component,
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::Endpoint {
+                    namespace,
+                    component,
+                    endpoint,
+                },
+            ) => &i.namespace == namespace && &i.component == component && &i.endpoint == endpoint,
+
+            (Self::Model { .. }, DiscoveryQuery::AllModels) => true,
+            (Self::Model { namespace: ns, .. }, DiscoveryQuery::NamespacedModels { namespace }) => {
+                ns == namespace
+            }
+            (
+                Self::Model {
+                    namespace: ns,
+                    component: comp,
+                    ..
+                },
+                DiscoveryQuery::ComponentModels {
+                    namespace,
+                    component,
+                },
+            ) => ns == namespace && comp == component,
+            (
+                Self::Model {
+                    namespace: ns,
+                    component: comp,
+                    endpoint: ep,
+                    ..
+                },
+                DiscoveryQuery::EndpointModels {
+                    namespace,
+                    component,
+                    endpoint,
+                },
+            ) => ns == namespace && comp == component && ep == endpoint,
+
+            (
+                Self::EventChannel {
+                    scope, topic: t, ..
+                },
+                DiscoveryQuery::EventChannels(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+            (
+                Self::EventSource {
+                    scope, topic: t, ..
+                },
+                DiscoveryQuery::EventSources(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+
+            _ => false,
+        }
+    }
 }
 
 /// Unique identifier for an endpoint instance
@@ -1114,6 +1193,14 @@ pub enum DiscoveryEvent {
     ModelTaintsUpdated(ModelTaintsUpdate),
     /// An instance was removed (identified by its unique ID)
     Removed(DiscoveryInstanceId),
+    /// The backend resynchronized. The payload holds every instance that matches the query at
+    /// that moment.
+    ///
+    /// The stream sends this event after the incremental events of the same resync. A consumer
+    /// that builds its state only from this stream can ignore this event. A consumer
+    /// that holds state from another source, such as a [`Discovery::list`] call, must replace its
+    /// state with the payload.
+    Resync(Vec<DiscoveryInstance>),
 }
 
 /// A scoped, idempotent update to an existing model card's routing taints.
@@ -1129,6 +1216,7 @@ pub type DiscoveryStream = Pin<Box<dyn Stream<Item = Result<DiscoveryEvent>> + S
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ModelRegistrationIdentity {
     display_name: String,
+    aliases: Vec<String>,
     source_path: Option<String>,
     is_lora: bool,
 }
@@ -1139,10 +1227,30 @@ impl ModelRegistrationIdentity {
     }
 
     fn is_compatible_with(&self, other: &Self) -> bool {
-        if self.is_lora || other.is_lora {
+        if self.is_lora != other.is_lora {
+            let (adapter, base) = if self.is_lora {
+                (self, other)
+            } else {
+                (other, self)
+            };
+            adapter.base_identity() == base.base_identity()
+                && adapter.display_name != base.display_name
+                && !base.aliases.contains(&adapter.display_name)
+        } else if self.is_lora {
             self.base_identity() == other.base_identity()
         } else {
+            // Preserve existing same-name registration compatibility across local model paths.
             self.display_name == other.display_name
+                || self.source_path.as_deref().is_some_and(|source| {
+                    !source.is_empty()
+                        && other.source_path.as_deref() == Some(source)
+                        && !self.aliases.contains(&other.display_name)
+                        && !other.aliases.contains(&self.display_name)
+                        && !self
+                            .aliases
+                            .iter()
+                            .any(|alias| other.aliases.contains(alias))
+                })
         }
     }
 }
@@ -1162,11 +1270,20 @@ fn extract_model_registration_identity(
         .get("source_path")
         .and_then(serde_json::Value::as_str)
         .map(str::to_owned);
+    let aliases = card_json
+        .get("aliases")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect();
     let is_lora =
         model_suffix.is_some() || card_json.get("lora").is_some_and(|value| !value.is_null());
 
     Ok(ModelRegistrationIdentity {
         display_name,
+        aliases,
         source_path,
         is_lora,
     })
@@ -1395,6 +1512,20 @@ pub(crate) fn reconcile_discovery_snapshot(
     (events, next)
 }
 
+/// Reconcile an authoritative snapshot after a backend resync.
+///
+/// Returns the changes between `known` and the snapshot, then one [`DiscoveryEvent::Resync`]
+/// with the reconciled set. `known` becomes the reconciled set.
+pub(crate) fn resync_discovery_events(
+    known: &mut HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+    current: HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+) -> Vec<DiscoveryEvent> {
+    let (mut events, reconciled) = reconcile_discovery_snapshot(known, current);
+    *known = reconciled;
+    events.push(DiscoveryEvent::Resync(known.values().cloned().collect()));
+    events
+}
+
 fn model_with_updated_taints(
     existing: &DiscoveryInstance,
     mut taints: HashSet<String>,
@@ -1537,7 +1668,20 @@ pub trait Discovery: Send + Sync {
     /// This is a one-time snapshot without watching for changes
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>>;
 
-    /// Returns a stream of discovery events (Added/Removed) for the given discovery query
+    /// Returns a stream of discovery events for the given discovery query
+    ///
+    /// An implementation establishes the watch before it returns. The stream reports the state at
+    /// that moment as `Added` events, and then every change that follows.
+    ///
+    /// A backend can fall behind and resynchronize from an authoritative snapshot. The stream then
+    /// reports the changes between its own state and that snapshot, and after them one
+    /// [`DiscoveryEvent::Resync`] that holds the full set. A change that started and ended inside
+    /// the gap is not reported as a change.
+    ///
+    /// A caller that also needs a [`Discovery::list`] snapshot calls `list_and_watch` first, and
+    /// replaces its state on every `Resync`. A `list` before the watch can show an instance that
+    /// an unregister removes before the snapshot, and no event reports that removal.
+    ///
     /// The optional cancellation token can be used to stop the watch stream
     async fn list_and_watch(
         &self,
@@ -1627,6 +1771,62 @@ mod tests {
             }
             _ => panic!("expected endpoint discovery metadata"),
         }
+    }
+
+    #[test]
+    fn matches_routes_by_query_scope() {
+        let endpoint = DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 1,
+            transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        });
+        let model = DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 1,
+            card_json: serde_json::json!({}),
+            model_suffix: None,
+        };
+
+        assert!(endpoint.matches(&DiscoveryQuery::AllEndpoints));
+        assert!(endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
+            namespace: "ns".to_string()
+        }));
+        assert!(endpoint.matches(&DiscoveryQuery::ComponentEndpoints {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+        }));
+        assert!(endpoint.matches(&DiscoveryQuery::Endpoint {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+        }));
+
+        assert!(!endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
+            namespace: "other".to_string()
+        }));
+        assert!(!endpoint.matches(&DiscoveryQuery::AllModels));
+
+        assert!(model.matches(&DiscoveryQuery::AllModels));
+        assert!(model.matches(&DiscoveryQuery::NamespacedModels {
+            namespace: "ns".to_string()
+        }));
+        assert!(model.matches(&DiscoveryQuery::ComponentModels {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+        }));
+        assert!(model.matches(&DiscoveryQuery::EndpointModels {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+        }));
+
+        assert!(!model.matches(&DiscoveryQuery::AllEndpoints));
     }
 }
 

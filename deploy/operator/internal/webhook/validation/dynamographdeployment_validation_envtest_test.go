@@ -27,10 +27,12 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
@@ -39,6 +41,7 @@ import (
 const (
 	dgdAdmissionWorkerName      = "worker"
 	dgdAdmissionUpperWorkerName = "WORKER"
+	dgdAdmissionPriorityClass   = "high-priority"
 )
 
 const sglangBackendFramework = "sglang"
@@ -52,11 +55,13 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		name               string
 		deployment         runtime.Object
 		oldDeployment      runtime.Object
+		oldBeforeUpdate    runtime.Object
 		mutateRequest      func(*testing.T, map[string]any) // mutates the source-version request map
 		withoutTopology    bool                             // omits the default cluster topology fixture
 		groveDisabled      bool                             // disables the configured Grove pathway
 		checkpointOff      bool                             // disables checkpoint creation and restore
 		seedWithoutWebhook bool                             // seeds oldDeployment without validating it
+		terminating        bool                             // deletes the seeded object so the update runs while it terminates
 		username           string                           // supplies the admission request identity
 
 		wantSchemaErr      string
@@ -66,6 +71,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		wantWarnings       []string
 		notWantErr         string
 		wantPodAnnotations map[string]string
+		wantProvider       string
+		wantRoleReplicas   map[string]int32
 	}{
 		// Baseline create-path rules.
 		{
@@ -134,6 +141,163 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker.RuntimeVersionOverride = ""
 				worker.ExtraPodSpec.MainContainer.Image = customRuntimeImage
 				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name: "existing v1beta1 DGD with a 1.4 Go EPP remains editable after operator upgrade",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name: "existing v1alpha1 DGD with a 1.4 Go EPP remains editable after operator upgrade",
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name:               "unrelated DGD update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			name:               "unrelated alpha DGD update ratchets an identical pre-existing native image and eppConfig mismatch",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Labels = map[string]string{"updated": "true"}
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+		},
+		{
+			// type is immutable once set, so the only transition into EPP starts
+			// from an unset type; it must still validate the complete contract.
+			name: "setting a previously unset DGD component type to EPP validates the complete runtime contract",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = ""
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.components[1].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "DGD atomically migrates from a 1.4 Go EPP to a 1.5 Rust EPP",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+		},
+		{
+			name: "DGD atomically rolls back from a 1.5 Rust EPP to a 1.4 Go EPP",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = frontendImage150
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+				worker.Replicas = k8sptr.To(int32(1))
+				worker.RuntimeVersionOverride = ""
+				worker.PodTemplate.Spec.Containers[0].Image = legacyEPPImage140
+				worker.EPPConfig = &nvidiacomv1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
 			}),
 		},
 		{
@@ -215,7 +379,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				enableBetaInterPodGMS(betaWorkerComponent(dgd))
 			}),
-			wantWebhookErrs: []string{"spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{`spec.components[1].experimental.gpuMemoryService.mode: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "inter-pod GMS requires vLLM backend",
@@ -302,8 +466,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "v1beta1 introducing case-insensitive component names is rejected by CEL on update",
 			oldDeployment: betaDGDForAdmission(nil),
 			deployment: dgdAdmissionWithLabel(t, betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.Components[0].ComponentName = dgdAdmissionWorkerName
-				dgd.Spec.Components[1].ComponentName = dgdAdmissionUpperWorkerName
+				dgd.Spec.Components[0].ComponentName = dgdAdmissionUpperWorkerName
 			})),
 			wantCELErr: "spec.components: Invalid value: component names must be unique case-insensitively",
 		},
@@ -500,6 +663,22 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				betaWorkerComponent(dgd).MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantCELErr: "spec.components[1]: Invalid value: minAvailable is immutable after creation",
+		},
+		{
+			name:          "v1alpha1 componentType change is rejected by CEL",
+			oldDeployment: alphaDGDForAdmission(nil),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services[dgdAdmissionWorkerName].ComponentType = consts.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: componentType is immutable after it is set",
+		},
+		{
+			name:          "v1beta1 type change is rejected by CEL",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ComponentType = nvidiacomv1beta1.ComponentTypeEPP
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: type is immutable after it is set",
 		},
 		{
 			name: "v1beta1 removed minAvailable update is restored by defaulting",
@@ -800,7 +979,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
@@ -809,7 +988,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 grove.forceScalingGroup on a single-node component reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 		},
@@ -819,9 +998,174 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
+		},
+
+		// Compound component role rules.
+		{
+			name: "multinode component without explicit roles preserves implicit behavior",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+			}),
+		},
+		{
+			name: "frontend component cannot be multinode",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "planner component cannot be multinode",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].ComponentType = nvidiacomv1beta1.ComponentTypePlanner
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "v1alpha1 frontend component cannot be multinode after conversion",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name: "complete explicit multinode roles are admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+			}),
+		},
+		{
+			name: "v1alpha1 explicit multinode roles convert and are admitted",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+		},
+		{
+			name: "v1beta1 role PodTemplates require component-specific support",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1beta1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "v1alpha1 role PodTemplates require component-specific support",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{
+						Name: nvidiacomv1alpha1.ComponentRoleLeader,
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+							Name: consts.MainContainerName, Image: "registry.example/leader:1.1.0",
+						}}}},
+					},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[0].roles[0].podTemplate: Forbidden: is not supported for this component role"},
+		},
+		{
+			name: "roles require a component role schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
+		},
+		{
+			name: "explicit multinode roles require the complete role set",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: must contain the "worker" role`},
+		},
+		{
+			name: "explicit multinode roles reject unknown role names",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: "coordinator"},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].name: Unsupported value: "coordinator": supported values: "leader", "worker"`,
+				`spec.components[1].roles: Required value: must contain the "leader" role`,
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+			},
+		},
+		{
+			name: "v1beta1 explicit multinode roles default omitted replicas",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader},
+					{Name: nvidiacomv1beta1.ComponentRoleWorker},
+				}
+			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
+		},
+		{
+			name: "v1alpha1 explicit multinode roles receive hub defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker},
+				}
+			}),
+			wantRoleReplicas: map[string]int32{
+				nvidiacomv1beta1.ComponentRoleLeader: 1,
+				nvidiacomv1beta1.ComponentRoleWorker: 3,
+			},
+		},
+		{
+			name: "explicit multinode role replicas must match node count",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+				betaWorkerComponent(dgd).Roles[1].Replicas = k8sptr.To(int32(2))
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[1].replicas: Invalid value: 2: must equal 3 for multinode role "worker"`,
+			},
 		},
 
 		// Checkpoint rules.
@@ -832,6 +1176,18 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
 				}
 			}),
+		},
+		{
+			name: "non-worker checkpoint is rejected at admission",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true},
+				}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].experimental.checkpoint: Forbidden: checkpoint functionality is supported only for worker, prefill, and decode components",
+			},
 		},
 		{
 			name:          "checkpoint configuration requires operator feature gate",
@@ -952,7 +1308,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					KvTransferPolicy: &nvidiacomv1beta1.KvTransferPolicy{ClusterTopologyName: "grove-topology", Domain: "zone"},
 				}
 			}),
-			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Forbidden: requires the Grove pathway; remove or unset annotation "nvidia.com/enable-grove" (currently "false")`},
+			wantWebhookErrs: []string{`spec.experimental.kvTransferPolicy.clusterTopologyName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "KV-transfer domain is required by the schema",
@@ -1231,6 +1587,10 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.services[worker].volumeMounts[0].mountPoint: Required value: is required when useAsCompilationCache is false"},
 		},
 		{
+			// eppConfig stays in the API while Go EPP is deprecated, so its
+			// v1alpha1 source-exclusivity rule must keep its coverage. A
+			// pre-1.5.0 runtime is a legacy Go EPP, so eppConfig is expected
+			// here and only its shape is at fault.
 			name: "alpha EPP config sources are mutually exclusive",
 			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				worker := dgd.Spec.Services["worker"]
@@ -1244,6 +1604,40 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: exactly one of configMapRef or config is required"},
+		},
+		{
+			name: "alpha DGD EPP config map requires a name at the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig.configMapRef.name: Required value: is required"},
+		},
+		{
+			name: "alpha DGD legacy EPP contract error uses the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = legacyEPPImage140
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Required value: is required for legacy Go EPP images with runtime version earlier than 1.5.0"},
+		},
+		{
+			name: "alpha DGD native EPP contract error uses the submitted source path",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeEPP
+				worker.RuntimeVersionOverride = ""
+				worker.ExtraPodSpec.MainContainer.Image = frontendImage150
+				worker.EPPConfig = &nvidiacomv1alpha1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: "legacy-epp-config"}},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
 		},
 		{
 			name: "alpha intra-pod failover shadow maximum is preserved structurally",
@@ -1420,6 +1814,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantCELErr: "spec.components[1].eppConfig: Invalid value: exactly one of configMapRef or config must be specified",
 		},
 		{
+			// A well-formed eppConfig on a pre-1.5.0 runtime is still the
+			// supported legacy Go EPP shape and must keep being accepted
+			// while the field is only deprecated.
 			name: "v1beta1 valid EPP config reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
@@ -1436,14 +1833,14 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name:          "priority class requires Grove",
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.PriorityClassName = "high-priority"
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
 			}),
-			wantWebhookErrs: []string{"spec.priorityClassName: Forbidden: requires the Grove pathway, but Grove is disabled in the operator configuration"},
+			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
 		},
 		{
 			name: "priority class is allowed with Grove",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Spec.PriorityClassName = "high-priority"
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
 			}),
 		},
 		{
@@ -1599,7 +1996,282 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].topologyConstraint.packDomain: Invalid value: "zone": must be equal to or narrower than the deployment-level domain "rack"`},
 		},
 
+		// Provider-native override rules.
+		{
+			name: "valid Grove root provider override is admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "v1alpha1 Grove root provider override converts and defaults",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = alphaGroveProviderOverride(
+					"",
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name:          "first provider override can be added without lifecycle history",
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+		},
+		{
+			name: "provider override can be removed without lifecycle status",
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name: "valid Grove component and multinode role overrides are admitted and defaulted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				frontend := dgd.GetComponentByName("frontend")
+				frontend.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker := betaWorkerComponent(dgd)
+				worker.ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
+				)
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[1].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+			}),
+		},
+		{
+			name:               "provider override requires a materialized workload provider on legacy update",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			oldDeployment: betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires controller-owned annotation "nvidia.com/workload-provider" to be materialized; wait for controller adoption and retry`},
+		},
+		{
+			name: "provider override target must match its DGD context",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": must match the provider-context target "PodCliqueSet"`},
+		},
+		{
+			name: "provider override rejects Dynamo-owned fields",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"replicas":3,"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value.spec.replicas: Forbidden: is Dynamo-owned or not enabled for provider override`},
+		},
+		{
+			name: "malformed provider override field is invalid without echoing its value",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"pack":"rack"}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field TopologyConstraint.spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+		},
+		{
+			name: "typed and provider-native Grove topology cannot be combined",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
+					ClusterTopologyName: "grove-topology",
+					PackDomain:          "rack",
+				}
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride.value: Forbidden: cannot be combined with spec.topologyConstraint or components[].topologyConstraint; use either the typed topology API or provider-native Grove topology overrides`},
+		},
+		{
+			name: "component workload provider rejects provider overrides",
+			deployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{`spec.providerOverride: Forbidden: requires workload provider "grove", but "component" is selected`},
+		},
+		{
+			name:               "legacy provider override schema identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+				dgd.Spec.ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"spec":{"template":{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{
+				`spec.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.providerOverride.target: Invalid value: "PodCliqueSet": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+		{
+			name:               "legacy component role provider identity is immutable during repair",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[0].ProviderOverride.APIVersion = "grove.io/v2"
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].roles[0].providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
+			},
+		},
+
 		// Metadata annotation rules.
+		{
+			name: "workload provider input is normalized from routing intent on create",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+			wantProvider: consts.WorkloadProviderGrove,
+		},
+		{
+			name:               "unsupported stored workload provider is rejected",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
+				}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: "unknown",
+				}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "unknown": supported values: "component", "grove"`},
+		},
+		{
+			name:               "user cannot materialize a legacy workload provider",
+			seedWithoutWebhook: true,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment:      betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Forbidden: may only be materialized by the Dynamo operator`},
+		},
+		{
+			name:               "operator can materialize a legacy workload provider",
+			seedWithoutWebhook: true,
+			username:           admissionOperatorPrincipal,
+			oldBeforeUpdate:    betaComponentDGDForAdmission(nil),
+			oldDeployment:      betaDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+			}),
+		},
+		{
+			name:               "workload provider cannot change",
+			seedWithoutWebhook: true,
+			oldDeployment:      betaComponentDGDForAdmission(nil),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+			}),
+			wantWebhookErrs: []string{`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "grove": ` + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name:               "Grove provider retains Grove admission semantics when the gate is disabled",
+			seedWithoutWebhook: true,
+			groveDisabled:      true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "component provider retains component admission semantics when Grove is enabled",
+			seedWithoutWebhook: true,
+			oldDeployment: betaComponentDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations = map[string]string{
+					consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+				}
+				dgd.Spec.PriorityClassName = dgdAdmissionPriorityClass
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+			wantWebhookErrs: []string{`spec.priorityClassName: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
+		},
 		{
 			name: "origin version accepts semver",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -1755,6 +2427,67 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Multinode updates.
 		{
+			name:               "unchanged legacy frontend multinode survives an unrelated update",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "v1alpha1 unchanged legacy frontend multinode survives conversion and update",
+			seedWithoutWebhook: true,
+			oldDeployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.ComponentType = consts.ComponentTypeFrontend
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2}
+				dgd.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:               "legacy multinode cannot set an unsupported component type",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].ComponentType = ""
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
+			name:               "legacy frontend multinode can be removed",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(nil),
+		},
+		{
+			name:               "legacy frontend multinode cannot change node count",
+			seedWithoutWebhook: true,
+			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{
+				"spec.components[0].multinode: Forbidden: multinode is supported only for worker, prefill, or decode components",
+			},
+		},
+		{
 			name:          "single-node to multinode transition is immutable",
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -1763,12 +2496,41 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
-			name: "node count-only update remains allowed",
+			name: "node count-only update is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].multinode.nodeCount: Invalid value: 3: " + apivalidation.FieldImmutableErrorMsg},
+		},
+		{
+			name: "implicit to semantically equivalent explicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+		},
+		{
+			name: "explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+		},
+		{
+			name: "explicit role list reorder is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0], worker.Roles[1] = worker.Roles[1], worker.Roles[0]
 			}),
 		},
 
@@ -1946,7 +2708,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: true: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
@@ -1955,7 +2717,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove.forceScalingGroup removal is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment:      newBetaDGDForValidation(),
@@ -1965,12 +2727,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "unchanged grove.forceScalingGroup update reaches the webhook",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 		},
@@ -1981,7 +2743,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: false},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(false)},
 				}
 			}),
 		},
@@ -1989,7 +2751,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove block removal with retained experimental is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
@@ -2180,18 +2942,105 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.backendFramework: Invalid value: \"sglang\": is immutable and cannot be changed after creation"},
 			wantWarnings:    []string{"Changing spec.backendFramework may cause unexpected behavior"},
 		},
+		// Terminating updates. A finalizer can hold a DGD terminating for an
+		// arbitrary period, so durable controller-owned metadata still has to be
+		// protected during that window while anything cleanup needs stays allowed.
+		// Each row deletes a finalizer-held object first, so the deletionTimestamp
+		// is the API server's and is present on both the old and the new object.
+		{
+			name:               "terminating rejects replacing the workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
+			}),
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/workload-provider]: Invalid value: "component": field is immutable`,
+			},
+		},
+		{
+			name:               "terminating rejects removing the workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+			}),
+			// Removal reports a null bad value, since there is no new value to name.
+			wantWebhookErrs: []string{
+				"metadata.annotations[nvidia.com/workload-provider]: Invalid value: null: field is immutable",
+			},
+		},
+		{
+			// Reachable without broadening the seeder bypass: the seed creates a
+			// provider-bearing object, then the bypassed seeder UPDATE removes it,
+			// which the mutating webhook does not undo on UPDATE. That leaves the
+			// stored no-provider state a legacy object reaches the update path in.
+			name:               "terminating rejects an unsupported workload provider",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			username:           admissionOperatorPrincipal,
+			oldBeforeUpdate:    betaTerminatingDGDForAdmission(nil),
+			oldDeployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				delete(dgd.Annotations, consts.KubeAnnotationWorkloadProvider)
+			}),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = "bogus"
+			}),
+			wantWebhookErrs: []string{
+				`metadata.annotations[nvidia.com/workload-provider]: Unsupported value: "bogus": supported values: "component", "grove"`,
+			},
+		},
+		{
+			name:               "terminating accepts a finalizer-only update",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Finalizers = nil
+			}),
+		},
+		{
+			// A legacy object whose existing settings no longer satisfy today's
+			// rules has to stay deletable, so no new-state rule may run here.
+			name:               "terminating accepts finalizer removal despite an invalid gpu memory service",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(withInvalidGPUMemoryService),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				withInvalidGPUMemoryService(dgd)
+				dgd.Finalizers = nil
+			}),
+		},
+		{
+			// Pins the boundary this draws: only the metadata update rules run
+			// while terminating, so a spec change the create-side rules would
+			// reject is accepted. Same edit on a live object is rejected by the
+			// "beta component main image is required" row above.
+			name:               "terminating accepts a spec update the create-side rules would reject",
+			terminating:        true,
+			seedWithoutWebhook: true,
+			oldDeployment:      betaTerminatingDGDForAdmission(nil),
+			deployment: betaTerminatingDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).PodTemplate = nil
+			}),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Assemble the admission scenario from the table entry")
 			gates := features.Gates{Checkpoint: !tt.checkpointOff, Grove: !tt.groveDisabled}
 			test := admissionTestCase{
 				object:             tt.deployment,
 				oldObject:          tt.oldDeployment,
+				oldBeforeUpdate:    tt.oldBeforeUpdate,
 				mutateObject:       tt.mutateRequest,
 				gates:              gates,
 				withoutTopology:    tt.withoutTopology,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
+				terminating:        tt.terminating,
 				username:           tt.username,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
@@ -2201,7 +3050,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				notWantError:       tt.notWantErr,
 			}
 			if tt.oldDeployment != nil {
-				test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
+				if test.oldBeforeUpdate == nil {
+					test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
+				}
 				if tt.checkpointOff || tt.groveDisabled {
 					seedGates := gates
 					seedGates.Checkpoint = true
@@ -2210,12 +3061,35 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}
 			actual := runAdmissionTest(t, test)
-			if tt.wantPodAnnotations != nil {
-				t.Log("Verify the API server preserved embedded component pod-template annotations")
-				var actualDGD nvidiacomv1beta1.DynamoGraphDeployment
-				if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, &actualDGD); err != nil {
-					t.Fatalf("convert admitted DGD: %v", err)
+			if tt.wantPodAnnotations != nil || tt.wantProvider != "" || tt.wantRoleReplicas != nil {
+				t.Log("Convert the admitted DGD for result assertions")
+				actualDGD := admittedBetaDGD(t, actual)
+				if tt.wantProvider != "" {
+					t.Log("Verify creation-time routing intent determined the admitted workload provider")
+					if got := actualDGD.Annotations[consts.KubeAnnotationWorkloadProvider]; got != tt.wantProvider {
+						t.Fatalf("workload provider = %q, want %q", got, tt.wantProvider)
+					}
 				}
+				if tt.wantRoleReplicas != nil {
+					t.Log("Verify admission persisted the defaulted multinode role replicas")
+					component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
+					if component == nil {
+						t.Fatalf("admitted DGD has no component %q", dgdAdmissionWorkerName)
+					}
+					actualRoleReplicas := make(map[string]int32, len(component.Roles))
+					for i := range component.Roles {
+						role := &component.Roles[i]
+						actualRoleReplicas[role.Name] = k8sptr.Deref(role.Replicas, 0)
+					}
+					if !maps.Equal(actualRoleReplicas, tt.wantRoleReplicas) {
+						t.Fatalf("role replicas = %v, want %v", actualRoleReplicas, tt.wantRoleReplicas)
+					}
+				}
+				if tt.wantPodAnnotations == nil {
+					return
+				}
+
+				t.Log("Verify the API server preserved embedded component pod-template annotations")
 				component := actualDGD.GetComponentByName(dgdAdmissionWorkerName)
 				if component == nil || component.PodTemplate == nil {
 					t.Fatalf("admitted DGD has no pod template for component %q", dgdAdmissionWorkerName)
@@ -2231,6 +3105,26 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func admittedBetaDGD(t *testing.T, actual *unstructured.Unstructured) *nvidiacomv1beta1.DynamoGraphDeployment {
+	t.Helper()
+	beta := &nvidiacomv1beta1.DynamoGraphDeployment{}
+	if actual.GetAPIVersion() == nvidiacomv1beta1.GroupVersion.String() {
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, beta); err != nil {
+			t.Fatalf("convert admitted v1beta1 DGD: %v", err)
+		}
+		return beta
+	}
+
+	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(actual.Object, alpha); err != nil {
+		t.Fatalf("convert admitted v1alpha1 DGD: %v", err)
+	}
+	if err := alpha.ConvertTo(beta); err != nil {
+		t.Fatalf("convert admitted DGD to v1beta1: %v", err)
+	}
+	return beta
 }
 
 func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]any) {
@@ -2270,6 +3164,52 @@ func betaDGDForAdmission(
 		mutate(dgd)
 	}
 	return dgd
+}
+
+// dgdTerminatingFinalizer holds a DGD in the terminating state so an update can
+// be submitted while deletion is pending.
+const dgdTerminatingFinalizer = "nvidia.com/dynamo-graph-deployment-finalizer"
+
+// betaTerminatingDGDForAdmission builds a DGD that is seeded with a finalizer and
+// an already-materialized workload provider, which is the state a terminating
+// update starts from. Callers drop either one to express the case under test.
+func betaTerminatingDGDForAdmission(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeployment),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Finalizers = []string{dgdTerminatingFinalizer}
+		dgd.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderGrove,
+		}
+		if mutate != nil {
+			mutate(dgd)
+		}
+	})
+}
+
+// withInvalidGPUMemoryService gives the worker a GPU memory service block that
+// today's create-side rules reject, standing in for a legacy object that has to
+// stay deletable.
+func withInvalidGPUMemoryService(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+	betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+		GPUMemoryService: &nvidiacomv1beta1.GPUMemoryServiceSpec{
+			ExtraClientContainers: []string{"no-such-container"},
+		},
+	}
+}
+
+func betaComponentDGDForAdmission(
+	mutate func(*nvidiacomv1beta1.DynamoGraphDeployment),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		dgd.Annotations = map[string]string{
+			consts.KubeAnnotationWorkloadProvider: consts.WorkloadProviderComponent,
+			consts.KubeAnnotationEnableGrove:      consts.KubeLabelValueFalse,
+		}
+		if mutate != nil {
+			mutate(dgd)
+		}
+	})
 }
 
 func alphaDGDForAdmission(
@@ -2449,6 +3389,17 @@ func betaWorkerComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return dgd.GetComponentByName("worker")
+}
+
+func setBetaExplicitMultinodeRoles(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+	worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+		{Name: nvidiacomv1beta1.ComponentRoleLeader},
+		{Name: nvidiacomv1beta1.ComponentRoleWorker},
+	}
 }
 
 func setBetaWorkerPowerInputs(

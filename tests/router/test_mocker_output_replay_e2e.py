@@ -74,6 +74,10 @@ async def _collect_output_token_ids(
         if not isinstance(response, dict):
             continue
 
+        # Distributed workers leave detokenization to the frontend.
+        assert response.get("text") is None, response
+        assert response.get("tokens") is None, response
+
         token_ids = response.get("token_ids")
         if isinstance(token_ids, list):
             output_token_ids.extend(token_ids)
@@ -181,8 +185,8 @@ def test_mocker_output_replay_generate_from_request_multi_turn(
     replay_trace_path = tmp_path / "response-replay.jsonl"
     # The final generated token does not have KV yet. Generate one extra token
     # so the first full output block is actually cached for the next turn.
-    first_output_token_ids = list(range(200_001, 200_001 + BLOCK_SIZE + 1))
-    second_output_token_ids = [300_001, 300_002, 300_003, 300_004]
+    first_output_token_ids = list(range(1000, 1000 + BLOCK_SIZE + 1))
+    second_output_token_ids = [2000, 2001, 2002, 2003]
     _write_response_replay_trace(
         replay_trace_path,
         [

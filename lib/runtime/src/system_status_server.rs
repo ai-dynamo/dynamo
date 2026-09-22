@@ -11,6 +11,9 @@ use crate::config::environment_names::runtime::system as env_system;
 use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
+use crate::utils::ip_resolver::{
+    DefaultIpResolver, IpResolutionError, IpResolver, resolve_advertise_ip_for_bind,
+};
 use axum::{
     Router,
     body::Bytes,
@@ -23,6 +26,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -32,12 +36,12 @@ use tower_http::trace::TraceLayer;
 /// System status server information containing socket address and handle
 #[derive(Debug)]
 pub struct SystemStatusServerInfo {
-    pub socket_addr: std::net::SocketAddr,
+    pub socket_addr: SocketAddr,
     pub handle: Option<Arc<JoinHandle<()>>>,
 }
 
 impl SystemStatusServerInfo {
-    pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
+    pub fn new(socket_addr: SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
         Self {
             socket_addr,
             handle: handle.map(Arc::new),
@@ -55,6 +59,37 @@ impl SystemStatusServerInfo {
     pub fn port(&self) -> u16 {
         self.socket_addr.port()
     }
+
+    /// Return an address that is served by the bound socket.
+    ///
+    /// A wildcard bind is replaced with a usable address from the same address
+    /// family. If interface enumeration fails, the same-family loopback is
+    /// used so IPv4 and IPv6 are never combined.
+    pub fn advertised_socket_addr(&self) -> SocketAddr {
+        match advertised_socket_addr(self.socket_addr, &DefaultIpResolver) {
+            Ok(address) => address,
+            Err(error) => {
+                let fallback = match self.socket_addr.ip() {
+                    IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+                };
+                tracing::warn!(
+                    %error,
+                    %fallback,
+                    "Failed to resolve the system status advertisement address; using loopback"
+                );
+                SocketAddr::new(fallback, self.socket_addr.port())
+            }
+        }
+    }
+}
+
+fn advertised_socket_addr<R: IpResolver>(
+    bound: SocketAddr,
+    resolver: &R,
+) -> Result<SocketAddr, IpResolutionError> {
+    let advertise_ip = resolve_advertise_ip_for_bind(bound.ip(), resolver)?;
+    Ok(SocketAddr::new(advertise_ip, bound.port()))
 }
 
 impl Clone for SystemStatusServerInfo {
@@ -710,7 +745,22 @@ async fn engine_route_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::ip_resolver::test_support::StubResolver;
     use tokio::time::Duration;
+
+    #[test]
+    fn advertised_address_stays_in_the_bound_family() {
+        let mut resolver = StubResolver::not_found();
+        resolver.interfaces = vec![
+            ("lo", "127.0.0.1".parse().unwrap()),
+            ("eth0", "2001:db8::20".parse().unwrap()),
+        ];
+
+        let advertised = advertised_socket_addr("0.0.0.0:8080".parse().unwrap(), &resolver)
+            .expect("wildcard advertisement should resolve");
+
+        assert_eq!(advertised, "127.0.0.1:8080".parse().unwrap());
+    }
 
     // This is a basic test to verify the HTTP server is working before testing other more complicated tests
     #[tokio::test]
@@ -1175,6 +1225,97 @@ mod integration_tests {
                     );
                 }
                 // DRT handles server cleanup automatically
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_payloadless_endpoint_is_healthy_with_canary_enabled() {
+        temp_env::async_with_vars(
+            [
+                (env_system::DYN_SYSTEM_PORT, Some("0")),
+                (
+                    env_system::DYN_SYSTEM_STARTING_HEALTH_STATUS,
+                    Some("notready"),
+                ),
+                ("DYN_HEALTH_CHECK_ENABLED", Some("true")),
+            ],
+            async {
+                let runtime = crate::Runtime::from_current().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::new(
+                        runtime,
+                        crate::distributed::DistributedConfig::process_local(),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                let addr = drt
+                    .system_status_server_info()
+                    .expect("System status server should be started")
+                    .socket_addr;
+
+                use crate::pipeline::{
+                    AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn, async_trait,
+                    network::Ingress,
+                };
+                use crate::protocols::annotated::Annotated;
+
+                struct PayloadlessHandler;
+
+                #[async_trait]
+                impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, anyhow::Error>
+                    for PayloadlessHandler
+                {
+                    async fn generate(
+                        &self,
+                        input: SingleIn<String>,
+                    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
+                        let (data, ctx) = input.into_parts();
+                        Ok(crate::pipeline::ResponseStream::new(
+                            Box::pin(crate::stream::iter(vec![Annotated::from_data(data)])),
+                            ctx.context(),
+                        ))
+                    }
+                }
+
+                let namespace = drt.namespace("test").unwrap();
+                let component = namespace.component("backend").unwrap();
+                let ingress = Ingress::for_engine(Arc::new(PayloadlessHandler)).unwrap();
+                tokio::spawn(async move {
+                    // Unified decode workers deliberately follow this path: the
+                    // endpoint is registered without a canary payload.
+                    let _ = component
+                        .endpoint("generate")
+                        .endpoint_builder()
+                        .handler(ingress)
+                        .start()
+                        .await;
+                });
+
+                let client = reqwest::Client::new();
+                for path in ["/health", "/live"] {
+                    let url = format!("http://{addr}{path}");
+                    let mut last_response = None;
+                    for _ in 0..50 {
+                        let response = client.get(&url).send().await.unwrap();
+                        let status = response.status();
+                        let body = response.text().await.unwrap();
+                        if status == 200 && body.contains("\"status\":\"ready\"") {
+                            last_response = Some((status, body));
+                            break;
+                        }
+                        last_response = Some((status, body));
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    let (status, body) = last_response.unwrap();
+                    assert_eq!(status, 200, "{path} response: {body}");
+                    assert!(
+                        body.contains("\"status\":\"ready\""),
+                        "{path} response: {body}"
+                    );
+                }
             },
         )
         .await;

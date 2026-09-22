@@ -1,0 +1,4 @@
+{"schema":"dynamo.agentic_mooncake","version":2,"block_size":4,"hash_id_scope":"local","source":{"format":"e2e-fixture","digest":"agentic-v1"}}
+{"request_id":"agent-root","play_id":"agent-play","session_id":"root","model":"tiny-model","input_length":4,"output_length":2,"hash_ids":[301],"not_before_ms":0,"dependencies":[]}
+{"request_id":"agent-child","play_id":"agent-play","session_id":"child","model":"tiny-model","input_length":4,"output_length":2,"hash_ids":[302],"not_before_ms":0,"dependencies":[{"request_id":"agent-root","trigger":"dispatch","delay_ms":5,"relation":"spawn"}]}
+{"request_id":"agent-join","play_id":"agent-play","session_id":"root","model":"tiny-model","input_length":4,"output_length":2,"hash_ids":[303],"not_before_ms":0,"dependencies":[{"request_id":"agent-root","trigger":"completion","delay_ms":1,"relation":"sequence"},{"request_id":"agent-child","trigger":"completion","delay_ms":1,"relation":"join"}]}

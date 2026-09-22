@@ -26,6 +26,7 @@ from aisimulate.sweeper.sampler import Suggestion
 from aisimulate.sweeper.score import objective_value
 from aisimulate.sweeper.search import Sweeper
 from aisimulate.sweeper.search_space import enumerate_branches
+
 from dynamo.planner.simulation import create_provider as create_planner_provider
 from dynamo.replay.simulation import DynamoReplayRunnerFactory
 from dynamo.router.simulation import create_provider as create_router_provider
@@ -38,8 +39,7 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore:invalid escape sequence.*:DeprecationWarning"),
 ]
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-_TRACE = str(_REPO_ROOT / "aisimulate/tests/sweeper/data/mooncake_tiny.jsonl")
+_TRACE = str(Path(__file__).resolve().parent / "data/mooncake_tiny.jsonl")
 
 
 def _config(
@@ -55,10 +55,10 @@ def _config(
     adapters = {
         "dynamo.planner": {
             "search_space": {
-                "scaling_policy": [scaling_policy],
-                "fpm_sampling": ["default"],
-                "load_sensitivity": ["default"],
-                "load_predictor_candidates": ["constant_last"],
+                "scaling_policy": {"preset": [scaling_policy]},
+                "fpm_sampling": {"preset": ["default"]},
+                "load_sensitivity": {"preset": ["default"]},
+                "load_predictor": {"preset": ["constant_last"]},
             }
         }
     }
@@ -235,7 +235,7 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
         include_router=True,
     )
 
-    candidates = Sweeper(
+    result = Sweeper(
         runner_factory=DynamoReplayRunnerFactory(),
         providers={
             "dynamo.planner": create_planner_provider(),
@@ -245,7 +245,9 @@ def test_sweeper_runs_real_dynamo_replay_in_spawned_workers() -> None:
         show_progress=False,
     ).run(config)
 
+    candidates = result.candidates
     assert len(candidates) == 2
+    assert all(candidate.status == "feasible" for candidate in candidates)
     assert all(
         candidate.metrics["output_throughput_tok_s"] > 0.0 for candidate in candidates
     )

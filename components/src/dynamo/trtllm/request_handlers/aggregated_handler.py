@@ -19,6 +19,7 @@ from dynamo.trtllm.request_handlers.handler_base import (
     HandlerBase,
     RequestHandlerConfig,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 
 class AggregatedHandler(HandlerBase):
@@ -37,6 +38,8 @@ class AggregatedHandler(HandlerBase):
         super().__init__(config)
         self._encoder_cache = encoder_cache
 
+    # Must stay outermost -- see push_egress.py.
+    @push_egress_capable
     async def generate(
         self, request: dict, context: Context
     ) -> AsyncGenerator[dict, None]:
@@ -49,12 +52,11 @@ class AggregatedHandler(HandlerBase):
         embeddings: Optional[Union[torch.Tensor, dict]] = None
         ep_disaggregated_params = None
         if self.multimodal_processor and self.encode_client:
-            messages = request.get("extra_args", {}).get(
-                "messages", request.get("messages", [])
-            )
-            _, image_urls, _ = self.multimodal_processor.extract_prompt_and_media(
-                messages
-            )
+            (
+                _,
+                image_urls,
+                _,
+            ) = self.multimodal_processor.extract_prompt_and_media_from_request(request)
             if image_urls:
                 result = await fetch_embeddings_from_encoder(
                     image_urls,

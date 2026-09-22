@@ -8,14 +8,19 @@ import logging
 import random
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 from PIL import Image
 
 from dynamo._core import Context
+from dynamo.common.http.base import HttpStatusError
+from dynamo.common.http.media_reference import local_media_reference
+from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.protocols.image_protocol import ImageNvExt
 from dynamo.common.storage import upload_to_fs
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -98,59 +103,53 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
-        try:
-            req = CreateImageRequest(**request)
+        # Exceptions propagate to the runtime, which converts them into error
+        # events on the response stream (Annotated::from_err); the frontend
+        # folds those into a non-200 HTTP response. Expected validation
+        # failures (InvalidArgument) become 400s without traceback noise.
+        req = CreateImageRequest(**request)
 
-            nvext = req.nvext or ImageNvExt()
+        nvext = req.nvext or ImageNvExt()
 
-            # Apply SGLang-specific defaults for unset values
-            raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
-            if raw_steps > MAX_NUM_INFERENCE_STEPS:
-                logger.warning(
-                    f"num_inference_steps={raw_steps} exceeds max "
-                    f"{MAX_NUM_INFERENCE_STEPS}, clamping"
-                )
-            num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
-            guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
-
-            width, height = self._parse_size(req.size)
-
-            images = await self._generate_images(
-                prompt=req.prompt,
-                negative_prompt=nvext.negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=nvext.seed,
-                input_reference=req.input_reference,
+        # Apply SGLang-specific defaults for unset values
+        raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
+        if raw_steps > MAX_NUM_INFERENCE_STEPS:
+            logger.warning(
+                f"num_inference_steps={raw_steps} exceeds max "
+                f"{MAX_NUM_INFERENCE_STEPS}, clamping"
             )
+        num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
+        guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
 
-            context_id = context.id()
-            assert context_id is not None
-            user_id = req.user or context_id
-            image_data = []
-            for img in images:
-                # uploading or encoding the image
-                if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context_id)
-                    image_data.append(ImageData(url=url))
-                else:
-                    b64 = self._encode_base64(img)
-                    image_data.append(ImageData(b64_json=b64))
+        width, height = self._parse_size(req.size)
 
-            response = ImagesResponse(created=int(time.time()), data=image_data)
+        images = await self._generate_images(
+            prompt=req.prompt,
+            negative_prompt=nvext.negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=nvext.seed,
+            input_reference=req.input_reference,
+        )
 
-            yield response.model_dump()
+        context_id = context.id()
+        assert context_id is not None
+        user_id = req.user or context_id
+        image_data = []
+        for img in images:
+            # uploading or encoding the image
+            if req.response_format == "url":
+                url = await self._upload_to_fs(img, user_id, context_id)
+                image_data.append(ImageData(url=url))
+            else:
+                b64 = self._encode_base64(img)
+                image_data.append(ImageData(b64_json=b64))
 
-        except Exception as e:
-            logger.error(f"Error in diffusion generation: {e}", exc_info=True)
-            error_response = {
-                "created": int(time.time()),
-                "data": [],
-                "error": str(e),
-            }
-            yield error_response
+        response = ImagesResponse(created=int(time.time()), data=image_data)
+
+        yield response.model_dump()
 
     async def _generate_images(
         self,
@@ -175,16 +174,43 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "seed": seed if seed is not None else random.randint(0, 1000000),
         }
 
-        # Add image_path for I2I/TI2I if provided
-        if input_reference is not None:
-            if not input_reference.strip():
-                raise ValueError("input_reference must be a non-empty string")
-            args["image_path"] = input_reference
+        # Add image_path for I2I/TI2I if provided. A URL is fetched through the
+        # SSRF-safe client (revalidating each redirect hop) into a temp file, so
+        # the generator only ever opens a trusted local path — never a URL it
+        # would fetch and redirect itself.
+        async with AsyncExitStack() as stack:
+            if input_reference is not None:
+                if not input_reference.strip():
+                    raise InvalidArgument("input_reference must be a non-empty string")
+                try:
+                    args["image_path"] = await stack.enter_async_context(
+                        local_media_reference(
+                            input_reference, UrlValidationPolicy.from_env()
+                        )
+                    )
+                except UrlValidationError as exc:
+                    # A policy verdict on a client-supplied reference is a bad
+                    # request. UrlValidationError is a ValueError, which the
+                    # binding already maps to InvalidArgument
+                    # (backend.rs py_err_to_dynamo) — this says so at the call
+                    # site rather than relying on that fallback.
+                    raise InvalidArgument(str(exc)) from exc
+                except HttpStatusError as exc:
+                    if not 400 <= exc.status < 500:
+                        raise
+                    # The origin the client picked answered 4xx. image_loader
+                    # takes the same line for an unreachable user-supplied URL
+                    # ("a client error (400) rather than an internal server
+                    # fault"). The URL is not echoed back: the client sent it,
+                    # and it has no length limit.
+                    raise InvalidArgument(
+                        f"input_reference could not be fetched (HTTP {exc.status})"
+                    ) from exc
 
-        result = await asyncio.to_thread(
-            self.generator.generate,
-            sampling_params_kwargs=args,
-        )
+            result = await asyncio.to_thread(
+                self.generator.generate,
+                sampling_params_kwargs=args,
+            )
 
         # DiffGenerator.generate() returns GenerationResult | list[GenerationResult] | None
         if result is None:
@@ -225,11 +251,20 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     def _parse_size(self, size_str: Optional[str]) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
-        if size_str is None:
+        # The OpenAI size enum includes "auto": the model picks; use the
+        # backend default, same as an omitted size.
+        if size_str is None or size_str == "auto":
             return 1024, 1024
 
-        w, h = size_str.split("x")
-        return int(w), int(h)
+        try:
+            w, h = size_str.split("x")
+            return int(w), int(h)
+        except ValueError as e:
+            # InvalidArgument maps to HTTP 400 with the message visible to
+            # the client, instead of a sanitized 500.
+            raise InvalidArgument(
+                f"size must be '<width>x<height>', got {size_str!r}"
+            ) from e
 
     async def _upload_to_fs(
         self, image_bytes: bytes, user_id: str, request_id: str

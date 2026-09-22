@@ -186,7 +186,7 @@ impl<R: Data + Clone> RecordingStream<R> {
         Self::from_stream_and_context(stream, ctx, mode, capacity, recorded_tx)
     }
 
-    /// Convert to Pin<Box<dyn AsyncEngineStream<R>>>
+    /// Convert to `Pin<Box<dyn AsyncEngineStream<R>>>`
     pub fn into_async_engine_stream(self) -> EngineStream<R> {
         Box::pin(self)
     }

@@ -1,24 +1,67 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Modality-specific output formatters for vLLM-Omni.
+"""Convert vLLM-Omni stage outputs into Dynamo protocol responses.
 
-Extracted from OmniHandler and AudioGenerationHandler so that any consumer
-(aggregated handler, disaggregated router, test harness) can format engine
-output without creating an engine or loading model weights.
+``OutputFormatter`` is the caller entry point. Construct it once for a model and
+pass each engine stage to ``await format(...)``. It dispatches on
+``stage_output.final_output_type`` using this stage contract:
+
+* ``"text"`` reads ``request_output`` and the optional ``previous_text`` context.
+* ``"image"`` or ``"video"`` reads ``images``. Supply ``request_type`` to
+  distinguish image, video, and chat-completion responses because a video
+  diffusion stage may be labelled ``"image"``.
+* ``"audio"`` reads ``multimodal_output``. Video stages may also use that mapping
+  for video, audio, frame-rate, and sample-rate data.
+
+A typical one-stage call is::
+
+    formatter = OutputFormatter(model_name, media_fs, media_http_url)
+    response = await formatter.format(
+        stage_output,
+        request_id,
+        request_type=request_type,
+        response_format="b64_json",
+    )
+
+The common context keys are ``response_format``, ``output_format``, ``fps``,
+``speed``, and the audio state objects. URL responses require a writable
+``media_fs``; ``media_http_url`` optionally rewrites the returned public URL.
+
+Audio state belongs to one request. For streaming, pass the same
+``AudioStreamState`` to every stage as ``audio_stream_state``. For one final
+non-streaming response, pass one ``AudioAggregateState`` as
+``audio_aggregate_state`` to every stage, then call ``await finish_audio(...)``
+with that state after the engine finishes.
+
+Formatters return serialized response mappings, or ``None`` when a stage has no
+response to emit. Invalid request options may raise ``ValueError``;
+media-processing failures are normally represented by a modality response with
+``status="failed"``.
+
+The formatters are independent of engine construction and model loading, so
+aggregated handlers, disaggregated routers, and tests can share them.
 """
 
 import asyncio
 import base64
 import logging
+import struct
 import time
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Dict, Optional
 
 import numpy as np
 import soundfile as sf
 import torch
+
+try:
+    from vllm_omni.diffusion.utils.media_utils import mux_video_audio_bytes
+except (ImportError, OSError):
+    mux_video_audio_bytes = None  # type: ignore[assignment]
 
 from dynamo.common.protocols.audio_protocol import AudioData, NvAudioSpeechResponse
 from dynamo.common.protocols.image_protocol import ImageData, NvImagesResponse
@@ -36,11 +79,52 @@ from dynamo.vllm.omni.utils import is_empty_payload
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_AUDIO_SAMPLE_RATE = 24000
+
+
+@dataclass
+class AudioStreamState:
+    """Request-local state for incremental audio output."""
+
+    emitted_chunks: int = 0
+    sample_rate: int | None = None
+    num_channels: int | None = None
+    channel_axis: int | None = None
+
+
+@dataclass
+class AudioAggregateState:
+    """Request-local raw audio accumulated for one final encode."""
+
+    chunks: list[np.ndarray] = field(default_factory=list)
+    sample_rate: int | None = None
+    emitted_chunks: int = 0
+    num_channels: int | None = None
+    channel_axis: int | None = None
+    cumulative: bool = False
+    """Each payload is a snapshot of the whole waveform decoded so far.
+
+    Set from the output kind the engine was actually given, not from the model:
+    ``RequestOutputKind.CUMULATIVE`` consolidates the accumulated audio on every
+    step and drains nothing, so the snapshots must be de-duplicated to the
+    longest one rather than concatenated, while ``DELTA`` drains what it emits
+    and yields disjoint pieces that must all be kept. See
+    ``utils.audio_output_is_cumulative``, which the handler uses to fill this in.
+    """
+
 
 class TextFormatter:
     """Formats LLM text output as OpenAI chat completion chunks."""
 
     def __init__(self, model_name: str) -> None:
+        """Initialize a text formatter.
+
+        Args:
+            model_name: Model identifier included in response chunks.
+
+        Returns:
+            None.
+        """
         self._model_name = model_name
 
     def format(
@@ -50,6 +134,19 @@ class TextFormatter:
         *,
         previous_text: str = "",
     ) -> Dict[str, Any] | None:
+        """Format the next text delta as a chat-completion chunk.
+
+        Args:
+            request_output: vLLM request output containing generated choices.
+            request_id: Identifier included in the response chunk.
+            previous_text: Text already emitted for this request.
+
+        Returns:
+            Dict[str, Any] | None: Formatted chunk or an engine-output error chunk.
+
+        Raises:
+            AttributeError: If the request output lacks required choice fields.
+        """
         if not request_output.outputs:
             return _error_chunk(request_id, self._model_name, "No outputs from engine")
 
@@ -94,6 +191,17 @@ class DiffusionFormatter:
         media_http_url: Optional[str],
         default_fps: int = 16,
     ) -> None:
+        """Initialize a diffusion formatter.
+
+        Args:
+            model_name: Model identifier included in responses.
+            media_fs: Storage backend used for URL responses.
+            media_http_url: Public base URL for stored media.
+            default_fps: Frame rate used when output metadata omits one.
+
+        Returns:
+            None.
+        """
         self._model_name = model_name
         self._media_fs = media_fs
         self._media_http_url = media_http_url
@@ -102,20 +210,35 @@ class DiffusionFormatter:
     async def format(
         self, stage_output: Any, request_id: str, *, request_type: Any, **ctx: Any
     ) -> Dict[str, Any] | None:
+        """Format a diffusion stage output as an image or video response.
+
+        Args:
+            stage_output: vLLM-Omni stage output containing generated media.
+            request_id: Identifier included in the response.
+            request_type: Request kind used to distinguish image and video output.
+            **ctx: Response format, output format, and frame-rate overrides.
+
+        Returns:
+            Dict[str, Any] | None: Formatted response, or ``None`` for empty images.
+
+        Raises:
+            ValueError: If an image or video response option is unsupported.
+        """
         images = (
             stage_output.images if hasattr(stage_output, "images") else stage_output
         )
-        if is_empty_payload(images):
-            return None
 
         if request_type == RequestType.VIDEO_GENERATION:
             return await self._encode_video(
                 images,
                 request_id,
+                multimodal_output=self._extract_multimodal_output(stage_output),
                 fps=ctx.get("fps", self._default_fps),
                 response_format=ctx.get("response_format"),
                 output_format=ctx.get("output_format"),
             )
+        if is_empty_payload(images):
+            return None
         return await self._encode_image(
             images,
             request_id,
@@ -125,12 +248,30 @@ class DiffusionFormatter:
 
     async def _encode_video(
         self,
-        images: list,
+        images: Any,
         request_id: str,
         fps: int,
+        multimodal_output: dict[str, Any] | None = None,
         response_format: Optional[str] = None,
         output_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
+        """Encode generated frames and optional audio as video responses.
+
+        Args:
+            images: Primary generated video-frame payload.
+            request_id: Identifier included in the response and storage path.
+            fps: Positive fallback frame rate when metadata does not provide one.
+            multimodal_output: Optional video, audio, and encoding metadata.
+            response_format: ``"url"`` or ``"b64_json"`` output representation.
+            output_format: Video container format; currently only ``"mp4"``.
+
+        Returns:
+            Dict[str, Any] | None: Completed response, or a failed response for
+                invalid media metadata, mismatched durations, or encoding errors.
+
+        Raises:
+            ValueError: If the response or output format is unsupported.
+        """
         output_format = output_format or "mp4"
         response_format = response_format or "url"
         if response_format not in ("url", "b64_json"):
@@ -143,30 +284,87 @@ class DiffusionFormatter:
             )
         try:
             start_time = time.time()
-            # Encode with the in-tree VP9 (libvpx-vp9) encoder rather
-            # than diffusers.export_to_video, whose imageio backend defaults to the
-            # H.264 codec that the codec-compliant image no longer ships (it would
-            # fail with "No valid H.264 encoder was found"). encode_to_video_bytes
-            # is the same shared helper the TRT-LLM video handler uses; VP9-in-mp4
-            # is valid and decodes with our VP8/VP9 allowlist.
-            frames_np = frames_to_numpy(normalize_video_frames(images))
-            video_bytes = await asyncio.to_thread(
-                encode_to_video_bytes, frames_np, fps=fps, output_format=output_format
+            multimodal_output = multimodal_output or {}
+            videos = self._split_video_outputs(images, multimodal_output)
+            if not videos:
+                raise ValueError("No video outputs found in generation result")
+            resolved_fps = self._resolve_int_metadata(multimodal_output, "fps", "video")
+            if resolved_fps is None:
+                resolved_fps = self._coerce_positive_int(fps)
+            if resolved_fps is None:
+                raise ValueError(f"Video fps must be greater than zero, got {fps!r}")
+            audio_sample_rate = self._resolve_audio_sample_rate(multimodal_output)
+            audio_outputs = self._split_audio_outputs(
+                multimodal_output.get("audio"), len(videos)
             )
 
-            if response_format == "b64_json":
+            data = []
+            for index, (video, audio) in enumerate(
+                zip(videos, audio_outputs, strict=True)
+            ):
+                frames_np = self._video_to_numpy_frames(video)
+                if audio is None:
+                    # The codec-compliant standard image retains its existing
+                    # royalty-free VP9 path for silent video models.
+                    video_bytes = await asyncio.to_thread(
+                        encode_to_video_bytes,
+                        frames_np,
+                        fps=resolved_fps,
+                        output_format=output_format,
+                    )
+                else:
+                    if mux_video_audio_bytes is None:
+                        raise RuntimeError(
+                            "Generated audio requires PyAV with H.264 and AAC encoders; "
+                            "use the video-audio codec overlay"
+                        )
+                    audio_np = self._audio_to_numpy(audio)
+                    if audio_np.ndim in (1, 2):
+                        # Match the muxer's channel-first/channel-last normalization.
+                        audio_sample_count = max(audio_np.shape)
+                        video_duration_s = frames_np.shape[0] / resolved_fps
+                        audio_duration_s = audio_sample_count / audio_sample_rate
+                        duration_tolerance_s = (
+                            1.0 / resolved_fps + 1.0 / audio_sample_rate
+                        )
+                        if (
+                            abs(video_duration_s - audio_duration_s)
+                            > duration_tolerance_s
+                        ):
+                            raise ValueError(
+                                "Audio/video duration mismatch: "
+                                f"video={video_duration_s:.3f}s, "
+                                f"audio={audio_duration_s:.3f}s, "
+                                f"tolerance={duration_tolerance_s:.3f}s"
+                            )
+                    video_bytes = await asyncio.to_thread(
+                        mux_video_audio_bytes,
+                        frames_np,
+                        audio_np,
+                        fps=float(resolved_fps),
+                        audio_sample_rate=audio_sample_rate,
+                    )
+
                 video_data = VideoData(
                     output_format=output_format,
-                    b64_json=base64.b64encode(video_bytes).decode("utf-8"),
+                    fps=resolved_fps,
+                    audio_sample_rate=audio_sample_rate if audio is not None else None,
                 )
-            else:
-                video_url = await upload_to_fs(
-                    self._media_fs,
-                    f"videos/{request_id}.{output_format}",
-                    video_bytes,
-                    self._media_http_url,
-                )
-                video_data = VideoData(output_format=output_format, url=video_url)
+                if response_format == "b64_json":
+                    video_data.b64_json = base64.b64encode(video_bytes).decode("utf-8")
+                else:
+                    filename = (
+                        f"videos/{request_id}.{output_format}"
+                        if len(videos) == 1
+                        else f"videos/{request_id}/{index}.{output_format}"
+                    )
+                    video_data.url = await upload_to_fs(
+                        self._media_fs,
+                        filename,
+                        video_bytes,
+                        self._media_http_url,
+                    )
+                data.append(video_data)
 
             return NvVideosResponse(
                 id=request_id,
@@ -175,7 +373,7 @@ class DiffusionFormatter:
                 status="completed",
                 progress=100,
                 created=int(time.time()),
-                data=[video_data],
+                data=data,
                 inference_time_s=time.time() - start_time,
             ).model_dump()
         except Exception as e:
@@ -191,6 +389,302 @@ class DiffusionFormatter:
                 error=str(e),
             ).model_dump()
 
+    @staticmethod
+    def _extract_multimodal_output(stage_output: Any) -> dict[str, Any]:
+        """Extract multimodal metadata from a stage output.
+
+        Args:
+            stage_output: vLLM-Omni stage result or compatibility wrapper.
+
+        Returns:
+            dict[str, Any]: A shallow metadata copy, or an empty dictionary.
+        """
+        multimodal_output = getattr(stage_output, "multimodal_output", None)
+        if isinstance(multimodal_output, Mapping):
+            return dict(multimodal_output)
+
+        request_output = getattr(stage_output, "request_output", None)
+        if isinstance(request_output, dict):
+            multimodal_output = request_output.get("multimodal_output")
+            if multimodal_output is None:
+                multimodal_output = request_output.get("_multimodal_output")
+        elif request_output is not None:
+            multimodal_output = getattr(request_output, "multimodal_output", None)
+            if multimodal_output is None:
+                multimodal_output = getattr(request_output, "_multimodal_output", None)
+        return dict(multimodal_output) if isinstance(multimodal_output, Mapping) else {}
+
+    @staticmethod
+    def _split_video_outputs(
+        images: Any, multimodal_output: dict[str, Any]
+    ) -> list[Any]:
+        """Separate a batched diffusion payload into individual videos.
+
+        Args:
+            images: Primary video-frame payload from the stage output.
+            multimodal_output: Metadata that may contain a fallback video payload.
+
+        Returns:
+            list[Any]: Individual video payloads, or an empty list when absent.
+
+        Raises:
+            ValueError: If a list mixes incompatible batched video payloads.
+        """
+        videos = images
+        if is_empty_payload(videos):
+            videos = multimodal_output.get("video")
+        if videos is None:
+            return []
+        if isinstance(videos, (np.ndarray, torch.Tensor)):
+            if videos.ndim == 5:
+                return [videos[index] for index in range(videos.shape[0])]
+            return [videos]
+        if isinstance(videos, (list, tuple)):
+            videos = list(videos)
+            if not videos:
+                return []
+            first = videos[0]
+            if isinstance(first, (np.ndarray, torch.Tensor)) and first.ndim == 5:
+                flattened: list[Any] = []
+                for batch in videos:
+                    if (
+                        not isinstance(batch, (np.ndarray, torch.Tensor))
+                        or batch.ndim != 5
+                    ):
+                        raise ValueError("Video output batches must all be 5-D")
+                    flattened.extend(batch[index] for index in range(batch.shape[0]))
+                return flattened
+            if isinstance(first, (np.ndarray, torch.Tensor)) and first.ndim == 4:
+                return videos
+            if isinstance(first, list):
+                return videos
+            return [videos]
+        return [videos]
+
+    @staticmethod
+    def _video_to_numpy_frames(video: Any) -> np.ndarray:
+        """Normalize one video to uint8 ``(frames, height, width, channels)``.
+
+        Args:
+            video: Video tensor, array, or sequence of image frames.
+
+        Returns:
+            np.ndarray: Contiguous FHWC frames with uint8 RGB values.
+
+        Raises:
+            ValueError: If frames are empty, inconsistent, or use an unsupported layout.
+        """
+        if isinstance(video, torch.Tensor):
+            video = video.detach().float().cpu().numpy()
+
+        if isinstance(video, np.ndarray):
+            if video.ndim == 3:
+                video = video[None, ...]
+            if video.ndim != 4:
+                raise ValueError(
+                    f"Expected a 4-D video tensor, got shape {video.shape}"
+                )
+            if video.shape[-1] in (1, 3, 4):
+                frames = video
+            else:
+                is_cfhw = video.shape[0] in (1, 3, 4)
+                is_fchw = video.shape[1] in (1, 3, 4)
+                if is_cfhw and is_fchw:
+                    raise ValueError(
+                        "Ambiguous channel-first video tensor; expected an "
+                        "unambiguous CFHW or FCHW shape, "
+                        f"got {video.shape}"
+                    )
+                if is_cfhw:
+                    frames = video.transpose(1, 2, 3, 0)
+                elif is_fchw:
+                    frames = video.transpose(0, 2, 3, 1)
+                else:
+                    raise ValueError(
+                        "Video tensor must use CFHW, FCHW, or FHWC channel layout, "
+                        f"got shape {video.shape}"
+                    )
+            if frames.shape[-1] == 1:
+                frames = np.repeat(frames, 3, axis=-1)
+            elif frames.shape[-1] == 4:
+                frames = frames[..., :3]
+            if np.issubdtype(frames.dtype, np.floating) and frames.min(initial=0.0) < 0:
+                frames = (frames + 1.0) / 2.0
+            return frames_to_numpy(list(np.ascontiguousarray(frames)))
+
+        frames = normalize_video_frames(video if isinstance(video, list) else [video])
+        normalized = []
+        for frame in frames:
+            if isinstance(frame, torch.Tensor):
+                frame = frame.detach().float().cpu().numpy()
+            if isinstance(frame, np.ndarray) and frame.ndim == 3:
+                if frame.shape[-1] in (1, 3, 4):
+                    pass
+                elif frame.shape[0] in (1, 3, 4):
+                    frame = frame.transpose(1, 2, 0)
+                else:
+                    raise ValueError(
+                        "Video frame must use CHW or HWC channel layout, "
+                        f"got shape {frame.shape}"
+                    )
+                if frame.shape[-1] == 1:
+                    frame = np.repeat(frame, 3, axis=-1)
+                elif frame.shape[-1] == 4:
+                    frame = frame[..., :3]
+                if (
+                    np.issubdtype(frame.dtype, np.floating)
+                    and frame.min(initial=0.0) < 0
+                ):
+                    frame = (frame + 1.0) / 2.0
+            normalized.append(frame)
+        return frames_to_numpy(normalized)
+
+    @staticmethod
+    def _split_audio_outputs(audio: Any, expected_count: int) -> list[Any | None]:
+        """Align generated audio payloads with their corresponding videos.
+
+        Args:
+            audio: Batched or per-video audio payload.
+            expected_count: Number of video outputs requiring audio entries.
+
+        Returns:
+            list[Any | None]: One audio payload or ``None`` for each video.
+
+        Raises:
+            ValueError: If the audio payload count does not match the video count.
+        """
+        if audio is None:
+            return [None] * expected_count
+        if isinstance(audio, (np.ndarray, torch.Tensor)):
+            if audio.ndim >= 3:
+                if audio.shape[0] != expected_count:
+                    raise ValueError(
+                        f"Expected {expected_count} audio output(s) for "
+                        f"{expected_count} videos"
+                    )
+                return [audio[index] for index in range(expected_count)]
+            if expected_count == 1:
+                return [audio]
+        if isinstance(audio, (list, tuple)):
+            if len(audio) == expected_count:
+                return list(audio)
+            if expected_count == 1:
+                return [audio]
+        raise ValueError(
+            f"Expected {expected_count} audio output(s) for {expected_count} videos"
+        )
+
+    @staticmethod
+    def _audio_to_numpy(audio: Any) -> np.ndarray:
+        """Convert an audio payload to a float32 NumPy array.
+
+        Args:
+            audio: Tensor, array, or array-like audio samples.
+
+        Returns:
+            np.ndarray: Audio samples represented as float32 values.
+
+        Raises:
+            TypeError: If the payload cannot be interpreted as an array.
+            ValueError: If the payload cannot be converted to float32 values.
+        """
+        if isinstance(audio, torch.Tensor):
+            return audio.detach().float().cpu().numpy()
+        if isinstance(audio, np.ndarray):
+            return audio.astype(np.float32, copy=False)
+        return np.asarray(audio, dtype=np.float32)
+
+    @staticmethod
+    def _resolve_int_metadata(
+        multimodal_output: dict[str, Any],
+        key: str,
+        metadata_section: str,
+        metadata_key: str | None = None,
+    ) -> int | None:
+        """Resolve positive numeric metadata rounded to the nearest integer.
+
+        Args:
+            multimodal_output: Multimodal payload containing optional metadata.
+            key: Top-level metadata key to inspect first.
+            metadata_section: Nested section under the ``metadata`` field.
+            metadata_key: Nested key, defaulting to the top-level key.
+
+        Returns:
+            int | None: Positive resolved value, or ``None`` when absent or invalid.
+
+        Raises:
+            RuntimeError: If tensor metadata contains more than one value.
+            OverflowError: If a non-finite numeric value cannot be converted.
+        """
+        value = multimodal_output.get(key)
+        if value is None:
+            metadata = multimodal_output.get("metadata")
+            if isinstance(metadata, Mapping):
+                section = metadata.get(metadata_section)
+                if isinstance(section, Mapping):
+                    value = section.get(metadata_key or key)
+        if value is None:
+            return None
+        return DiffusionFormatter._coerce_positive_int(value)
+
+    def _resolve_audio_sample_rate(self, multimodal_output: dict[str, Any]) -> int:
+        """Resolve an audio sample rate from known metadata aliases.
+
+        Args:
+            multimodal_output: Multimodal payload containing audio metadata.
+
+        Returns:
+            int: Positive sample rate, or the default when none is valid.
+
+        Raises:
+            RuntimeError: If tensor metadata contains more than one value.
+            OverflowError: If a non-finite numeric value cannot be converted.
+        """
+        for key in ("audio_sample_rate", "sample_rate", "sampling_rate", "sr"):
+            sample_rate = self._coerce_positive_int(multimodal_output.get(key))
+            if sample_rate is not None:
+                return sample_rate
+
+        metadata = multimodal_output.get("metadata")
+        audio_metadata = (
+            metadata.get("audio") if isinstance(metadata, Mapping) else None
+        )
+        if isinstance(audio_metadata, Mapping):
+            for key in (
+                "audio_sample_rate",
+                "sample_rate",
+                "sampling_rate",
+                "sr",
+            ):
+                sample_rate = self._coerce_positive_int(audio_metadata.get(key))
+                if sample_rate is not None:
+                    return sample_rate
+
+        return DEFAULT_AUDIO_SAMPLE_RATE
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> int | None:
+        """Round a scalar value to a positive integer when possible.
+
+        Args:
+            value: Scalar-like value to convert.
+
+        Returns:
+            int | None: Positive integer value, or ``None`` when invalid.
+
+        Raises:
+            RuntimeError: If a tensor contains more than one value.
+            OverflowError: If a non-finite numeric value cannot be converted.
+        """
+        if value is None:
+            return None
+        try:
+            scalar = value.item() if hasattr(value, "item") else value
+            resolved = round(float(scalar))
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved > 0 else None
+
     async def _encode_image(
         self,
         images: list,
@@ -199,6 +693,21 @@ class DiffusionFormatter:
         request_type: Any,
         response_format: Optional[str] = None,
     ) -> Dict[str, Any] | None:
+        """Encode generated images for chat or image-generation responses.
+
+        Args:
+            images: Generated image objects to encode.
+            request_id: Identifier included in the response and storage path.
+            request_type: Request kind selecting the response schema.
+            response_format: ``"url"`` or ``"b64_json"`` output representation.
+
+        Returns:
+            Dict[str, Any] | None: Formatted response or ``None`` for other request kinds.
+
+        Raises:
+            ValueError: If the response format is unsupported.
+            OSError: If an image cannot be encoded or uploaded.
+        """
         if is_empty_payload(images):
             return _error_chunk(request_id, self._model_name, "No images generated")
 
@@ -248,6 +757,20 @@ class DiffusionFormatter:
     async def _prepare_images(
         self, images: list, request_id: str, response_format: Optional[str] = None
     ) -> list:
+        """Serialize images as data URLs or upload-backed URLs.
+
+        Args:
+            images: Generated image objects supporting PNG serialization.
+            request_id: Identifier used to construct storage paths.
+            response_format: ``"url"`` or ``"b64_json"`` output representation.
+
+        Returns:
+            list: Encoded data URLs or uploaded media URLs.
+
+        Raises:
+            ValueError: If the response format is unsupported.
+            OSError: If an image cannot be encoded or uploaded.
+        """
         outlist = []
         for img in images:
             buf = BytesIO()
@@ -276,6 +799,16 @@ class AudioFormatter:
     def __init__(
         self, model_name: str, media_fs: Any, media_http_url: Optional[str]
     ) -> None:
+        """Initialize an audio formatter.
+
+        Args:
+            model_name: Model identifier included in responses.
+            media_fs: Storage backend used for URL responses.
+            media_http_url: Public base URL for stored media.
+
+        Returns:
+            None.
+        """
         self._model_name = model_name
         self._media_fs = media_fs
         self._media_http_url = media_http_url
@@ -284,12 +817,26 @@ class AudioFormatter:
     async def format(
         self, stage_output: Any, request_id: str, **ctx: Any
     ) -> Dict[str, Any] | None:
+        """Format complete, streaming, or aggregate audio output.
+
+        Args:
+            stage_output: Stage output or multimodal audio mapping.
+            request_id: Identifier included in the response and storage path.
+            **ctx: Encoding, response, speed, and stream-state options.
+
+        Returns:
+            Dict[str, Any] | None: Audio response, failure response, or no streaming chunk.
+        """
+        stream_state = ctx.get("audio_stream_state")
+        aggregate_state = ctx.get("audio_aggregate_state")
         mm_output = (
             stage_output.multimodal_output
             if hasattr(stage_output, "multimodal_output")
             else stage_output
         )
         if is_empty_payload(mm_output):
+            if stream_state is not None or aggregate_state is not None:
+                return None
             return self._error_response(request_id, "No audio generated")
 
         response_format = ctx.get("response_format")
@@ -298,18 +845,45 @@ class AudioFormatter:
 
         try:
             start_time = time.time()
-            audio_np, sample_rate = self._extract_audio_tensor(mm_output)
+            # A cumulative payload already carries the earlier frames, so it is
+            # taken whole and de-duplicated in _append_audio_chunk; tracking the
+            # newly appended entries would keep only the first snapshot.
+            chunk_state: AudioStreamState | AudioAggregateState | None
+            if stream_state is not None:
+                chunk_state = stream_state
+            elif aggregate_state is not None and not aggregate_state.cumulative:
+                chunk_state = aggregate_state
+            else:
+                chunk_state = None
 
-            encode_fmt = "wav" if output_format is None else output_format
-            assert encode_fmt is not None
-            audio_bytes, media_type = await asyncio.to_thread(
-                self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+            audio_np, sample_rate = self._extract_audio_tensor(
+                mm_output, chunk_state=chunk_state
             )
+            if audio_np.size == 0:
+                return None
 
-            logger.info(
+            if aggregate_state is not None:
+                self._append_audio_chunk(aggregate_state, audio_np, sample_rate)
+                return None
+
+            encode_fmt = (output_format or "wav").lower()
+            if stream_state is not None:
+                audio_bytes, _ = await asyncio.to_thread(
+                    self._encode_audio_chunk,
+                    audio_np,
+                    sample_rate,
+                    encode_fmt,
+                    stream_state,
+                )
+            else:
+                audio_bytes, _ = await asyncio.to_thread(
+                    self._encode_audio, audio_np, sample_rate, encode_fmt, speed
+                )
+
+            logger.debug(
                 "Audio encoded for request %s: %d samples, sr=%d, %d bytes %s",
                 request_id,
-                len(audio_np),
+                audio_np.shape[-1],
                 sample_rate,
                 len(audio_bytes),
                 encode_fmt,
@@ -345,7 +919,128 @@ class AudioFormatter:
             logger.error("Failed to process audio for request %s: %s", request_id, e)
             return self._error_response(request_id, str(e))
 
-    def _extract_audio_tensor(self, mm_output: Dict[str, Any]) -> tuple:
+    async def finish_aggregate(
+        self, request_id: str, aggregate_state: AudioAggregateState, **ctx: Any
+    ) -> Dict[str, Any]:
+        """Encode all buffered raw chunks as one complete audio file.
+
+        Args:
+            request_id: Identifier included in the response and storage path.
+            aggregate_state: Buffered audio chunks and their shared metadata.
+            **ctx: Encoding, response, and speed options.
+
+        Returns:
+            Dict[str, Any]: Completed or failed audio response.
+
+        Raises:
+            ValueError: If buffered chunks cannot be concatenated.
+        """
+        if not aggregate_state.chunks or aggregate_state.sample_rate is None:
+            return self._error_response(request_id, "No audio generated")
+
+        audio_np = np.concatenate(aggregate_state.chunks, axis=-1)
+        response = await self.format(
+            {"audio": audio_np, "sr": aggregate_state.sample_rate},
+            request_id,
+            **ctx,
+        )
+        if response is None:
+            return self._error_response(request_id, "No audio generated")
+        return response
+
+    def _append_audio_chunk(
+        self,
+        state: AudioAggregateState,
+        audio_np: np.ndarray,
+        sample_rate: int,
+    ) -> None:
+        """Normalize and append one chunk to aggregate audio state.
+
+        Args:
+            state: Aggregate state receiving the normalized chunk.
+            audio_np: Raw mono or stereo audio samples.
+            sample_rate: Chunk sample rate in hertz.
+
+        Returns:
+            None.
+
+        Raises:
+            ValueError: If the chunk shape or metadata conflicts with prior chunks.
+        """
+        audio_np, num_channels, channel_axis = self._channel_first_audio(
+            audio_np,
+            expected_channels=state.num_channels,
+            expected_channel_axis=state.channel_axis,
+        )
+        self._validate_audio_metadata(state, sample_rate, num_channels, channel_axis)
+        if not state.cumulative:
+            state.chunks.append(audio_np)
+            return
+
+        # Snapshots only grow, but keep the longest rather than the latest so a
+        # truncated trailing payload cannot drop already-decoded audio.
+        if state.chunks and state.chunks[0].shape[-1] >= audio_np.shape[-1]:
+            return
+        state.chunks = [audio_np]
+
+    @staticmethod
+    def _validate_audio_metadata(
+        state: AudioStreamState | AudioAggregateState,
+        sample_rate: int,
+        num_channels: int,
+        channel_axis: int | None,
+    ) -> None:
+        """Validate and record stable audio-stream metadata.
+
+        Args:
+            state: Streaming or aggregate state to validate and update.
+            sample_rate: Current chunk sample rate in hertz.
+            num_channels: Current chunk channel count.
+            channel_axis: Original channel axis, or ``None`` for mono samples.
+
+        Returns:
+            None.
+
+        Raises:
+            ValueError: If sample rate, channel count, or layout changes.
+        """
+        if state.sample_rate is not None and state.sample_rate != sample_rate:
+            raise ValueError(
+                f"Audio sample rate changed from {state.sample_rate} to {sample_rate}"
+            )
+        if state.num_channels is not None and state.num_channels != num_channels:
+            raise ValueError("Audio channel count changed while generating")
+        if (
+            state.channel_axis is not None
+            and channel_axis is not None
+            and state.channel_axis != channel_axis
+        ):
+            raise ValueError("Audio channel layout changed while generating")
+        state.sample_rate = sample_rate
+        state.num_channels = num_channels
+        if channel_axis is not None:
+            state.channel_axis = channel_axis
+
+    def _extract_audio_tensor(
+        self,
+        mm_output: Dict[str, Any],
+        *,
+        chunk_state: AudioStreamState | AudioAggregateState | None = None,
+    ) -> tuple[np.ndarray, int]:
+        """Extract new float32 audio samples and their sample rate.
+
+        Args:
+            mm_output: Multimodal mapping containing audio and sample-rate data.
+            chunk_state: State used to skip chunks emitted previously.
+
+        Returns:
+            tuple[np.ndarray, int]: Audio samples and sample rate in hertz.
+
+        Raises:
+            ValueError: If audio data or sample-rate metadata is invalid.
+            RuntimeError: If listed tensors cannot be concatenated.
+            TypeError: If audio samples cannot be converted to a NumPy array.
+        """
         audio_key = "audio" if "audio" in mm_output else "model_outputs"
         audio_val = mm_output.get(audio_key)
         if audio_val is None:
@@ -354,6 +1049,19 @@ class AudioFormatter:
             )
 
         if isinstance(audio_val, list):
+            if chunk_state is not None:
+                # Slicing by a running count assumes each list *extends* the
+                # previous one. That holds only while the engine does not drain
+                # what it emits: a draining (``DELTA``) stage restarts its list
+                # at index 0, and this would then keep just the tail. Audex
+                # takes the delta path but yields bare tensors, which skip this
+                # branch entirely. If a stage ever emits multi-entry lists under
+                # DELTA, the count has to be per-payload rather than running.
+                new_audio = audio_val[chunk_state.emitted_chunks :]
+                chunk_state.emitted_chunks = len(audio_val)
+                audio_val = new_audio
+                if not audio_val:
+                    return np.empty(0, dtype=np.float32), self._sample_rate(mm_output)
             audio_val = torch.cat(audio_val, dim=-1)
 
         if hasattr(audio_val, "float"):
@@ -363,19 +1071,238 @@ class AudioFormatter:
         else:
             audio_np = np.array(audio_val, dtype=np.float32)
 
-        if audio_np.ndim > 1:
-            audio_np = audio_np.squeeze()
+        return audio_np, self._sample_rate(mm_output)
 
+    @staticmethod
+    def _sample_rate(mm_output: Dict[str, Any]) -> int:
+        """Resolve the latest sample rate from multimodal output.
+
+        Args:
+            mm_output: Multimodal mapping containing optional ``sr`` metadata.
+
+        Returns:
+            int: Resolved sample rate, defaulting to 24000 Hz.
+
+        Raises:
+            TypeError: If sample-rate metadata is not integer-compatible.
+            ValueError: If sample-rate metadata cannot be converted to an integer.
+            RuntimeError: If tensor metadata contains more than one value.
+        """
         sr_raw = mm_output.get("sr", 24000)
         if isinstance(sr_raw, list):
             sr_raw = sr_raw[-1] if sr_raw else 24000
-        sample_rate = sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
+        return sr_raw.item() if hasattr(sr_raw, "item") else int(sr_raw)
 
-        return audio_np, sample_rate
+    def _encode_audio_chunk(
+        self,
+        audio_np: np.ndarray,
+        sample_rate: int,
+        fmt: str,
+        stream_state: AudioStreamState,
+    ) -> tuple[bytes, str]:
+        """Encode one incremental audio chunk as PCM or streaming WAV.
+
+        Args:
+            audio_np: Raw mono or stereo audio samples.
+            sample_rate: Chunk sample rate in hertz.
+            fmt: Requested streaming format, ``"wav"`` or raw PCM.
+            stream_state: State tracking established stream metadata.
+
+        Returns:
+            tuple[bytes, str]: Encoded bytes and their media type.
+
+        Raises:
+            ValueError: If audio layout or metadata is invalid or changes.
+            sf.LibsndfileError: If PCM encoding fails.
+        """
+        audio_np, num_channels, channel_axis = self._normalize_audio_layout(
+            audio_np,
+            expected_channels=stream_state.num_channels,
+            expected_channel_axis=stream_state.channel_axis,
+        )
+        first_chunk = stream_state.sample_rate is None
+        self._validate_audio_metadata(
+            stream_state, sample_rate, num_channels, channel_axis
+        )
+        pcm_bytes, _ = self._write_audio(audio_np, sample_rate, "pcm")
+        if fmt == "wav" and first_chunk:
+            pcm_bytes = self._wav_stream_header(sample_rate, num_channels) + pcm_bytes
+        return pcm_bytes, "audio/wav" if fmt == "wav" else "audio/pcm"
+
+    @staticmethod
+    def _channel_first_audio(
+        audio_np: np.ndarray,
+        *,
+        expected_channels: int | None = None,
+        expected_channel_axis: int | None = None,
+    ) -> tuple[np.ndarray, int, int | None]:
+        """Normalize mono or stereo audio to vLLM-Omni's channel-first layout.
+
+        An established channel axis determines the layout, including for square
+        chunks. Otherwise, channel count can disambiguate the axes. Shapes that
+        remain ambiguous follow vLLM-Omni's channel-first contract.
+
+        Args:
+            audio_np: Audio samples in mono, batched, or two-dimensional layout.
+            expected_channels: Channel count established by earlier chunks.
+            expected_channel_axis: Channel axis established by earlier chunks.
+
+        Returns:
+            tuple[np.ndarray, int, int | None]: Channel-first samples, channel
+                count, and the original channel axis.
+
+        Raises:
+            ValueError: If the shape is unsupported or conflicts with prior layout.
+        """
+        if audio_np.ndim == 3:
+            if audio_np.shape[0] != 1:
+                raise ValueError(
+                    f"Expected one audio batch, got shape {audio_np.shape}"
+                )
+            audio_np = audio_np[0]
+
+        if audio_np.ndim == 1:
+            return audio_np, 1, None
+
+        if audio_np.ndim != 2:
+            raise ValueError(f"Unexpected audio shape {audio_np.shape}")
+
+        if expected_channel_axis is not None:
+            if expected_channel_axis not in (0, 1):
+                raise ValueError(f"Invalid audio channel axis {expected_channel_axis}")
+            num_channels = int(audio_np.shape[expected_channel_axis])
+            if num_channels not in (1, 2):
+                raise ValueError(
+                    "Audio channel layout changed while generating: "
+                    f"expected channel axis {expected_channel_axis}, "
+                    f"got shape {audio_np.shape}"
+                )
+            if expected_channel_axis == 0:
+                return audio_np, num_channels, 0
+            return audio_np.T, num_channels, 1
+
+        channel_first_possible = audio_np.shape[0] in (1, 2)
+        frame_major_possible = audio_np.shape[1] in (1, 2)
+        channel_axis = None
+
+        if expected_channels is not None:
+            channel_first_matches = audio_np.shape[0] == expected_channels
+            frame_major_matches = audio_np.shape[1] == expected_channels
+            if channel_first_matches and not frame_major_matches:
+                channel_axis = 0
+            elif frame_major_matches and not channel_first_matches:
+                channel_axis = 1
+
+        if channel_axis is None:
+            if channel_first_possible and frame_major_possible:
+                logger.warning(
+                    "Ambiguous audio shape %s without an established channel layout; "
+                    "assuming vLLM-Omni's channel-first layout",
+                    audio_np.shape,
+                )
+                channel_axis = 0
+            elif channel_first_possible:
+                channel_axis = 0
+            elif frame_major_possible:
+                channel_axis = 1
+            else:
+                raise ValueError(
+                    f"Expected mono or stereo audio, got shape {audio_np.shape}"
+                )
+
+        num_channels = int(audio_np.shape[channel_axis])
+        if channel_axis == 0:
+            return audio_np, num_channels, channel_axis
+        return audio_np.T, num_channels, channel_axis
+
+    @classmethod
+    def _normalize_audio_layout(
+        cls,
+        audio_np: np.ndarray,
+        *,
+        expected_channels: int | None = None,
+        expected_channel_axis: int | None = None,
+    ) -> tuple[np.ndarray, int, int | None]:
+        """Convert supported audio layouts to soundfile's frame-major layout.
+
+        Args:
+            audio_np: Raw mono or stereo audio samples.
+            expected_channels: Channel count established by earlier chunks.
+            expected_channel_axis: Channel axis established by earlier chunks.
+
+        Returns:
+            tuple[np.ndarray, int, int | None]: Frame-major samples, channel
+                count, and the original channel axis.
+
+        Raises:
+            ValueError: If the shape is unsupported or conflicts with prior layout.
+        """
+        audio_np, num_channels, channel_axis = cls._channel_first_audio(
+            audio_np,
+            expected_channels=expected_channels,
+            expected_channel_axis=expected_channel_axis,
+        )
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return audio_np, num_channels, channel_axis
+
+    @staticmethod
+    def _wav_stream_header(
+        sample_rate: int, num_channels: int = 1, bits_per_sample: int = 16
+    ) -> bytes:
+        """Build a PCM WAV header whose payload length is not known yet.
+
+        Args:
+            sample_rate: Audio sample rate in hertz.
+            num_channels: Number of interleaved audio channels.
+            bits_per_sample: PCM bit depth for each sample.
+
+        Returns:
+            bytes: WAV header with placeholder RIFF and data lengths.
+
+        Raises:
+            struct.error: If a numeric field does not fit the WAV header layout.
+        """
+        byte_rate = sample_rate * num_channels * bits_per_sample // 8
+        block_align = num_channels * bits_per_sample // 8
+        placeholder_size = 0xFFFFFFFF
+
+        return struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            placeholder_size,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            num_channels,
+            sample_rate,
+            byte_rate,
+            block_align,
+            bits_per_sample,
+            b"data",
+            placeholder_size,
+        )
 
     def _encode_audio(
         self, audio_np: Any, sample_rate: int, fmt: str = "wav", speed: float = 1.0
-    ) -> tuple:
+    ) -> tuple[bytes, str]:
+        """Normalize, optionally retime, and encode complete audio.
+
+        Args:
+            audio_np: Raw mono or stereo audio samples.
+            sample_rate: Audio sample rate in hertz.
+            fmt: Requested output format.
+            speed: Playback-speed multiplier applied when librosa is available.
+
+        Returns:
+            tuple[bytes, str]: Encoded audio bytes and their media type.
+
+        Raises:
+            ValueError: If the audio layout or speed is invalid.
+            sf.LibsndfileError: If audio encoding fails.
+        """
+        audio_np, _, _ = self._channel_first_audio(audio_np)
         if speed != 1.0:
             try:
                 import librosa
@@ -384,6 +1311,28 @@ class AudioFormatter:
             except ImportError:
                 logger.warning("librosa not installed, ignoring speed adjustment")
 
+        if audio_np.ndim == 2:
+            audio_np = audio_np.T
+        return self._write_audio(audio_np, sample_rate, fmt)
+
+    @staticmethod
+    def _write_audio(
+        audio_np: np.ndarray, sample_rate: int, fmt: str
+    ) -> tuple[bytes, str]:
+        """Encode frame-major audio with soundfile.
+
+        Args:
+            audio_np: Frame-major mono or stereo samples.
+            sample_rate: Audio sample rate in hertz.
+            fmt: Requested output format; unsupported values fall back to WAV.
+
+        Returns:
+            tuple[bytes, str]: Encoded audio bytes and their media type.
+
+        Raises:
+            sf.LibsndfileError: If the selected codec cannot encode the audio.
+            TypeError: If samples or format parameters are incompatible.
+        """
         fmt = (fmt or "wav").lower()
         format_map = {
             "wav": ("WAV", "audio/wav", {}),
@@ -405,6 +1354,15 @@ class AudioFormatter:
         return buf.getvalue(), media_type
 
     def _error_response(self, request_id: str, error: str) -> Dict[str, Any]:
+        """Build a failed audio-speech response.
+
+        Args:
+            request_id: Identifier included in the response.
+            error: User-facing error description.
+
+        Returns:
+            Dict[str, Any]: Serialized failed audio response.
+        """
         return NvAudioSpeechResponse(
             id=request_id,
             model=self._model_name,
@@ -417,7 +1375,16 @@ class AudioFormatter:
 def _error_chunk(
     request_id: str, model_name: str, error_message: str
 ) -> Dict[str, Any]:
-    """Error response in OpenAI chat.completion.chunk format."""
+    """Build an OpenAI chat-completion error chunk.
+
+    Args:
+        request_id: Identifier included in the response chunk.
+        model_name: Model identifier included in the response chunk.
+        error_message: User-facing error description.
+
+    Returns:
+        Dict[str, Any]: Serialized chat-completion error chunk.
+    """
     return {
         "id": request_id,
         "created": int(time.time()),
@@ -434,7 +1401,19 @@ def _error_chunk(
 
 
 def _build_completion_usage(request_output: Any) -> Dict[str, Any]:
-    """Build completion usage stats from a vLLM RequestOutput."""
+    """Build token-usage statistics from a vLLM request output.
+
+    Args:
+        request_output: Request output containing prompt and completion token IDs.
+
+    Returns:
+        Dict[str, Any]: Prompt, completion, total, and cached-token statistics.
+
+    Raises:
+        AttributeError: If required output token fields are missing.
+        IndexError: If the request output contains no choices.
+        TypeError: If token identifiers do not provide a length.
+    """
     prompt_token_ids = getattr(request_output, "prompt_token_ids", None)
     prompt_tokens = (
         len(prompt_token_ids)
@@ -468,11 +1447,24 @@ class OutputFormatter:
         media_http_url: Optional[str] = None,
         default_fps: int = 16,
     ) -> None:
+        """Initialize modality-specific output formatters.
+
+        Args:
+            model_name: Model identifier included in responses.
+            media_fs: Storage backend used for URL responses.
+            media_http_url: Public base URL for stored media.
+            default_fps: Frame rate used when video metadata omits one.
+
+        Returns:
+            None.
+        """
+        diffusion_formatter = DiffusionFormatter(
+            model_name, media_fs, media_http_url, default_fps
+        )
         self._formatters: Dict[str, Any] = {
             "text": TextFormatter(model_name),
-            "image": DiffusionFormatter(
-                model_name, media_fs, media_http_url, default_fps
-            ),
+            "image": diffusion_formatter,
+            "video": diffusion_formatter,
             "audio": AudioFormatter(model_name, media_fs, media_http_url),
         }
 
@@ -484,6 +1476,21 @@ class OutputFormatter:
         request_type: Any = None,
         **ctx: Any,
     ) -> Dict[str, Any] | None:
+        """Dispatch a stage output to its modality formatter.
+
+        Args:
+            stage_output: vLLM-Omni output carrying ``final_output_type``.
+            request_id: Identifier included in the formatted response.
+            request_type: Request kind used by diffusion formatting.
+            **ctx: Modality-specific formatting and stream-state options.
+
+        Returns:
+            Dict[str, Any] | None: Formatted response or ``None`` when unsupported.
+
+        Raises:
+            ValueError: If modality-specific formatting options are invalid.
+            AttributeError: If a text output lacks required generation fields.
+        """
         fmt_type = getattr(stage_output, "final_output_type", None)
         formatter = self._formatters.get(fmt_type) if fmt_type else None
         if formatter is None:
@@ -500,4 +1507,27 @@ class OutputFormatter:
 
         return await formatter.format(
             stage_output, request_id, request_type=request_type, **ctx
+        )
+
+    async def finish_audio(
+        self,
+        request_id: str,
+        aggregate_state: AudioAggregateState,
+        **ctx: Any,
+    ) -> Dict[str, Any]:
+        """Finalize buffered audio through the audio formatter.
+
+        Args:
+            request_id: Identifier included in the formatted response.
+            aggregate_state: Buffered audio chunks and their shared metadata.
+            **ctx: Audio encoding, response, and speed options.
+
+        Returns:
+            Dict[str, Any]: Completed or failed audio response.
+
+        Raises:
+            ValueError: If buffered chunks cannot be concatenated.
+        """
+        return await self._formatters["audio"].finish_aggregate(
+            request_id, aggregate_state, **ctx
         )

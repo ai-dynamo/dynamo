@@ -119,7 +119,7 @@ impl TokenLogProbs {
 /// Trait for extracting logprob information from various response types
 pub trait LogprobExtractor {
     /// Extract logprobs organized by choice index
-    /// Returns: HashMap<choice_index, Vec<TokenLogProbs>>
+    /// Returns: `HashMap<choice_index, Vec<TokenLogProbs>>`
     fn extract_logprobs_by_choice(&self) -> HashMap<u32, Vec<TokenLogProbs>>;
 }
 
