@@ -300,6 +300,130 @@ fn tool_name_requests(name: &str) -> [(&'static str, Value, bool); 3] {
     ]
 }
 
+fn strict_tool_requests(function: Value) -> [(&'static str, Value); 3] {
+    let mut flat = function.clone();
+    flat["type"] = json!("function");
+    [
+        (
+            "/v1/chat/completions",
+            json!({
+                "model": MODEL, "messages": [{"role": "user", "content": "ping"}],
+                "tools": [{"type": "function", "function": function}]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [flat]
+            }),
+        ),
+        (
+            "/v1/responses",
+            json!({
+                "model": MODEL, "input": "ping", "tools": [{
+                    "type": "namespace", "name": "utilities", "description": "Utility functions",
+                    "tools": [flat]
+                }]
+            }),
+        ),
+    ]
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_rejected_before_dispatch() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let svc = HarnessService::start(Vec::new()).await;
+        for (parameters, detail) in [
+            (json!({"type": "object", "properties": {"query": {"type": "string", "minLength": 1}}}), "additionalProperties"),
+            (json!({"type": "object", "properties": {"query": {"type": "string"}}, "additionalProperties": false}), "required"),
+        ] {
+            for (path, body) in strict_tool_requests(json!({
+                "name": "search", "strict": true, "parameters": parameters
+            })) {
+                for stream in [false, true] {
+                    for choice in [json!("auto"), json!("none"), json!({
+                        "type": "allowed_tools", "mode": "auto",
+                        "tools": [{"type": "function", "name": "retained"}]
+                    })] {
+                        if choice.is_object() && path != "/v1/responses" {
+                            continue;
+                        }
+                        let mut body = body.clone();
+                        body["stream"] = json!(stream);
+                        if choice.is_object() {
+                            body["tools"].as_array_mut().unwrap().push(json!({
+                                "type": "function", "name": "retained"
+                            }));
+                        }
+                        body["tool_choice"] = choice;
+                        let response = post_json(&svc, path, body).await;
+                        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                        let error: Value = response.json().await.unwrap();
+                        assert_eq!(error["code"], 400);
+                        assert_eq!(error["type"], "Bad Request");
+                        let message = error["message"].as_str().unwrap();
+                        let prefix = if path == "/v1/responses" {
+                            "Failed to convert responses request: "
+                        } else {
+                            "Validation: "
+                        };
+                        assert!(message.starts_with(prefix), "{message}");
+                        assert!(message.contains("Invalid schema for function 'search': In context="), "{message}");
+                        assert!(message.contains(detail), "{message}");
+                        assert!(svc.engine.take_requests().await.is_empty());
+                    }
+                }
+            }
+        }
+        for request_type in [RequestType::Unary, RequestType::Stream] {
+            assert_error_metrics(&svc, &Endpoint::Responses, &request_type,
+                &[(ErrorType::Validation, 12), (ErrorType::Internal, 0)]);
+        }
+        svc.shutdown().await;
+    }).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn strict_tool_schema_acceptance_preserves_submitted_functions() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let valid = json!({"type": "object", "properties": {"query": {"type": "string", "minLength": 1}}, "required": ["query"], "additionalProperties": false});
+        let loose = json!({"type": "object", "properties": {"query": {"type": "string"}}});
+        let mut functions = vec![json!({"name": "search", "strict": true, "parameters": valid})];
+        for strict in [None, Some(json!(false)), Some(Value::Null)] {
+            let mut function = json!({"name": "search", "parameters": loose});
+            if let Some(strict) = strict { function["strict"] = strict; }
+            functions.push(function);
+        }
+        functions.push(json!({"name": "search", "strict": true}));
+        functions.push(json!({"name": "search", "strict": true, "parameters": null}));
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; functions.len() * 6]).await;
+        for function in functions {
+            for (path, body) in strict_tool_requests(function.clone()) {
+                for stream in [false, true] {
+                    let mut body = body.clone();
+                    body["stream"] = json!(stream);
+                    let response = post_json(&svc, path, body).await;
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                    response.bytes().await.unwrap();
+                    let requests = svc.engine.take_requests().await;
+                    assert_eq!(requests.len(), 1);
+                    let tools = requests[0].inner.tools.as_ref().unwrap();
+                    assert_eq!(tools.len(), 1);
+                    let actual = &tools[0].function;
+                    assert_eq!(actual.name, "search");
+                    assert_eq!(actual.strict, function["strict"].as_bool());
+                    assert_eq!(actual.parameters.as_ref(), function.get("parameters").filter(|v| !v.is_null()));
+                }
+            }
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    }).await;
+}
+
 fn dynamo_error(error_type: DynamoErrorType, message: &str) -> anyhow::Error {
     anyhow::Error::new(
         DynamoError::builder()
