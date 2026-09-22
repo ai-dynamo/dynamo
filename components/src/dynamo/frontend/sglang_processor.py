@@ -732,6 +732,10 @@ class SglangProcessor:
         post_proc_total_ms = 0.0
         created_ts = int(time.time())
         stream_interval = self.stream_interval
+        stream_options = request.get("stream_options") or {}
+        continuous_usage = stream_options.get(
+            "include_usage", False
+        ) and stream_options.get("continuous_usage_stats", False)
 
         try:
             dynamo_stream = await self.routed_engine.generate(
@@ -745,7 +749,7 @@ class SglangProcessor:
             pending_token_ids: list[int] = []
             pending_log_probs: list[float] | None = None
             pending_top_logprobs: list[list[dict[str, Any]]] | None = None
-            pending_usage: dict[str, Any] | None = None
+            latest_usage: dict[str, Any] | None = None
             first_chunk = True
             input_tokens = len(tokens)
             cumulative_output_tokens = 0
@@ -767,7 +771,7 @@ class SglangProcessor:
                 nonlocal pending_token_ids
                 nonlocal pending_log_probs
                 nonlocal pending_top_logprobs
-                nonlocal pending_usage
+                nonlocal latest_usage
                 nonlocal first_chunk
                 nonlocal post_proc_total_ms
                 nonlocal token_count
@@ -789,13 +793,13 @@ class SglangProcessor:
 
                 choice = post.process_output(mapped_response)
 
-                if post.locally_finished and pending_usage is None:
-                    pending_usage = {
+                if post.locally_finished and latest_usage is None:
+                    latest_usage = {
                         "prompt_tokens": input_tokens,
                         "completion_tokens": cumulative_output_tokens,
                         "total_tokens": input_tokens + cumulative_output_tokens,
                     }
-                usage_for_metrics = pending_usage
+                usage_for_metrics = latest_usage
 
                 if self.debug_perf:
                     t_pp1 = time.monotonic()
@@ -811,8 +815,18 @@ class SglangProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if pending_usage:
-                        dynamo_out["usage"] = pending_usage
+                    if latest_usage and (
+                        finish_reason
+                        or post.locally_finished
+                        or continuous_usage
+                        or not request.get("stream", False)
+                    ):
+                        prompt_tokens = latest_usage.get("prompt_tokens", input_tokens)
+                        dynamo_out["usage"] = {
+                            **latest_usage,
+                            "completion_tokens": cumulative_output_tokens,
+                            "total_tokens": prompt_tokens + cumulative_output_tokens,
+                        }
                     response_nvext: dict[str, Any] = {}
                     effective_stop_reason = (
                         stop_reason
@@ -854,7 +868,6 @@ class SglangProcessor:
                 pending_token_ids = []
                 pending_log_probs = None
                 pending_top_logprobs = None
-                pending_usage = None
                 first_chunk = False
                 return envelope
 
@@ -915,7 +928,15 @@ class SglangProcessor:
                 stop_terminated = raw_finish_reason in {"eos", "stop"}
 
                 if usage := engine_response.get("completion_usage"):
-                    pending_usage = usage
+                    # Cache reports can be sparse and arrive on buffered chunks.
+                    latest_usage = {
+                        **(latest_usage or {}),
+                        **{
+                            key: value
+                            for key, value in usage.items()
+                            if value is not None
+                        },
+                    }
                 engine_data = engine_response.get("engine_data")
 
                 pending_token_ids.extend(new_ids)

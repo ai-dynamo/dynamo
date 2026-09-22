@@ -3340,7 +3340,6 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens += len(token_ids)
                     total_output_tokens_by_index[
                         output_idx
                     ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
@@ -3363,6 +3362,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
+                    total_output_tokens += len(token_ids)
                     out = {
                         "index": output_idx,
                         "token_ids": token_ids,

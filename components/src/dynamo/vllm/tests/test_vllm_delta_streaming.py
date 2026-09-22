@@ -294,7 +294,7 @@ async def test_generate_tokens_tracks_interleaved_output_indexes_independently()
         (1, [12]),
         (1, []),
     ]
-    assert chunks[2]["completion_usage"]["completion_tokens"] == 5
+    assert chunks[2]["completion_usage"]["completion_tokens"] == 4
     assert chunks[-1]["completion_usage"]["completion_tokens"] == 5
     assert "completion_usage" not in chunks[3]
     assert [
@@ -302,9 +302,9 @@ async def test_generate_tokens_tracks_interleaved_output_indexes_independently()
         for chunk in chunks
         if "completion_usage" in chunk
     ] == [
+        1,
         3,
-        3,
-        5,
+        4,
         5,
     ]
 
