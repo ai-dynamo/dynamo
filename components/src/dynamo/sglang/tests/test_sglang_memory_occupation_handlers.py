@@ -238,3 +238,20 @@ async def test_clear_kv_blocks_reports_flush_exception(handler):
     chunks = [chunk async for chunk in handler.clear_kv_blocks({})]
 
     assert chunks == [{"status": "error", "message": "flush crashed"}]
+
+
+@pytest.mark.parametrize("flag", ["handoff", "release_failover_lock"])
+@pytest.mark.asyncio
+async def test_cooperative_handoff_fails_closed_without_mutating_worker(handler, flag):
+    lock = SimpleNamespace(release=AsyncMock())
+    handler._gms_failover_lock = lock
+
+    result = await handler.release_memory_occupation({flag: True})
+
+    assert result["status"] == "error"
+    assert "writer-cohort fencing" in result["message"]
+    lock.release.assert_not_awaited()
+    assert handler._gms_failover_lock is lock
+    handler.generate_endpoint.unregister_endpoint_instance.assert_not_awaited()
+    handler.engine.tokenizer_manager.pause_generation.assert_not_awaited()
+    handler.engine.tokenizer_manager.release_memory_occupation.assert_not_awaited()
