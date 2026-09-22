@@ -526,7 +526,10 @@ impl Client {
 
         // Send the snapshot before returning so it is immediately available to consumers
         if let Some(kvs) = existing_kvs {
-            tracing::trace!("sending {} existing kvs as the initial snapshot", kvs.len());
+            tracing::trace!(
+                count = kvs.len(),
+                "sending the existing kvs as the initial snapshot"
+            );
             tx.send(WatchEvent::Resync(kvs)).await?;
         }
 
@@ -1056,6 +1059,8 @@ impl KvCache {
 
             tokio::spawn(async move {
                 let mut rx = watcher.rx;
+                // The first resync is the initial snapshot; a later one means the watch reconnected.
+                let mut is_established = false;
 
                 while let Some(event) = rx.recv().await {
                     match event {
@@ -1082,11 +1087,20 @@ impl KvCache {
                                 replacement.insert(key, value);
                             }
 
-                            tracing::warn!(
-                                prefix,
-                                new_count = replacement.len(),
-                                "KvCache replacing state from etcd watch resync"
-                            );
+                            if is_established {
+                                tracing::warn!(
+                                    prefix,
+                                    new_count = replacement.len(),
+                                    "KvCache replacing state from etcd watch resync"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    prefix,
+                                    count = replacement.len(),
+                                    "KvCache loaded the initial snapshot"
+                                );
+                            }
+                            is_established = true;
                             let mut cache_write = cache.write().await;
                             *cache_write = replacement;
                         }
