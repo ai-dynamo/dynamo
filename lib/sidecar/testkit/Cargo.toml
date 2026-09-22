@@ -12,6 +12,18 @@ repository.workspace = true
 description = "CPU-only test infrastructure for Dynamo sidecars"
 publish = false
 
+[features]
+process-tests = []
+native-tests = []
+
+[[test]]
+name = "cross_process"
+required-features = ["process-tests"]
+
+[[test]]
+name = "native_engine"
+required-features = ["native-tests"]
+
 [dependencies]
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -30,3 +42,11 @@ tokio-stream = { workspace = true, features = ["net"] }
 tonic = { workspace = true }
 tonic-v14 = { workspace = true }
 tonic-health-v14 = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+dynamo-runtime = { workspace = true }
+dynamo-llm = { path = "../../llm", default-features = false }
+tempfile = { workspace = true }
+tokio-util = { workspace = true }
+libc = { workspace = true }
+prost-types-v14 = { workspace = true }

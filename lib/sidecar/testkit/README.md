@@ -13,10 +13,12 @@ construction, and assertions wherever the sidecar contract is the same. Keep
 native protocol details in small framework adapters. Add future tests to these
 boundaries instead of creating another independent fake server for each test.
 
-The initial scope is four scenario families: streaming, failures, cancellation,
-and cleanup. Each runs against both frameworks, giving eight registered tests.
-TensorRT-LLM remains outside this increment because it has no corresponding
-Mocker server.
+The foundation has four scenario families: streaming, failures, cancellation,
+and cleanup. Each remains covered for both vLLM and SGLang. The integration
+increment extends vLLM's existing families and adds distinct vLLM cases without
+registering the foundation's vLLM cases a second time. Its refreshed conformance
+suite collected and passed nine vLLM and four retained SGLang cases.
+No new SGLang or TensorRT-LLM scenario or native-engine activation is added.
 
 The stack is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879) (this
 foundation), [#15089](https://github.com/ai-dynamo/dynamo/pull/15089) (isolated
@@ -64,14 +66,14 @@ infrastructure from becoming part of their normal dependency graph.
 
 | Location | Responsibility |
 |---|---|
-| `src/server.rs` | Bind an available localhost port, own the server task, await bounded shutdown, and abort on drop if explicit teardown did not finish. |
+| `src/server.rs` | Bind an available localhost port, contain server connections/handlers in an owned runtime, and bound explicit shutdown and fallback cleanup. |
 | `src/control.rs` | Per-request plans, persistent observations, explicit pause/release coordination, and native-response interception. |
 | `src/fixtures.rs` | Construct ordinary `PreprocessedRequest` values and collect actual sidecar outputs. |
 | `src/assert.rs` | Assert exact token preservation, terminal placement, usage, and typed errors. |
 | `src/lib.rs` | Export the helpers and provide labeled, bounded waits. |
 | `tests/support/mod.rs` | Define the fixture interface and configuration shared by the two adapters. |
 | `tests/support/{vllm,sglang}.rs` | Start each existing Mocker service, construct its real sidecar, delegate RPCs, and interpret native messages. |
-| `tests/conformance.rs` | Define the four shared scenarios and enroll each backend once, generating its four tests. |
+| `tests/conformance.rs` and `tests/conformance/` | Enroll retained SGLang and extended vLLM scenarios without duplicating the four foundation vLLM cases. |
 
 Framework adapters are shared within the central integration suite. They are not
 public fixture APIs for other crates. Pure tests beside the sidecar implementation
@@ -125,7 +127,7 @@ tokenized generation RPC has no model selector.
 | Streaming (R09) | Exact tokens, one final length response, correct usage, and ignored data after completion. | Default forwarding and terminal replay; configurable model and connection count; native observations and shared assertions. |
 | Failures (R11) | Opening failure, premature EOF, and read failure preserve delivered tokens and report a typed error. | Opening control, response checkpoint, explicit release, and framework-specific error mapping. |
 | Cancellation (R12) | Cancellation before submission, while opening, and while waiting for another response. | Independently controlled requests A and B: pause A after two token responses and B after one, cancel A, verify B remains pending, then release B to normal completion. |
-| Cleanup (R13) | Generation before startup fails; repeated cleanup succeeds; cleanup cancels an active stream. | Separate construction/startup, unsubmitted-request observation, remote stream release, and explicit server teardown. |
+| Cleanup (R13) | Active-stream cleanup remains covered for both backends. SGLang retains before-start and repeated-cleanup checks; the vLLM no-I/O subsection moves to its isolated worker unit. | Separate construction/startup, unsubmitted-request observation, remote stream release, and explicit server teardown. |
 
 The two-request cancellation case also checks a focused part of R14: cancelling
 one request must not terminate another. It does not claim full concurrency or
@@ -137,9 +139,9 @@ Premature EOF remains a typed error in this branch: `Unknown` for vLLM and
 `EngineShutdown` for SGLang. These tests preserve the sidecar's production error
 contract.
 
-## Adding the rest of the suite
+## Choosing the owning layer
 
-| Future test | Where to add it | What to reuse or extend |
+| Behavior | Owning layer | What to reuse or extend |
 |---|---|---|
 | Endpoint/configuration parsing and request conversion | A test module beside the implementation | Existing value builders or assertions where useful; no server. |
 | Shared stream, cancellation, or lifecycle behavior | A new scenario in the central integration suite | Both existing fixtures, per-request controls, and output assertions. |
@@ -165,27 +167,60 @@ time. They do not test elapsed deadlines or rely on shortened sleeps.
 
 ## Running and validating
 
+The stack is refreshed onto main `4a0547f8ba2675f14d50e48d6aec53b1bc3cf3e3`; pinned vLLM 0.29.0 and
+`vllm-proto` 0.3.0 are unchanged. [UNITS.md](UNITS.md),
+[COVERAGE.md](COVERAGE.md), [PROCESS.md](PROCESS.md) and [NATIVE.md](NATIVE.md)
+record owners, commands and limits. [SUPPORT.md](SUPPORT.md) preserves the full
+capability mapping; [DEVIATIONS.md](DEVIATIONS.md) records changes separately
+from the read-only DEP. #15088 is superseded by the user-approved stack.
+
 ```bash
-cargo test --locked -p dynamo-sidecar-testkit --test conformance
-cargo clippy --locked -p dynamo-sidecar-testkit --all-targets --no-deps -- -D warnings
+python3 lib/sidecar/testkit/run.py --level unit --list
+python3 lib/sidecar/testkit/run.py --level pre-merge
+python3 lib/sidecar/testkit/run.py --level integration
 ```
 
-The crate is a workspace member, so the existing pre-merge workspace Rust test
-job discovers all eight cases without a feature flag or separate CI job. Tests
-start their servers inside the Rust test process on OS-assigned ports. GPU-free
-execution can also be checked with `CUDA_VISIBLE_DEVICES=` and
-`NVIDIA_VISIBLE_DEVICES=void`.
+`unit` selects common code once and vLLM's isolated modules. `wire` includes the
+retained SGLang foundation and Mocker coverage alongside vLLM's wire coverage.
+`process` launches actual vLLM sidecars; `integration` combines wire and process.
+`pre-merge` combines units and wire. `all` selects CPU layers; native engine
+execution requires its separate launcher. No new SGLang units/process/native
+fixtures are implied by retaining its existing wire coverage.
 
-Retain the existing Mocker `tests/sidecar.rs` suites when migrating these four
-scenarios. They cover logprobs, scheduler cancellation, and prefill/decode handoff
-that these shared scenarios do not replace. This harness adds coverage without
-removing those suites.
+Export and execute the same CPU selection without engines, GPU devices, model
+caches or external networking. Place the artifact directory outside the source
+checkout on the configured build storage:
 
-For this increment, acceptance requires eight shared cases passing, including
-two-request cancellation isolation, the existing Mocker sidecar integration
-tests passing, formatting and Clippy passing, and no production sidecar/Mocker
-behavior changes. When native protocol APIs change, update the adapters and
-rerun both the shared cases and the retained Mocker integration suites.
+```bash
+python3 lib/sidecar/testkit/run.py --level integration --export "$artifacts"
+docker build -f lib/sidecar/testkit/CPU.Dockerfile -t sidecar-cpu "$artifacts"
+docker run --rm --network none sidecar-cpu --level integration
+```
+
+Use Rust 1.96.1, protoc 30.2, matching `PROTOC`/`PROTOC_INCLUDE`, and an external
+`CARGO_TARGET_DIR`. The runner collects selected cases before execution and
+rejects empty, missing or duplicate targets, failures, ignored cases and count
+mismatches. Refreshed #14879 at `286d6fd5` passed eight shared and eight retained Mocker
+cases plus Clippy. #15089 at `b3ab1638513e255828acddc40f045d069ed6bc33`
+passed 62 isolated cases in the CPU container, 102 total common/vLLM library
+cases, eight shared conformance cases and eight retained Mocker cases; formatting,
+Clippy, pre-commit and ownership checks passed. These selections overlap and
+must not be added.
+
+The #15091 integration candidate based on `b3ab1638` passed all 124 selected
+cases in the isolated CPU container: 62 units, 56 wire cases and six process
+cases, with zero ignored. The wire selection includes nine vLLM/four SGLang
+conformance cases, two vLLM/four SGLang Mocker cases, and two common/35 vLLM
+retained library cases. The vLLM-only selector separately collected 116 cases;
+that collection is not another execution. All-target Clippy with both integration
+features and formatting passed. [COVERAGE.md](COVERAGE.md) records commands and
+[PROCESS.md](PROCESS.md) records the refreshed runtime regressions. Native
+compatibility and cancellation passed; handoff reproduced its upstream blocker,
+as recorded in [NATIVE.md](NATIVE.md). Final current-head CI remains pending.
+Older CPU/native/CI results remain labeled historical.
+
+Default CPU unit/wire coverage remains pre-merge. New process/native CI follows
+the post-merge/nightly allocation; existing E2E allocation is preserved.
 
 ## Limits of the evidence
 
@@ -197,28 +232,11 @@ intended for bounded correctness tests, not long-running load generators.
 Cancellation checks observe the server-side RPC being dropped and the Mocker's
 registered response routes being released. The fast simulated scheduler may
 already have completed, so those checks do not prove interruption of active
-scheduler work. Existing integration tests retain that coverage.
+scheduler work. The additional vLLM scheduler-active cases and retained SGLang Mocker tests
+address their distinct CPU scheduler assertions; actual engine release remains
+separate native coverage.
 
 A Mocker can share a protocol misunderstanding with a sidecar. Real-engine
 compatibility, model inference, and actual KV-cache transfer remain separate
 integration/nightly concerns. Their results cannot be inferred from this CPU-only
 suite.
-
-<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
-<!-- SPDX-License-Identifier: Apache-2.0 -->
-
-## Isolated unit increment
-
-[#15089](https://github.com/ai-dynamo/dynamo/pull/15089) adds isolated units for
-shared production code and vLLM on this foundation. The existing four wire
-families still run for both vLLM and SGLang; both retained Mocker suites and
-existing E2E scheduling remain. Only vLLM's before-start/repeated-cleanup wire
-subsection moves to its isolated unit replacement; SGLang's checks remain.
-
-The unit runner selects `unit_` modules only and runs common code once. Its
-historical 62-case result does not certify the restacked revision: collection,
-execution and current-head CI remain pending. See [UNITS.md](UNITS.md) for the
-full matrix and commands, [COVERAGE.md](COVERAGE.md) for retained and upcoming
-coverage, and [DEVIATIONS.md](DEVIATIONS.md) for departures from the read-only DEP.
-Additional vLLM wire, process and native-engine work belongs to
-[#15091](https://github.com/ai-dynamo/dynamo/pull/15091).
