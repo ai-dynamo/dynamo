@@ -140,8 +140,8 @@ class ExternalEncoderResult:
             raise ValueError(
                 "external encoder row_splits must contain non-negative integers"
             )
-        if any(left > right for left, right in zip(row_splits, row_splits[1:])):
-            raise ValueError("external encoder row_splits must be non-decreasing")
+        if any(left >= right for left, right in zip(row_splits, row_splits[1:])):
+            raise ValueError("external encoder row_splits must be strictly increasing")
         if isinstance(self.image_token_id, bool) or not isinstance(
             self.image_token_id, int
         ):

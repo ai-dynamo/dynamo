@@ -3,7 +3,10 @@
 
 """Tests for external encoder results consumed by stock vLLM."""
 
+from collections.abc import Mapping
+from threading import get_ident
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,6 +20,7 @@ from dynamo.common.external_encoder import (
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.handlers import BYPASS_REMOTE_PREFILL_ANNOTATION, DecodeWorkerHandler
+from dynamo.vllm.multimodal_utils import external_encoder as external_encoder_module
 from dynamo.vllm.multimodal_utils.external_encoder import ExternalEncoderPromptLoader
 
 pytestmark = [
@@ -90,6 +94,34 @@ async def test_loader_builds_mixed_prompt_from_request_plane_features() -> None:
     torch.testing.assert_close(prompt["prompt_embeds"][4], packed[2])
 
 
+async def test_loader_reconstructs_prompt_off_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_loop_thread = get_ident()
+    decode_thread: int | None = None
+    original_decode = external_encoder_module.decode_request_plane_tensor
+
+    def tracked_decode(payload: Mapping[str, Any]) -> torch.Tensor:
+        nonlocal decode_thread
+        decode_thread = get_ident()
+        return original_decode(payload)
+
+    monkeypatch.setattr(
+        external_encoder_module,
+        "decode_request_plane_tensor",
+        tracked_decode,
+    )
+    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+
+    await loader.load(
+        _encoder_result(row_splits=(0, 3)),
+        [_IMAGE_TOKEN_ID],
+    )
+
+    assert decode_thread is not None
+    assert decode_thread != event_loop_thread
+
+
 @pytest.mark.parametrize(
     "model_config,engine_args,match",
     [
@@ -119,11 +151,6 @@ def test_loader_rejects_incompatible_decoder_configuration(
             (0, 3),
             "expected decoder dtype",
         ),
-        (
-            torch.ones((2, _HIDDEN), dtype=torch.bfloat16),
-            (0, 0, 2),
-            "empty image",
-        ),
     ],
 )
 async def test_loader_rejects_invalid_tensor(
@@ -138,6 +165,19 @@ async def test_loader_rejects_invalid_tensor(
         await loader.load(
             _encoder_result(packed, row_splits=row_splits),
             token_ids,
+        )
+
+
+async def test_loader_rejects_empty_image_row_split() -> None:
+    packed = torch.ones((2, _HIDDEN), dtype=torch.bfloat16)
+    encoder_result = _encoder_result(packed, row_splits=(0, 2))
+    encoder_result["row_splits"] = [0, 0, 2]
+    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+
+    with pytest.raises(InvalidArgument, match="strictly increasing"):
+        await loader.load(
+            encoder_result,
+            [_IMAGE_TOKEN_ID, _IMAGE_TOKEN_ID],
         )
 
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -50,6 +51,15 @@ class ExternalEncoderPromptLoader:
     ) -> EmbedsPrompt:
         """Decode packed feature rows and adapt them to vLLM mixed mode."""
 
+        return await asyncio.to_thread(self._load_sync, encoder_result, token_ids)
+
+    def _load_sync(
+        self,
+        encoder_result: Mapping[str, Any],
+        token_ids: list[int],
+    ) -> EmbedsPrompt:
+        """Reconstruct one prompt outside the request event loop."""
+
         try:
             parsed = ExternalEncoderResult.from_dict(encoder_result)
             packed = decode_request_plane_tensor(parsed.features)
@@ -72,8 +82,6 @@ class ExternalEncoderPromptLoader:
                 packed[start:end]
                 for start, end in zip(parsed.row_splits, parsed.row_splits[1:])
             ]
-            if any(row.shape[0] == 0 for row in rows):
-                raise ValueError("external encoder row_splits contain an empty image")
             prompt_embeds, prompt_token_ids, prompt_is_token_ids = build_mixed_embeds(
                 token_ids,
                 rows,

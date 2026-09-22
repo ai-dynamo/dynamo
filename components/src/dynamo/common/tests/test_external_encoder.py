@@ -100,3 +100,14 @@ def test_external_encoder_result_covers_packed_rows() -> None:
             row_splits=(0, 2),
             image_token_id=99,
         )
+
+
+def test_external_encoder_result_rejects_empty_image() -> None:
+    features = encode_request_plane_tensor(torch.ones((3, 4)))
+
+    with pytest.raises(ValueError, match="strictly increasing"):
+        ExternalEncoderResult(
+            features=features,
+            row_splits=(0, 0, 3),
+            image_token_id=99,
+        )
