@@ -450,6 +450,8 @@ navigation:
                     contents:
                       - page: Configuration and Tuning
                         path: pages/developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md
+                      - page: Router Presets
+                        path: pages/developer-guide/knowledge-base/modular-components/router/router-presets.md
                       - page: Router Operations
                         path: pages/developer-guide/knowledge-base/modular-components/router/router-operations.md
                       - page: KV Event Replay Comparison
