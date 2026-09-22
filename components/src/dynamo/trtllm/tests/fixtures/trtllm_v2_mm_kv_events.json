@@ -1,10 +1,10 @@
 {
   "forward_source": {
     "repository": "NVIDIA/TensorRT-LLM",
-    "pull_request": 18810,
-    "merge_commit": "3fafd1376149d14ab718cfb5d6b5b2333b367db6",
+    "pull_request": 19529,
+    "head_commit": "687d95a29106e642d3f38b81ae193ac5d0aa6ee2",
     "producer": "KVCacheEventManager + KVCacheEventSerializer",
-    "contract": "buffered serialized event"
+    "contract": "buffered serialized event with additive UUID identity"
   },
   "legacy_source": {
     "repository": "NVIDIA/TensorRT-LLM",
@@ -35,7 +35,7 @@
           "cache_level": 0,
           "priority": 0,
           "mm_keys": [
-            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "start_offset": 0}
+            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "uuid": "9dc26f865941d289", "start_offset": 0}
           ]
         },
         {
@@ -51,8 +51,8 @@
           "cache_level": 0,
           "priority": 0,
           "mm_keys": [
-            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "start_offset": 3},
-            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "start_offset": 4}
+            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "uuid": "9dc26f865941d289", "start_offset": 3},
+            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "uuid": "9dc26f865941d289", "start_offset": 4}
           ]
         },
         {
@@ -68,8 +68,8 @@
           "cache_level": 0,
           "priority": 0,
           "mm_keys": [
-            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "start_offset": 6},
-            {"type": "mm_key", "hash": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100", "start_offset": 0}
+            {"type": "mm_key", "hash": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "uuid": "9dc26f865941d289", "start_offset": 6},
+            {"type": "mm_key", "hash": "1f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100", "uuid": "0123456789abcdef", "start_offset": 0}
           ]
         }
       ]

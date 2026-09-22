@@ -510,17 +510,17 @@ def _load_v2_mm_fixture():
 
 
 @pytest.mark.multimodal
-def test_v2_mm_fixture_is_merged_trtllm_serializer_output():
+def test_v2_mm_fixture_matches_trtllm_uuid_event_contract():
     fixture = _load_v2_mm_fixture()
     source = fixture["forward_source"]
     event = fixture["forward_event"]
 
     assert source == {
         "repository": "NVIDIA/TensorRT-LLM",
-        "pull_request": 18810,
-        "merge_commit": "3fafd1376149d14ab718cfb5d6b5b2333b367db6",
+        "pull_request": 19529,
+        "head_commit": "687d95a29106e642d3f38b81ae193ac5d0aa6ee2",
         "producer": "KVCacheEventManager + KVCacheEventSerializer",
-        "contract": "buffered serialized event",
+        "contract": "buffered serialized event with additive UUID identity",
     }
     assert event["event_id"] == 0
     assert event["window_size"] == 128
@@ -529,12 +529,10 @@ def test_v2_mm_fixture_is_merged_trtllm_serializer_output():
     assert event["hash_algo"] == "v1_block_key"
 
 
-@pytest.mark.parametrize("hash_algo", ["v1_block_key", "v2_sha256_64"])
 @pytest.mark.multimodal
-def test_text_only_v1_and_v2_events_remain_unchanged(hash_algo):
+def test_text_only_event_remains_unchanged():
     pub = _publisher_for_kv_event_test()
     event = _stored_kv_event()
-    event["hash_algo"] = hash_algo
 
     _, normalized = pub._normalize_kv_event(event)
 
@@ -545,14 +543,6 @@ def test_text_only_v1_and_v2_events_remain_unchanged(hash_algo):
 
 
 @pytest.mark.multimodal
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "TensorRT-LLM V2 events do not yet preserve the frontend multimodal "
-        "routing identity"
-    ),
-)
 def test_v2_mm_fixture_matches_frontend_routing_identity():
     fixture = _load_v2_mm_fixture()
     pub = _publisher_for_kv_event_test()
@@ -560,10 +550,12 @@ def test_v2_mm_fixture_matches_frontend_routing_identity():
 
     _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
 
-    digest_a = fixture["forward_event"]["data"]["blocks"][0]["mm_keys"][0]["hash"]
-    digest_b = fixture["forward_event"]["data"]["blocks"][2]["mm_keys"][1]["hash"]
-    routing_uuid_a = "9dc26f865941d289"
-    routing_uuid_b = "0123456789abcdef"
+    key_a = fixture["forward_event"]["data"]["blocks"][0]["mm_keys"][0]
+    key_b = fixture["forward_event"]["data"]["blocks"][2]["mm_keys"][1]
+    digest_a = key_a["hash"]
+    digest_b = key_b["hash"]
+    routing_uuid_a = key_a["uuid"]
+    routing_uuid_b = key_b["uuid"]
     assert pad_value_for_mm_hash(int(routing_uuid_a, 16)) != pad_value_for_mm_hash(
         int(digest_a[:16], 16)
     )
@@ -610,8 +602,8 @@ def test_v2_mm_fixture_preserves_cross_block_and_text_separated_offsets():
 
     pub = _publisher_for_kv_event_test()
     _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
-    digest_a = blocks[0]["mm_keys"][0]["hash"]
-    pad_a = pad_value_for_mm_hash(int(digest_a[:16], 16))
+    routing_uuid_a = blocks[0]["mm_keys"][0]["uuid"]
+    pad_a = pad_value_for_mm_hash(int(routing_uuid_a, 16))
     assert normalized["token_ids"][1:5] == [pad_a] * 4
     assert normalized["token_ids"][5] == 7
     assert normalized["token_ids"][6:9] == [pad_a] * 3
@@ -621,22 +613,22 @@ def test_v2_mm_fixture_preserves_cross_block_and_text_separated_offsets():
 def test_v2_mm_fixture_normalizes_distinct_image_and_video_items():
     fixture = _load_v2_mm_fixture()
     blocks = fixture["forward_event"]["data"]["blocks"]
-    digest_a = blocks[0]["mm_keys"][0]["hash"]
-    digest_b = blocks[2]["mm_keys"][1]["hash"]
+    routing_uuid_a = blocks[0]["mm_keys"][0]["uuid"]
+    routing_uuid_b = blocks[2]["mm_keys"][1]["uuid"]
     pub = _publisher_for_kv_event_test()
 
     _, normalized = pub._normalize_kv_event(copy.deepcopy(fixture["forward_event"]))
 
-    pad_a = pad_value_for_mm_hash(int(digest_a[:16], 16))
-    pad_b = pad_value_for_mm_hash(int(digest_b[:16], 16))
+    pad_a = pad_value_for_mm_hash(int(routing_uuid_a, 16))
+    pad_b = pad_value_for_mm_hash(int(routing_uuid_b, 16))
     assert pad_a != pad_b
     assert normalized["token_ids"][-4:] == [pad_a, pad_b, pad_b, 9]
 
 
 @pytest.mark.parametrize(
     "bad_digest",
-    ["abcd", "z" * 64],
-    ids=["wrong-length", "non-hex"],
+    ["abcd", "z" * 64, " " * 64],
+    ids=["wrong-length", "non-hex", "whitespace"],
 )
 @pytest.mark.multimodal
 def test_v2_mm_malformed_digest_is_dropped_without_logging_digest(bad_digest, caplog):
@@ -657,7 +649,7 @@ def test_v2_mm_malformed_digest_is_dropped_without_logging_digest(bad_digest, ca
 
 @pytest.mark.parametrize(
     "malformation",
-    ["missing", "inconsistent", "out-of-order"],
+    ["missing", "missing-uuid", "inconsistent", "inconsistent-uuid", "out-of-order"],
 )
 @pytest.mark.multimodal
 def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog):
@@ -666,8 +658,12 @@ def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog)
     blocks = event["data"]["blocks"]
     if malformation == "missing":
         blocks[0]["mm_keys"] = []
+    elif malformation == "missing-uuid":
+        del blocks[0]["mm_keys"][0]["uuid"]
     elif malformation == "inconsistent":
         blocks[0]["mm_keys"][0]["hash"] = blocks[2]["mm_keys"][1]["hash"]
+    elif malformation == "inconsistent-uuid":
+        blocks[1]["mm_keys"][0]["uuid"] = blocks[2]["mm_keys"][1]["uuid"]
     else:
         blocks[1]["mm_keys"][0]["start_offset"] = 2
     pub = _publisher_for_kv_event_test()
@@ -677,6 +673,33 @@ def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog)
 
     assert normalized is None
     assert "Dropping unsupported multimodal stored KV event" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "bad_token_id",
+    [1001.5, None, True],
+    ids=["float", "none", "bool"],
+)
+@pytest.mark.multimodal
+def test_invalid_token_id_is_skipped_and_next_text_event_is_published(
+    bad_token_id, caplog
+):
+    fixture = _load_v2_mm_fixture()
+    invalid_event = copy.deepcopy(fixture["forward_event"])
+    invalid_event["data"]["blocks"][0]["tokens"][0]["token_id"] = bad_token_id
+    next_event = _stored_kv_event()
+    next_event["event_id"] = invalid_event["event_id"] + 1
+    pub = _publisher_for_kv_event_test()
+    publisher = MagicMock()
+    pub.zmq_kv_event_publisher = None
+    pub.kv_event_publishers = {0: publisher}
+
+    with caplog.at_level(logging.WARNING):
+        pub._handle_kv_event_batch([invalid_event, next_event])
+
+    publisher.publish_batch.assert_called_once()
+    assert publisher.publish_batch.call_args.args[0][0]["token_ids"] == [1, 2, 3, 4]
+    assert "reason=invalid token ID type" in caplog.text
 
 
 @pytest.mark.multimodal

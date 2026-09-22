@@ -178,7 +178,6 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
 
 
 def _resolve_mm_token_id_offset(model_config: Any) -> Optional[int]:
-    """Resolve the vocabulary-size offset used by TRT-LLM V2 MM tokens."""
     for config in (model_config, getattr(model_config, "text_config", None)):
         vocab_size = getattr(config, "vocab_size", None)
         if type(vocab_size) is int and vocab_size >= 0:

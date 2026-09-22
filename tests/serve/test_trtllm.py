@@ -39,11 +39,7 @@ from tests.utils.payload_builder import (
     multimodal_payload_default,
     router_selection_chat_payload_default,
 )
-from tests.utils.payloads import (
-    ImageGenerationPayload,
-    RouterKvHitRateBelowThreshold,
-    VideoGenerationPayload,
-)
+from tests.utils.payloads import ImageGenerationPayload, VideoGenerationPayload
 
 logger = logging.getLogger(__name__)
 
@@ -382,14 +378,6 @@ trtllm_configs = {
             pytest.mark.profiled_vram_gib(12.0),
             pytest.mark.requested_trtllm_kv_tokens(32768),
             pytest.mark.timeout(960),
-            pytest.mark.xfail(
-                strict=True,
-                raises=RouterKvHitRateBelowThreshold,
-                reason=(
-                    "TensorRT-LLM V2 events do not yet preserve the frontend "
-                    "multimodal routing identity"
-                ),
-            ),
         ],
         model="Qwen/Qwen3-VL-2B-Instruct",
         frontend_port=DefaultPort.FRONTEND.value,
