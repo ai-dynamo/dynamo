@@ -1979,6 +1979,76 @@ impl Client {
         })
     }
 
+    /// Wait until at least `min_count` ready endpoint instances have MDC runtime_data
+    /// containing the requested JSON string value; returns their sorted worker ids.
+    #[pyo3(signature = (key, value, min_count, timeout_s=None))]
+    fn wait_for_instances_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        min_count: usize,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        if min_count == 0 {
+            return Err(PyValueError::new_err("min_count must be positive"));
+        }
+        let endpoint = self.endpoint.clone();
+        crate::future_into_py(py, async move {
+            // Scope the discovery watcher to this lookup so every exit path stops it.
+            let lifecycle = endpoint.drt().primary_token().child_token();
+            let _guard = lifecycle.clone().drop_guard();
+            let mut last_matches: Vec<u64> = Vec::new();
+            let wait = async {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let mut matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+                    matches.sort_unstable();
+
+                    if matches.len() >= min_count {
+                        return Ok(matches);
+                    }
+                    last_matches = matches;
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let result = tokio::time::timeout(timeout, wait).await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(PyTimeoutError::new_err(format!(
+                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{key:?}] == {value:?}; last_match_count={}, matching_ids={last_matches:?}",
+                        last_matches.len(),
+                    ))),
+                }
+            } else {
+                wait.await
+            }
+        })
+    }
+
     /// Issue a request to the endpoint using the default routing strategy.
     #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn generate<'p>(
