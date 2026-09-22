@@ -147,6 +147,8 @@ Omitted, `null`, or `false` strictness retains existing behavior. Omitted or `nu
 
 Passing preflight does not establish complete OpenAI compatibility or guarantee backend enforcement of every constraint. Structural-tag activation and the deployment schema mode remain separate controls.
 
+The keyword and reference exclusions above are the complete list of keywords rejected solely because they are present. Traversing a keyword such as `oneOf`, `contains`, or `unevaluatedItems` checks its nested schemas; it does not establish OpenAI support for that keyword. Preflight does not reject `uniqueItems`, `minContains`, or `maxContains` solely because they are present. It also does not enforce OpenAI's documented ten-level nesting limit: depth accounting through arrays, reference chains, and recursive schemas is outside this preflight contract. Backend schema compilation can still reject a schema that passes these checks.
+
 ## Schema Modes
 
 The `--dyn-structural-tag-schema` flag controls what JSON schema is used for
