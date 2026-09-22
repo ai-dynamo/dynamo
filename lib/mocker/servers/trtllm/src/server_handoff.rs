@@ -125,7 +125,11 @@ pub(super) fn first_gen_token(session: &pb::KvSessionRef) -> Option<u32> {
         return None;
     };
     match list.values.first()?.kind.as_ref()? {
-        Kind::NumberValue(value) if value.is_finite() && *value >= 0.0 => Some(*value as u32),
+        Kind::NumberValue(value)
+            if value.fract() == 0.0 && *value >= 0.0 && *value <= f64::from(u32::MAX) =>
+        {
+            Some(*value as u32)
+        }
         _ => None,
     }
 }
