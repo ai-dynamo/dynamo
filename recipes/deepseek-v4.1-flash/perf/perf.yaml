@@ -4,16 +4,8 @@
 # AIPerf Mooncake trace-replay benchmark for the DeepSeek-V4.1-Flash vLLM DGDs.
 #
 # One Job covers all four vLLM variants (agg/disagg x B200/GB200). Set ENDPOINT
-# and CONCURRENCY in the env block below to pick the target; the podAffinity
-# already lists every deployment name, so it needs no edit.
-# Run one concurrency per Job, and clear
-# DGD worker and router KV state between independent runs -- every run replays
-# the same corpus, so a warm second run inherits the first run's cache rather
-# than the trace's own reuse, and the two stop being comparable.
-#
-# The trace is the shared DeepSeek-V4 agentic Mooncake trace in
-# ../../deepseek-v4/perf/traces/ (Git LFS), referenced through the symlink in
-# traces/. Stage it onto the model-cache PVC first -- see README.md.
+# and CONCURRENCY in the env block below to pick the target. Stage the trace on
+# the PVC first -- see README.md.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,9 +32,8 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                # Every target this Job can drive. Only one is deployed at a
-                # time, so the Job lands beside whichever frontend exists; set
-                # ENDPOINT below to pick the target.
+                # Only one target is deployed at a time, so the Job lands
+                # beside whichever frontend exists.
                 - dsv41-flash-vllm-b200-agg
                 - dsv41-flash-vllm-b200-disagg
                 - dsv41-flash-vllm-gb200-agg
@@ -84,7 +75,6 @@ spec:
             exit 1
           fi
 
-          # First boot loads a 510 GB checkpoint and can take roughly an hour.
           wait_for_model_ready
 
           EPOCH=$(date +%s)
@@ -115,14 +105,8 @@ spec:
             --workers-max "${CONCURRENCY}" \
             --export-http-trace
           echo "Done. Artifacts: ${RUN_DIR}"
-
-          # The SLA this recipe was tuned against: output token throughput per
-          # user p50 >= 50 tok/s, and time to first token p50 < 5000 ms.
-          # total_output_tokens counts the non-reasoning subset only; add
-          # total_reasoning_tokens to get what the GPU actually produced.
         env:
         # Defaults target AGG B200 at its validated operating point (C=88).
-        # Edit ENDPOINT + CONCURRENCY per variant; see README.md for the table.
         - name: ENDPOINT
           value: dsv41-flash-vllm-b200-agg-frontend:8000
         - name: TARGET_MODEL

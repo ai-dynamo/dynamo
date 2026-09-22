@@ -6,16 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4.1-Flash vLLM benchmark
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. Set `ENDPOINT` and
-`CONCURRENCY` for the target.
-
-The Job waits for the target model on the DGD frontend, then replays the trace
-at one `CONCURRENCY` value and writes raw artifacts to the shared
-`shared-model-cache` PVC. The benchmark pod is co-located with the target DGD
-frontend through `podAffinity`.
-
-This is the SGLang lane's sibling; the SGLang targets of this model are day-0
-and carry no benchmark.
+[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. It waits for the target
+model on the DGD frontend, replays the trace at one `CONCURRENCY` value, and
+writes raw artifacts to the shared `shared-model-cache` PVC.
 
 ## Targeting a variant
 
@@ -30,14 +23,12 @@ at a time and the Job lands beside whichever frontend exists.
 | GB200 aggregated | `dsv41-flash-vllm-gb200-agg-frontend:8000` | `88` |
 | GB200 disaggregated | `dsv41-flash-vllm-gb200-disagg-frontend:8000` | `168` |
 
-Each concurrency is that variant's best SLA-clearing rung, not the peak of the
-throughput curve. Both lanes end on the per-user token rate rather than on
-TTFT, so a higher concurrency produces more total tokens while missing the
-floor. Running more than one benchmark in the same namespace also needs a
+Each concurrency is that variant's best SLO-clearing rung, not the peak of the
+throughput curve. Running more than one benchmark in the same namespace needs a
 distinct `metadata.name` and `labels.app`, so Jobs and artifact directories
 stay separate.
 
-## SLA
+## SLO
 
 The recipes were tuned against two floors, both measured at p50:
 
@@ -76,8 +67,7 @@ The trace contains 3,541 requests. Its SHA-256 is
 
 Measured against this corpus, the input median is about 67,600 tokens and the
 output median is about 400. The input p99 is above 450,000 and the longest row
-exceeds 900,000, which is why the prefill knobs in the disaggregated recipes
-target the tail rather than the median.
+exceeds 900,000.
 
 ## Workflow
 

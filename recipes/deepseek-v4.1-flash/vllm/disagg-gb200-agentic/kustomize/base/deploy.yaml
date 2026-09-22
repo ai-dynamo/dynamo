@@ -59,7 +59,7 @@ spec:
       sharedMemorySize: 200Gi
       podTemplate:
         spec:
-          nodeSelector:
+          nodeSelector: &workerNodeSelector
             nvidia.com/gpu.product: NVIDIA-GB200
           tolerations: &workerTolerations
             - key: nvidia.com/gpu
@@ -193,8 +193,7 @@ spec:
       sharedMemorySize: 200Gi
       podTemplate:
         spec:
-          nodeSelector:
-            nvidia.com/gpu.product: NVIDIA-GB200
+          nodeSelector: *workerNodeSelector
           tolerations: *workerTolerations
           terminationGracePeriodSeconds: 60
           resourceClaims: *workerResourceClaims
