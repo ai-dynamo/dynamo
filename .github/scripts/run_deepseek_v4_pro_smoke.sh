@@ -6,31 +6,25 @@ set -Eeuo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 readonly REPO_ROOT
-readonly RUN_KEY="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
-readonly NAMESPACE="${NAMESPACE:-dynamo-nightly-dsv4-${RUN_KEY}}"
+readonly NAMESPACE="${NAMESPACE:-dynamo-nightly-dsv4}"
 readonly ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/artifacts/deepseek-v4-pro-smoke}"
 readonly DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-100m}"
 readonly SCHEDULING_TIMEOUT="${SCHEDULING_TIMEOUT:-10m}"
 readonly PERF_TIMEOUT="${PERF_TIMEOUT:-30m}"
 readonly PVC_TIMEOUT_SECONDS="${PVC_TIMEOUT_SECONDS:-300}"
-readonly KEEP_NAMESPACE="${KEEP_NAMESPACE:-0}"
+readonly KEEP_RESOURCES="${KEEP_RESOURCES:-0}"
 
 KUBECTL=(kubectl)
 if [[ -n "${KUBE_CONTEXT:-}" ]]; then
     KUBECTL+=(--context "${KUBE_CONTEXT}")
 fi
 
-namespace_created=0
 secret_manifest=""
 deploy_manifest=""
 smoke_manifest=""
 mkdir -p "${ARTIFACT_DIR}"
 
 collect_diagnostics() {
-    if (( namespace_created == 0 )); then
-        return
-    fi
-
     "${KUBECTL[@]}" -n "${NAMESPACE}" get \
         pods,services,jobs,dynamographdeployments,computedomains \
         -o wide >"${ARTIFACT_DIR}/resources.txt" 2>&1 || true
@@ -54,11 +48,17 @@ cleanup() {
         collect_diagnostics
     fi
 
-    if (( namespace_created == 1 )) && [[ "${KEEP_NAMESPACE}" != "1" ]]; then
-        "${KUBECTL[@]}" delete namespace "${NAMESPACE}" \
+    if [[ "${KEEP_RESOURCES}" != "1" ]]; then
+        [[ -z "${smoke_manifest}" ]] || \
+            "${KUBECTL[@]}" -n "${NAMESPACE}" delete -f "${smoke_manifest}" \
+                --ignore-not-found --wait=false --timeout=2m || true
+        [[ -z "${deploy_manifest}" ]] || \
+            "${KUBECTL[@]}" -n "${NAMESPACE}" delete -f "${deploy_manifest}" \
+                --ignore-not-found --wait=false --timeout=2m || true
+        "${KUBECTL[@]}" -n "${NAMESPACE}" delete secret hf-token-secret \
             --ignore-not-found --wait=false --timeout=2m || true
-    elif (( namespace_created == 1 )); then
-        echo "Keeping namespace ${NAMESPACE} for inspection"
+    else
+        echo "Keeping benchmark resources in ${NAMESPACE} for inspection"
     fi
 
     [[ -z "${secret_manifest}" ]] || rm -f "${secret_manifest}"
@@ -78,23 +78,23 @@ for command in git kubectl; do
 done
 
 cd "${REPO_ROOT}"
-if "${KUBECTL[@]}" get namespace "${NAMESPACE}" >/dev/null 2>&1; then
-    echo "Refusing to reuse existing namespace ${NAMESPACE}" >&2
-    exit 2
-fi
-
-"${KUBECTL[@]}" create namespace "${NAMESPACE}"
-namespace_created=1
-"${KUBECTL[@]}" label namespace "${NAMESPACE}" \
-    app.kubernetes.io/managed-by=github-actions \
-    app.kubernetes.io/name=deepseek-v4-pro-smoke \
-    ops.nvidia.com/issue=OPS-8599 \
-    ops.nvidia.com/run-key="${RUN_KEY}"
-
 secret_manifest="$(mktemp)"
 deploy_manifest="$(mktemp)"
 smoke_manifest="$(mktemp)"
 chmod 600 "${secret_manifest}" "${deploy_manifest}" "${smoke_manifest}"
+
+"${KUBECTL[@]}" kustomize .github/ci/deepseek-v4-pro/deploy \
+    --load-restrictor=LoadRestrictionsNone >"${deploy_manifest}"
+"${KUBECTL[@]}" kustomize .github/ci/deepseek-v4-pro/smoke \
+    --load-restrictor=LoadRestrictionsNone >"${smoke_manifest}"
+
+# The workflow owns these names and its concurrency group serializes runs.
+"${KUBECTL[@]}" -n "${NAMESPACE}" delete -f "${smoke_manifest}" \
+    --ignore-not-found --wait=true --timeout=5m
+"${KUBECTL[@]}" -n "${NAMESPACE}" delete -f "${deploy_manifest}" \
+    --ignore-not-found --wait=true --timeout=5m
+"${KUBECTL[@]}" -n "${NAMESPACE}" delete secret hf-token-secret \
+    --ignore-not-found --wait=true --timeout=2m
 
 "${KUBECTL[@]}" -n "${NAMESPACE}" create secret generic hf-token-secret \
     --from-literal=HF_TOKEN="${HF_TOKEN:-cache-only-smoke}" \
@@ -110,11 +110,6 @@ until [[ "$("${KUBECTL[@]}" -n "${NAMESPACE}" get pvc shared-model-cache \
     fi
     sleep 5
 done
-
-"${KUBECTL[@]}" kustomize .github/ci/deepseek-v4-pro/deploy \
-    --load-restrictor=LoadRestrictionsNone >"${deploy_manifest}"
-"${KUBECTL[@]}" kustomize .github/ci/deepseek-v4-pro/smoke \
-    --load-restrictor=LoadRestrictionsNone >"${smoke_manifest}"
 
 "${KUBECTL[@]}" -n "${NAMESPACE}" apply -f "${deploy_manifest}"
 

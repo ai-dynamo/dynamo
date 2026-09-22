@@ -35,7 +35,7 @@ jobs:
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 150
     env:
-      NAMESPACE: dynamo-nightly-dsv4-${{ github.run_id }}-${{ github.run_attempt }}
+      NAMESPACE: dynamo-nightly-dsv4
       KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
