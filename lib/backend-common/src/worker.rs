@@ -46,8 +46,8 @@ use crate::lifecycle::{
 };
 use crate::publisher::{PublisherHandles, setup_publishers};
 use crate::shutdown::{
-    CLEANUP_RESERVE_S, CLEANUP_TIMEOUT_ENV, KvTransferFallback, ShutdownBudget, ShutdownConfig,
-    Stage, StageOutcome, StageReason, cleanup_timeout, force_exit_deadline,
+    CLEANUP_TIMEOUT_ENV, KvTransferFallback, ShutdownBudget, ShutdownConfig, Stage, StageOutcome,
+    StageReason, cleanup_timeout, force_exit_deadline,
 };
 
 /// Operator override for the health-check canary, mirrors the Python helper
@@ -418,14 +418,11 @@ pub struct Worker {
     /// adapters that detach work (such as a separately scheduled language
     /// runtime task) remain responsible for cancelling that work themselves.
     engine_route_shutdown: CancellationToken,
-    /// Shared with the caller so transport teardown, which happens after
-    /// `run()` returns, can draw on the same deadline instead of starting a
-    /// fresh one. See [`Worker::shutdown_deadline`].
-    shutdown_deadline: Arc<std::sync::OnceLock<std::time::Instant>>,
+    cleanup_deadline: Option<std::time::Instant>,
     /// The instant the shutdown token was cancelled, i.e. where the force-exit
     /// watchdog starts counting. The stage budget is armed from this same
-    /// origin so the watchdog's cleanup floor is not eaten by the unbounded
-    /// engine-route and RL-endpoint teardown that runs in between. Unset on
+    /// origin so engine-route and RL-endpoint teardown consume the total
+    /// rather than delaying its start. Unset on
     /// the paths that never see a signal; those fall back to "now".
     shutdown_started_at: Arc<std::sync::OnceLock<std::time::Instant>>,
     /// The single SIGTERM-to-exit budget, armed once by whichever comes first:
@@ -438,6 +435,7 @@ pub struct Worker {
     /// but the process must not report success, or an operator sees exit 0 for
     /// a worker that leaked its GPU.
     cleanup_abandoned: bool,
+    cleanup_error: Option<DynamoError>,
     /// KV-aware-routing publisher handles. Drained in `cleanup_once` while NATS is alive.
     publishers: Option<PublisherHandles>,
     /// Framework-owned lifecycle gauges. Set in `setup_publishing` after
@@ -469,10 +467,11 @@ impl Worker {
             )),
             engine_route_mutation: Arc::new(tokio::sync::Mutex::new(())),
             engine_route_shutdown: CancellationToken::new(),
-            shutdown_deadline: Arc::new(std::sync::OnceLock::new()),
+            cleanup_deadline: None,
             shutdown_started_at: Arc::new(std::sync::OnceLock::new()),
             shutdown_budget: None,
             cleanup_abandoned: false,
+            cleanup_error: None,
             publishers: None,
             lifecycle: None,
         }
@@ -486,8 +485,8 @@ impl Worker {
     ///   1. unregister from discovery — routers stop selecting this worker.
     ///   2. router grace — keep serving while routers observe that.
     ///   3. stop admission — reject new requests with `WorkerDraining`.
-    ///   4. wait for in-flight requests to finish. This precedes cleanup so a
-    ///      request can never execute against memory cleanup has released.
+    ///   4. wait for in-flight requests, bounded by the drain allowance.
+    ///      On expiry, engine cleanup must cancel unfinished execution.
     ///   5. on prefill, wait for KV-transfer quiescence.
     ///   6. `engine.cleanup()` — release engine resources while NATS / etcd
     ///      are still reachable.
@@ -511,12 +510,49 @@ impl Worker {
         let mut watchdog = None;
         let result = self.run_lifecycle(runtime.clone(), &mut watchdog).await;
         let teardown_bound = self
-            .shutdown_deadline
-            .get()
-            .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()))
+            .shutdown_budget
+            .and_then(|budget| budget.remaining())
             .unwrap_or_else(crate::shutdown::graceful_shutdown_timeout);
-        runtime.shutdown_and_wait(Some(teardown_bound)).await;
+        let teardown_bound = self.cleanup_deadline.map_or(teardown_bound, |deadline| {
+            teardown_bound.min(deadline.saturating_duration_since(std::time::Instant::now()))
+        });
+        let runtime_started = std::time::Instant::now();
+        let budget = self
+            .shutdown_budget
+            .unwrap_or_else(ShutdownBudget::unbounded);
+        self.observe_stage(&StageOutcome::new(
+            Stage::Runtime,
+            StageReason::Started,
+            Duration::ZERO,
+            &budget,
+        ));
+        let timed_out = tokio::time::timeout(
+            teardown_bound,
+            runtime.shutdown_and_wait(Some(teardown_bound)),
+        )
+        .await
+        .is_err();
+        let outcome = StageOutcome::new(
+            Stage::Runtime,
+            if timed_out {
+                StageReason::TimedOut
+            } else {
+                StageReason::Completed
+            },
+            runtime_started.elapsed(),
+            &budget,
+        );
+        outcome.log();
+        self.observe_stage(&outcome);
+        if timed_out {
+            // Do not disarm the watchdog when transport teardown is unfinished.
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("runtime teardown exceeded shutdown cleanup budget")
+                .build());
+        }
         if !self.cleanup_abandoned
+            && self.cleanup_error.is_none()
             && let Some(watchdog) = watchdog
         {
             let _ = watchdog.send(());
@@ -589,9 +625,8 @@ impl Worker {
 
         // Mirror `dynamo_runtime::Worker::execute`'s shutdown deadline:
         // once a signal arrives, the orchestrator + cleanup must finish
-        // within `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` seconds (plus the
-        // grace-period sleep, which is a fixed wait rather than a hang
-        // risk), otherwise we force-exit. Healthy long-running workers
+        // within the total shutdown budget, including grace and cleanup,
+        // otherwise we force-exit. Healthy long-running workers
         // never hit this — the timer only starts after `shutdown_token`
         // is cancelled.
         let shutdown_config = self.config.shutdown;
@@ -610,12 +645,9 @@ impl Worker {
                     // until `begin_engine_route_shutdown` and the RL endpoint
                     // teardown finish, and neither is bounded, so a budget armed
                     // on arrival there would run past this watchdog by exactly
-                    // that skew — straight through the cleanup floor below.
+                    // that skew.
                     let _ = started_at.set(std::time::Instant::now());
-                    // The stage budget plus the cleanup floor: a stage may
-                    // legitimately spend everything, and `cleanup_once` is
-                    // still owed its floor after that. Firing at the end of the
-                    // stage budget killed the process mid-cleanup.
+                    // Cleanup is reserved inside this same total deadline.
                     let deadline = force_exit_deadline(&shutdown_config);
                     *watchdog = Some(Self::arm_hard_watchdog(deadline));
                     tracing::debug!(
@@ -654,6 +686,10 @@ impl Worker {
                 "engine cleanup exceeded its budget and was abandoned; \
                  engine resources may not have been released",
             ));
+        }
+
+        if let Some(error) = &self.cleanup_error {
+            return outcome.and(Err(error.clone()));
         }
 
         outcome
@@ -978,9 +1014,21 @@ impl Worker {
         // with the worker Admin API.
         let cancel = CancellationToken::new();
 
+        self.observe_stage(&StageOutcome::new(
+            Stage::Unregister,
+            StageReason::Started,
+            Duration::ZERO,
+            &budget,
+        ));
         let outcome = stage_unregister(endpoint, &budget).await;
         self.observe_stage(&outcome);
 
+        self.observe_stage(&StageOutcome::new(
+            Stage::RouterGrace,
+            StageReason::Started,
+            Duration::ZERO,
+            &budget,
+        ));
         let outcome = stage_router_grace(None, &budget, &cancel).await;
         self.observe_stage(&outcome);
 
@@ -989,8 +1037,20 @@ impl Worker {
             self.observe_stage(&outcome);
 
             // The request-plane barrier, before anything frees engine memory.
+            if let Some(gauges) = &self.lifecycle {
+                gauges.observe_shutdown_state(Some(tracker.inflight()), None);
+            }
+            self.observe_stage(&StageOutcome::new(
+                Stage::Inflight,
+                StageReason::Started,
+                Duration::ZERO,
+                &budget,
+            ));
             let outcome = stage_await_inflight(tracker, &budget, &cancel).await;
             self.observe_stage(&outcome);
+            if let Some(gauges) = &self.lifecycle {
+                gauges.observe_shutdown_state(Some(tracker.inflight()), None);
+            }
         }
 
         self.run_engine_shutdown_steps(&budget, &cancel).await;
@@ -999,6 +1059,9 @@ impl Worker {
     /// Record one shutdown stage on `dynamo_component_shutdown_stage_seconds`.
     /// No-op before the gauges exist (a signal arriving during startup).
     fn observe_stage(&self, outcome: &StageOutcome) {
+        if outcome.reason == StageReason::Started {
+            outcome.log();
+        }
         if let Some(gauges) = self.lifecycle.as_ref() {
             gauges.observe_shutdown_stage(outcome);
         }
@@ -1058,21 +1121,7 @@ impl Worker {
         let budget = *self
             .shutdown_budget
             .get_or_insert_with(|| ShutdownBudget::from_config_starting_at(&config, origin));
-        // Publish the instant the whole shutdown must finish by, so the caller
-        // driving transport teardown after `run()` returns spends what is left
-        // of this budget rather than starting a second one.
-        if let Some(remaining) = budget.remaining()
-            && let Some(deadline) = std::time::Instant::now().checked_add(remaining)
-        {
-            let _ = self.shutdown_deadline.set(deadline);
-        }
         budget
-    }
-
-    /// Handle to the shutdown deadline, readable after `run()` has consumed
-    /// the `Worker`. Unset until shutdown begins.
-    pub fn shutdown_deadline(&self) -> Arc<std::sync::OnceLock<std::time::Instant>> {
-        Arc::clone(&self.shutdown_deadline)
     }
 
     /// Start the engine exactly once. `Worker::run` consumes `self`, so all
@@ -1120,39 +1169,25 @@ impl Worker {
         // On the signal path the outer deadline would eventually hard-exit,
         // but the serve-error and external-shutdown paths never arm it, so
         // without this an engine could hang the process indefinitely.
-        // Cleanup draws from the same total as every other stage. Three cases
-        // are deliberately distinct:
-        //   * no budget armed  — not a shutdown path; use the configured bound
-        //   * unbounded        — reversible drain; use the configured bound
-        //   * under the floor  — the total is spent (or nearly), but abandoning
-        //     teardown leaks GPU memory, so cleanup still gets the reserve floor
-        //     and the hard-exit deadline remains the real backstop
-        let reserve = Duration::from_secs_f64(CLEANUP_RESERVE_S);
+        // Pre-cleanup stages withhold this allowance inside the total deadline.
+        // An exhausted deadline cannot be extended by cleanup.
         let budget = match self.shutdown_budget {
             None => cleanup_timeout(),
-            Some(armed) => match (armed.remaining(), armed.allowance(Stage::Cleanup)) {
-                (None, _) | (_, None) => cleanup_timeout(),
-                // A floor, not a cliff. Keyed on the *remaining total*, not on
-                // the allowance: testing the allowance also bumped an operator
-                // who deliberately configured a short cleanup cap up to the
-                // floor, which is not what the floor is for. Keyed on the
-                // total, it only fires when the budget really is spent —
-                // including the sub-second remainders an aggregated worker
-                // leaves, where granting the remainder as-is would start
-                // teardown and drop it on the first poll.
-                (Some(left), _) if left < reserve => {
-                    tracing::warn!(
-                        remaining_s = left.as_secs_f64(),
-                        "shutdown budget spent before cleanup; granting the {:.0}s reserve",
-                        CLEANUP_RESERVE_S
-                    );
-                    reserve
-                }
-                (_, Some(allowance)) => allowance,
-            },
+            Some(armed) => armed
+                .allowance(Stage::Cleanup)
+                .unwrap_or_else(cleanup_timeout),
         };
-        // An engine error is still a completed stage: teardown ran and
-        // returned. Only the timeout means the stage did not finish.
+        // Runtime teardown spends what is left of this same cleanup allowance.
+        // The total watchdog remains armed until both stages have finished.
+        self.cleanup_deadline = Some(cleanup_start + budget);
+        self.observe_stage(&StageOutcome::new(
+            Stage::Cleanup,
+            StageReason::Started,
+            Duration::ZERO,
+            &self
+                .shutdown_budget
+                .unwrap_or_else(ShutdownBudget::unbounded),
+        ));
         let cleanup_reason = match tokio::time::timeout(budget, self.engine.cleanup()).await {
             Ok(Ok(())) => {
                 tracing::info!("Engine cleanup complete");
@@ -1160,7 +1195,8 @@ impl Worker {
             }
             Ok(Err(e)) => {
                 tracing::error!(error = %e, "engine cleanup failed");
-                StageReason::Completed
+                self.cleanup_error = Some(e);
+                StageReason::Failed
             }
             Err(_) => {
                 tracing::error!(
@@ -1540,6 +1576,12 @@ impl Worker {
         budget: &ShutdownBudget,
         cancel: &CancellationToken,
     ) {
+        self.observe_stage(&StageOutcome::new(
+            Stage::KvTransfer,
+            StageReason::Started,
+            Duration::ZERO,
+            budget,
+        ));
         let outcome = stage_kv_quiescence(
             &self.engine,
             self.config.disaggregation_mode,
@@ -1552,6 +1594,12 @@ impl Worker {
         // `drain_time_seconds`, and the KV wait is what it has always meant.
         if let Some(gauges) = self.lifecycle.as_ref() {
             gauges.observe_drain_time(outcome.elapsed.as_secs_f64());
+            let quiescent = match outcome.reason {
+                StageReason::Completed => Some(true),
+                StageReason::TimedOut => Some(false),
+                _ => None,
+            };
+            gauges.observe_shutdown_state(None, quiescent);
         }
 
         self.cleanup_once().await;

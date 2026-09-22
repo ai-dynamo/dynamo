@@ -120,7 +120,61 @@ pub struct LifecycleGauges {
     /// stage ended. The reason label is the point: a 30s stage that completed
     /// and a 30s stage that timed out are the same number and very different
     /// events, and only one of them needs an operator.
-    shutdown_stage_seconds: prometheus::GaugeVec,
+    shutdown: ShutdownMetrics,
+}
+
+/// Shutdown instruments shared by native workers and the Python coordinator.
+pub struct ShutdownMetrics {
+    stages: prometheus::GaugeVec,
+    remaining: prometheus::Gauge,
+    inflight: prometheus::Gauge,
+    kv_quiescent: prometheus::Gauge,
+}
+
+impl ShutdownMetrics {
+    pub fn new(hierarchy: &dyn MetricsHierarchy, labels: &[(&str, &str)]) -> anyhow::Result<Self> {
+        let gauge = |name, help| {
+            create_metric::<prometheus::Gauge, _>(hierarchy, name, help, labels, None, None)
+        };
+        let result = Self {
+            stages: create_metric(
+                hierarchy,
+                "shutdown_stage_seconds",
+                "Shutdown stage elapsed seconds by outcome.",
+                labels,
+                None,
+                Some(&["stage", "reason"]),
+            )?,
+            remaining: gauge(
+                "shutdown_remaining_seconds",
+                "Remaining total shutdown budget at the last stage transition.",
+            )?,
+            inflight: gauge(
+                "shutdown_inflight_requests",
+                "Inflight requests at the last shutdown observation; -1 when unavailable.",
+            )?,
+            kv_quiescent: gauge(
+                "shutdown_kv_quiescent",
+                "KV transfer quiescence: 1 idle, 0 busy, -1 unsupported or unknown.",
+            )?,
+        };
+        result.inflight.set(-1.0);
+        result.kv_quiescent.set(-1.0);
+        Ok(result)
+    }
+
+    pub fn record_stage(&self, stage: &str, reason: &str, elapsed: f64, remaining: f64) {
+        self.stages.with_label_values(&[stage, reason]).set(elapsed);
+        self.remaining.set(remaining);
+    }
+
+    pub fn record_state(&self, inflight: Option<u64>, kv_quiescent: Option<bool>) {
+        if let Some(inflight) = inflight {
+            self.inflight.set(inflight as f64);
+        }
+        self.kv_quiescent
+            .set(kv_quiescent.map_or(-1.0, |value| if value { 1.0 } else { 0.0 }));
+    }
 }
 
 impl LifecycleGauges {
@@ -149,22 +203,13 @@ impl LifecycleGauges {
             "Time engine.start() took to return. Set once at Worker setup.",
         )?;
         model_load.set(model_load_time_seconds);
-        let shutdown_stage_seconds = create_metric::<prometheus::GaugeVec, _>(
-            hierarchy,
-            "shutdown_stage_seconds",
-            "Time spent in each graceful-shutdown stage, labelled by stage and \
-             by why the stage ended (completed, timed_out, skipped, cancelled, \
-             unsupported).",
-            &labels,
-            None,
-            Some(&["stage", "reason"]),
-        )
-        .map_err(|e| gauge_err("shutdown_stage_seconds", e))?;
+        let shutdown = ShutdownMetrics::new(hierarchy, &labels)
+            .map_err(|e| gauge_err("shutdown_stage_seconds", e))?;
         Ok(Self {
             cleanup_time_seconds: cleanup,
             drain_time_seconds: drain,
             model_load_time_seconds: model_load,
-            shutdown_stage_seconds,
+            shutdown,
         })
     }
 
@@ -184,9 +229,18 @@ impl LifecycleGauges {
     /// stages that were skipped record their (near-zero) elapsed under the
     /// `skipped` reason, so a dashboard can tell "did not run" from "ran fast".
     pub fn observe_shutdown_stage(&self, outcome: &StageOutcome) {
-        self.shutdown_stage_seconds
-            .with_label_values(&[outcome.stage.name(), outcome.reason.as_str()])
-            .set(outcome.elapsed.as_secs_f64());
+        self.shutdown.record_stage(
+            outcome.stage.name(),
+            outcome.reason.as_str(),
+            outcome.elapsed.as_secs_f64(),
+            outcome
+                .remaining_total
+                .map_or(f64::INFINITY, |value| value.as_secs_f64()),
+        );
+    }
+
+    pub fn observe_shutdown_state(&self, inflight: Option<u64>, kv_quiescent: Option<bool>) {
+        self.shutdown.record_state(inflight, kv_quiescent);
     }
 }
 

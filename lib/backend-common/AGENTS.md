@@ -78,13 +78,9 @@ opt-out and lets `run.rs` stay non-generic.
   `QUIESCENCE_POLL_INTERVAL` after the in-flight barrier and before `cleanup`:
   `Ok(Some(true))` exits the loop; `Ok(Some(false))`/`Ok(None)`/`Err`
   keep polling until the budget expires. The stage runs **after** the
-  request-plane in-flight barrier, so by the time it is polled no request is
-  executing — it waits only on transfers that outlive the request stream.
-  Budget = `min(DYN_PREFILL_DRAIN_TIMEOUT_S, remaining total)`; see
-  `shutdown.rs`. No cleanup reserve is subtracted here — withholding one zeroed
-  the in-flight barrier under the debug defaults. Cleanup is funded by its own
-  floor in `cleanup_once`, with the force-exit watchdog extended to match.
-  The default `Ok(None)` never frees KV early. No Rust engine currently
+  request-plane in-flight barrier. A successful barrier means no tracked request is executing; a timed-out barrier does not establish that guarantee.
+  Budget = `min(KV stage cap, max(0, remaining total - cleanup reserve))`; see `shutdown.rs`. The canonical cap is `DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS`, with `DYN_PREFILL_DRAIN_TIMEOUT_S` as its legacy alias. Cleanup and runtime teardown share a five-second default reserve inside the original total. The watchdog never extends that total.
+  The default `Ok(None)` waits the available stage allowance, but cannot prove that KV reads have finished. No Rust engine currently
   overrides it — the vLLM, SGLang, and TRT-LLM sidecar adapters all inherit
   the default, so their prefill drain waits the full budget rather than
   exiting early. The Python `BaseEngine` default is `None` too. The
@@ -97,12 +93,12 @@ opt-out and lets `run.rs` stay non-generic.
   successful first returns `Ok(())` without re-entering teardown. The
   conformance kit pins both — `CleanupWithoutStartFailed` and
   `SecondCleanupFailed`. **Bounded** by
-  `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` (default: the post-signal
-  shutdown deadline); on expiry the `Worker` logs an error, abandons the
+  `DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS` (default: five seconds shared with runtime teardown, capped by the remaining total); on expiry the `Worker` logs an error, abandons the
   call, and continues to transport teardown. An engine that blocks here
   delays but cannot prevent shutdown. Note "abandons" means the future is
   dropped, not cancelled: a Python `cleanup()` coroutine already handed to
   the event loop keeps running until the process exits.
+  A returned cleanup error is recorded as `failed` and propagated after runtime teardown is attempted. Cleanup must also handle unfinished execution when request draining times out.
 - `health_check_payload(&self) -> Result<Option<Value>, DynamoError>` —
   optional, default `Ok(None)`. Canary payload the runtime sends through
   `generate` to actively probe an idle endpoint; `None` disables active

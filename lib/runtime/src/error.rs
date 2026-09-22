@@ -714,7 +714,15 @@ impl Serialize for DynamoError {
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
-        state.serialize_field("reason", self.reason())?;
+        // N-2 frontends reject unknown reasons even when the class is known.
+        // Keep drain admission failures on the established worker-unavailable
+        // wire identity until the supported readers understand draining.
+        let wire_reason = if self.reason().as_str() == "backend.worker_draining" {
+            ErrorReason::for_class(ErrorClass::WorkerUnavailable)
+        } else {
+            self.reason().clone()
+        };
+        state.serialize_field("reason", &wire_reason)?;
         state.serialize_field("message", &self.message())?;
         if let Some(diagnostic) = &self.diagnostic {
             state.serialize_field("diagnostic", diagnostic)?;
@@ -873,7 +881,7 @@ impl DynamoError {
             | ErrorClass::RateLimited => ErrorClass::ResourceExhausted,
             ErrorClass::Unavailable => ErrorClass::Unavailable,
             ErrorClass::WorkerUnavailable => ErrorClass::WorkerUnavailable,
-            ErrorClass::WorkerDraining => ErrorClass::WorkerDraining,
+            ErrorClass::WorkerDraining => ErrorClass::WorkerUnavailable,
             ErrorClass::Backend(error) => ErrorClass::Backend(error),
         }
     }
@@ -1137,6 +1145,23 @@ mod tests {
             assert_static::<DynamoError>();
         }
     };
+
+    #[test]
+    fn draining_uses_compatible_worker_unavailable_wire_identity() {
+        // Regression: an older frontend rejects unknown reason keys and loses
+        // migration eligibility even when the canonical class is Unavailable.
+        let error = DynamoError::builder()
+            .error_type(ErrorClass::WorkerDraining)
+            .message("worker is draining")
+            .build();
+        let wire = serde_json::to_value(error).unwrap();
+        assert_eq!(wire["class"], "Unavailable");
+        assert_eq!(wire["error_type"], "WorkerUnavailable");
+        assert_eq!(wire["reason"], "backend.worker_unavailable");
+        let received: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(received.error_type(), ErrorClass::WorkerUnavailable);
+        assert_eq!(received.reason().as_str(), "backend.worker_unavailable");
+    }
 
     #[test]
     fn test_msg_constructor() {

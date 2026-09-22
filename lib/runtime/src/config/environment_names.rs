@@ -191,8 +191,12 @@ pub mod worker {
     pub const DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS: &str =
         "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS";
 
+    pub const DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS: &str = "DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS";
+    pub const DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS";
+
     /// Upper bound on `engine.cleanup()` during shutdown, in seconds.
-    /// Defaults to `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`.
+    /// Defaults to five seconds, reserved inside the total shutdown budget.
     pub const DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS: &str =
         "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS";
 
@@ -1068,6 +1072,8 @@ mod tests {
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             worker::DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS,
+            worker::DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS,
             worker::DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS,
             worker::DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS,
             worker::DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK,

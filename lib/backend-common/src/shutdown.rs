@@ -7,8 +7,7 @@
 //! Extracted from `worker.rs` so the whole timing surface is legible in one
 //! place — the stage bounds only make sense relative to one another, and
 //! reading them interleaved with lifecycle code hid the fact that they can
-//! sum past the deadline they nominally live inside (see
-//! [`shutdown_deadline`]).
+//! sum past the deadline they nominally live inside.
 //!
 //! Every knob resolves through [`env_secs`], so an operator gets the same
 //! parse behaviour and the same warning on every variable. What differs per
@@ -20,11 +19,9 @@
 //! # One budget, not a sum
 //!
 //! Every stage draws from the same deadline, measured once from SIGTERM. A
-//! stage receives `min(its cap, remaining)`. No reserve is withheld from
-//! earlier stages — withholding one zeroed the in-flight barrier under the
-//! debug defaults, where grace and reserve together consumed the whole total.
-//! Cleanup is funded by its own floor in `cleanup_once`, and the force-exit
-//! watchdog is extended by that floor so the two cannot race.
+//! stage receives `min(its cap, remaining)`. Earlier stages additionally
+//! withhold the configured cleanup allowance. Engine cleanup and transport
+//! teardown share that allowance inside the total; the watchdog never extends it.
 //!
 //! This is deliberately not a set of independent timers: the earlier design
 //! summed to roughly 95s worst case from a knob documented as 30, which could
@@ -47,23 +44,14 @@ pub(crate) const DRAIN_TIMEOUT_ENV: &str = "DYN_PREFILL_DRAIN_TIMEOUT_S";
 /// Cadence at which a long-running drain emits a progress log.
 pub(crate) const DRAIN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Floor granted to `engine.cleanup()` when the total budget is already spent.
-///
-/// Not withheld from earlier stages — see [`ShutdownBudget::allowance`].
-/// Cleanup is the one stage that must run even out of budget, because
-/// abandoning it leaks GPU memory; the hard-exit deadline bounds the overrun.
+/// Default allowance reserved for engine cleanup and transport teardown.
 pub(crate) const CLEANUP_RESERVE_S: f64 = 5.0;
 
 /// Default cap on waiting for request-plane in-flight requests to finish.
 ///
 /// `f64::INFINITY` means "no cap of its own" — the stage is bounded by the
-/// remaining total, like [`Stage::Unregister`]. It used to default to 900s to
-/// match `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS`, which was a knob that
-/// could never bind: `total_budget` is composed from the *worker* timeout plus
-/// the grace period (35s on release defaults), and `allowance` is
-/// `min(cap, remaining)`, so the documented 900s was 25x unreachable and
-/// raising it changed nothing. The total is the authority; this caps the stage
-/// *within* it.
+/// remaining total minus the cleanup reserve, like [`Stage::Unregister`].
+/// The total is the authority; this caps the stage *within* it.
 pub(crate) const DEFAULT_INFLIGHT_TIMEOUT_S: f64 = f64::INFINITY;
 pub(crate) const INFLIGHT_TIMEOUT_ENV: &str =
     dynamo_runtime::config::environment_names::worker::DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS;
@@ -130,7 +118,7 @@ fn env_secs(env: &str) -> Option<f64> {
 /// Grace period between discovery unregister and drain. Negative clamps to
 /// zero: skipping the sleep is a coherent request.
 pub(crate) fn grace_period_secs() -> f64 {
-    env_secs(GRACE_PERIOD_ENV)
+    env_secs_with_alias("DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS", GRACE_PERIOD_ENV)
         .unwrap_or(DEFAULT_GRACE_PERIOD_SECS)
         .max(0.0)
 }
@@ -138,19 +126,22 @@ pub(crate) fn grace_period_secs() -> f64 {
 /// Prefill KV-transfer drain budget. Negative clamps to zero: skipping the
 /// drain is a coherent request.
 pub(crate) fn drain_timeout_secs() -> f64 {
-    env_secs(DRAIN_TIMEOUT_ENV)
-        .unwrap_or(DEFAULT_DRAIN_TIMEOUT_S)
-        .max(0.0)
+    env_secs_with_alias(
+        "DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS",
+        DRAIN_TIMEOUT_ENV,
+    )
+    .unwrap_or(DEFAULT_DRAIN_TIMEOUT_S)
+    .max(0.0)
 }
 
-/// Bound for `engine.cleanup()`, defaulting to the post-signal deadline.
+/// Shared cleanup/transport bound, defaulting to five seconds.
 ///
 /// Unlike the stage budgets above, a non-positive value is rejected rather
 /// than clamped: `timeout(ZERO, fut)` polls once and cancels, which would
 /// abandon every cleanup immediately — strictly worse than the unbounded
 /// behaviour this replaced.
 pub(crate) fn cleanup_timeout() -> Duration {
-    let default = graceful_shutdown_timeout();
+    let default = Duration::from_secs_f64(CLEANUP_RESERVE_S);
     match env_secs(CLEANUP_TIMEOUT_ENV) {
         Some(v) if v > 0.0 => duration_from_secs(v),
         Some(v) => {
@@ -163,6 +154,14 @@ pub(crate) fn cleanup_timeout() -> Duration {
             default
         }
         None => default,
+    }
+}
+
+fn env_secs_with_alias(name: &str, alias: &str) -> Option<f64> {
+    if std::env::var(name).is_ok_and(|value| !value.trim().is_empty()) {
+        env_secs(name)
+    } else {
+        env_secs(alias)
     }
 }
 
@@ -247,7 +246,8 @@ pub(crate) fn inflight_timeout_secs() -> f64 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ShutdownConfig {
     /// Total SIGTERM-to-exit budget. Overrides
-    /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` + router grace.
+    /// `DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` (legacy alias:
+    /// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`).
     pub total_secs: Option<f64>,
     /// Time to keep serving after the discovery unregister.
     pub router_grace_secs: Option<f64>,
@@ -255,7 +255,7 @@ pub struct ShutdownConfig {
     pub inflight_timeout_secs: Option<f64>,
     /// Cap on waiting for prefill KV transfers.
     pub kv_transfer_timeout_secs: Option<f64>,
-    /// Cap on `engine.cleanup()`.
+    /// Shared cap and reserve for engine cleanup and transport teardown.
     pub cleanup_timeout_secs: Option<f64>,
     /// Policy when a prefill engine cannot report KV-transfer state.
     pub kv_transfer_fallback: Option<KvTransferFallback>,
@@ -308,7 +308,7 @@ impl StageMaxima {
             Stage::RouterGrace => self.router_grace,
             Stage::Inflight => self.inflight,
             Stage::KvTransfer => self.kv_transfer,
-            Stage::Cleanup => self.cleanup,
+            Stage::Cleanup | Stage::Runtime => self.cleanup,
         }
     }
 }
@@ -328,6 +328,8 @@ pub enum Stage {
     KvTransfer,
     /// Release engine resources.
     Cleanup,
+    /// Disconnect runtime transports after engine cleanup.
+    Runtime,
 }
 
 impl Stage {
@@ -339,6 +341,7 @@ impl Stage {
             Stage::Inflight => "inflight",
             Stage::KvTransfer => "kv_transfer",
             Stage::Cleanup => "cleanup",
+            Stage::Runtime => "runtime",
         }
     }
 }
@@ -347,8 +350,11 @@ impl Stage {
 /// logs without inferring intent from timing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StageReason {
+    Started,
     /// The stage's completion condition was met.
     Completed,
+    /// The stage returned an error.
+    Failed,
     /// The stage ran out of budget.
     TimedOut,
     /// The stage did not apply, or had zero budget.
@@ -362,7 +368,9 @@ pub enum StageReason {
 impl StageReason {
     pub fn as_str(self) -> &'static str {
         match self {
+            StageReason::Started => "started",
             StageReason::Completed => "completed",
+            StageReason::Failed => "failed",
             StageReason::TimedOut => "timed_out",
             StageReason::Skipped => "skipped",
             StageReason::Cancelled => "cancelled",
@@ -429,7 +437,7 @@ impl StageOutcome {
                 reason = self.reason.as_str(),
                 elapsed_s = self.elapsed.as_secs_f64(),
                 remaining_total_s = remaining,
-                "shutdown stage finished"
+                "shutdown stage transition"
             );
         }
     }
@@ -438,11 +446,8 @@ impl StageOutcome {
 /// The single SIGTERM-to-exit budget every stage draws from.
 ///
 /// Stage maxima are caps, not additive deadlines: a stage gets
-/// `min(stage_max, remaining_total)`. No reserve is withheld here — see
-/// [`ShutdownBudget::allowance`] for why withholding one zeroed the in-flight
-/// barrier under the debug defaults. Cleanup is funded instead by
-/// `cleanup_once`'s own floor, with [`force_exit_deadline`] extending the
-/// watchdog to cover it.
+/// `min(stage_max, remaining_total)`. Pre-cleanup stages also withhold the
+/// cleanup reserve. Nothing may extend the original deadline.
 #[derive(Clone, Copy, Debug)]
 pub struct ShutdownBudget {
     /// `None` for the reversible Admin drain, which has no deadline.
@@ -488,10 +493,8 @@ impl ShutdownBudget {
     /// The force-exit watchdog starts its clock the instant the shutdown token
     /// is cancelled, but the stages are armed later — `begin_engine_route_shutdown`
     /// and the RL endpoint teardown both run first, and both are unbounded. When
-    /// the budget measured from *its* start instead, that skew came straight out
-    /// of the cleanup floor `force_exit_deadline` adds, so the watchdog fired
-    /// during `engine.cleanup()` — the exact failure the floor exists to prevent.
-    /// Sharing one origin is what makes the floor real.
+    /// the budget measured from *its* start instead, it extended the deadline
+    /// by that skew. Sharing one origin keeps all stages inside the same total.
     pub fn from_config_starting_at(config: &ShutdownConfig, origin: Instant) -> Self {
         let maxima = StageMaxima::resolve(config);
         // Via `total_budget` so this and the hard-exit timer cannot diverge —
@@ -536,28 +539,15 @@ impl ShutdownBudget {
     /// How long `stage` may run: `min(stage_max, remaining)`, or `None` when
     /// unbounded.
     ///
-    /// No reserve is withheld for cleanup here, deliberately. Subtracting one
-    /// zeroed the in-flight barrier under the debug defaults — grace (5s) plus
-    /// the reserve (5s) consumed the whole 10s total — so shutdown released
-    /// engine memory while a request was still executing, which is the exact
-    /// failure this sequence exists to prevent. `cleanup_once` already
-    /// substitutes [`CLEANUP_RESERVE_S`] as a floor when the budget is spent,
-    /// so cleanup was never actually relying on the withholding, and the
-    /// hard-exit deadline remains the real backstop.
-    ///
-    /// A zero allowance does not mean the same thing to every stage:
-    ///
-    /// * A read-only predicate stage (in-flight, KV quiescence) still gets one
-    ///   poll, because `timeout(ZERO, fut)` polls once before cancelling and
-    ///   an already-satisfied condition should complete rather than be
-    ///   reported as unfinished.
-    /// * A stage with side effects must **not** run under a zero timeout.
-    ///   `cleanup` would start teardown and abandon it on the first poll, so
-    ///   `cleanup_once` substitutes the reserve floor instead.
-    /// * A fixed sleep (`router_grace`) is simply skipped.
+    /// Pre-cleanup stages cannot spend the reserved cleanup allowance.
     pub fn allowance(&self, stage: Stage) -> Option<Duration> {
         let remaining = self.remaining()?;
-        Some(self.maxima.get(stage).min(remaining))
+        let available = if matches!(stage, Stage::Cleanup | Stage::Runtime) {
+            remaining
+        } else {
+            remaining.saturating_sub(self.maxima.cleanup)
+        };
+        Some(self.maxima.get(stage).min(available))
     }
 }
 
@@ -571,44 +561,13 @@ impl ShutdownBudget {
 pub(crate) fn total_budget(config: &ShutdownConfig) -> Duration {
     match config.total_secs {
         Some(secs) => duration_from_secs(secs),
-        // The grace sleep is a fixed wait, so it sits on top of the
-        // drain+cleanup timeout rather than eating into it.
-        None => shutdown_deadline(
-            graceful_shutdown_timeout(),
-            config.router_grace_secs.unwrap_or_else(grace_period_secs),
-        ),
+        None => graceful_shutdown_timeout(),
     }
 }
 
-/// The instant the process force-exits, which is the stage budget plus the
-/// floor `cleanup_once` is guaranteed to grant.
-///
-/// The two must not be the same instant. A stage is allowed to spend the whole
-/// remaining budget — the KV wait does exactly that whenever its cap exceeds
-/// what is left, which is the default on both build profiles — and
-/// `cleanup_once` then falls back to [`CLEANUP_RESERVE_S`]. If the watchdog
-/// fired at the end of the stage budget it would kill the process during that
-/// floor, so a healthy worker whose engine simply cannot report KV quiescence
-/// exited 70 with its engine never cleaned up. Extending the watchdog by the
-/// floor does not lengthen shutdown in the normal case; it stops the two
-/// racing.
+/// The watchdog uses exactly the total budget, including cleanup.
 pub(crate) fn force_exit_deadline(config: &ShutdownConfig) -> Duration {
-    total_budget(config).saturating_add(Duration::from_secs_f64(CLEANUP_RESERVE_S))
-}
-
-/// Compose the post-signal shutdown deadline from the drain+cleanup
-/// timeout and the grace-period sleep that precedes them.
-///
-/// The grace sleep is a fixed wait (not a hang risk), so reserving its
-/// duration on top of `timeout` ensures the drain loop and
-/// `engine.cleanup()` always get the full timeout budget regardless of
-/// how the operator configures the grace period. Without this reserve,
-/// a grace period equal to the timeout (the debug default — both 5s)
-/// consumes the whole budget and the deadline expires before drain or
-/// cleanup get scheduled.
-pub(crate) fn shutdown_deadline(timeout: Duration, grace_secs: f64) -> Duration {
-    let grace = duration_from_secs(grace_secs);
-    timeout.saturating_add(grace)
+    total_budget(config)
 }
 
 #[cfg(test)]
@@ -709,7 +668,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         {
             let _g = EnvGuard::unset(CLEANUP_TIMEOUT_ENV);
-            assert_eq!(cleanup_timeout(), graceful_shutdown_timeout());
+            assert_eq!(cleanup_timeout(), Duration::from_secs(5));
         }
         {
             let _g = EnvGuard::set(CLEANUP_TIMEOUT_ENV, "12.5");
@@ -726,35 +685,10 @@ mod tests {
             let _g = EnvGuard::set(CLEANUP_TIMEOUT_ENV, bad);
             assert_eq!(
                 cleanup_timeout(),
-                graceful_shutdown_timeout(),
+                Duration::from_secs(5),
                 "{bad:?} must fall back to the default, not produce a zero budget"
             );
         }
-    }
-
-    #[test]
-    fn shutdown_deadline_adds_grace_to_timeout() {
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(30), 5.0),
-            Duration::from_secs(35)
-        );
-    }
-
-    #[test]
-    fn shutdown_deadline_ignores_non_positive_grace() {
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(30), 0.0),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            shutdown_deadline(Duration::from_secs(30), -1.0),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn shutdown_deadline_saturates_instead_of_overflowing() {
-        assert_eq!(shutdown_deadline(Duration::MAX, 5.0), Duration::MAX);
     }
 
     // -------------------------------------------------------------------
@@ -804,18 +738,13 @@ mod tests {
             .allowance(Stage::RouterGrace)
             .expect("bounded budget yields an allowance");
         assert!(
-            allowance <= Duration::from_secs(20) && allowance > Duration::from_secs(19),
-            "expected ~20s (the remaining total, under the 30s cap), got {allowance:?}"
+            allowance <= Duration::from_secs(15) && allowance > Duration::from_secs(14),
+            "expected ~15s after reserving cleanup, got {allowance:?}"
         );
     }
 
-    /// The defect that made the whole sequence pointless under the debug
-    /// defaults: withholding a cleanup reserve left the in-flight barrier with
-    /// a zero budget, so it "timed out" in ~1ms and `engine.cleanup()` ran
-    /// while a request was still executing.
-    ///
-    /// Debug totals are `timeout (5s) + grace (5s)`, so after the grace there
-    /// is exactly 5s left — all of which the old formula reserved.
+    /// Both build profiles must leave time for requests after router grace
+    /// while still reserving cleanup inside the total.
     #[test]
     fn inflight_barrier_still_has_budget_after_the_grace_at_debug_defaults() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -824,7 +753,10 @@ mod tests {
         let _cleanup = EnvGuard::unset(CLEANUP_TIMEOUT_ENV);
 
         // The state the worker is in once the router grace has been served.
-        let after_grace = ShutdownBudget::starting_now(graceful_shutdown_timeout());
+        let after_grace = ShutdownBudget::starting_now(
+            graceful_shutdown_timeout()
+                .saturating_sub(Duration::from_secs_f64(grace_period_secs())),
+        );
         let allowance = after_grace
             .allowance(Stage::Inflight)
             .expect("bounded budget yields an allowance");
@@ -835,11 +767,9 @@ mod tests {
         );
     }
 
-    /// Cleanup is funded even when the stages before it spent everything —
-    /// `cleanup_once` substitutes the floor, which is why `allowance` does not
-    /// need to withhold one.
+    /// Cleanup cannot extend the total after an earlier stage exhausts it.
     #[test]
-    fn cleanup_reserve_is_a_floor_not_a_withholding() {
+    fn cleanup_reserve_cannot_extend_an_expired_deadline() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _cleanup = EnvGuard::set(CLEANUP_TIMEOUT_ENV, "10");
 
@@ -847,9 +777,6 @@ mod tests {
         let budget = ShutdownBudget::starting_now(Duration::ZERO);
         assert_eq!(budget.allowance(Stage::Cleanup), Some(Duration::ZERO));
         assert!(budget.is_exhausted());
-        // The floor itself is applied by `Worker::cleanup_once`, which is
-        // covered by `cleanup_once_is_bounded_when_engine_hangs`; the budget
-        // simply reports the truth rather than pre-emptively withholding.
     }
 
     /// An expired budget reports exhausted and hands out zero, which callers
@@ -1014,25 +941,16 @@ mod tests {
     }
 
     #[test]
-    fn total_budget_falls_back_to_timeout_plus_grace() {
+    fn total_budget_includes_router_grace() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set(GRACE_PERIOD_ENV, "7");
         let config = ShutdownConfig::default();
-        assert_eq!(
-            total_budget(&config),
-            shutdown_deadline(graceful_shutdown_timeout(), 7.0)
-        );
+        assert_eq!(total_budget(&config), graceful_shutdown_timeout());
     }
 
-    /// Regression: a stage may legitimately spend the entire remaining budget
-    /// — `allowance` is `min(cap, remaining)` and the KV cap exceeds what is
-    /// left on both build profiles — after which `cleanup_once` is still owed
-    /// its floor. If the watchdog fired at the end of the stage budget it
-    /// killed the process during that floor, so a healthy prefill worker whose
-    /// engine cannot report quiescence exited 70 with its engine never cleaned
-    /// up.
+    /// Cleanup is reserved inside the total, never added to the watchdog.
     #[test]
-    fn force_exit_deadline_leaves_room_for_the_cleanup_floor() {
+    fn force_exit_deadline_includes_the_cleanup_reserve() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _grace = EnvGuard::unset(GRACE_PERIOD_ENV);
         let config = ShutdownConfig::default();
@@ -1040,8 +958,8 @@ mod tests {
         let stages = total_budget(&config);
         let watchdog = force_exit_deadline(&config);
         assert!(
-            watchdog >= stages + Duration::from_secs_f64(CLEANUP_RESERVE_S),
-            "watchdog {watchdog:?} must outlast the stage budget {stages:?} by the cleanup floor"
+            watchdog == stages,
+            "watchdog {watchdog:?} must equal the total budget {stages:?}"
         );
 
         // The precondition that triggered it, asserted without reading the
@@ -1057,8 +975,8 @@ mod tests {
     /// two different moments — the watchdog when the shutdown token was
     /// cancelled, the budget when the orchestrator was finally reached, with
     /// the unbounded engine-route and RL-endpoint teardown in between. The
-    /// identity asserted above still held, but the cleanup floor it buys was
-    /// consumed by that skew, so the watchdog fired during `engine.cleanup()`.
+    /// identity asserted above still held, but the stage budget outlived the
+    /// watchdog by that skew.
     ///
     /// Asserting the identity is not enough; this pins the origin itself.
     #[test]
