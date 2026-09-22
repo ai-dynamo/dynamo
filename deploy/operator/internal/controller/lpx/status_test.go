@@ -138,13 +138,13 @@ func TestLPXStatusSkipsUnchangedObservations(t *testing.T) {
 			require.Zero(t, writes)
 			require.Equal(t, previous, &child.Status)
 
-			t.Log("A real transition is persisted once and updates component readiness")
+			t.Log("A graph transition is persisted without overwriting independently observed component readiness")
 			setReadyCondition(child, different, "new observation")
 			require.Zero(t, writes)
 			require.NoError(t, r.updateStatus(t.Context(), child, previous))
 			require.Equal(t, 1, writes)
 			require.True(t, meta.FindStatusCondition(child.Status.Conditions, "Ready").LastTransitionTime.After(transition.Time))
-			require.Equal(t, different == v1beta1.DGDStateSuccessful, child.Status.Components["engine"].Ready)
+			require.Equal(t, state == v1beta1.DGDStateSuccessful, child.Status.Components["engine"].Ready)
 		})
 	}
 }
@@ -243,6 +243,8 @@ func TestSchedulingFailureCoversPipelineRequests(t *testing.T) {
 		noCondition     bool
 		noFailureTime   bool
 		start           *metav1.Time
+		created         *metav1.Time
+		noStatus        bool
 		wantCurrent     bool
 		wantCovered     bool
 	}{
@@ -255,7 +257,11 @@ func TestSchedulingFailureCoversPipelineRequests(t *testing.T) {
 		{name: "older cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt.Add(-time.Minute))), wantCurrent: true, wantCovered: true},
 		{name: "same timestamp", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt)), wantCurrent: true},
 		{name: "newer cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: ptr.To(metav1.NewTime(failedAt.Add(time.Second))), wantCurrent: true},
-		{name: "unknown cycle", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, wantCurrent: true},
+		{name: "no scheduler receipt uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, noStatus: true, wantCurrent: true, wantCovered: true},
+		{name: "no scheduling start uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, wantCurrent: true, wantCovered: true},
+		{name: "zero scheduling start uses creation", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, start: &metav1.Time{}, wantCurrent: true, wantCovered: true},
+		{name: "creation after failure is not covered", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, created: ptr.To(metav1.NewTime(failedAt.Add(time.Second))), noStatus: true, wantCurrent: true},
+		{name: "unpublished request is not covered", conditionStatus: metav1.ConditionTrue, reason: pipelineRequestDeadlineExceededReason, generation: 2, created: &metav1.Time{}, noStatus: true, wantCurrent: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("A durable failure authorizes cleanup of older cycles independently of retry generation")
@@ -270,7 +276,16 @@ func TestSchedulingFailureCoversPipelineRequests(t *testing.T) {
 				}
 				deployment.Status.Conditions = []metav1.Condition{condition}
 			}
-			request := &lpxv1alpha1.LPUPipelineRequest{Status: &lpxv1alpha1.LPUPipelineRequestStatus{SchedulingStartedAt: tc.start}}
+			request := &lpxv1alpha1.LPUPipelineRequest{
+				ObjectMeta: metav1.ObjectMeta{CreationTimestamp: metav1.NewTime(failedAt.Add(-time.Hour))},
+				Status:     &lpxv1alpha1.LPUPipelineRequestStatus{SchedulingStartedAt: tc.start},
+			}
+			if tc.created != nil {
+				request.CreationTimestamp = *tc.created
+			}
+			if tc.noStatus {
+				request.Status = nil
+			}
 			require.Equal(t, tc.wantCurrent, isSchedulingFailedConditionCurrent(deployment))
 			require.Equal(t, tc.wantCovered, schedulingFailureCoversPipelineRequests(deployment, []*lpxv1alpha1.LPUPipelineRequest{request}))
 		})
@@ -334,7 +349,7 @@ func TestClearPreviousSchedulingFailure(t *testing.T) {
 				}}
 			}
 			before := deployment.Status.DeepCopy()
-			clearPreviousSchedulingFailure(deployment)
+			acknowledgeSchedulingRetry(deployment)
 			if !tc.wantCleared {
 				require.Equal(t, *before, deployment.Status)
 				return

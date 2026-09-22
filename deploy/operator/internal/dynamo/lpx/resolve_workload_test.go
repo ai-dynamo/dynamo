@@ -20,7 +20,7 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
+func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
 	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
 	dgd.Annotations = nil
@@ -30,14 +30,14 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "ordinary"}}}},
 	})
 
-	t.Log("Resolve an LPU-only engine without selecting the conventional decode")
+	t.Log("Resolve an LPU-only workload without selecting the conventional decode")
 	hxSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
-	hx, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": hxSnapshot})
+	hx, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": hxSnapshot})
 	require.NoError(t, err)
 	require.Equal(t, PipelineSingle, hx.Pipeline())
 	require.Equal(t, BuildFamilyHX, hx.BuildFamily())
 	require.Equal(t, lpxv1alpha1.WorkloadModeV3HxLPUOnly, hx.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
-	require.Equal(t, "LPX", hx.LPXComponentName())
+	require.Equal(t, "LPX", hx.ServingComponentName())
 	plan, err := hx.PlanNodeLocalMaterialization("test-pcs")
 	require.NoError(t, err)
 	require.Equal(t, "test-pcs-0-lpx", plan.LPXScalingGroup)
@@ -45,10 +45,10 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	require.Empty(t, plan.CyborgTemplate)
 	require.NotEmpty(t, plan.ConductorClique)
 
-	t.Log("Scale Nova engines without changing their model or workload digest")
+	t.Log("Scale Nova workloads without changing their model or workload digest")
 	for _, replicas := range []int32{2, 10, 12, 123} {
 		dgd.Spec.Components[0].Replicas = ptr.To(replicas)
-		scaled, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": hxSnapshot})
+		scaled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": hxSnapshot})
 		require.NoError(t, err)
 		require.Equal(t, hx.Digest(), scaled.Digest())
 		require.Equal(t, replicas, scaled.scalingGroupReplicas)
@@ -62,11 +62,11 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	fixture.partitions = append(fixture.partitions, testV3CapnpPartition{id: 11, deviceType: manifestcapnp.DeviceType_cuda})
 	snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	source := staticBuildSnapshotSource{"build": snapshot}
-	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
+	_, err = ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 	conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 	conductor.PodTemplate = testLPXPodTemplate("cyborg-runtime")
-	_, err = ResolveSelectedWorkload(t.Context(), dgd, source)
+	_, err = ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.ErrorContains(t, err, "requires a declared resourceClaim or a positive nvidia.com/gpu request")
 
 	t.Log("Validate claim consumption by the Cyborg main container")
@@ -106,7 +106,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 			before := candidate.DeepCopy()
 
 			t.Log("Require scalar GPUs or a claim consumed by main without rewriting the template")
-			_, err := ResolveSelectedWorkload(t.Context(), candidate, source)
+			_, err := ResolveWorkload(t.Context(), candidate, singleGroupComponents(t, candidate), source)
 			if test.wantErr {
 				require.ErrorContains(t, err, "conductor main container requires a declared resourceClaim")
 			} else {
@@ -122,7 +122,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(2))
 
 	t.Log("Project two complete hybrid replicas")
-	xt, err := ResolveSelectedWorkload(t.Context(), dgd, source)
+	xt, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, PipelineLPX, xt.Pipeline())
 	require.Equal(t, BuildFamilyXT, xt.BuildFamily())
@@ -138,7 +138,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 	t.Log("A scheduling deadline and annotation do not change hybrid launch")
 	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
 	dgd.Annotations = map[string]string{commonconsts.KubeAnnotationLPXSchedulerBackend: commonconsts.LPXSchedulerBackend}
-	scheduled, err := ResolveSelectedWorkload(t.Context(), dgd, source)
+	scheduled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, xt, scheduled)
 	scheduledPlan, err := scheduled.PlanNodeLocalMaterialization("test-pcs")
@@ -148,7 +148,7 @@ func TestResolveSelectedWorkloadDerivesRuntimeShapeFromCompilationMode(t *testin
 
 }
 
-func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
+func TestResolveWorkloadSpecDecodeV2AndV3(t *testing.T) {
 	t.Log("Define revision-specific SpecDecode compiler snapshots")
 	tests := []struct {
 		name     string
@@ -195,7 +195,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 
 			t.Log("Project the selected SpecDecode workload")
 			before := dgd.DeepCopy()
-			selected, err := ResolveSelectedWorkload(t.Context(), dgd, source)
+			selected, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 
 			t.Log("Project the selected family, workload mode, and pipeline")
 			require.NoError(t, err)
@@ -203,7 +203,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			require.Equal(t, test.family, selected.BuildFamily())
 			require.Equal(t, test.wantMode, selected.modelProjections[0].RequestSpec(&MaterializationPlan{}, "agents").WorkloadMode)
 			require.Equal(t, PipelineSpecDecode, selected.Pipeline())
-			require.Equal(t, "lpx", selected.LPXComponentName())
+			require.Equal(t, "lpx", selected.ServingComponentName())
 
 			t.Log("Expand draft fanout while preserving model and template identity order")
 			projections := selected.ModelProjections()
@@ -232,17 +232,20 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 			t.Log("Reordering authored components does not change build identities or resources")
 			reordered := dgd.DeepCopy()
 			slices.Reverse(reordered.Spec.Components)
-			reselected, err := ResolveSelectedWorkload(t.Context(), reordered, source)
+			members := singleGroupComponents(t, reordered)
+			slices.Reverse(members)
+			reselected, err := ResolveWorkload(t.Context(), reordered, members, source)
 			require.NoError(t, err)
 			require.Equal(t, selected.Digest(), reselected.Digest())
 			reorderedPlan, err := reselected.PlanNodeLocalMaterialization("test-pcs")
 			require.NoError(t, err)
 			require.Equal(t, plan, reorderedPlan)
+			require.Equal(t, []string{"small", "lpx"}, reselected.ComponentNames())
 
 			t.Log("Agent replica assertions count one compiled model instance, not draft fanout")
 			invalidCount := dgd.DeepCopy()
 			invalidCount.Spec.Components[1].ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(compiledAgentCount * 2)
-			_, err = ResolveSelectedWorkload(t.Context(), invalidCount, source)
+			_, err = ResolveWorkload(t.Context(), invalidCount, singleGroupComponents(t, invalidCount), source)
 			require.ErrorContains(t, err, "must match the compiled count")
 
 			t.Log("Derive an aggregate digest and reject mixed-family aggregation")
@@ -277,7 +280,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 					if expansion.count > 1 {
 						draft.Replicas = ptr.To(expansion.count)
 					}
-					expanded, err := ResolveSelectedWorkload(t.Context(), dgd, source)
+					expanded, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 					require.NoError(t, err)
 					models := make([]string, 0, len(expansion.models))
 					for _, projection := range expanded.ModelProjections() {
@@ -294,7 +297,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 				draft := &dgd.Spec.Components[1]
 				draft.Replicas = nil
 				draft.LPX.BuildID = "target-build"
-				shared, err := ResolveSelectedWorkload(t.Context(), dgd, source)
+				shared, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 				require.NoError(t, err)
 				projections := shared.ModelProjections()
 				require.Len(t, projections, 2)
@@ -307,7 +310,7 @@ func TestResolveSelectedWorkloadSpecDecodeV2AndV3(t *testing.T) {
 	}
 }
 
-func TestResolveSelectedWorkloadPreservesAuthoredLaunch(t *testing.T) {
+func TestResolveWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	t.Log("Author independent wrappers without exposing launch syntax to the operator")
 	conductor := testLPXPodTemplate("conductor-runtime")
 	conductor.Spec.Containers[0].Command = []string{"/bin/sh", "-c"}
@@ -323,12 +326,12 @@ func TestResolveSelectedWorkloadPreservesAuthoredLaunch(t *testing.T) {
 	before := dgd.DeepCopy()
 
 	t.Log("Validate placement and role ownership without parsing either command line")
-	_, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": snapshot})
+	_, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": snapshot})
 	require.NoError(t, err)
 	require.Equal(t, before, dgd)
 }
 
-func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t *testing.T) {
+func TestResolveWorkloadChecksConductorContainerNamesForSelectedBuild(t *testing.T) {
 	t.Log("Acquire LPU-only and hybrid builds that select different runtime container identities")
 	lpuSnapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
 	hybridFixture := newV2CompilerFixture()
@@ -428,11 +431,11 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 				before := dgd.DeepCopy()
 
 				t.Log("Defer conductor-name checks until the immutable build has been acquired")
-				_, err := ResolveSelectedWorkload(t.Context(), dgd, unreachableBuildSnapshotSource{})
+				_, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), unreachableBuildSnapshotSource{})
 				require.ErrorIs(t, err, ErrBuildSnapshotAcquisition)
 
 				t.Log("Reject only actual conductor collisions for the selected runtime")
-				selected, err := ResolveSelectedWorkload(t.Context(), dgd, staticBuildSnapshotSource{"build": snapshot})
+				selected, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), staticBuildSnapshotSource{"build": snapshot})
 				if test.wantForbidden {
 					namePath := field.NewPath("spec", "components").Index(componentIndex).Child("roles").Index(roleIndex).Child("podTemplate", "spec", containerList).Index(containerIndex).Child("name")
 					want := field.Forbidden(namePath, `LPX reserves "conductor" for the materialized role container`)
@@ -448,4 +451,53 @@ func TestResolveSelectedWorkloadChecksConductorContainerNamesForSelectedBuild(t 
 			})
 		}
 	}
+}
+
+func TestResolveWorkloadIsolatesComponentGroups(t *testing.T) {
+	t.Log("Author two LPU-only workloads with different builds and replica counts")
+	dgd := newSelectedTestDGD(t, "graph", v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+	})
+	for index, name := range []string{"first", "second"} {
+		component := testLPXComponent(name, name+"-build",
+			v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")},
+			v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor")},
+		)
+		component.Replicas = ptr.To(int32(index + 2))
+		dgd.Spec.Components = append(dgd.Spec.Components, component)
+	}
+	snapshot := acquireTestSnapshot(t, writeV3CompilerFixture(t))
+	before := dgd.DeepCopy()
+
+	t.Log("Resolve each group using only its own build, replicas and component identity")
+	groups := ComponentGroups(dgd)
+	for index, name := range []string{"first", "second"} {
+		workload, err := ResolveWorkload(t.Context(), dgd, groups[name], staticBuildSnapshotSource{name + "-build": snapshot})
+		require.NoError(t, err)
+		require.Equal(t, PipelineSingle, workload.Pipeline())
+		require.Equal(t, name, workload.ServingComponentName())
+		require.Equal(t, []string{name}, workload.ComponentNames())
+		plan, err := workload.PlanNodeLocalMaterialization("pcs")
+		require.NoError(t, err)
+		require.EqualValues(t, index+2, plan.Replicas)
+	}
+	require.Equal(t, before, dgd)
+
+	t.Log("Validate the second conductor and report its index in the complete graph")
+	conductor := dgd.GetComponentByName("second").ComponentRole(v1beta1.ComponentRoleLPXConductor)
+	conductor.PodTemplate.Spec.InitContainers = []corev1.Container{{Name: "conductor", Image: "sidecar"}}
+	_, err := ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
+	require.ErrorContains(t, err, "spec.components[2].roles[1].podTemplate.spec.initContainers[0].name")
+	conductor.PodTemplate.Spec.InitContainers = nil
+	conductor.Replicas = ptr.To(int32(2))
+	_, err = ResolveWorkload(t.Context(), dgd, groups["second"], staticBuildSnapshotSource{"second-build": snapshot})
+	require.ErrorContains(t, err, `component "second" conductor replicas must be one`)
+}
+
+func TestExpandedModelNames(t *testing.T) {
+	t.Log("Expand admitted component replicas into runtime model names")
+	require.Equal(t, []string{"draft0", "draft1", "draft2"}, expandedModelNames(2, false, 3))
+	require.Equal(t, []string{"draft0"}, expandedModelNames(2, false, 1))
+	require.Equal(t, []string{"target"}, expandedModelNames(2, true, 1))
+	require.Equal(t, []string{"default"}, expandedModelNames(1, true, 2))
 }

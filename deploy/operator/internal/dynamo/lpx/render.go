@@ -31,37 +31,44 @@ const StageLabel = "lpx.nvidia.com/stage"
 type RenderInput struct {
 	// CyborgConfigMap is rendered before the user's Cyborg defaults are merged.
 	CyborgConfigMap *corev1.ConfigMap
-	// MinAvailable is the minimum number of complete engine replicas in the gang.
+	// MinAvailable is the minimum number of complete workload replicas in the gang.
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
 	Stages map[string]corev1.PodTemplateSpec
 	// Conductor supplies a fresh, independently merged template for the shared LPU
 	// conductor. Required for non-hybrid pipelines; hybrid pipelines leave it nil
-	// and supply their independently rendered Cyborg clique in pcs.
+	// and supply their independently rendered Cyborg clique below.
 	Conductor *corev1.PodTemplateSpec
+	// Cyborg supplies the GPU clique for hybrid pipelines; nil for LPU-only workloads.
+	Cyborg *grovev1alpha1.PodCliqueTemplateSpec
 }
 
-// RenderSelectedNodeLocal consumes fresh graph and render inputs. pcs, workload,
-// and plan must be non-nil. The function mutates pcs and may mutate the
-// reference-backed stage and conductor template contents in input; callers must
-// pass independently owned values. pcs contains only the optional Cyborg clique
-// rendered from the same workload, with no scaling groups. workload and plan are
-// read without mutation.
+// WorkloadTemplates contains only the templates and resources contributed by one workload.
+type WorkloadTemplates struct {
+	Cliques      []*grovev1alpha1.PodCliqueTemplateSpec
+	ScalingGroup grovev1alpha1.PodCliqueScalingGroupConfig
+	Resources    []client.Object
+}
+
+// RenderNodeLocal renders a workload without constructing a PCS. workload
+// and plan must be non-nil and are read without mutation. The function may mutate
+// the reference-backed templates in input; callers must pass fresh owned values.
+// The caller assigns namespaces to the returned resources.
 //
 //nolint:gocyclo // Rendering is one transactional validation-and-materialization pass.
-func RenderSelectedNodeLocal(
-	pcs *grovev1alpha1.PodCliqueSet,
-	workload *SelectedWorkload,
+func RenderNodeLocal(
+	workload *Workload,
 	plan *MaterializationPlan,
 	input RenderInput,
-) ([]client.Object, error) {
+) (*WorkloadTemplates, error) {
 	projections := workload.modelProjections
 
-	// Hybrid input owns one GPU clique before the LPU roles are appended.
+	// Keep the hybrid GPU clique before the workload's LPU roles.
 	hybrid := projections[0].pipeline == PipelineLPX
-	var cyborg *grovev1alpha1.PodCliqueTemplateSpec
+	rendered := &WorkloadTemplates{}
+	cyborg := input.Cyborg
 	if hybrid {
-		cyborg = pcs.Spec.Template.Cliques[0]
+		rendered.Cliques = append(rendered.Cliques, cyborg)
 	}
 
 	workloadDigest := workload.Digest().String()
@@ -74,10 +81,9 @@ func RenderSelectedNodeLocal(
 	if projections[0].pipeline == PipelineSpecDecode {
 		allocation = strings.Join(agentTemplateNames, ":")
 	}
-	namespace := pcs.Namespace
 
 	// The serving component owns conductor metadata and storage independently of model order.
-	conductorStage := projections[len(projections)-1].stage
+	conductorStage := workload.ServingComponentName()
 	conductorTemplate := input.Conductor
 	storageTemplate := input.Stages[conductorStage]
 	if !hybrid {
@@ -90,7 +96,7 @@ func RenderSelectedNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	configMap, err := renderRuntimeConfigMap(namespace, plan.PodCliqueSetName+"-lpu", resolvedPartitionData(projections))
+	configMap, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +139,7 @@ func RenderSelectedNodeLocal(
 				StartsAfter:  agentTemplateNames,
 			},
 		}
-		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, conductor)
+		rendered.Cliques = append(rendered.Cliques, conductor)
 	}
 
 	// Canonical projections keep each component together; consume its last Agent instance.
@@ -177,7 +183,7 @@ func RenderSelectedNodeLocal(
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
 		agent := plan.Agents[index]
 		replicas := int32(agent.Replicas)
-		pcs.Spec.Template.Cliques = append(pcs.Spec.Template.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
+		rendered.Cliques = append(rendered.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        agent.TemplateName,
 			Labels:      maps.Clone(template.Labels),
 			Annotations: annotations,
@@ -190,16 +196,13 @@ func RenderSelectedNodeLocal(
 		})
 	}
 
-	pcs.Annotations = workloadAnnotations(pcs.Annotations, workloadDigest)
-	// Node-local uses canonical annotation absence for backward compatibility.
-	delete(pcs.Annotations, ExecutionBackendAnnotation)
 	selectedTemplateNames := agentTemplateNames
 	if conductorTemplateName != "" {
 		selectedTemplateNames = append([]string{conductorTemplateName}, selectedTemplateNames...)
 	}
 
 	if hybrid {
-		// Bound GPU hostnames using the rendered width of the last engine replica.
+		// Bound GPU hostnames using the rendered width of the last workload replica.
 		if err := plan.validatePodHostname("Cyborg", plan.CyborgTemplate, int(cyborg.Spec.Replicas)-1); err != nil {
 			return nil, err
 		}
@@ -224,32 +227,31 @@ func RenderSelectedNodeLocal(
 		}
 	}
 
-	// Seed the complete-engine group at its immutable minimum; live capacity is managed through /scale.
+	// Each workload contributes its own scaling group to the shared PCS.
 	members := selectedTemplateNames
 	if hybrid {
 		members = append(members, plan.CyborgTemplate)
 	}
-	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{
-		Name:         lpxScalingGroupTemplateName,
+	rendered.ScalingGroup = grovev1alpha1.PodCliqueScalingGroupConfig{
+		Name:         plan.ScalingGroupTemplate,
 		CliqueNames:  members,
 		Annotations:  map[string]string{WorkloadDigestAnnotation: workloadDigest},
 		Replicas:     ptr.To(ptr.Deref(input.MinAvailable, 1)),
 		MinAvailable: ptr.To(ptr.Deref(input.MinAvailable, 1)),
-	}}
+	}
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.
-	for _, clique := range pcs.Spec.Template.Cliques {
+	for _, clique := range rendered.Cliques {
 		clique.Spec.PodSpec.SchedulerName = SchedulerName
 	}
 
-	explicit := grovev1alpha1.CliqueStartupTypeExplicit
-	pcs.Spec.Template.StartupType = &explicit
-	return extraResources, nil
+	rendered.Resources = extraResources
+	return rendered, nil
 }
 
 // configureLPURolePods consumes fresh, independently owned Agent and conductor
 // specs. Agent and workload are nonnil; nil conductor means no emitted launcher.
-func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *SelectedWorkload, configMapName, allocation string) error {
+func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, workload *Workload, configMapName, allocation string) error {
 	if err := withLPUConfigVolume(agentPodSpec, configMapName, workload.BuildFamily() == BuildFamilyXT); err != nil {
 		return err
 	}
@@ -275,7 +277,6 @@ func roleAnnotations(
 	annotations := workloadAnnotations(maps.Clone(base), workloadDigest)
 	// Remove controller-owned role metadata before stamping canonical values.
 	for _, key := range []string{
-		ExecutionBackendAnnotation,
 		WorkloadModeAnnotation,
 		lpxv1alpha1.CompilerSnapshotDigestAnnotation,
 		lpxv1alpha1.PodModelAnnotation,

@@ -28,13 +28,7 @@ const (
 
 // updateStatus persists the updated status on the deployment.
 func (r *graphReconciler) updateStatus(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, previous *v1alpha1.LPXGraphDeploymentStatus) error {
-	// Every component inherits the parent ready condition.
-	ready := meta.IsStatusConditionTrue(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
-	for name, component := range deployment.Status.Components {
-		component.Ready = ready
-		deployment.Status.Components[name] = component
-	}
-
+	// Persist the complete observation without overwriting per-workload readiness.
 	if apiequality.Semantic.DeepEqual(previous, &deployment.Status) {
 		return nil
 	}
@@ -169,8 +163,8 @@ func schedulingFailureCoversPipelineRequests(
 		return false
 	}
 	for _, request := range requests {
-		startedAt, known := pipelineRequestSchedulingStartedAt(request)
-		if !known || !startedAt.Before(failed.LastTransitionTime.Time) {
+		startedAt := pipelineRequestSchedulingStartedAt(request)
+		if startedAt.IsZero() || !startedAt.Before(failed.LastTransitionTime.Time) {
 			return false
 		}
 	}
@@ -201,9 +195,9 @@ func setSchedulingFailedCondition(deployment *v1alpha1.LPXGraphDeployment, renew
 	})
 }
 
-// clearPreviousSchedulingFailure clears an old failure only for a later generation.
+// acknowledgeSchedulingRetry marks an older failure superseded by a later generation.
 // deployment is non-nil; callers must not use this after observing a current expiry.
-func clearPreviousSchedulingFailure(deployment *v1alpha1.LPXGraphDeployment) {
+func acknowledgeSchedulingRetry(deployment *v1alpha1.LPXGraphDeployment) {
 	prior := meta.FindStatusCondition(deployment.Status.Conditions, schedulingFailedCondition)
 	if prior == nil || deployment.Generation <= prior.ObservedGeneration {
 		return
@@ -211,7 +205,7 @@ func clearPreviousSchedulingFailure(deployment *v1alpha1.LPXGraphDeployment) {
 	meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{
 		Type: schedulingFailedCondition, Status: metav1.ConditionFalse,
 		ObservedGeneration: deployment.Generation, Reason: "LPXSchedulingRetryAuthorized",
-		Message: "The expired request was removed and current input may be published",
+		Message: "The current input revision supersedes the previous scheduling failure",
 	})
 }
 

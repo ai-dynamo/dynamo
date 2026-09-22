@@ -1,0 +1,362 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data:
+  nodes_per_partition: |-
+    2
+    2
+  partition_ids: |-
+    0
+    1
+  partition_node_offsets: |-
+    0
+    2
+  partition_paths: |-
+    part-0
+    part-1
+  topologies: |-
+    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
+  namespace: test
+---
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:26e70c69aa2a43744d6a89c9fffb8c9bbd2711cd6203561d0a97af75e4080798
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
+  name: lpu-gpu-specdecode-bc86
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
+        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
+      labels:
+        lpx.nvidia.com/stage: draft
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
+        nvidia.com/dynamo-namespace: test-lpu-gpu-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-gpu-specdecode-draft
+      name: agt
+      spec:
+        minAvailable: 4
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/dynamo-lpu
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/lpu-agent:test
+            name: agent
+            resources:
+              limits:
+                lpu.nvidia.com/lpu: "8"
+              requests:
+                lpu.nvidia.com/lpu: "8"
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
+            name: config
+        replicas: 4
+        roleName: agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
+        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+        scheduling.lpu.nvidia.com/role: conductor
+      labels:
+        lpx.nvidia.com/serving: "true"
+        lpx.nvidia.com/stage: draft
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
+        nvidia.com/dynamo-namespace: test-lpu-gpu-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-gpu-specdecode-draft
+      name: cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/dynamo-lpu
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/lpu-conductor:test
+            name: conductor
+            resources: {}
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-gpu-specdecode-bc86-lpu-6bcf1f4cf22aaf55
+            name: config
+        replicas: 1
+        roleName: cond
+        startsAfter:
+        - agt
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-gpu-specdecode
+        lpx.nvidia.com/deployment-uid: lpx-render-uid
+        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+      cliqueNames:
+      - cond
+      - agt
+      minAvailable: 1
+      name: lpx
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0
+---
+metadata:
+  labels:
+    nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
+  name: lpu-gpu-specdecode
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeAnyOrder
+    cliques:
+    - labels:
+        nvidia.com/dynamo-component: target
+        nvidia.com/dynamo-component-type: worker
+        nvidia.com/dynamo-graph-deployment-name: lpu-gpu-specdecode
+        nvidia.com/dynamo-namespace: test-lpu-gpu-specdecode
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-gpu-specdecode-target
+      name: target
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --experimental-external-draft-endpoint
+            - test-lpu-gpu-specdecode/backend/generate
+            command:
+            - python
+            - -m
+            - dynamo.vllm
+            env:
+            - name: DYN_COMPONENT
+              value: worker
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: test-lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-gpu-specdecode
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/vllm-target:test
+            livenessProbe:
+              failureThreshold: 1
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 5
+              timeoutSeconds: 4
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /health
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 4
+            resources:
+              limits:
+                nvidia.com/gpu: "1"
+            startupProbe:
+              failureThreshold: 720
+              httpGet:
+                path: /live
+                port: system
+              periodSeconds: 10
+              timeoutSeconds: 5
+            volumeMounts:
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          securityContext:
+            fsGroup: 1000
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+        replicas: 1
+        roleName: target
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

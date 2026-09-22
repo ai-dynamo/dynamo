@@ -91,7 +91,7 @@ spec:
 
 <Indent>
   <ParamField path="attemptDeadlineSeconds" type="int64">
-    Best-effort deadline for each LPU pipeline request's scheduling cycle. The timer starts at the scheduler's `status.schedulingStartedAt`; without that timestamp, no deadline is running. A later scheduling cycle supplies a new timestamp. Valid values are `1` through `9,223,372,036`; omission means unlimited. This field is not a solver budget or an overall deployment readiness timeout.
+    Best-effort deadline for each LPU pipeline request to leave Pending, including waiting for the scheduler to start. The timer uses a nonzero `status.schedulingStartedAt` when available; otherwise it uses `metadata.creationTimestamp`. A scheduler-provided timestamp for a later scheduling cycle takes precedence over the request's original creation time. Valid values are `1` through `9,223,372,036`; omission means unlimited. This field is not a solver budget or an overall deployment readiness timeout.
 
     Current-generation `Bound`, `NoFit`, and `Unsupported` receipts are exempt. `Degraded`, `Releasing`, and `Released` receipts are also exempt when their committed execution was accepted for the current request generation. `NoFit` can therefore leave the deployment Pending indefinitely, and a `Bound` request can still wait indefinitely for runtime readiness.
 

@@ -36,7 +36,7 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 	if err != nil {
 		return nil, err
 	}
-	workload := &SelectedWorkload{
+	workload := &Workload{
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: 1,
@@ -46,14 +46,20 @@ func renderSelectedForTest(pcs *grovev1alpha1.PodCliqueSet, projections []*Model
 		return nil, err
 	}
 	if workload.BuildFamily() == BuildFamilyXT && workload.Pipeline() == PipelineLPX {
-		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(pcs.Namespace, plan)
+		input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(plan)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if _, err := RenderSelectedNodeLocal(pcs, workload, plan, input); err != nil {
+	if workload.Pipeline() == PipelineLPX {
+		input.Cyborg = pcs.Spec.Template.Cliques[0]
+	}
+	templates, err := RenderNodeLocal(workload, plan, input)
+	if err != nil {
 		return nil, err
 	}
+	pcs.Spec.Template.Cliques = templates.Cliques
+	pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{templates.ScalingGroup}
 	return pcs, nil
 }
 
@@ -99,12 +105,8 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			projection := projectRenderFixture(t, test.pipeline, test.snapshot)
 			require.NotEqual(t, projection.Digest().String(), projection.CompilerSnapshotDigest())
 			pcs := renderTestPCS(test.pipeline == PipelineLPX)
-			pcs.Annotations = map[string]string{
-				ExecutionBackendAnnotation: "stale",
-			}
 			for _, clique := range pcs.Spec.Template.Cliques {
 				clique.Annotations = map[string]string{
-					ExecutionBackendAnnotation:                   "stale",
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
 				}
 			}
@@ -113,7 +115,6 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 					"user":                         "kept",
 					lpxv1alpha1.PodModelAnnotation: "spoofed",
 					lpxv1alpha1.CompilerSnapshotDigestAnnotation: "stale",
-					ExecutionBackendAnnotation:                   "stale",
 				}},
 				Spec: renderTestPodSpec(),
 			}
@@ -147,11 +148,9 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			})
 			require.NoError(t, err)
 			require.Same(t, pcs, rendered)
-			require.Equal(t, projection.Digest().String(), rendered.Annotations[WorkloadDigestAnnotation])
-			require.NotContains(t, rendered.Annotations, ExecutionBackendAnnotation)
+			require.Equal(t, projection.Digest().String(), rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].Annotations[WorkloadDigestAnnotation])
 			for _, clique := range rendered.Spec.Template.Cliques {
 				require.Equal(t, SchedulerName, clique.Spec.PodSpec.SchedulerName)
-				require.NotContains(t, clique.Annotations, ExecutionBackendAnnotation)
 				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
 					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 				} else {
@@ -251,7 +250,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	targetSnapshot := acquireTestSnapshot(t, writeCompilerFixture(t, targetFixture))
 
 	t.Log("Keep independent draft, target and conductor templates")
-	draft := testLPXComponent(draftStageName, "draft-build",
+	draft := testLPXComponent(runtimeModelDraft, "draft-build",
 		v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: &corev1.PodTemplateSpec{Spec: renderTestPodSpec()}},
 	)
 	draft.Replicas = ptr.To(int32(2))
@@ -284,20 +283,21 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	before := source.DeepCopy()
 
 	t.Log("Resolve and render the authored speculative workload")
-	selected, err := ResolveSelectedWorkload(t.Context(), source, staticBuildSnapshotSource{
+	selected, err := ResolveWorkload(t.Context(), source, singleGroupComponents(t, source), staticBuildSnapshotSource{
 		"draft-build": draftSnapshot, "target-build": targetSnapshot,
 	})
 	require.NoError(t, err)
 	pcs := renderTestPCS(false)
 	plan, err := selected.PlanNodeLocalMaterialization(pcs.Name)
 	require.NoError(t, err)
-	extraResources, err := RenderSelectedNodeLocal(pcs, selected, plan, RenderInput{
+	templates, err := RenderNodeLocal(selected, plan, RenderInput{
 		Stages: stages, Conductor: conductorTemplate.DeepCopy(),
 	})
 	require.NoError(t, err)
 
 	t.Log("Retain each authored component's image and metadata on its Agent cliques")
-	for index, stage := range []string{draftStageName, draftStageName, testTargetStageName} {
+	pcs.Spec.Template.Cliques = templates.Cliques
+	for index, stage := range []string{runtimeModelDraft, runtimeModelDraft, testTargetStageName} {
 		agent := namedClique(t, pcs, plan.Agents[index].TemplateName)
 		require.Equal(t, stage+"-runtime", agent.Spec.PodSpec.Containers[0].Image)
 		require.Equal(t, stage, agent.Labels["owner"])
@@ -321,7 +321,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, conductorBefore, &conductor.Spec.PodSpec)
 
 	t.Log("Preserve runtime settings in the conductor template and share only partition data")
-	configMap, ok := extraResources[0].(*corev1.ConfigMap)
+	configMap, ok := templates.Resources[0].(*corev1.ConfigMap)
 	require.True(t, ok)
 	require.NotContains(t, configMap.Data, "model_config.toml")
 	for _, env := range conductorTemplate.Spec.Containers[0].Env {

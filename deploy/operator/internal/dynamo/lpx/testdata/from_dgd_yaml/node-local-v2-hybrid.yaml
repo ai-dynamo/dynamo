@@ -11,7 +11,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-decode-<decode-config-hash-prefix>
+  name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
   namespace: test
 ---
 data:
@@ -30,7 +30,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-lpu-<lpu-config-hash-prefix>
+  name: node-local-v2-hybrid-9d06-lpu-355e8ac6768c54e3
   namespace: test
 ---
 metadata:
@@ -38,7 +38,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:db59c694410ca3a5c6502ab3b9d4de7ec12d4a5c0488fba792685fd35f08fd67
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-hybrid
@@ -52,7 +52,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <lpu-config-hash>
+        nvidia.com/extra-resources-hash: 355e8ac6768c54e3ee778e2044a7498390f64c82034bbc4cc3dafa0ef4031877
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:a70fcf7def9c874b1634097fef306b97a4af1103842c80b3516dcf6bda30ad59
         scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
@@ -207,14 +207,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-lpu-<lpu-config-hash-prefix>
+              name: node-local-v2-hybrid-9d06-lpu-355e8ac6768c54e3
             name: config
         replicas: 4
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <decode-config-hash>
+        nvidia.com/extra-resources-hash: 734ce683f6b7ea5f7b0c0172b07d5e1ed45773120ab8c7d834967d180c62cea2
         scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
         scheduling.lpu.nvidia.com/role: cyborg-worker
@@ -360,7 +360,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-decode-<decode-config-hash-prefix>
+              name: node-local-v2-hybrid-9d06-decode-734ce683f6b7ea5f
             name: config
         replicas: 1
         roleName: cond

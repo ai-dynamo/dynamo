@@ -351,7 +351,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
 
 	t.Log("An LPX template edit advances the real child generation and invalidates the old observation")
-	dynamolpx.ServingComponent(source).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "lpu-runtime:next"
+	source.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "lpu-runtime:next"
 	require.NoError(t, env.Client().Update(t.Context(), source))
 	updated, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)

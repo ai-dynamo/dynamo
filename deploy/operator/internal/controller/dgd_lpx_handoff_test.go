@@ -45,7 +45,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 	require.NoError(t, err)
 	source := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, yaml.Unmarshal(data, source))
-	lpx.ServingComponent(source).ComponentName = "lpx"
+	source.GetComponentByName("lpu").ComponentName = "lpx"
 	source.Generation = 3
 	return source
 }

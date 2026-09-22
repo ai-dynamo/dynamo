@@ -8,7 +8,9 @@ package lpx
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"time"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -30,9 +32,8 @@ func pipelineRequestDeadlineSeconds(dgd *v1beta1.DynamoGraphDeployment) *int64 {
 }
 
 // pipelineRequestDeadlines examines already-selected, owned requests without I/O.
-// Missing schedulingStartedAt means the scheduler has not started a cycle yet.
-// A surviving LPR can return to Pending; its scheduler-supplied start resets the clock.
-// Creation time and managed fields cannot identify that new scheduling cycle.
+// Creation time bounds the initial wait for the scheduler. On reused requests,
+// the scheduler-supplied start takes precedence for later scheduling cycles.
 func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineRequest, seconds *int64) (expired []*lpxv1alpha1.LPUPipelineRequest, next time.Time) {
 	if seconds == nil {
 		return nil, time.Time{}
@@ -42,10 +43,14 @@ func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineReques
 		if !request.DeletionTimestamp.IsZero() || isPipelineRequestDeadlineExempt(request) {
 			continue
 		}
-		started, known := pipelineRequestSchedulingStartedAt(request)
-		if !known {
+
+		// Desired requests awaiting publication have neither timestamp yet.
+		started := pipelineRequestSchedulingStartedAt(request)
+		if started.IsZero() {
 			continue
 		}
+
+		// Track each request's expiration and the earliest remaining deadline.
 		deadline := started.Add(time.Duration(*seconds) * time.Second)
 		if !now.Before(deadline) {
 			expired = append(expired, request)
@@ -56,13 +61,13 @@ func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineReques
 	return expired, next
 }
 
-// pipelineRequestSchedulingStartedAt requires a nonnil request and reports whether the
-// scheduler published a usable start for its current scheduling cycle.
-func pipelineRequestSchedulingStartedAt(request *lpxv1alpha1.LPUPipelineRequest) (time.Time, bool) {
+// pipelineRequestSchedulingStartedAt returns the scheduler's nonzero cycle start,
+// or creation time while waiting for the scheduler. request must be non-nil.
+func pipelineRequestSchedulingStartedAt(request *lpxv1alpha1.LPUPipelineRequest) time.Time {
 	if request.Status == nil || request.Status.SchedulingStartedAt == nil || request.Status.SchedulingStartedAt.IsZero() {
-		return time.Time{}, false
+		return request.CreationTimestamp.Time
 	}
-	return request.Status.SchedulingStartedAt.Time, true
+	return request.Status.SchedulingStartedAt.Time
 }
 
 // isPipelineRequestDeadlineExempt recognizes current receipts outside the scheduling timer.
@@ -115,38 +120,49 @@ func requeueForPipelineRequestDeadline(
 	return result
 }
 
-// reconcilePipelineRequestDeadline records expiry before cleanup and blocks republication
-// for the failed generation. Call only for expired requests or a current SchedulingFailed
-// condition. deployment and requests are validated observations. A nil pcsg still
-// permits recording failure, but cleanup must wait for an observed scaling group.
-func (r *graphReconciler) reconcilePipelineRequestDeadline(
+// reconcileSchedulingFailure records graph-wide failure before deadline cleanup.
+// Each workload removes only its own expired suffix; omitted replicas retain
+// external capacity ownership. All configured groups have been observed.
+// deployment and requests are validated observations; replica counts are keyed by PCSG name.
+func (r *graphReconciler) reconcileSchedulingFailure(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
-	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+	groups map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	explicitReplicas map[string]*int32,
 	requests []lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
-	manageReplicas bool,
 ) (ctrl.Result, error) {
-	// Persist a failure covering every expired scheduling cycle before deleting requests.
-	if len(expired) > 0 {
-		if !schedulingFailureCoversPipelineRequests(deployment, expired) {
-			setSchedulingFailedCondition(deployment, true)
-			// Status-only LPXGD updates are filtered, so explicitly observe the persisted failure.
-			return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
-		}
-		setSchedulingFailedCondition(deployment, false)
-		return r.reconcileExpiredPipelineRequests(ctx, pcsg, requests, expired, manageReplicas)
+	// Persist evidence covering every expired cycle before deleting any expired request.
+	if len(expired) > 0 && !schedulingFailureCoversPipelineRequests(deployment, expired) {
+		setSchedulingFailedCondition(deployment, true)
+		return ctrl.Result{RequeueAfter: time.Nanosecond}, nil
+	}
+	setSchedulingFailedCondition(deployment, false)
+
+	// Partition both collections by their actual target; ordinals belong to one workload.
+	expiredByGroup := make(map[string][]*lpxv1alpha1.LPUPipelineRequest)
+	for _, request := range expired {
+		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
+		expiredByGroup[name] = append(expiredByGroup[name], request)
+	}
+	requestsByGroup := make(map[string][]lpxv1alpha1.LPUPipelineRequest)
+	for _, request := range requests {
+		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
+		requestsByGroup[name] = append(requestsByGroup[name], request)
 	}
 
-	// A failed generation must not recreate requests removed by its deadline.
-	setSchedulingFailedCondition(deployment, false)
+	// An interior failure in one workload does not prevent another workload's suffix cleanup.
+	for _, name := range slices.Sorted(maps.Keys(expiredByGroup)) {
+		if err := r.reconcileExpiredPipelineRequests(ctx, groups[name], requestsByGroup[name], expiredByGroup[name], explicitReplicas[name] != nil); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	return ctrl.Result{}, nil
 }
 
 // reconcileExpiredPipelineRequests removes only complete expired trailing replicas.
-// A nil pcsg defers cleanup: the live replica count is unknown, not zero. Non-nil
-// pcsg and all requests are already validated against their PCS. No PodCliques
-// are deleted for interior failures.
+// pcsg must be non-nil; it and all requests are already validated against their PCS.
+// No PodCliques are deleted for interior failures.
 // manageReplicas is false for omitted DGD replicas: external scaling retains capacity ownership.
 func (r *graphReconciler) reconcileExpiredPipelineRequests(
 	ctx context.Context,
@@ -154,26 +170,24 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 	requests []lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 	manageReplicas bool,
-) (ctrl.Result, error) {
-	// Observe capacity before deciding which ordinals are safe to remove; the PCSG watch resumes cleanup.
-	if pcsg == nil {
-		return ctrl.Result{}, nil
-	}
+) error {
+	// Use the observed capacity to decide which ordinals are safe to remove.
 	replicas, removed, err := expiredPipelineRequestSuffix(requests, expired, pcsg.Spec.Replicas)
 	if err != nil || len(removed) == 0 {
-		return ctrl.Result{}, err
+		return err
 	}
 
 	// Persist the lower PCSG count before asynchronous LPR/pod cleanup starts.
 	if manageReplicas {
-		if err := r.scaleDownPodCliqueScalingGroup(ctx, pcsg, &replicas); err != nil {
-			return ctrl.Result{}, err
+		if err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, replicas); err != nil {
+			return err
 		}
 	}
-	return ctrl.Result{}, r.deletePipelineRequests(ctx, removed)
+
+	return r.deletePipelineRequests(ctx, removed)
 }
 
-// expiredPipelineRequestSuffix returns complete engine replicas only when every
+// expiredPipelineRequestSuffix returns complete workload replicas only when every
 // expired replica belongs to one contiguous trailing suffix. It orders the
 // expired requests last so transient sibling cleanup leaves durable expiry
 // evidence for the next reconciliation. An interior failure blocks all

@@ -25,61 +25,76 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-// RenderLPXBasePodCliqueSet applies shared Dynamo defaults to the Grove envelope
-// and independently owned LPX role templates. The LPX controller completes the
-// compiled workload and its identity. All pointer inputs except secretsRetriever
-// must be non-nil; preflight supplies the validated workload and its materialization plan.
-func RenderLPXBasePodCliqueSet(
+// RenderLPXPodCliqueSet constructs the shared LPX Grove envelope without workload
+// templates. Its labels include the resolved scheduler queue.
+// Pointer inputs must be non-nil and are not mutated.
+func RenderLPXPodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
-	secretsRetriever SecretsRetriever,
-	selectedWorkload *dynamolpx.SelectedWorkload,
-	plan *dynamolpx.MaterializationPlan,
-) (*grovev1alpha1.PodCliqueSet, *dynamolpx.RenderInput, error) {
-	// Reuse the Grove envelope, but keep LPX compilation out of normal rendering.
+	pcsName string,
+) (*grovev1alpha1.PodCliqueSet, error) {
+	// Reuse the ordinary Grove defaults once for the complete LPX graph.
 	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	pcs.Name = plan.PodCliqueSetName
+
+	pcs.Name = pcsName
+	pcs.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeExplicit)
+
 	queue, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	// Publish the validated queue for the LPX backend's KAI fallback.
 	if queue != "" {
-		if pcs.Labels == nil {
-			pcs.Labels = make(map[string]string)
-		}
 		pcs.Labels[commonconsts.KubeLabelKaiSchedulerQueue] = queue
 	}
 
-	// Preserve the complete source graph as the independent role-default context.
-	component := dynamolpx.ServingComponent(dynamoDeployment)
-
-	input, gpuCliques, err := renderLPXComponents(cliqueParams{
-		component: component, componentName: component.ComponentName,
-		dynamoDeployment: dynamoDeployment, operatorConfig: operatorConfig, runtimeConfig: runtimeConfig,
-		secretsRetriever:   secretsRetriever,
-		discoveryBackend:   controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
-		discoveryContext:   NewDiscoveryContext(operatorConfig.Discovery.Backend, dynamoDeployment.Annotations),
-		validatedQueueName: queue,
-	}, selectedWorkload, plan)
-	if err != nil {
-		return nil, nil, err
-	}
-	pcs.Spec.Template.Cliques = gpuCliques
-
-	// Preserve scheduler-visible source metadata below the new owner boundary.
-	// Explicit PCS/spec metadata retains precedence over inherited DGD metadata.
+	// Explicit PCS/spec metadata takes precedence over inherited scheduler metadata.
 	labels, annotations := lpxSchedulingMetadata(dynamoDeployment.Labels), lpxSchedulingMetadata(dynamoDeployment.Annotations)
 	maps.Copy(labels, pcs.Labels)
 	maps.Copy(annotations, pcs.Annotations)
 	pcs.Labels, pcs.Annotations = labels, annotations
-	return pcs, input, nil
+	return pcs, nil
+}
+
+// RenderLPXWorkloadTemplates renders one workload's roles, scaling group and resources.
+// Pointer inputs must be non-nil, except secretsRetriever when no secrets are used.
+// Inputs are not mutated.
+func RenderLPXWorkloadTemplates(
+	source *v1beta1.DynamoGraphDeployment,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *controller_common.RuntimeConfig,
+	secretsRetriever SecretsRetriever,
+	workload *dynamolpx.Workload,
+	plan *dynamolpx.MaterializationPlan,
+) (*dynamolpx.WorkloadTemplates, error) {
+	// Apply Dynamo defaults independently to the selected workload's authored roles.
+	component := source.GetComponentByName(workload.ServingComponentName())
+	input, err := renderLPXComponents(cliqueParams{
+		component: component, componentName: component.ComponentName,
+		dynamoDeployment: source, operatorConfig: operatorConfig, runtimeConfig: runtimeConfig,
+		secretsRetriever: secretsRetriever,
+		discoveryBackend: controller_common.GetDiscoveryBackend(operatorConfig.Discovery.Backend, source.Annotations),
+		discoveryContext: NewDiscoveryContext(operatorConfig.Discovery.Backend, source.Annotations),
+	}, workload, plan)
+	if err != nil {
+		return nil, err
+	}
+	rendered, err := dynamolpx.RenderNodeLocal(workload, plan, *input)
+	if err != nil {
+		return nil, err
+	}
+
+	// Scope the rendered resources to the graph's Kubernetes namespace.
+	for _, resource := range rendered.Resources {
+		resource.SetNamespace(source.Namespace)
+	}
+	return rendered, nil
 }
 
 const (
@@ -239,7 +254,7 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
 // Preflight supplies the non-nil validated workload and materialization plan.
-func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, []*grovev1alpha1.PodCliqueTemplateSpec, error) {
+func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dynamolpx.MaterializationPlan) (*dynamolpx.RenderInput, error) {
 	// Pass runtime inputs; deployment identity is stamped only on final resources.
 	input := &dynamolpx.RenderInput{
 		MinAvailable: p.component.MinAvailable,
@@ -252,8 +267,9 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		alphaComponents = alpha.Spec.Services
 	}
 
-	gpuCliques := make([]*grovev1alpha1.PodCliqueTemplateSpec, 0, 1)
-	for _, component := range dynamolpx.Components(p.dynamoDeployment) {
+	// Render only members of this workload; other graph components supply shared context.
+	for _, name := range workload.ComponentNames() {
+		component := p.dynamoDeployment.GetComponentByName(name)
 		alphaComponent := alphaComponents[component.ComponentName]
 		agent := component.ComponentRole(v1beta1.ComponentRoleLPXAgent)
 		lpuRole := lpxRoleComponent(component, agent.PodTemplate, p.dynamoDeployment, p.discoveryBackend)
@@ -261,7 +277,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		lpuTemplate, err := renderSelectedLPXRole(lpuRole, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, lpuDefaults)
 		if err != nil {
-			return nil, nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
+			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
 		lpuTemplate.Labels[dynamolpx.StageLabel] = component.ComponentName
 		input.Stages[component.ComponentName] = *lpuTemplate
@@ -276,7 +292,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 			input.Conductor, err = renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 				p.discoveryContext, lpuDefaults)
 			if err != nil {
-				return nil, nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
+				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
 			input.Conductor.Labels[dynamolpx.StageLabel] = component.ComponentName
 			continue
@@ -290,9 +306,9 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		role.MinAvailable = nil
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
 		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
-			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(p.dynamoDeployment.Namespace, plan)
+			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(plan)
 			if err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 		}
 		gpu := p
@@ -302,19 +318,23 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.SelectedWorkload, p
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {
-			return nil, nil, fmt.Errorf("rendering %s.conductor: failed to generate podSpec for role %s: %w", component.ComponentName, gpu.r.Name, err)
+			return nil, fmt.Errorf("rendering %s.conductor: failed to generate podSpec for role %s: %w", component.ComponentName, gpu.r.Name, err)
 		}
+
+		// Select LPX before applying Grove defaults; the PCS already owns the KAI queue.
+		gpuTemplate.Spec.SchedulerName = dynamolpx.SchedulerName
 		clique, err := buildCliqueFromTemplate(gpu, *gpuTemplate)
 		if err != nil {
-			return nil, nil, fmt.Errorf("rendering %s.conductor: %w", component.ComponentName, err)
+			return nil, fmt.Errorf("rendering %s.conductor: %w", component.ComponentName, err)
 		}
-		// Every GPU worker is required by the same compiled engine replica.
+
+		// Every GPU worker is required by the same compiled workload replica.
 		clique.Spec.MinAvailable = ptr.To(clique.Spec.Replicas)
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
 		clique.Labels[dynamolpx.StageLabel] = component.ComponentName
-		gpuCliques = append(gpuCliques, clique)
+		input.Cyborg = clique
 	}
-	return input, gpuCliques, nil
+	return input, nil
 }
 
 func lpxRoleComponent(source *v1beta1.DynamoComponentDeploymentSharedSpec, template *corev1.PodTemplateSpec, dgd *v1beta1.DynamoGraphDeployment, backend configv1alpha1.DiscoveryBackend) *v1beta1.DynamoComponentDeploymentSharedSpec {

@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: lpu-gpu-specdecode
+  namespace: test
+  uid: 22222222-2222-4222-8222-222222222222
+  generation: 1
+  annotations:
+    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
+spec:
+  components:
+  - name: draft
+    type: lpx
+    replicas: 1
+    lpx:
+      buildId: node-local-v2-connected
+    roles:
+    - name: conductor
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/lpu-conductor:test
+            command: [/opt/dynamo-lpu]
+            args: [serve]
+    - name: agent
+      podTemplate:
+        spec:
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          containers:
+          - name: main
+            volumeMounts:
+            - name: model-storage
+              mountPath: /models
+            image: example.invalid/lpu-agent:test
+            command: [/opt/dynamo-lpu]
+            args: [serve]
+  - name: target
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: example.invalid/vllm-target:test
+          command: [python, -m, dynamo.vllm]
+          args: [--experimental-external-draft-endpoint, test-lpu-gpu-specdecode/backend/generate]
+          resources:
+            limits:
+              nvidia.com/gpu: '1'

@@ -303,10 +303,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	allErrs := field.ErrorList{}
 
 	// LPX cardinality determines the root overrides and shared draft/target contract.
-	lpxComponentCount := 0
+	lpxComponentCount, independentEngineCount := 0, 0
 	for i := range spec.Components {
 		if spec.Components[i].IsLPX() {
 			lpxComponentCount++
+			if spec.Components[i].ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) != nil {
+				independentEngineCount++
+			}
 		}
 	}
 
@@ -333,7 +336,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
-	if lpxComponentCount > 2 {
+	if lpxComponentCount > 2 && independentEngineCount != lpxComponentCount {
 		allErrs = append(allErrs, field.Forbidden(componentsPath, "requires one complete LPX component or a shared draft and target pair"))
 	}
 	components := componentsByName(spec.Components)
@@ -343,7 +346,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		componentPath := componentsPath.Index(i)
 
 		// Draft fanout expands models; the target owns the shared endpoint and availability.
-		if lpxComponentCount == 2 && component.IsLPX() {
+		if lpxComponentCount == 2 && independentEngineCount == 1 && component.IsLPX() {
 			replicas := k8sptr.Deref(component.Replicas, 1)
 			if component.ComponentRole(nvidiacomv1beta1.ComponentRoleLPXConductor) == nil {
 				if replicas > dynamolpx.MaxSpecDecodeNumDrafts {
@@ -447,8 +450,8 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			}
 		}
 	}
-	if hasLPXComponent && conductorCount != 1 {
-		allErrs = append(allErrs, field.Forbidden(conductorComponentsPath, "LPX components must declare exactly one conductor role"))
+	if hasLPXComponent && conductorCount != lpxComponentCount && !(lpxComponentCount == 2 && conductorCount == 1) {
+		allErrs = append(allErrs, field.Forbidden(conductorComponentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
 	}
 
 	if spec.Restart != nil {

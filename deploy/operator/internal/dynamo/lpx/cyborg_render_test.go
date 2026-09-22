@@ -20,19 +20,21 @@ import (
 func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 	t.Parallel()
 
-	t.Log("Project a hybrid engine with the longest PCS name and maximum scheduling replica count")
+	t.Log("Project a hybrid workload at the combined name limit and maximum scheduling replica count")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	projection := projectRenderFixture(t, PipelineLPX, acquireTestSnapshot(t, writeCompilerFixture(t, fixture)))
 	projection.stage = testRenderComponentName
 	projection.configuredBuild.IOFPGACount = 1
 	projection.configuredBuild.IOFanoutFactor = 1
-	workload := &SelectedWorkload{
+	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 2496,
 	}
-	pcsName := strings.Repeat("a", MaxPodCliqueSetNameLength)
+	pcsName := strings.Repeat("a", 28) // target + target-cond consume the remaining Grove budget.
 	plan, err := workload.PlanNodeLocalMaterialization(pcsName)
+	require.NoError(t, err)
+	plan, err = plan.WithGroup("target")
 	require.NoError(t, err)
 
 	t.Log("Validate actual GPU widths rather than assuming the largest int32 pod index")
@@ -50,9 +52,11 @@ func TestRenderHybridBoundsActualGPUHostnames(t *testing.T) {
 			pcs := renderTestPCS(true)
 			pcs.Name = pcsName
 			cyborg := namedClique(t, pcs, "cond")
+			cyborg.Name, cyborg.Spec.RoleName = plan.CyborgTemplate, plan.CyborgTemplate
 			cyborg.Spec.Replicas = test.replicas
 			cyborg.Spec.MinAvailable = ptr.To(test.replicas)
-			_, err := RenderSelectedNodeLocal(pcs, workload, plan, RenderInput{
+			_, err := RenderNodeLocal(workload, plan, RenderInput{
+				Cyborg: cyborg,
 				Stages: map[string]corev1.PodTemplateSpec{testRenderComponentName: {Spec: renderTestPodSpec()}},
 			})
 			if test.wantError {

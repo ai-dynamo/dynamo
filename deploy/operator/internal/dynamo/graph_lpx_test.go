@@ -253,47 +253,49 @@ func TestLPXInputRevision(t *testing.T) {
 		wantChange bool
 		mutate     func(*v1beta1.DynamoGraphDeployment)
 	}{
-		{"component/name", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).ComponentName = "new-engine" }},
-		{"component/replicas", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).Replicas = ptr.To(int32(3)) }},
-		{"component/min-available", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).MinAvailable = ptr.To(int32(1)) }},
-		{"component/namespace", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).GlobalDynamoNamespace = true }},
-		{"component/runtime-version", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).RuntimeVersionOverride = "1.5.0" }},
+		{"component/name", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").ComponentName = "new-engine" }},
+		{"component/replicas", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").Replicas = ptr.To(int32(3)) }},
+		{"component/min-available", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").MinAvailable = ptr.To(int32(1)) }},
+		{"component/namespace", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").GlobalDynamoNamespace = true }},
+		{"component/runtime-version", true, func(d *v1beta1.DynamoGraphDeployment) {
+			d.GetComponentByName("decode").RuntimeVersionOverride = "1.5.0"
+		}},
 		{"component/shared-memory", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).SharedMemorySize = ptr.To(resource.MustParse("16Gi"))
+			d.GetComponentByName("decode").SharedMemorySize = ptr.To(resource.MustParse("16Gi"))
 		}},
 		{"component/model", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ModelRef = &v1beta1.ModelReference{Name: "model", Revision: "2"}
+			d.GetComponentByName("decode").ModelRef = &v1beta1.ModelReference{Name: "model", Revision: "2"}
 		}},
 		{"component/compilation-cache", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "cache"}
+			d.GetComponentByName("decode").CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "cache"}
 		}},
 		{"component/topology", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}
+			d.GetComponentByName("decode").TopologyConstraint = &v1beta1.TopologyConstraint{PackDomain: "rack"}
 		}},
-		{"component/build", true, func(d *v1beta1.DynamoGraphDeployment) { lpx.ServingComponent(d).LPX.BuildID = "next-build" }},
+		{"component/build", true, func(d *v1beta1.DynamoGraphDeployment) { d.GetComponentByName("decode").LPX.BuildID = "next-build" }},
 		{"agent/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(int32(4))
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).Replicas = ptr.To(int32(4))
 		}},
 		{"conductor/replicas", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(2))
 		}},
 		{"agent/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "agent:next"}}
 		}},
 		{"conductor/image", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "conductor:next"}}
 		}},
 		{"agent/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.NodeSelector = map[string]string{"lpu": "new"}
 		}},
 		{"conductor/placement", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.NodeSelector = map[string]string{"gpu": "new"}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Spec.NodeSelector = map[string]string{"gpu": "new"}
 		}},
 		{"agent/metadata", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Labels = map[string]string{"role": "new"}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Labels = map[string]string{"role": "new"}
 		}},
 		{"conductor/metadata", true, func(d *v1beta1.DynamoGraphDeployment) {
-			lpx.ServingComponent(d).ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = map[string]string{"role": "new"}
+			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = map[string]string{"role": "new"}
 		}},
 		{"scheduling/deadline", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Scheduling.AttemptDeadlineSeconds = ptr.To(int64(60))
@@ -369,7 +371,7 @@ func TestLPXInputRevision(t *testing.T) {
 
 	t.Log("Both members independently contribute to the shared LPX revision")
 	pair := source.DeepCopy()
-	target := lpx.ServingComponent(pair)
+	target := pair.GetComponentByName("decode")
 	target.Replicas = ptr.To(int32(1))
 	draft := target.DeepCopy()
 	draft.ComponentName = "small-model"
@@ -397,7 +399,7 @@ func TestLPXInputRevisionTracksIndirectRenderMetadata(t *testing.T) {
 			require.NoError(t, err)
 			source := &v1beta1.DynamoGraphDeployment{}
 			require.NoError(t, yaml.Unmarshal(payload, source))
-			component := lpx.ServingComponent(source)
+			component := source.GetComponentByName("lpu")
 			role := lpxRoleComponent(component, component.ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate, source, "")
 			role.ComponentType = v1beta1.ComponentTypeDecode
 			metadata := generatePodMetadata(role, source, getDGDAlphaComponent(source, component.ComponentName), component.ComponentName, DiscoveryContext{})
@@ -422,7 +424,7 @@ func TestLPXInputRevisionTracksIndirectRenderMetadata(t *testing.T) {
 				}
 				require.NoError(t, alpha.ConvertTo(changed))
 			}
-			require.Equal(t, component, lpx.ServingComponent(changed))
+			require.Equal(t, component, changed.GetComponentByName("lpu"))
 			nextMetadata := generatePodMetadata(role, changed, getDGDAlphaComponent(changed, component.ComponentName), component.ComponentName, DiscoveryContext{})
 			if change == "alpha-annotation" {
 				require.NotEqual(t, metadata.Annotations, nextMetadata.Annotations)

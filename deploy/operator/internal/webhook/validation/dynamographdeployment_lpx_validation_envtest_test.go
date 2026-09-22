@@ -14,9 +14,9 @@ import (
 // lpxDGDAdmissionCases builds fresh LPX scenarios for the single native DGD admission table.
 func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
-	const conductorRoleErr = "spec.components: Forbidden: LPX components must declare exactly one conductor role"
+	const conductorRoleErr = "spec.components: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
-	const alphaConductorRoleErr = "spec.services: Forbidden: LPX components must declare exactly one conductor role"
+	const alphaConductorRoleErr = "spec.services: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
 	const alphaConductorTemplateErr = "spec.services[lpx].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
@@ -489,7 +489,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				extra.ComponentName = "extra-draft"
 				dgd.Spec.Components = append(dgd.Spec.Components, *extra)
 			}),
-			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair"},
+			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair", conductorRoleErr},
 		},
 		{
 			name: "LPX rejects zero draft replicas",
@@ -682,14 +682,43 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantCELErr: "spec.services[lpx]: Invalid value: lpx may only be set when componentType is lpx",
 		},
 		{
-			name: "LPX rejects more than one conductor across components",
+			name: "LPX admits independent conductors across components",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				second := dgd.Spec.Components[0]
 				second.ComponentName = "lpx-2"
 				dgd.Spec.Components = append(dgd.Spec.Components, second)
 			}),
-			wantWebhookErrs: []string{conductorRoleErr},
 		},
+		{
+			name: "LPX admits three independent engines with unrelated replica counts",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+				second := dgd.Spec.Components[0].DeepCopy()
+				second.ComponentName, second.Replicas = "second", nil
+				third := dgd.Spec.Components[0].DeepCopy()
+				third.ComponentName, third.Replicas = "third", k8sptr.To(int32(9))
+				dgd.Spec.Components = append(dgd.Spec.Components, *second, *third)
+			}),
+		},
+		{
+			name: "v1alpha1 LPX admits independent conductors",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				second := dgd.Spec.Services["lpx"].DeepCopy()
+				second.Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Services["second"] = second
+			}),
+		},
+		{
+			name: "LPX rejects ambiguous shared and independent engines",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				second := dgd.Spec.Components[1].DeepCopy()
+				second.ComponentName = "independent"
+				dgd.Spec.Components = append(dgd.Spec.Components, *second)
+			}),
+			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair", conductorRoleErr},
+		},
+
 		{
 			name: "shared LPX draft does not consume the target Grove name budget",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {

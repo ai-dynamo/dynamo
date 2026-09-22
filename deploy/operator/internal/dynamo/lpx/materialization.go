@@ -6,6 +6,7 @@
 package lpx
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"slices"
 	"strings"
@@ -18,11 +19,12 @@ import (
 const (
 	lpxScalingGroupTemplateName = "lpx"
 	conductorTemplateName       = "cond"
-	maxEngineReplicas           = 2496
+	maxWorkloadReplicas         = 2496
+	minGroupNameLength          = 6
 )
 
-// MaxPodCliqueSetNameLength reserves Grove's combined name budget for the fixed
-// scaling group and longest role name, independently of the selected components.
+// MaxPodCliqueSetNameLength preserves the established PCS identity budget.
+// WithGroup separately validates the extra names needed by multiple workloads.
 const MaxPodCliqueSetNameLength = commonconsts.MaxCombinedGroveResourceNameLength -
 	len(lpxScalingGroupTemplateName) - len(conductorTemplateName)
 
@@ -41,6 +43,10 @@ type ExpectedAgent struct {
 // MaterializationPlan is the deterministic identity projection shared by the
 // renderer and the controller's API-object observer.
 type MaterializationPlan struct {
+	// ScalingGroupTemplate is unique within the shared PCS.
+	ScalingGroupTemplate string
+	// ResourcePrefix scopes runtime ConfigMaps and discovery Services to this workload.
+	ResourcePrefix string
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
 	// ConductorClique is the materialized conductor PodClique name, if present.
@@ -63,7 +69,7 @@ type MaterializationPlan struct {
 
 // PlanNodeLocalMaterialization derives the exact identities shared by graph
 // rendering and lifecycle observation without mutating the workload.
-func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*MaterializationPlan, error) {
+func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*MaterializationPlan, error) {
 	// Leave room for the fixed scaling group and every LPX role in Grove's name budget.
 	if strings.TrimSpace(pcsName) == "" {
 		return nil, fmt.Errorf("PodCliqueSet name is required")
@@ -88,10 +94,12 @@ func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*Materi
 
 	// Construct the plan with Grove's canonical replica-zero scaling-group identity.
 	plan := &MaterializationPlan{
-		PodCliqueSetName:  pcsName,
-		ConductorTemplate: conductorTemplate,
-		CyborgTemplate:    cyborgTemplate,
-		Agents:            agents,
+		PodCliqueSetName:     pcsName,
+		ScalingGroupTemplate: lpxScalingGroupTemplateName,
+		ResourcePrefix:       pcsName,
+		ConductorTemplate:    conductorTemplate,
+		CyborgTemplate:       cyborgTemplate,
+		Agents:               agents,
 		LPXScalingGroup: grovecommon.GeneratePodCliqueScalingGroupName(
 			grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0}, lpxScalingGroupTemplateName,
 		),
@@ -102,10 +110,10 @@ func (w *SelectedWorkload) PlanNodeLocalMaterialization(pcsName string) (*Materi
 	return plan, plan.ValidateReplicaCount()
 }
 
-// ValidateReplicaCount bounds per-engine allocations and checks Pod hostnames.
+// ValidateReplicaCount bounds per-workload allocations and checks Pod hostnames.
 func (p *MaterializationPlan) ValidateReplicaCount() error {
-	if p.Replicas < 0 || p.Replicas > maxEngineReplicas {
-		return fmt.Errorf("LPX replica count must be between 0 and %d", maxEngineReplicas)
+	if p.Replicas < 0 || p.Replicas > maxWorkloadReplicas {
+		return fmt.Errorf("LPX replica count must be between 0 and %d", maxWorkloadReplicas)
 	}
 	if p.ConductorTemplate != "" {
 		if err := p.validatePodHostname("conductor", p.ConductorTemplate, 0); err != nil {
@@ -169,4 +177,65 @@ func (p *MaterializationPlan) validatePodHostname(role, templateName string, pod
 
 func materializedPodHostname(cliqueName string, podIndex int) string {
 	return fmt.Sprintf("%s-%d", cliqueName, podIndex)
+}
+
+// WithGroup scopes a workload's resource names within a multi-workload PCS.
+// Sole workloads retain the unscoped plan's established names.
+// The receiver is a validated non-nil plan and groupName is an admitted,
+// non-empty conductor component name from ComponentGroups.
+// The receiver is not mutated; names that cannot fit Grove's budget are rejected.
+func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan, error) {
+	// Reserve the group prefix in both the scaling group and its longest role.
+	roleLength := max(len(p.ConductorTemplate), len(p.CyborgTemplate))
+	for _, agent := range p.Agents {
+		roleLength = max(roleLength, len(agent.TemplateName))
+	}
+	groupNameLength := (commonconsts.MaxCombinedGroveResourceNameLength - len(p.PodCliqueSetName) - roleLength - 1) / 2
+	name, err := boundedGroupName(groupName, groupNameLength)
+	if err != nil {
+		return nil, fmt.Errorf("naming group %q in PCS %q: %w", groupName, p.PodCliqueSetName, err)
+	}
+
+	// ConfigMaps and Services retain more of the group name than Grove allows.
+	const maxResourcePrefixLength = validation.DNS1123LabelMaxLength - len("-serve")
+	resourceName, err := boundedGroupName(groupName, maxResourcePrefixLength-len(p.PodCliqueSetName)-1)
+	if err != nil {
+		return nil, err
+	}
+	out := p.ForReplica(0)
+	out.ResourcePrefix = p.PodCliqueSetName + "-" + resourceName
+	out.ScalingGroupTemplate = name
+	out.LPXScalingGroup = grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: p.PodCliqueSetName, Replica: 0}, name)
+
+	// Every role remains unique within the shared PCS and readable in Grove objects.
+	if out.ConductorTemplate != "" {
+		out.ConductorTemplate = name + "-" + out.ConductorTemplate
+	}
+	if out.CyborgTemplate != "" {
+		out.CyborgTemplate = name + "-" + out.CyborgTemplate
+	}
+	for i := range out.Agents {
+		out.Agents[i].TemplateName = name + "-" + out.Agents[i].TemplateName
+	}
+	out = out.ForReplica(0)
+	return out, out.ValidateReplicaCount()
+}
+
+// boundedGroupName preserves admitted component names when they fit. Hashes retain
+// the original identity when lowercasing or shortening; at least one readable
+// character and four hash characters must fit alongside the separator.
+func boundedGroupName(component string, maxLength int) (string, error) {
+	name := strings.ToLower(component)
+	if name == component && len(name) <= maxLength {
+		return name, nil
+	}
+	if maxLength < minGroupNameLength {
+		return "", fmt.Errorf("component name needs more than %d characters; shorten the deployment name", maxLength)
+	}
+
+	// Prefer eight hash characters, reducing only for Grove's tighter name budget.
+	digest := sha256.Sum256([]byte(component))
+	suffix := fmt.Sprintf("%x", digest[:4])[:min(8, maxLength-2)]
+	prefixLength := min(len(name), maxLength-len(suffix)-1)
+	return strings.TrimRight(name[:prefixLength], "-") + "-" + suffix, nil
 }

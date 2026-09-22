@@ -25,10 +25,9 @@ func mergeLPXChildStatus(
 	if ordinary.ComponentStatus == nil {
 		ordinary.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
 	}
-	serving := lpx.ServingComponent(source)
 	for _, component := range components {
 		kind := v1beta1.ComponentKindPodCliqueScalingGroup
-		if component != serving {
+		if component.ComponentRole(v1beta1.ComponentRoleLPXConductor) == nil {
 			kind = v1beta1.ComponentKindPodClique
 		}
 		ordinary.ComponentStatus[component.ComponentName] = v1beta1.ComponentReplicaStatus{ComponentKind: kind}

@@ -48,22 +48,21 @@ func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1a
 // collects missing requests in replica/model order in the same pass. An immutable
 // mismatch returns nil collections and true: the caller must replace the PCS.
 // Pointer inputs are non-nil; deployment has a validated DGD controller owner.
-// currentRequests contains owned observations and may be empty.
+// currentRequests contains owned observations indexed by name and may be nil.
 // Inputs are not mutated; owner references are added only on publication.
 func resolvePipelineRequests(
 	deployment *v1alpha1.LPXGraphDeployment,
-	currentRequests []lpxv1alpha1.LPUPipelineRequest,
-	workload *lpx.SelectedWorkload,
+	currentRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
+	workload *lpx.Workload,
 	plan *lpx.MaterializationPlan,
 ) (map[string]*lpxv1alpha1.LPUPipelineRequest, []*lpxv1alpha1.LPUPipelineRequest, bool) {
 	// The reconcile boundary already validated the DGD owner; rendering uses that identity.
 	dgdOwner := metav1.GetControllerOf(deployment)
 
-	// Index the observed requests once, preserving their scheduler-owned status.
-	currentRequestsByName := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(currentRequests))
-	for index := range currentRequests {
-		request := &currentRequests[index]
-		currentRequestsByName[request.Name] = request
+	// Only multiple workloads need a group identity; sole workloads retain existing LPR names.
+	groupName := ""
+	if plan.ResourcePrefix != plan.PodCliqueSetName {
+		groupName = workload.ServingComponentName()
 	}
 
 	// Model projections are already ordered (default, or draft0..draft7 then target).
@@ -75,7 +74,7 @@ func resolvePipelineRequests(
 		replicaPlan := plan.ForReplica(replica)
 
 		for index, projection := range projections {
-			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, projection.Model(), replica)
+			digest := pipelineRequestIdentityDigest(deployment.Namespace, deployment.Name, deployment.UID, groupName, projection.Model(), replica)
 
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -96,7 +95,7 @@ func resolvePipelineRequests(
 				Spec: projection.RequestSpec(replicaPlan, replicaPlan.Agents[index].CliqueName),
 			}
 
-			if currentRequest, exists := currentRequestsByName[request.Name]; exists {
+			if currentRequest, exists := currentRequests[request.Name]; exists {
 				if !pipelineRequestMatches(currentRequest, request) {
 					return nil, nil, true
 				}
@@ -112,12 +111,14 @@ func resolvePipelineRequests(
 	return requests, missing, false
 }
 
-// pipelineRequestIdentityDigest identifies one model at one engine ordinal.
+// pipelineRequestIdentityDigest identifies a model and replica within an optional group.
+// An empty group preserves the established single-workload identity.
 // InputRevision and generation are deliberately absent: there is no publication batch.
 func pipelineRequestIdentityDigest(
 	namespace string,
 	name string,
 	uid types.UID,
+	group string,
 	model string,
 	replicaIndex int32,
 ) string {
@@ -125,6 +126,9 @@ func pipelineRequestIdentityDigest(
 	writeIdentityHashField(h, "namespace", namespace)
 	writeIdentityHashField(h, "name", name)
 	writeIdentityHashField(h, "uid", string(uid))
+	if group != "" {
+		writeIdentityHashField(h, "group", group)
+	}
 	writeIdentityHashField(h, "model", model)
 	if replicaIndex > 0 {
 		writeIdentityHashField(h, "group-replica", strconv.FormatInt(int64(replicaIndex), 10))

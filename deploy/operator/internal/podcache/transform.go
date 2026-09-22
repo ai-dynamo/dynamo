@@ -91,8 +91,8 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 		Containers: projectContainers(in.Containers),
 		// GMS Pod replacement requires native init-sidecar identity.
 		InitContainers: projectInitContainers(in.InitContainers),
-		// Topology label discovery inspects DownwardAPI label field paths.
-		Volumes: projectTopologyVolumes(in.Volumes),
+		// Topology uses DownwardAPI fields; LPX eviction uses runtime ConfigMap references.
+		Volumes: projectVolumes(in.Volumes),
 	}
 }
 
@@ -124,9 +124,20 @@ func projectInitContainers(in []corev1.Container) []corev1.Container {
 	return nil
 }
 
-func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
+func projectVolumes(in []corev1.Volume) []corev1.Volume {
 	out := make([]corev1.Volume, 0, len(in))
 	for i := range in {
+		// Keep only ConfigMap identity, not its projected keys or mount settings.
+		if in[i].ConfigMap != nil {
+			out = append(out, corev1.Volume{
+				Name: in[i].Name,
+				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: in[i].ConfigMap.LocalObjectReference,
+				}},
+			})
+			continue
+		}
+
 		if in[i].DownwardAPI == nil {
 			continue
 		}

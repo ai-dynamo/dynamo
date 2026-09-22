@@ -36,8 +36,8 @@ SPDX-License-Identifier: Apache-2.0
 
 - The DynamoGraphDeployment (DGD) owns the LPXGraphDeployment (LPXGD). The LPXGD
   owns its PodCliqueSet (PCS), runtime ConfigMaps, and Services. The PCS owns the
-  LPUPipelineRequests (LPRs) and Grove hierarchy. One PodCliqueScalingGroup (PCSG)
-  under PCS ordinal zero holds all engine replicas.
+  LPUPipelineRequests (LPRs) and Grove hierarchy. Each independent workload has one
+  PodCliqueScalingGroup (PCSG). A shared draft/target runtime remains one workload.
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
   Foreground PCS deletion keeps the owner present until blocking LPRs are gone.
   This is the supported lifecycle, not a guarantee against external orphaning.
@@ -48,7 +48,8 @@ SPDX-License-Identifier: Apache-2.0
 - Index LPRs by controlling PCS UID, validating the owner's API version and kind
   in the index. Do not add a PCS-name index or namespace-wide request scan.
 - PCS identity derives from the LPXGD UID and stays stable across input edits.
-  LPR names identify the LPXGD namespace, name, UID, model, and PCSG ordinal.
+  LPR names identify the LPXGD namespace, name, UID, workload, model, and PCSG
+  ordinal.
 - Keep identity and change detection separate: `InputRevision` synchronizes the
   parent-to-child handoff; workload digests detect immutable workload changes;
   `CompilerSnapshotDigestAnnotation` records compiler provenance and is part of
@@ -80,16 +81,16 @@ SPDX-License-Identifier: Apache-2.0
 - Retain matching LPRs and their status across input edits. Collect missing
   requests in the same ordered pass that constructs desired requests. An
   immutable mismatch invalidates that result and requires PCS replacement.
-- Publish missing requests independently in PCSG ordinal/model order. Partial
-  publication and idempotent retries are supported; exactly-once batches are
-  not required. Creation order does not guarantee scheduler order or prevent
+- Publish missing requests independently in workload/PCSG ordinal/model order.
+  Partial publication and idempotent retries are supported; exactly-once
+  batches are not required. Creation order does not guarantee scheduler order or prevent
   interior scheduling failures.
 - Wait for terminating requests to disappear before reusing their names.
   Do not introduce batch finalizers or cleanup protocols.
 
 # Capacity and Deletion
 
-- Keep the top-level PCS replica count at one; engine capacity belongs to the
+- Keep the top-level PCS replica count at one; workload capacity belongs to the
   PCSG. Correct top-level replica drift through normal synchronization, not
   PCS replacement.
 - Seed the PCS's scaling-group template from immutable `MinAvailable` (default
@@ -102,15 +103,13 @@ SPDX-License-Identifier: Apache-2.0
 - External capacity is not persisted across PCS or PCSG replacement. A new
   group starts from the immutable template seed; its external scaler must
   reapply the desired count. Explicit DGD replicas are reapplied by this controller.
-- Validate the single-group template, group ownership, and deletion state at
-  observation. A foreign PCSG is an ownership error, not a cache miss. A nil PCSG
-  means the group is missing or the owned group is deleting; it does not mean
-  zero capacity or completed pod deletion.
-- Initial PCS creation needs no PCSG. With explicit replicas and no existing
-  LPRs, PCS synchronization may also proceed before the group appears. With
-  explicit replicas, deadlines may be recorded while the group is unavailable.
-  Request deletion, publication, and readiness require an observed group;
-  externally managed capacity also requires it once the PCS exists.
+- Index PCSGs by controlling PCS, validating the owner's API version and kind
+  in the index. Do not add a namespace-wide request scan.
+- Initial PCS creation needs no PCSG. Once the PCS exists, `Reconcile` waits
+  until every configured group has an owned, non-deleting PCSG before proceeding.
+  The PCSG watch resumes reconciliation. Downstream capacity, request, deadline,
+  and readiness operations can rely on all configured groups being present.
+  This also defers PCS updates and replacement until all groups are observed.
 - Render a complete valid replacement before deleting an existing workload.
   A replacement error preserves the existing workload, even if its digest differs.
 - For immutable workload or request changes, foreground-delete the PCS and
@@ -133,19 +132,20 @@ SPDX-License-Identifier: Apache-2.0
 
 # Scheduling Cycles
 
-- Scheduling deadlines apply to individual LPR cycles, not all deployment
-  Pending states, runtime readiness, or asynchronous cleanup.
-- Start the deadline at `LPR.status.schedulingStartedAt`. Without that timestamp,
-  no deadline is running. Do not substitute creation time, managed fields, or a
-  deployment-level timestamp. The scheduler supplies a new start when a surviving
-  request begins another cycle, including Bound-to-Pending transitions.
+- `attemptDeadlineSeconds` bounds how long an individual LPR remains pending,
+  including waiting for the scheduler to start. It is not a solver budget or a
+  deadline for all deployment Pending states, runtime readiness, or asynchronous cleanup.
+- Use a nonzero `LPR.status.schedulingStartedAt` when present; otherwise use
+  `LPR.metadata.creationTimestamp`. The scheduler supplies a new start when a
+  surviving request begins another cycle, including Bound-to-Pending transitions;
+  that timestamp takes precedence over the request's original creation time.
 - Current-generation `Bound`, `NoFit`, and `Unsupported` states are exempt.
   `Degraded`, `Releasing`, and `Released` are exempt only with a current-generation
   status and a committed execution accepted for that generation.
 - Exemption is not readiness: `NoFit` remains pending, and `Bound` still requires
   Grove runtime readiness.
-- The deadline is best effort: download checks, compiler-registry resolution and
-  desired-state validation precede expiry evaluation. Their failures can delay
+- The deadline is best effort: PCSG observation, download checks, compiler-registry
+  resolution and desired-state validation precede expiry evaluation. Their failures can delay
   failure reporting and deadline cleanup indefinitely, including after expiry.
 
 # Scheduling Failure and Cleanup
@@ -156,11 +156,13 @@ SPDX-License-Identifier: Apache-2.0
 - Re-evaluate expiry from current request status on every pass. Do not delete
   a request solely because it expired in an earlier pass. The condition records
   failure, not a deletion queue; do not persist an expired-request UID list.
-- One expired model request makes its entire engine replica eligible, including
-  sibling model requests. Cleanup may remove only a trailing suffix.
-  Any interior expired ordinal blocks all deadline scale-down and request
-  deletion, even if another expired suffix exists. For four replicas, expiry at
-  `{2,3}` permits scale to two; `{0}` or `{0,3}` permits no cleanup.
+- Evaluate deadline cleanup independently for each workload. One expired model
+  request makes its entire workload replica eligible, including sibling model
+  requests. Cleanup may remove only a trailing suffix.
+  Any interior expired ordinal blocks that workload's deadline scale-down and
+  request deletion, even if another expired suffix exists in the same workload.
+  For four replicas, expiry at `{2,3}` permits scale to two; `{0}` or `{0,3}`
+  permits no cleanup.
 - Continue cleanup beyond an already-lowered group count on subsequent passes.
   Delete non-expired siblings before expired requests so a partial failure
   leaves expiry evidence for the next reconciliation.
@@ -194,6 +196,9 @@ SPDX-License-Identifier: Apache-2.0
 - `Ready.LastTransitionTime` changes only when its boolean status changes.
   Renewing `SchedulingFailed` deliberately gives it a new timestamp even when
   it remains true.
+- Derive each component's readiness from its own workload's scheduler receipts and
+  Grove roles. The graph is Ready only when every workload is ready; aggregate
+  readiness must not overwrite independently observed component readiness.
 - Persist child status once at the reconciliation boundary, including early
   errors. Record errors before converting them into bounded deadline retries.
   Advance `ObservedGeneration` after error-free reconciliation, including pending
@@ -202,9 +207,6 @@ SPDX-License-Identifier: Apache-2.0
   acknowledgement and persisting status. Status-write failures remain errors.
   `reconcileWorkload` preserves its error and puts any bounded deadline retry in
   `ctrl.Result`; only the outer `Reconcile` converts that pair to a successful retry.
-- Synchronize propagated PCS and serving Service labels and annotations through
-  `WithMetadataSync`. Remove previously tracked keys omitted from desired state;
-  preserve untracked metadata and the shared helper's bookkeeping annotations.
 - Check downloads before acquiring compiler metadata or deriving deadlines.
   Reuse fresh successful observations by build URL across revisions, without
   renewing `LastCheckedAt`. Check new or expired builds. Only a Ready deployment

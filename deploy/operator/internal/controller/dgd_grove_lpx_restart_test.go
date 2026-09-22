@@ -9,7 +9,6 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +37,7 @@ func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
 			require.Empty(t, resolver.Resolve(ctx, dgd, []string{"lpx"}))
 
 			t.Log("An input edit before handoff must keep the restart in progress despite the old Ready receipt")
-			lpx.ServingComponent(dgd).ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "runtime:changed"
+			dgd.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "runtime:changed"
 			dgd.Generation++
 			revision, err := dynamo.LPXInputRevision(dgd, "restart-1")
 			require.NoError(t, err)

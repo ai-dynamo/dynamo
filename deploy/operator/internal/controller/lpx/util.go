@@ -12,6 +12,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -78,33 +79,82 @@ func getPodCliqueSet(ctx context.Context, reader client.Reader, deployment *v1al
 	return pcs, nil
 }
 
-// getPodCliqueScalingGroup observes the single engine group under PCS ordinal zero.
-// reader and pcs must be non-nil; reader must use the cache, and pcs must already
-// be owned by this LPXGD. A non-nil result is controlled by that PCS and not
-// deleting; nil means the group is absent from the cache or is deleting.
-// A group controlled by another PCS is an ownership error.
-// Nil does not mean zero replicas, and a zero-replica group is returned normally.
-func getPodCliqueScalingGroup(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet) (*grovev1alpha1.PodCliqueScalingGroup, error) {
-	// Engine replicas belong to one PCSG, not to additional top-level PCS ordinals.
+// deletePodCliqueSet deletes the already-validated, non-nil PCS.
+func deletePodCliqueSet(ctx context.Context, cl client.Client, pcs *grovev1alpha1.PodCliqueSet) error {
+	return client.IgnoreNotFound(
+		cl.Delete(
+			ctx,
+			pcs,
+			// Foreground GC so that blocking LPRs and Grove dependents can be removed.
+			client.PropagationPolicy(metav1.DeletePropagationForeground),
+			client.Preconditions{UID: &pcs.UID, ResourceVersion: &pcs.ResourceVersion},
+		),
+	)
+}
+
+// getPodCliqueScalingGroups observes all workload groups under PCS ordinal zero.
+// reader and pcs must be non-nil; reader uses the cache and pcs is owned by this LPXGD.
+// Missing or deleting groups are omitted; a foreign group at an expected name is an
+// ownership error, never a cache miss.
+func getPodCliqueScalingGroups(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet) (map[string]*grovev1alpha1.PodCliqueScalingGroup, error) {
 	configs := pcs.Spec.Template.PodCliqueScalingGroupConfigs
-	if len(configs) != 1 {
-		return nil, fmt.Errorf("LPX PodCliqueSet %q requires exactly one scaling-group template", pcs.Name)
-	}
-	name := grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, configs[0].Name)
-
-	// Establish the group's identity and lifetime once for all downstream operations.
-	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: pcs.Namespace, Name: name}, pcsg); err != nil {
-		return nil, client.IgnoreNotFound(err)
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("LPX PodCliqueSet %q requires at least one scaling-group template", pcs.Name)
 	}
 
-	if !metav1.IsControlledBy(pcsg, pcs) {
-		return nil, fmt.Errorf("PodCliqueScalingGroup %q is not controlled by PodCliqueSet %q", pcsg.Name, pcs.Name)
+	// Select only the current templates under PCS ordinal zero.
+	expected := make(map[string]struct{}, len(configs))
+	for _, config := range configs {
+		name := grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, config.Name)
+		expected[name] = struct{}{}
 	}
 
-	if !pcsg.DeletionTimestamp.IsZero() {
-		return nil, nil
+	observed := &grovev1alpha1.PodCliqueScalingGroupList{}
+	if err := reader.List(ctx, observed, client.InNamespace(pcs.Namespace), client.MatchingLabels{grovecommon.LabelPartOfKey: pcs.Name}); err != nil {
+		return nil, err
 	}
 
-	return pcsg, nil
+	// Establish each expected group's identity and lifetime once for downstream operations.
+	groups := make(map[string]*grovev1alpha1.PodCliqueScalingGroup, len(configs))
+	for i := range observed.Items {
+		group := &observed.Items[i]
+		if _, selected := expected[group.Name]; !selected {
+			continue
+		}
+		if !metav1.IsControlledBy(group, pcs) {
+			return nil, fmt.Errorf("PodCliqueScalingGroup %q is not controlled by PodCliqueSet %q", group.Name, pcs.Name)
+		}
+		if group.DeletionTimestamp.IsZero() {
+			groups[group.Name] = group
+		}
+	}
+	return groups, nil
+}
+
+// scaleDownPodCliqueScalingGroup lowers capacity before asynchronous request cleanup.
+// pcsg must be non-nil, owned and not deleting. Call only for explicitly managed
+// capacity. Scale-out must wait until terminating request names disappear.
+func scaleDownPodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) error {
+	if replicas >= pcsg.Spec.Replicas {
+		return nil
+	}
+	return scalePodCliqueScalingGroup(ctx, cl, pcsg, replicas)
+}
+
+// scalePodCliqueScalingGroup updates the non-nil, already-owned PCSG using its
+// observed resource version. Call only for explicitly managed capacity.
+// A successful write updates the supplied observation for the rest of this pass.
+func scalePodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) error {
+	if pcsg.Spec.Replicas == replicas {
+		return nil
+	}
+	scale := &autoscalingv1.Scale{
+		ObjectMeta: metav1.ObjectMeta{ResourceVersion: pcsg.ResourceVersion},
+		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+	}
+	if err := cl.SubResource("scale").Update(ctx, pcsg, client.WithSubResourceBody(scale)); err != nil {
+		return fmt.Errorf("scale LPX PodCliqueScalingGroup %q: %w", pcsg.Name, err)
+	}
+	pcsg.Spec.Replicas = replicas
+	return nil
 }

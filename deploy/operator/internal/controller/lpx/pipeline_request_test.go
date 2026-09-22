@@ -112,7 +112,11 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 
 func TestPipelineRequestIdentityDigest(t *testing.T) {
 	t.Log("Every identity field distinguishes requests; the same tuple always has the same digest")
-	base := pipelineRequestIdentityDigest("ns", "dgd", "uid-a", "default", 0)
+	base := pipelineRequestIdentityDigest("ns", "dgd", "uid-a", "", "default", 0)
+	firstGroup := pipelineRequestIdentityDigest("ns", "dgd", "uid-a", "first", "default", 0)
+	secondGroup := pipelineRequestIdentityDigest("ns", "dgd", "uid-a", "second", "default", 0)
+	require.NotEqual(t, base, firstGroup)
+	require.NotEqual(t, firstGroup, secondGroup)
 	for _, test := range []struct {
 		name       string
 		namespace  string
@@ -130,17 +134,17 @@ func TestPipelineRequestIdentityDigest(t *testing.T) {
 		{"replica", "ns", "dgd", "uid-a", "default", 1, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			digest := pipelineRequestIdentityDigest(test.namespace, test.deployment, test.uid, test.model, test.replica)
+			digest := pipelineRequestIdentityDigest(test.namespace, test.deployment, test.uid, "", test.model, test.replica)
 			require.NotEmpty(t, digest)
 			require.Equal(t, test.same, base == digest)
-			require.Equal(t, digest, pipelineRequestIdentityDigest(test.namespace, test.deployment, test.uid, test.model, test.replica))
+			require.Equal(t, digest, pipelineRequestIdentityDigest(test.namespace, test.deployment, test.uid, "", test.model, test.replica))
 		})
 	}
 }
 
 func TestPipelineRequestName(t *testing.T) {
 	t.Log("Keep request names readable and within the DNS label limit")
-	digest := pipelineRequestIdentityDigest("ns", "dgd", "uid", "default", 0)
+	digest := pipelineRequestIdentityDigest("ns", "dgd", "uid", "", "default", 0)
 	for _, test := range []struct{ name, prefix string }{
 		{"dgd", "dgd"},
 		{"a-very-long-but-readable-dynamo-graph-deployment-name", "a-very-long-but-readabl"},
@@ -172,7 +176,7 @@ func TestResolvePipelineRequestsPreservesImmutableIntent(t *testing.T) {
 			current := desired.requests[0].DeepCopy()
 			current.Annotations[test.annotation] = test.value
 			require.Equal(t, !test.changed, pipelineRequestMatches(current, &desired.requests[0]))
-			requests, missing, changed := resolvePipelineRequests(deployment, []lpxv1alpha1.LPUPipelineRequest{*current}, desired.workload, desired.plan)
+			requests, missing, changed := resolvePipelineRequests(deployment, map[string]*lpxv1alpha1.LPUPipelineRequest{current.Name: current}, desired.workload, desired.plan)
 			require.Equal(t, test.changed, changed)
 			require.Empty(t, missing)
 			if !changed {
@@ -227,9 +231,6 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		require.NotContains(t, clique.Annotations, lpxv1alpha1.PodPartitionIDAnnotation)
 		require.NotContains(t, clique.Annotations, lpxv1alpha1.PodRankInPartitionAnnotation)
 	}
-	pcs := findLPXTestPodCliqueSet(t, objects)
-	require.Equal(t, desired.workload.Digest().String(), pcs.Annotations[lpx.WorkloadDigestAnnotation])
-
 }
 
 func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
@@ -248,7 +249,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 		{name: "mismatch discards earlier missing requests", replicas: 2, published: []int{5}, intentChanged: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Resolve two engine replicas with draft0, draft1 and target models")
+			t.Log("Resolve two workload replicas with draft0, draft1 and target models")
 			deployment, dgd, registry := newLPXSpecDecodeTestDGD(t)
 			desired := resolveLPXTestWorkload(t, registry, t.Context(), deployment, dgd)
 			desired.plan.Replicas = 2
@@ -261,7 +262,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 			}
 
 			t.Log("Keep observed receipts and collect only absent desired names without sorting")
-			var observed []lpxv1alpha1.LPUPipelineRequest
+			observed := make(map[string]*lpxv1alpha1.LPUPipelineRequest)
 			for _, index := range tc.published {
 				request := rendered[index].DeepCopy()
 				request.UID = types.UID(request.Name)
@@ -269,7 +270,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				if tc.intentChanged {
 					request.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = "another-snapshot"
 				}
-				observed = append(observed, *request)
+				observed[request.Name] = request
 			}
 			desired.plan.Replicas = tc.replicas
 			requests, missing, changed := resolvePipelineRequests(deployment, observed, desired.workload, desired.plan)
@@ -285,8 +286,7 @@ func TestResolvePipelineRequestsCollectsMissingInOrder(t *testing.T) {
 				require.Equal(t, rendered[renderedIndex], missing[index])
 				require.Same(t, requests[missing[index].Name], missing[index])
 			}
-			for index := range observed {
-				request := &observed[index]
+			for _, request := range observed {
 				if request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex < int64(tc.replicas) {
 					require.Same(t, request, requests[request.Name])
 				}

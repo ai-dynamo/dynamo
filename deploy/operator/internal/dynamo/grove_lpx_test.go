@@ -7,8 +7,10 @@ import (
 	"testing"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func TestEvaluateLPXGroveReadinessUsesEachComponentRuntimeNamespace(t *testing.T) {
@@ -33,9 +35,21 @@ func TestEvaluateLPXGroveReadinessUsesEachComponentRuntimeNamespace(t *testing.T
 		Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{draft, serving}},
 	}
 
-	readiness, err := EvaluateLPXGroveReadiness(t.Context(), nil, source, nil, nil)
-	require.NoError(t, err)
-	require.NotEqual(t, source.GetDynamoNamespaceForComponent(&draft), source.GetDynamoNamespaceForComponent(&serving))
-	require.Equal(t, source.GetDynamoNamespaceForComponent(&draft), readiness.ComponentStatuses[draft.ComponentName].RuntimeNamespace)
-	require.Equal(t, source.GetDynamoNamespaceForComponent(&serving), readiness.ComponentStatuses[serving.ComponentName].RuntimeNamespace)
+	t.Log("Preserve component namespaces while the PCS or its scaling group is still missing")
+	for _, pcs := range []*grovev1alpha1.PodCliqueSet{
+		nil,
+		{
+			ObjectMeta: metav1.ObjectMeta{Generation: 1},
+			Status: grovev1alpha1.PodCliqueSetStatus{
+				ObservedGeneration: ptr.To(int64(1)), CurrentGenerationHash: ptr.To("accepted"),
+			},
+		},
+	} {
+		readiness, err := EvaluateLPXGroveReadiness(t.Context(), nil, source, "serving", []string{"draft", "serving"}, pcs, nil)
+		require.NoError(t, err)
+		require.False(t, readiness.Ready)
+		require.NotEqual(t, source.GetDynamoNamespaceForComponent(&draft), source.GetDynamoNamespaceForComponent(&serving))
+		require.Equal(t, source.GetDynamoNamespaceForComponent(&draft), readiness.ComponentStatuses[draft.ComponentName].RuntimeNamespace)
+		require.Equal(t, source.GetDynamoNamespaceForComponent(&serving), readiness.ComponentStatuses[serving.ComponentName].RuntimeNamespace)
+	}
 }

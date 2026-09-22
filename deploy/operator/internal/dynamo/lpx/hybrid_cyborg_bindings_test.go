@@ -31,7 +31,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	require.NoError(t, err)
 	projection := projectionBatch[0]
 	projection.stage = testRenderComponentName
-	workload := &SelectedWorkload{
+	workload := &Workload{
 		modelProjections:     []*ModelProjection{projection},
 		scalingGroupReplicas: 1,
 	}
@@ -39,16 +39,16 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	t.Log("Render the generated Agent endpoints")
 	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 	require.NoError(t, err)
-	initial, err := workload.RenderCyborgConfigMap("test-namespace", plan)
+	initial, err := workload.RenderCyborgConfigMap(plan)
 	require.NoError(t, err)
 
-	t.Log("Verify every engine replica addresses only its own Agents")
+	t.Log("Verify every workload replica addresses only its own Agents")
 	for _, replicas := range []int32{1, 2, 10, 12} {
 		t.Run(strconv.Itoa(int(replicas)), func(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
 			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
-			configMap, err := workload.RenderCyborgConfigMap("test-namespace", scaledPlan)
+			configMap, err := workload.RenderCyborgConfigMap(scaledPlan)
 			require.NoError(t, err)
 			require.Equal(t, initial, configMap)
 			require.True(t, *configMap.Immutable)
@@ -56,7 +56,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			require.Equal(t, prefix+"agt-0\n"+prefix+"agt-2", configMap.Data["lpu_servers"])
 			require.Len(t, configMap.Data, 1)
 
-			t.Log("Resolve Cyborg server addresses to the last engine replica's actual Agent hostnames")
+			t.Log("Resolve Cyborg server addresses to the last workload replica's actual Agent hostnames")
 			lastReplica := scaledPlan.ForReplica(replicas - 1)
 			servers := strings.Split(strings.ReplaceAll(configMap.Data["lpu_servers"], "${GROVE_PCSG_INDEX}", strconv.Itoa(int(replicas-1))), "\n")
 			for index, offset := range []int{0, 2} {
@@ -100,12 +100,12 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			projection.stage = testRenderComponentName
 
 			t.Log("Render only projected endpoints without compressing their physical Agent offsets")
-			workload := &SelectedWorkload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
+			workload := &Workload{modelProjections: []*ModelProjection{projection}, scalingGroupReplicas: 1}
 			plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
 			require.Equal(t, 2*test.partitions, projection.agentReplicas)
-			configMap, err := workload.RenderCyborgConfigMap("test", plan)
+			configMap, err := workload.RenderCyborgConfigMap(plan)
 			require.NoError(t, err)
 			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
 			servers := make([]string, len(test.wantOffsets))

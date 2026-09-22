@@ -34,6 +34,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		starts           []*metav1.Time
+		created          *metav1.Time
 		seconds          *int64
 		noStatus         bool
 		deleting         bool
@@ -43,9 +44,11 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 	}{
 		{name: "disabled deadline", starts: []*metav1.Time{oldStart}},
 		{name: "no requests", seconds: ptr.To(int64(30))},
-		{name: "no scheduler receipt", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), noStatus: true},
-		{name: "no scheduling start", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30))},
-		{name: "zero scheduling start", starts: []*metav1.Time{{}}, seconds: ptr.To(int64(30))},
+		{name: "no scheduler receipt expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), noStatus: true, wantExpired: []string{"request-0"}},
+		{name: "no scheduling start expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
+		{name: "zero scheduling start expires from creation", starts: []*metav1.Time{{}}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
+		{name: "new request awaits scheduler with a deadline", starts: []*metav1.Time{nil}, created: ptr.To(metav1.NewTime(now)), seconds: ptr.To(int64(30)), noStatus: true, wantWake: now.Add(30 * time.Second)},
+		{name: "unpublished request has no deadline", starts: []*metav1.Time{nil}, created: &metav1.Time{}, seconds: ptr.To(int64(30)), noStatus: true},
 		{name: "expired cycle", starts: []*metav1.Time{oldStart}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
 		{name: "deleting request", starts: []*metav1.Time{oldStart}, seconds: ptr.To(int64(30)), deleting: true},
 		{name: "independent starts", starts: []*metav1.Time{laterStart, newStart}, seconds: ptr.To(int64(30)), wantWake: newStart.Add(30 * time.Second)},
@@ -53,7 +56,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		{name: "surviving request starts again", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), lastPlanRevision: 1, wantWake: newStart.Add(30 * time.Second)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Observe scheduling cycles independently of object creation time and prior plans")
+			t.Log("Use creation time until the scheduler supplies a scheduling-cycle start")
 			requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(tc.starts))
 			for index, start := range tc.starts {
 				request := &lpxv1alpha1.LPUPipelineRequest{
@@ -62,6 +65,9 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 						Phase: lpxv1alpha1.RequestPhasePending, ObservedGeneration: ptr.To(int64(1)),
 						SchedulingStartedAt: start, LastPlanRevision: tc.lastPlanRevision,
 					},
+				}
+				if tc.created != nil {
+					request.CreationTimestamp = *tc.created
 				}
 				if tc.noStatus {
 					request.Status = nil
@@ -184,7 +190,7 @@ func TestReconcileExpiredPipelineRequests(t *testing.T) {
 		{name: "externally managed capacity", replicas: 1, expired: []int{0}, wantReplicas: 1, removed: []int{0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Log("Observe independent engine requests with only the selected ordinals expired")
+			t.Log("Observe independent workload requests with only the selected ordinals expired")
 			dgd := loadTestDGD(t, lpx.PipelineSingle, "build-v2")
 			deployment := newLPXTestDeployment(t, dgd)
 			pcs := newTestPodCliqueSet(deployment)
@@ -225,9 +231,8 @@ func TestReconcileExpiredPipelineRequests(t *testing.T) {
 					return delegated.Delete(ctx, object, opts...)
 				},
 			})
-			result, err := r.reconcileExpiredPipelineRequests(t.Context(), group, requests, expired, tc.manageReplicas)
+			err := r.reconcileExpiredPipelineRequests(t.Context(), group, requests, expired, tc.manageReplicas)
 			require.NoError(t, err)
-			require.Zero(t, result, "LPR and PCSG watches drive further cleanup")
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(group), group))
 			require.Equal(t, tc.wantReplicas, group.Spec.Replicas)
 			for i := range requests {
@@ -323,7 +328,7 @@ func newTestPodCliqueSet(deployment *v1alpha1.LPXGraphDeployment) *grovev1alpha1
 }
 
 func TestExpiredPipelineRequestsRetrySiblingDeletion(t *testing.T) {
-	t.Log("Publish multiple model requests for one engine and expire one of them")
+	t.Log("Publish multiple model requests for one workload and expire one of them")
 	ctx := t.Context()
 	child, dgd, registry := newLPXSpecDecodeTestDGD(t)
 	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
@@ -333,7 +338,8 @@ func TestExpiredPipelineRequestsRetrySiblingDeletion(t *testing.T) {
 	pcs := findLPXTestPodCliqueSet(t, objects)
 	requests, err := r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
-	group, err := getPodCliqueScalingGroup(ctx, r.Client, pcs)
+	groups, err := getPodCliqueScalingGroups(ctx, r.Client, pcs)
+	group := groups[desired.plan.LPXScalingGroup]
 	require.NoError(t, err)
 	require.Greater(t, len(requests), 1)
 	expired := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, desired.requests[0].Name)
@@ -357,50 +363,19 @@ func TestExpiredPipelineRequestsRetrySiblingDeletion(t *testing.T) {
 			return delegated.Delete(ctx, object, opts...)
 		},
 	})
-	_, err = r.reconcileExpiredPipelineRequests(ctx, group, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
+	err = r.reconcileExpiredPipelineRequests(ctx, group, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
 	require.ErrorIs(t, err, deleteErr)
 	require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(expired), &lpxv1alpha1.LPUPipelineRequest{}))
 
-	t.Log("Retry from the retained expiry proof and remove the complete engine request set")
+	t.Log("Retry from the retained expiry proof and remove the complete workload request set")
 	r.Client = base
 	requests, err = r.getPipelineRequests(ctx, pcs)
 	require.NoError(t, err)
 	expired = getTestPipelineRequest(t, ctx, r.Client, child.Namespace, expired.Name)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
-	_, err = r.reconcileExpiredPipelineRequests(ctx, group, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
+	err = r.reconcileExpiredPipelineRequests(ctx, group, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
 	require.NoError(t, err)
 	for index := range desired.requests {
 		requirePipelineRequestNotFound(t, ctx, r.Client, child.Namespace, desired.requests[index].Name)
 	}
-}
-
-func TestExpiredPipelineRequestsWaitForScalingGroup(t *testing.T) {
-	t.Log("Keep an expired request while its live PCS has not materialized a scaling group")
-	ctx := t.Context()
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
-	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
-	createLPXTestObjects(t, ctx, r.Client, objects...)
-	publishSelectedLPXForTest(t, ctx, r, child, desired)
-	pcs := findLPXTestPodCliqueSet(t, objects)
-	group := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, desired.plan.LPXScalingGroup)
-	expired := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, desired.requests[0].Name)
-	require.NoError(t, r.Delete(ctx, group))
-	requests, err := r.getPipelineRequests(ctx, pcs)
-	require.NoError(t, err)
-	_, err = r.reconcileExpiredPipelineRequests(ctx, nil, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
-	require.NoError(t, err)
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(expired), &lpxv1alpha1.LPUPipelineRequest{}))
-
-	t.Log("Once Grove creates the group, issue scale-down before deleting the LPR")
-	group.ResourceVersion = ""
-	group.UID = "replacement-group"
-	group.DeletionTimestamp = nil
-	group.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))}
-	require.NoError(t, r.Create(ctx, group))
-	_, err = r.reconcileExpiredPipelineRequests(ctx, group, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}, true)
-	require.NoError(t, err)
-	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
-	require.Zero(t, group.Spec.Replicas)
-	require.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(expired), &lpxv1alpha1.LPUPipelineRequest{})))
 }

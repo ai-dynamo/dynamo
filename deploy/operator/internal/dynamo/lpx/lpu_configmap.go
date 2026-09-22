@@ -18,24 +18,32 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
 
 const lpuConfigVolumeName = "config"
 
 // LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
-// The root is the PCS identity carried by Grove's part-of Pod label.
+// The root is the workload resource prefix, including its group when independent workloads share a PCS.
 func LPUConfigMapName(root, configHash string) string {
 	return fmt.Sprintf("%s-lpu-%.16s", root, configHash)
 }
 
-func renderRuntimeConfigMap(namespace, namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
+// LPUAgentConfigMapName returns the runtime table referenced by a non-nil Agent Pod.
+// The cached Pod projection must preserve ConfigMap volume names. Reading the Pod's
+// reference keeps old runtime revisions addressable across workload template updates.
+func LPUAgentConfigMapName(pod *corev1.Pod) (string, error) {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Name == lpuConfigVolumeName && volume.ConfigMap != nil && volume.ConfigMap.Name != "" {
+			return volume.ConfigMap.Name, nil
+		}
+	}
+	return "", fmt.Errorf("LPU-GPU eviction trigger pod %s/%s has no runtime ConfigMap volume", pod.Namespace, pod.Name)
+}
+
+func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
 	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-		},
 		Immutable: ptr.To(true),
 		Data:      data,
 	}

@@ -6,6 +6,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
@@ -20,16 +21,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// EvaluateLPXGroveReadiness observes one complete engine, including every role
-// in every replica. Ordinary DGD components are deliberately not evaluated here.
-// source is non-nil. pcs and group may be nil while materializing; otherwise the
-// caller has verified ownership, deletion state, and the single-group template.
-func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, group *grovev1alpha1.PodCliqueScalingGroup) (GroveReadiness, error) {
-	component := lpx.ServingComponent(source)
+// EvaluateLPXGroveReadiness observes every role and replica of one component group.
+// source is non-nil and admitted; groupName and componentNames identify one entry
+// from ComponentGroups. pcs and group may be nil while materializing; otherwise
+// the caller has verified ownership and deletion state. reader may be nil until
+// both pcs and group are available. Inputs remain read-only.
+func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment, groupName string, componentNames []string, pcs *grovev1alpha1.PodCliqueSet, pcsg *grovev1alpha1.PodCliqueScalingGroup) (GroveReadiness, error) {
+	component := source.GetComponentByName(groupName)
 	status := v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup, RuntimeNamespace: source.GetDynamoNamespaceForComponent(component)}
 	// Draft instances are counted from their own complete Agent cliques.
 	statuses := make(map[string]v1beta1.ComponentReplicaStatus)
-	for _, member := range lpx.Components(source) {
+	for _, name := range componentNames {
+		member := source.GetComponentByName(name)
 		if member.ComponentName != component.ComponentName {
 			statuses[member.ComponentName] = v1beta1.ComponentReplicaStatus{
 				ComponentKind: v1beta1.ComponentKindPodClique, RuntimeNamespace: source.GetDynamoNamespaceForComponent(member),
@@ -59,20 +62,18 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	if hash == nil {
 		return pending("Waiting for Grove to accept the LPX PodCliqueSet revision"), nil
 	}
-	config := pcs.Spec.Template.PodCliqueScalingGroupConfigs[0]
-	groupName := grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 0}, config.Name)
-	status.ComponentNames = []string{groupName}
-	if group == nil {
+	if pcsg == nil {
 		return pending("Waiting for the LPX scaling group"), nil
 	}
-	status.Replicas, status.UpdatedReplicas = group.Status.Replicas, group.Status.UpdatedReplicas
-	status.AvailableReplicas = ptr.To(group.Status.AvailableReplicas)
-	if group.Status.ObservedGeneration == nil || *group.Status.ObservedGeneration != group.Generation {
+	status.ComponentNames = []string{pcsg.Name}
+	status.Replicas, status.UpdatedReplicas = pcsg.Status.Replicas, pcsg.Status.UpdatedReplicas
+	status.AvailableReplicas = ptr.To(pcsg.Status.AvailableReplicas)
+	if pcsg.Status.ObservedGeneration == nil || *pcsg.Status.ObservedGeneration != pcsg.Generation {
 		return pending("Waiting for the exact observed LPX scaling group"), nil
 	}
-	status.ScheduledReplicas = ptr.To(group.Status.ScheduledReplicas)
-	replicas := ptr.Deref(component.Replicas, group.Spec.Replicas)
-	if group.Spec.Replicas != replicas || group.Status.CurrentPodCliqueSetGenerationHash == nil || *group.Status.CurrentPodCliqueSetGenerationHash != *hash {
+	status.ScheduledReplicas = ptr.To(pcsg.Status.ScheduledReplicas)
+	replicas := ptr.Deref(component.Replicas, pcsg.Spec.Replicas)
+	if pcsg.Spec.Replicas != replicas || pcsg.Status.CurrentPodCliqueSetGenerationHash == nil || *pcsg.Status.CurrentPodCliqueSetGenerationHash != *hash {
 		return result(false, v1beta1.DGDReadyReasonUpdating, "LPX scaling group has not applied the desired revision and capacity"), nil
 	}
 	// Observe every member before returning so partial draft readiness remains visible.
@@ -85,9 +86,12 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	for replica := int32(0); replica < replicas; replica++ {
 		replicaReady := true
 		for _, template := range pcs.Spec.Template.Cliques {
-			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: groupName, Replica: int(replica)}, template.Name)
+			if !slices.Contains(pcsg.Spec.CliqueNames, template.Name) {
+				continue
+			}
+			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(replica)}, template.Name)
 			memberName := template.Labels[lpx.StageLabel]
-			readiness, err := observeLPXRole(ctx, reader, group, name, template.Spec.Replicas)
+			readiness, err := observeLPXRole(ctx, reader, pcsg, name, template.Spec.Replicas)
 			if err != nil {
 				return GroveReadiness{}, err
 			}
@@ -114,7 +118,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 	if unreadyMessage != "" {
 		return result(false, unreadyClassification, unreadyMessage), nil
 	}
-	ready, message, classification := pcsgStatusReady(group, replicas)
+	ready, message, classification := pcsgStatusReady(pcsg, replicas)
 	if ready {
 		classification = v1beta1.DGDReadyReasonAllResourcesReady
 	}

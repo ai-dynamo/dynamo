@@ -7,21 +7,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	autoscalingv1 "k8s.io/api/autoscaling/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -118,6 +116,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		}
 	}(deployment.Status.DeepCopy())
 
+	for name, component := range deployment.Status.Components {
+		component.Ready = false
+		deployment.Status.Components[name] = component
+	}
+
 	if !r.enabled {
 		setReadyCondition(deployment, v1beta1.DGDStateFailed, integrationDisabledMessage(r.runtimeConfig))
 		return ctrl.Result{}, nil
@@ -147,132 +150,147 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}
 
 	var (
-		pcsg     *grovev1alpha1.PodCliqueScalingGroup
+		pcsgs    map[string]*grovev1alpha1.PodCliqueScalingGroup
 		requests []lpxv1alpha1.LPUPipelineRequest
 	)
 
 	if pcs != nil {
+		// Wait for every configured group before reconciling an existing PCS.
+		pcsgs, err = getPodCliqueScalingGroups(ctx, r.Client, pcs)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if len(pcsgs) != len(pcs.Spec.Template.PodCliqueScalingGroupConfigs) {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for all LPX scaling groups")
+			return ctrl.Result{}, nil
+		}
+
 		// Foreground PCS replacement waits for its blocking LPRs; discover them only by owner UID.
 		requests, err = r.getPipelineRequests(ctx, pcs)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-
-		pcsg, err = getPodCliqueScalingGroup(ctx, r.Client, pcs)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
-	return r.reconcileWorkload(ctx, deployment, dgd, pcs, pcsg, requests)
-}
-
-// reconcileWorkload consumes owned observations; DGD and deployment are non-nil.
-// A nil pcs means initial creation (pcsg is nil and requests is empty). A nil pcsg
-// means no current, non-deleting group is observed, not zero capacity. A non-nil
-// pcsg is owned by pcs; only its live Spec.Replicas controls existing engine capacity.
-// On error, a nonzero RequeueAfter requests a bounded deadline retry; Reconcile
-// records the error and persists status before returning that retry to controller-runtime.
-func (r *graphReconciler) reconcileWorkload(
-	ctx context.Context,
-	deployment *v1alpha1.LPXGraphDeployment,
-	dgd *v1beta1.DynamoGraphDeployment,
-	pcs *grovev1alpha1.PodCliqueSet,
-	pcsg *grovev1alpha1.PodCliqueScalingGroup,
-	requests []lpxv1alpha1.LPUPipelineRequest,
-) (result ctrl.Result, err error) {
 	if result, err := r.reconcileModelDownloads(ctx, deployment, dgd); err != nil || result.RequeueAfter > 0 {
 		return result, err
 	}
 
-	workload, err := lpx.ResolveSelectedWorkload(ctx, dgd, r.modelRegistry)
+	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, requests)
+}
+
+// reconcileWorkloads consumes owned observations; DGD and deployment are non-nil.
+// A nil pcs means initial creation, with no pcsgs or requests. Otherwise pcsgs
+// contains every configured, non-deleting group. On error, Reconcile persists
+// status before applying deadline retries.
+func (r *graphReconciler) reconcileWorkloads(
+	ctx context.Context,
+	deployment *v1alpha1.LPXGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	requests []lpxv1alpha1.LPUPipelineRequest,
+) (result ctrl.Result, err error) {
+	// Resolve and render every workload before deleting the running PCS.
+	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Validate the complete replacement before either immutable change can delete the running PCS.
-	plan, err := workload.PlanNodeLocalMaterialization(dynamo.PCSNameForLPX(deployment))
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workload, plan)
+	// Share the rendered identities with capacity management and request publication.
+	desiredPCS, resources, err := r.renderPodCliqueSet(ctx, deployment, dgd, workloads, plans)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Model composition changes require replacement: Grove makes clique membership immutable.
-	// Replica-only changes, including top-level PCS replica drift, use normal mutable sync.
-	if pcs != nil && pcs.Annotations[lpx.WorkloadDigestAnnotation] != workload.Digest().String() {
+	// Immutable composition changes replace the PCS; replica-only changes use /scale.
+	if pcs != nil && pcs.Annotations[lpx.WorkloadDigestAnnotation] != desiredPCS.Annotations[lpx.WorkloadDigestAnnotation] {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
-		return ctrl.Result{}, r.deletePodCliqueSet(ctx, pcs)
+		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
 	}
 
-	// Explicit DGD replicas authorize scale writes; omission leaves the live count externally managed.
-	explicitReplicas := lpx.ServingComponent(dgd).Replicas
-	if explicitReplicas == nil && pcs != nil {
-		// Do not derive an externally managed request set from an unknown replica count.
-		if pcsg == nil {
-			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the LPX scaling group")
-			return ctrl.Result{}, nil
+	// Resolve capacity and requests for the complete graph before any group is changed.
+	var (
+		groupNames = slices.Sorted(maps.Keys(workloads))
+
+		desiredRequests  = make(map[string]*lpxv1alpha1.LPUPipelineRequest)
+		explicitReplicas = make(map[string]*int32, len(plans))
+		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
+	)
+
+	// Index the graph's observed requests once, retaining scheduler-owned receipts.
+	requestsByName := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(requests))
+	for i := range requests {
+		request := &requests[i]
+		requestsByName[request.Name] = request
+	}
+
+	// Resolve each workload in the same order used for request publication.
+	for _, groupName := range groupNames {
+		plan := plans[groupName]
+		workload := workloads[groupName]
+		pcsg := pcsgs[plan.LPXScalingGroup]
+		explicitReplicas[plan.LPXScalingGroup] = dgd.GetComponentByName(groupName).Replicas
+
+		// External scalers own live capacity once Grove has created the groups.
+		if pcs != nil && explicitReplicas[plan.LPXScalingGroup] == nil {
+			plan.Replicas = pcsg.Spec.Replicas
+			if err := plan.ValidateReplicaCount(); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
-		plan.Replicas = pcsg.Spec.Replicas
-		if err := plan.ValidateReplicaCount(); err != nil {
-			return ctrl.Result{}, err
+		desired, missing, intentChanged := resolvePipelineRequests(deployment, requestsByName, workload, plan)
+
+		if intentChanged {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
+			return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
 		}
+
+		maps.Copy(desiredRequests, desired)
+		missingRequests = append(missingRequests, missing...)
 	}
 
-	// Preserve matching scheduler receipts and collect new LPRs in publication order.
-	desiredRequests, missingRequests, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
-	if intentChanged {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
-		return ctrl.Result{}, r.deletePodCliqueSet(ctx, pcs)
-	}
-
-	// Schedule deadline wakes without consuming errors needed by the status boundary.
+	// One graph-wide deadline observation preserves the earliest wakeup on every return.
 	expiredRequests, deadlineAt := pipelineRequestDeadlines(desiredRequests, pipelineRequestDeadlineSeconds(dgd))
 	defer func() {
 		result = requeueForPipelineRequestDeadline(deadlineAt, result, err)
 	}()
 
-	// Apply explicit scale-in before deadline failures can block publication.
-	if err := r.scaleDownPodCliqueScalingGroup(ctx, pcsg, explicitReplicas); err != nil {
+	// Scale only existing groups with explicitly managed capacity.
+	for groupName, pcsg := range pcsgs {
+		if replicas := explicitReplicas[groupName]; replicas != nil {
+			if err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, *replicas); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	// Remove requests only after all scale-down writes have succeeded.
+	removed := pipelineRequestsPendingDeletion(requests, desiredRequests)
+	if err := r.deletePipelineRequests(ctx, removed); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Deadline failures stop publication even when no timer or cleanup is needed.
+	// Failure blocks publication while each workload independently cleans up expired suffixes.
 	if len(expiredRequests) > 0 || isSchedulingFailedConditionCurrent(deployment) {
-		// Explicit or external scale-in has already lowered capacity; failure must not prevent its LPR cleanup.
-		if pcsg != nil {
-			if err := r.deletePipelineRequests(ctx, pipelineRequestsPendingDeletion(requests, desiredRequests)); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			// Do not delete those names again during deadline cleanup or mutate the expired requests' backing slice.
-			requests = slices.DeleteFunc(slices.Clone(requests), func(request lpxv1alpha1.LPUPipelineRequest) bool {
-				_, desired := desiredRequests[request.Name]
-				return !desired
-			})
-		}
-		return r.reconcilePipelineRequestDeadline(ctx, deployment, pcsg, requests, expiredRequests, explicitReplicas != nil)
+		retained := slices.DeleteFunc(slices.Clone(requests), func(request lpxv1alpha1.LPUPipelineRequest) bool {
+			_, desired := desiredRequests[request.Name]
+			return !desired
+		})
+		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, retained, expiredRequests)
 	}
 
-	clearPreviousSchedulingFailure(deployment)
+	acknowledgeSchedulingRetry(deployment)
 
-	// Existing LPRs require an observed group so scale-down precedes their deletion.
-	// Without LPRs, initial PCS synchronization can proceed before Grove creates the group.
-	if pcsg == nil && len(requests) > 0 {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the LPX scaling group")
+	// Terminating requests must settle before synchronization or scale-out.
+	if len(removed) > 0 {
+		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for removed LPX requests to finish deletion")
 		return ctrl.Result{}, nil
 	}
 
-	// Deletion is terminal for this pass; LPR events resume publication after cleanup.
-	if removed := pipelineRequestsPendingDeletion(requests, desiredRequests); len(removed) > 0 {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for removed LPX requests to finish deletion")
-		return ctrl.Result{}, r.deletePipelineRequests(ctx, removed)
-	}
-
-	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder(), commoncontroller.WithMetadataSync())
+	modified, _, err := commoncontroller.SyncObservedResource(ctx, r, deployment, pcs, desiredPCS, commoncontroller.WithPreservedListOrder())
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
 			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the PodCliqueSet cache observation")
@@ -282,67 +300,42 @@ func (r *graphReconciler) reconcileWorkload(
 		return ctrl.Result{}, err
 	}
 
-	if err := r.reconcileRuntimeResources(ctx, deployment, dgd, resources); err != nil {
+	if err := r.reconcileRuntimeResources(ctx, deployment, resources); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// Publication requires an observed PCS spec and its current, non-deleting group.
-	if modified || pcsg == nil {
+	// Observe the created or updated PCS before scaling or publishing requests.
+	if pcs == nil || modified {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for Grove to observe the workload")
 		return ctrl.Result{}, nil
 	}
 
 	// Scale-out proceeds after deleting old names, without waiting for Pods.
-	if err := r.scalePodCliqueScalingGroup(ctx, pcsg, explicitReplicas); err != nil {
-		return ctrl.Result{}, err
+	for _, groupName := range groupNames {
+		plan := plans[groupName]
+		if replicas := explicitReplicas[plan.LPXScalingGroup]; replicas != nil {
+			if err := scalePodCliqueScalingGroup(ctx, r, pcsgs[plan.LPXScalingGroup], *replicas); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
 	}
 
-	// Publication is terminal for this pass; readiness needs watched scheduler receipts.
 	if len(missingRequests) > 0 {
 		return ctrl.Result{}, r.reconcilePipelineRequests(ctx, deployment, pcs, missingRequests)
 	}
 
 	defer func() {
+		// Old configmaps remain available until all workloads are Ready.
 		if err == nil {
 			err = r.deleteUnusedConfigMaps(ctx, deployment, resources)
 		}
 	}()
 
-	return r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsg, desiredRequests)
+	return r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, plans, desiredRequests)
 }
 
-// scaleDownPodCliqueScalingGroup lowers capacity before asynchronous request cleanup.
-// A nil pcsg defers scaling until the group is observed; a non-nil pcsg is owned
-// and not deleting. Nil replicas leaves capacity externally managed. Scale-out
-// must wait until terminating request names disappear.
-func (r *graphReconciler) scaleDownPodCliqueScalingGroup(ctx context.Context, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas *int32) error {
-	if pcsg == nil || replicas == nil || *replicas >= pcsg.Spec.Replicas {
-		return nil
-	}
-	return r.scalePodCliqueScalingGroup(ctx, pcsg, replicas)
-}
-
-// scalePodCliqueScalingGroup updates the non-nil, already-owned PCSG using its
-// observed resource version. Nil replicas leaves capacity to external autoscaling.
-// A successful write updates the supplied observation for the rest of this pass.
-func (r *graphReconciler) scalePodCliqueScalingGroup(ctx context.Context, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas *int32) error {
-	if replicas == nil || pcsg.Spec.Replicas == *replicas {
-		return nil
-	}
-	scale := &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{ResourceVersion: pcsg.ResourceVersion},
-		Spec:       autoscalingv1.ScaleSpec{Replicas: *replicas},
-	}
-	if err := r.SubResource("scale").Update(ctx, pcsg, client.WithSubResourceBody(scale)); err != nil {
-		return fmt.Errorf("scale LPX PodCliqueScalingGroup %q: %w", pcsg.Name, err)
-	}
-	pcsg.Spec.Replicas = *replicas
-	return nil
-}
-
-// reconcileRuntimeResources synchronizes native rendered resources and the
-// serving endpoint. deployment and DGD are non-nil.
-func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment, resources []client.Object) error {
+// reconcileRuntimeResources synchronizes additional resources for the LPX deployment.
+func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, resources []client.Object) error {
 	for _, resource := range resources {
 		if _, _, err := commoncontroller.SyncResource(ctx, r, deployment, func(context.Context) (client.Object, bool, error) {
 			return resource, false, nil
@@ -350,59 +343,7 @@ func (r *graphReconciler) reconcileRuntimeResources(ctx context.Context, deploym
 			return err
 		}
 	}
-	return r.reconcileEndpoint(ctx, deployment, dgd)
-}
-
-func (r *graphReconciler) reconcileEndpoint(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, dgd *v1beta1.DynamoGraphDeployment) error {
-	// One serving endpoint belongs to the engine, independently of mutable component names.
-	pcsName := dynamo.PCSNameForLPX(deployment)
-	serviceName := pcsName + "-serve"
-	backend := commoncontroller.GetDiscoveryBackend(r.config.Discovery.Backend, dgd.Annotations)
-
-	observed := &corev1.Service{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deployment.Namespace, Name: serviceName}, observed); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-		observed = nil
-	}
-
-	// Switching discovery backends removes only this deployment's endpoint.
-	if backend != configv1alpha1.DiscoveryBackendKubernetes {
-		if observed == nil {
-			return nil
-		}
-		if err := commoncontroller.CheckControllerOwnership(observed, deployment, r.Scheme()); err != nil {
-			return err
-		}
-		return client.IgnoreNotFound(r.Delete(ctx, observed, client.Preconditions{UID: &observed.UID, ResourceVersion: &observed.ResourceVersion}))
-	}
-
-	component := lpx.ServingComponent(dgd)
-	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName: serviceName, Namespace: deployment.Namespace,
-		ComponentType: string(component.ComponentType), ComponentName: component.ComponentName,
-		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component), IsK8sDiscovery: true,
-		Labels:      dynamo.GetDGDComponentResourceLabels(dgd, component.ComponentName, component),
-		Annotations: dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component),
-	})
-	if err != nil {
-		return err
-	}
-	// Keep cleanup and pod selection scoped to this materialization.
-	service.Labels[deploymentUIDLabel] = string(deployment.UID)
-	service.Spec.Selector[dynamo.LPXServingLabel] = consts.KubeLabelValueTrue
-	service.Spec.Selector[grovecommon.LabelPartOfKey] = pcsName
-
-	// Preserve API-allocated addresses and IP families across selector updates.
-	if observed != nil {
-		service.Spec.ClusterIP = observed.Spec.ClusterIP
-		service.Spec.ClusterIPs = observed.Spec.ClusterIPs
-		service.Spec.IPFamilies = observed.Spec.IPFamilies
-		service.Spec.IPFamilyPolicy = observed.Spec.IPFamilyPolicy
-	}
-	_, _, err = commoncontroller.SyncObservedResource(ctx, r, deployment, observed, service, commoncontroller.WithMetadataSync())
-	return err
+	return nil
 }
 
 // reconcileReadiness combines scheduler receipts with Grove runtime readiness.
@@ -412,15 +353,29 @@ func (r *graphReconciler) reconcileReadiness(
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
-	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	plans map[string]*lpx.MaterializationPlan,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) (ctrl.Result, error) {
-	readiness, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, dgd, pcs, pcsg)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	readiness := dynamo.GroveReadiness{Ready: true}
+	deployment.Status.Components = make(map[string]v1beta1.ComponentReplicaStatus)
 
-	deployment.Status.Components = readiness.ComponentStatuses
+	componentGroups := lpx.ComponentGroups(dgd)
+
+	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
+		plan := plans[groupName]
+
+		observed, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, dgd, groupName, componentGroups[groupName], pcs, pcsgs[plan.LPXScalingGroup])
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		maps.Copy(deployment.Status.Components, observed.ComponentStatuses)
+
+		if !observed.Ready && readiness.Ready {
+			readiness = observed
+		}
+	}
 
 	if !setPipelineRequestReadyCondition(deployment, requests) {
 		return ctrl.Result{}, nil
@@ -439,19 +394,6 @@ func (r *graphReconciler) reconcileReadiness(
 	}
 
 	return ctrl.Result{RequeueAfter: delay}, nil
-}
-
-// deletePodCliqueSet deletes the already-validated, non-nil PCS.
-func (r *graphReconciler) deletePodCliqueSet(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet) error {
-	return client.IgnoreNotFound(
-		r.Delete(
-			ctx,
-			pcs,
-			// Foreground GC so that blocking LPRs and Grove dependents can be removed.
-			client.PropagationPolicy(metav1.DeletePropagationForeground),
-			client.Preconditions{UID: &pcs.UID, ResourceVersion: &pcs.ResourceVersion},
-		),
-	)
 }
 
 // deleteUnusedConfigMaps runs only after readiness so existing pods keep their

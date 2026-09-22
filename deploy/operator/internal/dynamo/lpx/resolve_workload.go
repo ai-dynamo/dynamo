@@ -20,6 +20,14 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
+const (
+	// MaxSpecDecodeNumDrafts bounds the supported speculative-decoding draft fanout.
+	MaxSpecDecodeNumDrafts = 8
+
+	runtimeModelDraft  = "draft"
+	runtimeModelTarget = "target"
+)
+
 // ErrUnsupportedRuntime identifies input that the supported LPX runtimes cannot materialize.
 var ErrUnsupportedRuntime = errors.New("unsupported LPX runtime")
 
@@ -33,23 +41,40 @@ type BuildSnapshotSource interface {
 	AcquireBuildSnapshot(context.Context, string) (*BuildSnapshot, error)
 }
 
-// ResolveSelectedWorkload projects admitted LPX intent against immutable builds.
-// dgd and source must be non-nil; dgd must select LPX and have passed webhook validation.
-// The function reads but does not mutate dgd.
-func ResolveSelectedWorkload(
+// ResolveWorkload projects one admitted component group against immutable builds.
+// dgd and source must be non-nil. componentNames must contain exactly the members
+// of one ComponentGroups entry from the admitted dgd, in any order.
+// Inputs are read without mutation; the full dgd supplies validation field paths.
+func ResolveWorkload(
 	ctx context.Context,
 	dgd *dynamov1beta1.DynamoGraphDeployment,
+	componentNames []string,
 	source BuildSnapshotSource,
-) (*SelectedWorkload, error) {
-	components := Components(dgd)
-	projections := make([]*ModelProjection, 0, len(components))
-	var snapshot NormalizedBuildSnapshot
-	var pipeline Pipeline
-	for index, stage := range components {
+) (*Workload, error) {
+	// Resolve only this group's native components from the unchanged graph.
+	components := make([]*dynamov1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
+	for _, name := range componentNames {
+		components = append(components, dgd.GetComponentByName(name))
+	}
+
+	// Preserve draft-before-target runtime identities independently of authored order.
+	if len(components) == 2 && components[0].ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil {
+		components[0], components[1] = components[1], components[0]
+	}
+
+	// Acquire each build and expand its models in canonical runtime order.
+	var (
+		snapshot NormalizedBuildSnapshot
+		pipeline Pipeline
+
+		projections = make([]*ModelProjection, 0, len(components))
+	)
+
+	for _, stage := range components {
 		model := stage.LPX
 		configuredModel := stage.ComponentName
 
-		// A validated selection has at most two models, so only the preceding projection can share its build.
+		// An admitted group has at most two components, so only its preceding component can share a build.
 		if len(projections) == 0 || projections[len(projections)-1].runtimeBuildRef != model.BuildID {
 			rawSnapshot, acquireErr := source.AcquireBuildSnapshot(ctx, model.BuildID)
 			if acquireErr != nil {
@@ -83,12 +108,13 @@ func ResolveSelectedWorkload(
 			}
 		}
 
-		if err := validateSelectedConductor(dgd, stage, pipeline, snapshot.build.CompilationMode); err != nil {
+		if err := validateWorkloadConductor(dgd, stage, pipeline, snapshot.build.CompilationMode); err != nil {
 			return nil, err
 		}
 
 		// Project the component once into the resolver-owned aggregate destination.
-		modelNames := expandedSelectedModelNames(index, len(components), int(ptr.Deref(stage.Replicas, 1)))
+		hasConductor := stage.ComponentRole(dynamov1beta1.ComponentRoleLPXConductor) != nil
+		modelNames := expandedModelNames(len(components), hasConductor, int(ptr.Deref(stage.Replicas, 1)))
 		intent := ModelProjectionInput{
 			Pipeline:        pipeline,
 			Models:          modelNames,
@@ -122,15 +148,15 @@ func ResolveSelectedWorkload(
 	if err != nil {
 		return nil, err
 	}
-	return &SelectedWorkload{
+	return &Workload{
 		modelProjections:     projections,
 		digest:               digest,
 		scalingGroupReplicas: scalingGroupReplicas,
 	}, nil
 }
 
-// validateSelectedConductor checks role requirements that depend on the immutable build.
-func validateSelectedConductor(
+// validateWorkloadConductor checks role requirements that depend on the immutable build.
+func validateWorkloadConductor(
 	dgd *dynamov1beta1.DynamoGraphDeployment,
 	component *dynamov1beta1.DynamoComponentDeploymentSharedSpec,
 	pipeline Pipeline,
@@ -164,7 +190,7 @@ func validateSelectedConductor(
 	}
 
 	// Only the LPU-only serving template materializes a renamed conductor container.
-	if component != ServingComponent(dgd) {
+	if conductor == nil {
 		return nil
 	}
 
@@ -182,7 +208,7 @@ func validateSelectedConductor(
 		return err
 	}
 
-	// An LPU-only conductor is a singleton even when the engine replica count is larger.
+	// An LPU-only conductor is a singleton even when the workload replica count is larger.
 	if ptr.Deref(conductor.Replicas, 1) != 1 {
 		return fmt.Errorf("%w: component %q conductor replicas must be one for LPU-only execution", ErrUnsupportedRuntime, component.ComponentName)
 	}
@@ -212,4 +238,19 @@ func validateRolePodSpecContainerNames(spec *corev1.PodSpec, fldPath *field.Path
 		}
 	}
 	return allErrs
+}
+
+func expandedModelNames(componentCount int, hasConductor bool, draftCount int) []string {
+	// Component membership retains Nova's existing default/draft/target identities.
+	if componentCount == 1 {
+		return []string{"default"}
+	}
+	if hasConductor {
+		return []string{runtimeModelTarget}
+	}
+	names := make([]string, draftCount)
+	for index := range names {
+		names[index] = fmt.Sprintf("draft%d", index)
+	}
+	return names
 }

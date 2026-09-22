@@ -59,7 +59,7 @@ metadata:
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-specdecode-63df-lpu-<lpu-config-hash-prefix>
+  name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
   namespace: test
 ---
 metadata:
@@ -67,7 +67,7 @@ metadata:
     lpx.nvidia.com/deployment-name: node-local-v2-specdecode
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
-    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7621a191ee823ec3253598cc1df75c66f5fd342293229da33eed1f6cff4fdfe7
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:eeb1e1a79f8739fa99975c047dbffde2c51cf1d1d5cfedae40ee7a3857a55ab2
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
     nvidia.com/dynamo-graph-deployment-name: node-local-v2-specdecode
@@ -81,7 +81,7 @@ spec:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <lpu-config-hash>
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b0943511c591eb7201003374eacf778c4545a959d7be251547399296e35ee1ae
@@ -214,14 +214,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-<lpu-config-hash-prefix>
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <lpu-config-hash>
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:d19c12c440463a3ebbc8c86f3fe882a33e7d5f48de493146aaf6d0acfa4fdba7
@@ -354,14 +354,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-<lpu-config-hash-prefix>
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <lpu-config-hash>
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:b06e7ae90a96bd569bf228eb8b1d4b1192c4b0df3af7e33202d1fc1965a5247e
@@ -494,14 +494,14 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-<lpu-config-hash-prefix>
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 4
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
         lpx.nvidia.com/deployment-uid: lpx-render-uid
-        nvidia.com/extra-resources-hash: <lpu-config-hash>
+        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
         scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7621a191ee823ec3253598cc1df75c66f5fd342293229da33eed1f6cff4fdfe7
         scheduling.lpu.nvidia.com/role: conductor
@@ -673,7 +673,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-<lpu-config-hash-prefix>
+              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
             name: config
         replicas: 1
         roleName: cond

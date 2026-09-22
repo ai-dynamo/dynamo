@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"slices"
 
-	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -22,8 +21,6 @@ const (
 	DGDGenerationAnnotation = "scheduling.lpu.nvidia.com/dgd-generation"
 	// DGDUIDAnnotation records the source DGD UID on rendered objects.
 	DGDUIDAnnotation = "scheduling.lpu.nvidia.com/dgd-uid"
-	// ExecutionBackendAnnotation selects the LPX execution backend on rendered objects.
-	ExecutionBackendAnnotation = commonconsts.KubeAnnotationLPXExecutionBackend
 	// WorkloadModeAnnotation records the projected LPX workload mode on rendered objects.
 	WorkloadModeAnnotation = "scheduling.lpu.nvidia.com/workload-mode"
 )
