@@ -202,16 +202,16 @@ pub mod frontend_service {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "kv_hit_rate";
 
-    /// F2: raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    /// Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
     pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS: &str = "kv_best_eligible_cached_prefix_tokens";
 
-    /// F3: raw cached prefix tokens on the selected worker and DP rank at selection
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection
     pub const KV_SELECTED_CACHED_PREFIX_TOKENS: &str = "kv_selected_cached_prefix_tokens";
 
-    /// F4: worker-reported GPU hits plus external lookup tokens
+    /// Worker-reported GPU hits plus external lookup tokens
     pub const KV_WORKER_LOOKUP_TOKENS: &str = "kv_worker_lookup_tokens";
 
-    /// F5: worker-reported GPU hits plus successful external hits
+    /// Worker-reported GPU hits plus successful external hits
     pub const KV_WORKER_REUSED_TOKENS: &str = "kv_worker_reused_tokens";
 
     /// Worker cache-hit reports per tracked attempt, labelled result=complete|incomplete
@@ -673,17 +673,17 @@ pub mod router {
     /// Predicted KV cache hit rate at routing time (0.0-1.0)
     pub const KV_HIT_RATE: &str = "router_kv_hit_rate";
 
-    /// F2 raw cached prefix tokens on the best eligible worker (histogram, per routing attempt)
+    /// Raw cached prefix tokens on the best eligible worker (histogram, per routing attempt)
     pub const KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS: &str =
         "router_kv_best_eligible_cached_prefix_tokens";
 
-    /// F3 raw cached prefix tokens on the selected worker and DP rank (histogram)
+    /// Raw cached prefix tokens on the selected worker and DP rank (histogram)
     pub const KV_SELECTED_CACHED_PREFIX_TOKENS: &str = "router_kv_selected_cached_prefix_tokens";
 
-    /// F4 worker-reported GPU hits plus external lookup tokens (histogram)
+    /// Worker-reported GPU hits plus external lookup tokens (histogram)
     pub const KV_WORKER_LOOKUP_TOKENS: &str = "router_kv_worker_lookup_tokens";
 
-    /// F5 worker-reported GPU hits plus successful external hits (histogram)
+    /// Worker-reported GPU hits plus successful external hits (histogram)
     pub const KV_WORKER_REUSED_TOKENS: &str = "router_kv_worker_reused_tokens";
 
     /// Worker cache-hit reports per tracked attempt, result=complete|incomplete

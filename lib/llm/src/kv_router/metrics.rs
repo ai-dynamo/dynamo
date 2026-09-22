@@ -858,16 +858,16 @@ pub struct RouterRequestMetrics {
     pub shared_cache_beyond_blocks: prometheus::Histogram,
     pub non_max_overlap_selections_total: IntCounterVec,
     pub overlap_blocks_lost: HistogramVec,
-    /// F2: raw cached prefix tokens on the best eligible worker, one observation per tracked
-    /// attempt, labelled by request `phase` (aggregated | prefill | decode).
+    /// Raw cached prefix tokens on the best eligible worker at selection, one observation
+    /// per tracked attempt; labels `phase` (aggregated | prefill | decode) and `model`.
     pub kv_best_eligible_cached_prefix_tokens: HistogramVec,
-    /// F3: raw cached prefix tokens on the selected worker and DP rank, per attempt, by `phase`.
+    /// Raw cached prefix tokens on the selected worker and DP rank at selection; same labels.
     pub kv_selected_cached_prefix_tokens: HistogramVec,
-    /// F4: worker-reported GPU hits plus external lookup tokens, per complete report, by `phase`.
+    /// Worker-reported GPU hits plus external lookup tokens, per complete report; same labels.
     pub kv_worker_lookup_tokens: HistogramVec,
-    /// F5: worker-reported GPU hits plus successful external hits, per complete report, by `phase`.
+    /// Worker-reported GPU hits plus successful external hits, per complete report; same labels.
     pub kv_worker_reused_tokens: HistogramVec,
-    /// Worker cache-hit report per tracked attempt: labels `phase` and `result` (complete | incomplete).
+    /// Worker cache-hit report per tracked attempt: labels `phase`, `model`, `result`.
     pub kv_worker_outcomes_total: IntCounterVec,
 }
 
@@ -995,19 +995,15 @@ impl RouterRequestMetrics {
                 non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 let kv_tokens_hist = |name: &str, help: &str| {
-                    let hist = metrics
+                    metrics
                         .create_histogramvec(
                             &router_metric(name),
                             help,
-                            &[KV_PHASE_LABEL],
+                            &[KV_PHASE_LABEL, labels::MODEL],
                             extra_labels,
                             Some(generate_log_buckets(50.0, 128000.0, 12)),
                         )
-                        .unwrap_or_else(|_| panic!("failed to create {}", router_metric(name)));
-                    for phase in RequestPhase::ALL {
-                        hist.with_label_values(&[phase.as_str()]);
-                    }
-                    hist
+                        .unwrap_or_else(|_| panic!("failed to create {}", router_metric(name)))
                 };
                 let kv_best_eligible_cached_prefix_tokens = kv_tokens_hist(
                     frontend_service::KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS,
@@ -1028,15 +1024,11 @@ impl RouterRequestMetrics {
                 let kv_worker_outcomes_total = metrics
                     .create_intcountervec(
                         &router_metric(frontend_service::KV_WORKER_OUTCOMES_TOTAL),
-                        "Worker cache-hit reports per tracked routing attempt, by phase and result",
-                        &[KV_PHASE_LABEL, "result"],
+                        "Worker cache-hit reports per tracked routing attempt, by phase, model and result",
+                        &[KV_PHASE_LABEL, labels::MODEL, "result"],
                         extra_labels,
                     )
                     .expect("failed to create router_kv_worker_outcomes_total");
-                for phase in RequestPhase::ALL {
-                    kv_worker_outcomes_total.with_label_values(&[phase.as_str(), "complete"]);
-                    kv_worker_outcomes_total.with_label_values(&[phase.as_str(), "incomplete"]);
-                }
                 Arc::new(Self {
                     requests_started_total,
                     requests_total,
@@ -1084,7 +1076,7 @@ impl RouterRequestMetrics {
                     format!("dynamo_component_{}", router_metric(name)),
                     "test",
                 ),
-                &[KV_PHASE_LABEL],
+                &[KV_PHASE_LABEL, labels::MODEL],
             )
             .unwrap();
             registry.register(Box::new(h.clone())).unwrap();
@@ -1098,7 +1090,7 @@ impl RouterRequestMetrics {
                 ),
                 "test",
             ),
-            &[KV_PHASE_LABEL, "result"],
+            &[KV_PHASE_LABEL, labels::MODEL, "result"],
         )
         .unwrap();
         registry
@@ -1151,44 +1143,46 @@ impl RouterRequestMetrics {
             .observe(overlap_blocks_lost);
     }
 
-    /// F2/F3 for one tracked routing attempt, recorded at selection time.
+    /// Router-side estimates for one tracked routing attempt, recorded at selection time.
     pub fn observe_kv_route_estimate(
         &self,
         phase: RequestPhase,
+        model: &str,
         best_tokens: u64,
         selected_tokens: u64,
     ) {
-        let phase = &[phase.as_str()];
+        let labels = &[phase.as_str(), model];
         self.kv_best_eligible_cached_prefix_tokens
-            .with_label_values(phase)
+            .with_label_values(labels)
             .observe(best_tokens as f64);
         self.kv_selected_cached_prefix_tokens
-            .with_label_values(phase)
+            .with_label_values(labels)
             .observe(selected_tokens as f64);
     }
 
-    /// F4/F5 for one attempt whose stream completed with a valid worker report.
+    /// Worker-side tokens for one attempt whose stream completed with a valid report.
     pub fn observe_kv_worker_hit(
         &self,
         phase: RequestPhase,
+        model: &str,
         [lookup_tokens, reused_tokens]: [u64; 2],
     ) {
-        let phase = phase.as_str();
+        let labels = &[phase.as_str(), model];
         self.kv_worker_lookup_tokens
-            .with_label_values(&[phase])
+            .with_label_values(labels)
             .observe(lookup_tokens as f64);
         self.kv_worker_reused_tokens
-            .with_label_values(&[phase])
+            .with_label_values(labels)
             .observe(reused_tokens as f64);
         self.kv_worker_outcomes_total
-            .with_label_values(&[phase, "complete"])
+            .with_label_values(&[phase.as_str(), model, "complete"])
             .inc();
     }
 
     /// A tracked attempt that ended without a usable worker report.
-    pub fn observe_kv_worker_incomplete(&self, phase: RequestPhase) {
+    pub fn observe_kv_worker_incomplete(&self, phase: RequestPhase, model: &str) {
         self.kv_worker_outcomes_total
-            .with_label_values(&[phase.as_str(), "incomplete"])
+            .with_label_values(&[phase.as_str(), model, "incomplete"])
             .inc();
     }
 }
@@ -1436,9 +1430,9 @@ mod tests {
         // histogram _sum must carry the identical totals and _count the observations.
         let registry = prometheus::Registry::new();
         let metrics = RouterRequestMetrics::for_test(&registry);
-        metrics.observe_kv_route_estimate(RequestPhase::Prefill, 96, 64);
-        metrics.observe_kv_worker_hit(RequestPhase::Prefill, [80, 72]);
-        metrics.observe_kv_worker_incomplete(RequestPhase::Decode);
+        metrics.observe_kv_route_estimate(RequestPhase::Prefill, "m", 96, 64);
+        metrics.observe_kv_worker_hit(RequestPhase::Prefill, "m", [80, 72]);
+        metrics.observe_kv_worker_incomplete(RequestPhase::Decode, "m");
 
         let output = gather_pef(&registry);
         for (name, value) in [
@@ -1449,27 +1443,23 @@ mod tests {
         ] {
             assert!(
                 output.contains(&format!(
-                    "dynamo_component_router_{name}_sum{{phase=\"prefill\"}} {value}\n"
+                    "dynamo_component_router_{name}_sum{{model=\"m\",phase=\"prefill\"}} {value}\n"
                 )),
                 "{output}"
             );
             assert!(
                 output.contains(&format!(
-                    "dynamo_component_router_{name}_count{{phase=\"prefill\"}} 1\n"
+                    "dynamo_component_router_{name}_count{{model=\"m\",phase=\"prefill\"}} 1\n"
                 )),
                 "{output}"
             );
         }
-        assert!(
-            output.contains(
-                "router_kv_worker_outcomes_total{phase=\"prefill\",result=\"complete\"} 1"
-            )
-        );
-        assert!(
-            output.contains(
-                "router_kv_worker_outcomes_total{phase=\"decode\",result=\"incomplete\"} 1"
-            )
-        );
+        assert!(output.contains(
+            "router_kv_worker_outcomes_total{model=\"m\",phase=\"prefill\",result=\"complete\"} 1"
+        ));
+        assert!(output.contains(
+            "router_kv_worker_outcomes_total{model=\"m\",phase=\"decode\",result=\"incomplete\"} 1"
+        ));
         assert!(!output.contains("cache_loss"));
         assert!(!output.contains("funnel"));
         assert!(!output.contains("stage="));
