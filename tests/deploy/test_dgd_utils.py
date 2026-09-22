@@ -240,17 +240,32 @@ async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> Non
 @pytest.mark.parametrize(
     ("failed", "capture_behavior", "expected_events"),
     [
-        (False, "complete", ["service-logs", "delete"]),
+        (False, "complete", ["checkpoint-logs", "service-logs", "delete"]),
         (
             True,
             "complete",
-            ["capture-start", "capture-done", "service-logs", "delete"],
+            [
+                "capture-start",
+                "capture-done",
+                "checkpoint-logs",
+                "service-logs",
+                "delete",
+            ],
         ),
-        (True, "timeout", ["capture-start", "service-logs", "delete"]),
-        (True, "cancel", ["capture-start", "service-logs", "delete"]),
+        (
+            True,
+            "timeout",
+            ["capture-start", "checkpoint-logs", "service-logs", "delete"],
+        ),
+        (
+            True,
+            "cancel",
+            ["capture-start", "checkpoint-logs", "service-logs", "delete"],
+        ),
     ],
     ids=["success", "failure", "capture-timeout", "capture-cancelled"],
 )
+@pytest.mark.timeout(5)
 async def test_discovery_capture_and_cleanup(
     monkeypatch, tmp_path, failed, capture_behavior, expected_events
 ):
@@ -261,8 +276,14 @@ async def test_discovery_capture_and_cleanup(
     monkeypatch.setattr(
         ManagedDeployment, "__aenter__", AsyncMock(return_value=deployment)
     )
+
+    def checkpoint_logs():
+        events.append("checkpoint-logs")
+        return {"checkpoint-source"}
+
+    deployment._get_checkpoint_pod_logs = Mock(side_effect=checkpoint_logs)
     deployment._get_service_logs = MagicMock(
-        side_effect=lambda: events.append("service-logs")
+        side_effect=lambda **kwargs: events.append("service-logs")
     )
     snapshot_timeout = 1 if capture_behavior == "cancel" else 0.01
     monkeypatch.setattr(dgd_utils, "DISCOVERY_SNAPSHOT_TIMEOUT", snapshot_timeout)
@@ -294,6 +315,9 @@ async def test_discovery_capture_and_cleanup(
             pass
 
     assert events == expected_events
+    deployment._get_service_logs.assert_called_once_with(
+        exclude_pods={"checkpoint-source"}
+    )
 
 
 @pytest.mark.parametrize(
