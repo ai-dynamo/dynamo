@@ -1811,6 +1811,12 @@ func applyCompilationCache(container *corev1.Container, component *v1beta1.Dynam
 		})
 	}
 	container.VolumeMounts = normalizedMounts
+
+	// Set backend-specific env var so the engine reads from the mounted cache path.
+	switch backendFramework {
+	case BackendFrameworkVLLM:
+		container.Env = MergeEnvs(container.Env, []corev1.EnvVar{{Name: "VLLM_CACHE_ROOT", Value: mountPath}})
+	}
 	return nil
 }
 

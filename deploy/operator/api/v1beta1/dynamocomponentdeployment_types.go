@@ -220,13 +220,15 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
-	// dynamoSidecar names the restartable init container running the Dynamo
-	// runtime for a worker, prefill, or decode component. The operator injects
-	// Dynamo defaults into this container; the regular container named main
-	// runs the engine with user-provided commands, ports, and probes.
-	// The named init container must have restartPolicy: Always. Multinode,
-	// enabled checkpoint, GPU memory service, and failover are not supported.
-	// This field is preserved through v1alpha1 conversion annotations.
+	// dynamoSidecar names the restartable init container that carries the Dynamo
+	// runtime in engine-primary mode, the recommended architecture for vLLM and
+	// other engine integrations. Setting this field activates engine-primary mode:
+	// the engine runs in main with user-provided launch configuration, and the
+	// operator injects Dynamo configuration (env, identity, system port, probes)
+	// into the named init container instead. The init container must declare
+	// restartPolicy: Always. Multinode deployments, enabled checkpoint, GPU memory
+	// service, and failover are not yet supported in engine-primary mode. This
+	// field is preserved through v1alpha1 conversion annotations.
 	// +optional
 	DynamoSidecar *string `json:"dynamoSidecar,omitempty"`
 
