@@ -4,6 +4,7 @@
 """E2E coverage for lib/sidecar/{vllm,sglang,trtllm}/launch/agg.sh (native-gRPC sidecar + engine)."""
 
 import dataclasses
+import json
 import os
 
 import pytest
@@ -20,7 +21,11 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
 from tests.utils.payload_builder import chat_payload_default
 from tests.utils.payloads import ChatPayload
-from tests.utils.port_utils import reserved_ports
+from tests.utils.port_utils import (
+    allocate_contiguous_ports,
+    deallocate_ports,
+    reserved_ports,
+)
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
     WORKSPACE_DIR, "lib/sidecar/vllm"
@@ -150,12 +155,32 @@ def test_serve_deployment(
 @pytest.mark.router
 @pytest.mark.sidecar
 @pytest.mark.e2e
-@pytest.mark.gpu_1
 @pytest.mark.pre_merge  # Guard native KV-event discovery on every sidecar change.
-@pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(1200)
-@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "dep,num_system_ports,model_name",
+    [
+        pytest.param(
+            False,
+            2,
+            "Qwen/Qwen3-0.6B",
+            id="replicas",
+            marks=[pytest.mark.gpu_1, pytest.mark.model("Qwen/Qwen3-0.6B")],
+        ),
+        pytest.param(
+            True,
+            1,
+            "silence09/DeepSeek-R1-Small-2layers",
+            id="dep",
+            marks=[
+                pytest.mark.gpu_2,
+                pytest.mark.model("silence09/DeepSeek-R1-Small-2layers"),
+            ],
+        ),
+    ],
+    indirect=["num_system_ports"],
+)
 @pytest.mark.parametrize(
     "backend",
     [
@@ -174,31 +199,34 @@ def test_serve_deployment(
 )
 def test_sidecar_kv_routing(
     backend,
+    dep,
+    model_name,
     request,
     runtime_services_dynamic_ports,
     dynamo_dynamic_ports,
     predownload_models,
     monkeypatch,
 ):
-    """Verify native sidecar KV events route requests to the cached worker."""
+    """Verify native sidecar KV events route requests to the cached worker or rank."""
     monkeypatch.delenv("DYN_ROUTER_PREDICTED_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_TTL_SECS", raising=False)
     monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
     namespace = f"sidecar-kv-{generate_random_suffix()}"
     block_size = 64
+    worker_count = 1 if dep else 2
     config = EngineConfig(
-        name=f"{backend}_kv_routing",
+        name=f"{backend}_{'dep' if dep else 'kv'}_routing",
         directory=vllm_sidecar_dir if backend == "vllm" else sglang_sidecar_dir,
-        script_name="agg_kv_router.sh",
+        script_name="agg.sh" if dep else "agg_kv_router.sh",
         script_args=(
             ["--disable-cuda-graph", "--disable-piecewise-cuda-graph"]
             if backend == "sglang"
             else []
         ),
         marks=[],
-        model="Qwen/Qwen3-0.6B",
+        model=model_name,
         health_check_workers=True,
-        health_check_worker_count=2,
+        health_check_worker_count=worker_count,
         request_payloads=[
             ChatPayload(
                 body={
@@ -212,27 +240,105 @@ def test_sidecar_kv_routing(
         ],
         env={
             "PYTHONUNBUFFERED": "1",
+            "PYTHONHASHSEED": "0",
+            "MODEL": model_name,
             "DYN_NAMESPACE": namespace,
             "DYN_COMPONENT": "backend",
             "DYN_ENDPOINT": "generate",
             "DYN_ROUTER_USE_KV_EVENTS": "true",
+            "DYN_ROUTER_MODE": "kv",
             "DYN_ROUTER_TEMPERATURE": "0",
-            "DYN_ROUTER_MIN_INITIAL_WORKERS": "2",
+            "DYN_ROUTER_MIN_INITIAL_WORKERS": str(worker_count),
             "DYN_REQUEST_PLANE": "tcp",
             "MAX_MODEL_LEN": "2048",
             "VLLM_BLOCK_SIZE": str(block_size),
             "SGLANG_PAGE_SIZE": str(block_size),
         },
     )
-    with reserved_ports(4, start_port=DynamoPortRange.SERVE.value) as engine_ports:
-        engine_env = _sidecar_worker_gpu_env(backend)
-        for worker_index in range(2):
-            prefix = f"{backend.upper()}_WORKER{worker_index + 1}"
-            engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[worker_index * 2])
-            engine_env[f"{prefix}_GRPC_PORT"] = str(engine_ports[worker_index * 2 + 1])
-            engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
-                dynamo_dynamic_ports.kv_event_ports[worker_index]
+    with reserved_ports(
+        worker_count * 2, start_port=DynamoPortRange.SERVE.value
+    ) as engine_ports:
+        if dep:
+            devices = map_cuda_visible_devices(
+                [0, 1], os.environ.get("CUDA_VISIBLE_DEVICES")
+            ).split(",")
+            assert (
+                len(set(devices)) == 2 and "-1" not in devices
+            ), "DEP requires two distinct GPUs"
+            engine_env = {"CUDA_VISIBLE_DEVICES": ",".join(devices)}
+            # KV publishers offset by rank; SGLang also derives communication ports.
+            dep_ports = allocate_contiguous_ports(
+                1, 12 if backend == "sglang" else 2, DynamoPortRange.SERVE.value
             )
+            request.addfinalizer(lambda: deallocate_ports(dep_ports))
+            config.script_args += [
+                "--kv-events-config",
+                json.dumps(
+                    {
+                        "publisher": "zmq",
+                        "topic": "kv-events",
+                        "endpoint": f"tcp://*:{dep_ports[0]}",
+                        **(
+                            {"enable_kv_cache_events": True}
+                            if backend == "vllm"
+                            else {}
+                        ),
+                    }
+                ),
+            ]
+            if backend == "vllm":
+                engine_env.update(
+                    VLLM_RS_HTTP_PORT=str(engine_ports[0]),
+                    VLLM_GRPC_PORT=str(engine_ports[1]),
+                    VLLM_DATA_PARALLEL_SIZE="2",
+                )
+                config.script_args += [
+                    "--tensor-parallel-size",
+                    "1",
+                    "--enable-expert-parallel",
+                    "--block-size",
+                    str(block_size),
+                    "--attention-backend",
+                    "TRITON_MLA",
+                ]
+            else:
+                engine_env.update(
+                    SGLANG_HTTP_PORT=str(engine_ports[0]),
+                    SGLANG_GRPC_PORT=str(engine_ports[1]),
+                    SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
+                )
+                config.script_args += [
+                    "--tp-size",
+                    "2",
+                    "--dp-size",
+                    "2",
+                    "--ep-size",
+                    "2",
+                    "--enable-dp-attention",
+                    "--page-size",
+                    str(block_size),
+                    "--attention-backend",
+                    "triton",
+                    "--moe-runner-backend",
+                    "triton",
+                    "--moe-a2a-backend",
+                    "none",
+                    "--dist-init-addr",
+                    f"127.0.0.1:{dep_ports[2]}",
+                    "--nccl-port",
+                    str(dep_ports[-1]),
+                ]
+        else:
+            engine_env = _sidecar_worker_gpu_env(backend)
+            for worker_index in range(2):
+                prefix = f"{backend.upper()}_WORKER{worker_index + 1}"
+                engine_env[f"{prefix}_HTTP_PORT"] = str(engine_ports[worker_index * 2])
+                engine_env[f"{prefix}_GRPC_PORT"] = str(
+                    engine_ports[worker_index * 2 + 1]
+                )
+                engine_env[f"{prefix}_KV_EVENT_PORT"] = str(
+                    dynamo_dynamic_ports.kv_event_ports[worker_index]
+                )
         run_serve_deployment(
             config,
             request,
@@ -244,5 +350,6 @@ def test_sidecar_kv_routing(
                 namespace=namespace,
                 model_name=config.model,
                 block_size=block_size,
+                dp_ranks=(0, 1) if dep else (0,),
             ),
         )
