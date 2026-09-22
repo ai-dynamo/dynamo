@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Inverted (push-based) Python -> Rust response egress for the TRT-LLM workers.
+"""Inverted (push-based) Python -> Rust response egress for Python workers.
 
 On the pull path Rust drives the handler's async generator, taking the GIL on
 tokio threads once per response. Here the handler -- already on the event loop
@@ -58,11 +58,18 @@ async def drive_push_egress(
     pull path. See invariant 3 in the module docstring for what catching it
     would cost.
     """
-    async for response in stream:
-        # The actual Python -> Rust crossing: encode to request-plane bytes
-        # and enqueue, both under the GIL we are already holding.
-        response_sender.send(response)
-    response_sender.close()
+    try:
+        async for response in stream:
+            # The actual Python -> Rust crossing: encode to request-plane bytes
+            # and enqueue, both under the GIL we are already holding.
+            waiter = response_sender.send(response)
+            if waiter is not None:
+                await waiter
+        response_sender.close()
+    finally:
+        # A failed send means the consumer is gone. Close the wrapped generator
+        # explicitly so its cancellation cleanup is not delayed until GC.
+        await stream.aclose()
 
 
 async def drive_push_egress_stream(

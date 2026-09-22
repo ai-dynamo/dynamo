@@ -1613,10 +1613,11 @@ impl Endpoint {
         // its `response_sender` argument, instead of Rust pulling `__anext__`
         // off its generator on a tokio thread once per response. Selected per
         // handler, purely by signature -- a handler must declare a
-        // `response_sender` parameter, which in practice means the TRT-LLM
-        // workers' `@push_egress_capable` decorator. NOT `context`, which every
-        // handler accepts and would therefore make this check always true,
-        // rendering the pull path unreachable. Anything else stays on pull.
+        // `response_sender` parameter, which in practice means the TRT-LLM or
+        // SGLang worker's `@push_egress_capable` decorator. NOT `context`,
+        // which every handler accepts and would therefore make this check
+        // always true, rendering the pull path unreachable. Anything else
+        // stays on pull.
         let use_push_egress = push_egress::handler_supports_push(&generator);
 
         // An endpoint has two doors, and this branch answers for both: the

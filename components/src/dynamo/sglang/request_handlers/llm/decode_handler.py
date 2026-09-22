@@ -44,6 +44,7 @@ from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     extract_media_urls,
     raise_if_unextracted_multimodal,
 )
+from dynamo.trtllm.request_handlers.push_egress import push_egress_capable
 
 _SAMPLING_OPTION_FIELDS = (
     "presence_penalty",
@@ -553,6 +554,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         )
         return native_generate_stream(self.engine, native_request)
 
+    @push_egress_capable
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:

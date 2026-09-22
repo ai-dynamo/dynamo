@@ -239,6 +239,7 @@ pub struct PythonServerStreamingEngine {
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     has_context: bool,
+    local_push_egress: bool,
 }
 
 impl PythonServerStreamingEngine {
@@ -248,12 +249,14 @@ impl PythonServerStreamingEngine {
         event_loop: Arc<PyObject>,
     ) -> Self {
         let has_context = detect_has_context(&generator);
+        let local_push_egress = crate::push_egress::handler_supports_push(&generator);
 
         PythonServerStreamingEngine {
             _cancel_token: cancel_token,
             generator,
             event_loop,
             has_context,
+            local_push_egress,
         }
     }
 }
@@ -278,6 +281,15 @@ where
     Resp: Data + for<'de> Deserialize<'de>,
 {
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
+        if self.local_push_egress {
+            return crate::push_egress::generate_local_typed(
+                self.generator.clone(),
+                self.event_loop.clone(),
+                request,
+            )
+            .await;
+        }
+
         generate_python_stream(
             self,
             request,

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for push_egress.py — the inverted push-egress path for TRT-LLM workers.
+"""Unit tests for push_egress.py — the inverted Python worker response path.
 
 These tests are designed to BREAK the implementation; a passing run that finds
 nothing is a failed deliverable.  Every test targets a specific claim in the
@@ -91,6 +91,7 @@ class FakeSender:
 
     Contract enforced:
     - send() raises after close / close_with_error.
+    - send() returns None when no asynchronous backpressure wait is needed.
     - close() and close_with_error() are idempotent.
     - close() after close_with_error() is a no-op.
     """
@@ -453,11 +454,23 @@ class TestTermination:
                     raise RuntimeError("consumer dropped the response stream")
                 super().send(obj)
 
+        closed = False
+
+        async def tracked_stream():
+            nonlocal closed
+            try:
+                yield "a"
+                yield "b"
+                yield "c"
+            finally:
+                closed = True
+
         sender = SenderFailsOnSecond()
         with pytest.raises(RuntimeError, match="consumer dropped"):
-            run(drive_push_egress(gen("a", "b", "c"), sender))
+            run(drive_push_egress(tracked_stream(), sender))
         assert sender.sent == ["a"]
         assert sender.total_closes == 0
+        assert closed, "consumer loss must close the wrapped generator immediately"
 
     def test_failing_close_propagates(self):
         """A `close()` that raises is a bridge failure, not something to hide.
@@ -487,6 +500,26 @@ class TestChunkDelivery:
         sender = FakeSender()
         run(drive_push_egress(gen(*chunks), sender))
         assert sender.sent == chunks
+
+    def test_awaits_backpressure_without_blocking_event_loop(self):
+        class BackpressuredSender(FakeSender):
+            def __init__(self):
+                super().__init__()
+                self.awaited = []
+
+            def send(self, obj):
+                super().send(obj)
+
+                async def wait_for_capacity():
+                    await asyncio.sleep(0)
+                    self.awaited.append(obj)
+
+                return wait_for_capacity()
+
+        sender = BackpressuredSender()
+        run(drive_push_egress(gen("a", "b"), sender))
+        assert sender.sent == ["a", "b"]
+        assert sender.awaited == ["a", "b"]
 
     def test_chunks_before_exception_are_sent(self):
         """Items before a handler exception should all be delivered."""
@@ -704,21 +737,22 @@ class TestDecoratorAppliedToRealHandlers:
     """Every LLM handler `generate` must carry @push_egress_capable.
 
     Verified against the source with `ast` rather than by importing the
-    classes: importing them pulls in tensorrt_llm, which needs CUDA, so an
+    classes: importing them pulls in engine packages that need CUDA, so an
     import-based test would silently skip everywhere except a GPU container
     and would therefore never guard anything in normal CI.
-
-    Confirmed equivalent in the worker-egress-push container, where all four
-    real classes report
-    `params=['self', 'request', 'context', 'response_sender', 'kwargs']`.
 
     Dropping the decorator from a handler is invisible at runtime: that
     endpoint just reverts to the pull path, with no error and no failure.
     """
 
     HANDLERS: ClassVar[dict[str, list[str]]] = {
-        "handlers.py": ["EncodeHandler", "PrefillHandler", "DecodeHandler"],
-        "aggregated_handler.py": ["AggregatedHandler"],
+        "trtllm/request_handlers/handlers.py": [
+            "EncodeHandler",
+            "PrefillHandler",
+            "DecodeHandler",
+        ],
+        "trtllm/request_handlers/aggregated_handler.py": ["AggregatedHandler"],
+        "sglang/request_handlers/llm/decode_handler.py": ["DecodeWorkerHandler"],
     }
 
     @staticmethod
@@ -743,7 +777,7 @@ class TestDecoratorAppliedToRealHandlers:
         [(m, c) for m, cs in HANDLERS.items() for c in cs],
     )
     def test_generate_is_push_egress_capable(self, module, class_name):
-        path = _COMPONENTS_SRC / "dynamo" / "trtllm" / "request_handlers" / module
+        path = _COMPONENTS_SRC / "dynamo" / module
         decorators = self._generate_decorators(path, class_name)
         assert "push_egress_capable" in decorators, (
             f"{class_name}.generate is missing @push_egress_capable "
@@ -758,7 +792,7 @@ class TestDecoratorAppliedToRealHandlers:
     def test_push_egress_capable_is_outermost(self, module, class_name):
         """It must be first in the list: `inspect.signature` sees the outermost
         wrapper, and range_decorator must wrap a real async-gen function."""
-        path = _COMPONENTS_SRC / "dynamo" / "trtllm" / "request_handlers" / module
+        path = _COMPONENTS_SRC / "dynamo" / module
         decorators = self._generate_decorators(path, class_name)
         assert decorators[0] == "push_egress_capable", (
             f"{class_name}.generate: @push_egress_capable must be OUTERMOST, "
@@ -772,12 +806,13 @@ class TestDecoratorAppliedToRealHandlers:
 
 
 class TestNoBleedIntoOtherEngines:
-    """Only TRT-LLM handlers may be push-capable.
+    """Only the shared helper may declare ``response_sender`` directly.
 
     `Endpoint.serve_endpoint` is shared by every Python worker -- vLLM, SGLang,
     frontend, planner, router, mocker, and more -- and the ONLY thing keeping
     them on the pull path is that `handler_supports_push` finds no
-    `response_sender` parameter on their handlers.
+    `response_sender` parameter on their handlers. Approved handlers gain that
+    parameter through ``@push_egress_capable`` instead of declaring it.
 
     So the moment any other engine's handler declares a parameter with that
     name, for any unrelated reason, Rust drives it with the push engine. It
@@ -802,17 +837,25 @@ class TestNoBleedIntoOtherEngines:
                 hits.append(node.name)
         return hits
 
-    def test_only_trtllm_handlers_declare_response_sender(self):
+    def test_only_push_egress_helper_declares_response_sender(self):
         offenders = {}
+        helper = (
+            _COMPONENTS_SRC
+            / "dynamo"
+            / "trtllm"
+            / "request_handlers"
+            / "push_egress.py"
+        )
         for path in (_COMPONENTS_SRC / "dynamo").rglob("*.py"):
-            if "/trtllm/" in path.as_posix():
-                continue  # the one engine that is supposed to have it
+            if path == helper or "tests" in path.parts:
+                continue
             hits = self._declares_response_sender(path)
             if hits:
                 offenders[path.relative_to(_COMPONENTS_SRC).as_posix()] = hits
 
         assert not offenders, (
-            "non-TRT-LLM code declares a `response_sender` parameter: "
+            "code outside the shared push-egress helper declares a "
+            "`response_sender` parameter: "
             f"{offenders}. Endpoint.serve_endpoint selects the push egress "
             "engine purely on that parameter name, so these handlers would be "
             "driven in push mode without ever pushing -- silently degrading "
