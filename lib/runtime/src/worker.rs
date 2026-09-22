@@ -12,14 +12,13 @@
 //! the calling thread until the application completes or is canceled. The method initialized
 //! the signal handler used to trap `SIGINT` and `SIGTERM` signals and trigger a graceful shutdown.
 //!
-//! On termination, the user application is given a graceful shutdown period of controlled by
-//! the `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` environment variable. If the application does not
+//! On termination, the user application is given a graceful shutdown period controlled by
+//! `DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS` (legacy alias:
+//! `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT`). If the application does not
 //! shutdown in time, the worker will terminate the application with an exit code of
 //! [`EXIT_CODE_SHUTDOWN_TIMEOUT`].
 //!
-//! The default values of `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` differ between the development
-//! and release builds. In development, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG] and
-//! in release, the default is [DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE].
+//! Both development and release builds default to 30 seconds.
 
 use super::{CancellationToken, Runtime, RuntimeConfig};
 
@@ -70,7 +69,7 @@ const SHUTDOWN_TIMEOUT_MESSAGE: &str =
 pub const EXIT_CODE_SHUTDOWN_TIMEOUT: i32 = 70;
 
 /// Default graceful shutdown timeout in seconds in debug mode
-pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 5;
+pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG: u64 = 30;
 
 /// Default graceful shutdown timeout in seconds in release mode
 pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE: u64 = 30;
@@ -84,14 +83,21 @@ pub fn graceful_shutdown_timeout_secs() -> u64 {
     } else {
         DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
     };
-    match std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT) {
+    let name = if std::env::var(env_worker::DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS)
+        .is_ok_and(|value| !value.trim().is_empty())
+    {
+        env_worker::DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS
+    } else {
+        env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT
+    };
+    match std::env::var(name) {
         Err(_) => default,
         Ok(raw) if raw.trim().is_empty() => default,
         Ok(raw) => match raw.trim().parse::<u64>() {
-            Ok(secs) => secs,
-            Err(_) => {
+            Ok(secs) if secs > 0 && secs <= 315_360_000 => secs,
+            _ => {
                 tracing::warn!(
-                    env = env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+                    env = name,
                     value = raw,
                     default_secs = default,
                     "invalid graceful shutdown timeout; using the default"
@@ -135,6 +141,15 @@ fn remaining_shutdown_budget() -> std::time::Duration {
         Some(deadline) => deadline.saturating_duration_since(std::time::Instant::now()),
         None => graceful_shutdown_timeout(),
     }
+}
+
+// The runtime's argument bounds endpoint draining only. Bound the complete
+// wait as well, including lease revocation. The runtime owns its teardown task,
+// so cancelling this waiter does not cancel teardown.
+async fn shutdown_runtime(runtime: &Runtime, remaining: std::time::Duration) -> anyhow::Result<()> {
+    tokio::time::timeout(remaining, runtime.shutdown_and_wait(Some(remaining)))
+        .await
+        .map_err(|_| anyhow::anyhow!("runtime teardown exceeded the worker shutdown deadline"))
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +264,7 @@ impl Worker {
         // endpoint inflight drain and leaving transports connected.
         runtime
             .secondary()
-            .block_on(runtime.shutdown_and_wait(Some(remaining_shutdown_budget())));
+            .block_on(shutdown_runtime(&runtime, remaining_shutdown_budget()))?;
         Ok(())
     }
 
@@ -261,9 +276,7 @@ impl Worker {
         let runtime = self.runtime.clone();
         let task = self.execute_internal(f);
         task.await??;
-        runtime
-            .shutdown_and_wait(Some(remaining_shutdown_budget()))
-            .await;
+        shutdown_runtime(&runtime, remaining_shutdown_budget()).await?;
         Ok(())
     }
 
@@ -380,4 +393,38 @@ async fn signal_handler(cancel_token: CancellationToken) -> anyhow::Result<()> {
     cancel_token.cancel();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_budget_includes_post_cancellation_teardown() {
+        // Regression: a delayed lease revoke added five seconds after the
+        // worker's drain budget. Timing out the waiter must not cancel revoke.
+        let runtime = Runtime::from_current().unwrap();
+        let token = runtime.primary_token();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completion = finished.clone();
+        runtime.register_teardown_task(tokio::spawn(async move {
+            token.cancelled().await;
+            released.await.unwrap();
+            completion.store(true, Ordering::SeqCst);
+        }));
+        let started = tokio::time::Instant::now();
+        assert!(
+            shutdown_runtime(&runtime, Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+        assert!(!finished.load(Ordering::SeqCst));
+        release.send(()).unwrap();
+        runtime.shutdown_and_wait(None).await;
+        assert!(finished.load(Ordering::SeqCst));
+    }
 }
