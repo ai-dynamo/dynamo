@@ -88,6 +88,55 @@ def _promotion_warmup_concurrency(backend_name: str) -> int:
     return max(1, _int_env("DYN_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", 1))
 
 
+def _promotion_warmup_token_counts(backend_name: str) -> tuple[int, ...]:
+    """Return opt-in per-request token counts for production-shape warmup."""
+
+    backend_env = _backend_env_name(
+        backend_name, "GMS_FAILOVER_PROMOTION_WARMUP_TOKEN_COUNTS"
+    )
+    raw = os.environ.get(backend_env)
+    if raw is None:
+        raw = os.environ.get("DYN_GMS_FAILOVER_PROMOTION_WARMUP_TOKEN_COUNTS", "")
+    if not raw.strip():
+        return ()
+    try:
+        counts = tuple(dict.fromkeys(int(value.strip()) for value in raw.split(",")))
+    except ValueError as exc:
+        raise ValueError(
+            f"{backend_env} must be a comma-separated integer list"
+        ) from exc
+    if any(value <= 0 for value in counts):
+        raise ValueError(f"{backend_env} token counts must be positive")
+    return counts
+
+
+def _promotion_warmup_payloads(
+    payload: dict[str, Any], backend_name: str
+) -> tuple[dict[str, Any], ...]:
+    """Expand a token-input probe into isolated production-shape requests.
+
+    The caller gives every vLLM stream a distinct cache salt. Without it,
+    progressively longer warmups share their prefix and fail to exercise the
+    intended prefill shape, leaving Triton MoE kernels for the first request.
+    """
+
+    counts = _promotion_warmup_token_counts(backend_name)
+    if not counts:
+        return (dict(payload),)
+    token_ids = payload.get("token_ids")
+    if not isinstance(token_ids, list) or not token_ids:
+        raise ValueError(
+            "promotion warmup token counts require a non-empty token_ids payload"
+        )
+    variants = []
+    for count in counts:
+        variant = dict(payload)
+        repeats = (count + len(token_ids) - 1) // len(token_ids)
+        variant["token_ids"] = (list(token_ids) * repeats)[:count]
+        variants.append(variant)
+    return tuple(variants)
+
+
 def _post_lock_fence_ms(backend_name: str) -> int:
     # Cohort guards exclude CPU submitters and permanently close old admission.
     # Their release is NOT proof that previously submitted CUDA work has drained:
@@ -134,15 +183,23 @@ async def run_gms_failover_promotion_warmup(
     last_error: Exception | None = None
 
     concurrency = _promotion_warmup_concurrency(backend_name)
+    warmup_payloads = _promotion_warmup_payloads(payload, backend_name)
 
-    async def _run_stream() -> None:
+    async def _run_stream(run_payload: dict[str, Any]) -> None:
         # Engine handlers accept Dynamo's native Context, not merely a Python
         # object with similarly named methods. SGLang forwards this through a
         # compiled boundary that enforces the concrete type.
         from dynamo._core import Context
 
         context = Context(f"gms-failover-promotion-warmup-{uuid.uuid4()}")
-        stream = generate(dict(payload), context)
+        request = dict(run_payload)
+        if backend_name.lower() == "vllm":
+            # Isolate concurrent requests too: an already-completed peer must
+            # not turn the remaining probes into prefix-cache hits.
+            nvext = dict(request.get("nvext") or {})
+            nvext["cache_salt"] = f"gms-promotion-warmup-stream-{uuid.uuid4()}"
+            request["nvext"] = nvext
+        stream = generate(request, context)
         saw_chunk = False
         try:
             while True:
@@ -161,13 +218,17 @@ async def run_gms_failover_promotion_warmup(
 
     async def _run_once(attempt: int) -> None:
         started = time.monotonic()
-        await asyncio.gather(*(_run_stream() for _ in range(concurrency)))
+        for run_payload in warmup_payloads:
+            await asyncio.gather(
+                *(_run_stream(run_payload) for _ in range(concurrency))
+            )
         logger.info(
             "[GMS failover] %s promotion warmup completed attempt=%d "
-            "concurrency=%d elapsed_ms=%.2f",
+            "concurrency=%d token_counts=%s elapsed_ms=%.2f",
             backend_name,
             attempt,
             concurrency,
+            [len(item.get("token_ids", ())) for item in warmup_payloads],
             (time.monotonic() - started) * 1000.0,
         )
 
