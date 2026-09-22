@@ -27,7 +27,7 @@ import (
 )
 
 // dgdWaitForLeaderReconciler owns the wait-for-leader ConfigMap used by
-// multinode vLLM mp workers.
+// multinode vLLM MP and Ray workers.
 type dgdWaitForLeaderReconciler struct {
 	dgdResourceSyncer
 }

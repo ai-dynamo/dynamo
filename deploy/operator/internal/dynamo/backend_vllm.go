@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -144,6 +145,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 const (
 	waitLeaderConfigMapSuffix = "wait-leader-script"
 	waitLeaderScriptKey       = "wait-for-leader.py"
+	waitRayLeaderScriptKey    = "wait-for-ray-leader.sh"
 	waitLeaderVolumeName      = "wait-leader-script"
 	waitLeaderMountPath       = "/scripts"
 )
@@ -222,6 +224,32 @@ while True:
     time.sleep(5)
 `
 
+// WaitRayLeaderScript waits until Ray's GCS health check succeeds. After a
+// bounded number of attempts, it exits with an actionable error; Kubernetes
+// then retries the init container with backoff while keeping the worker's main
+// container stopped.
+const WaitRayLeaderScript = `#!/bin/sh
+set -eu
+
+address="${LEADER_HOST}:${LEADER_PORT}"
+attempt=0
+max_attempts=60
+
+echo "Waiting for Ray GCS at ${address}..."
+until ray health-check --address "${address}" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+        echo "ERROR: Ray GCS at ${address} did not become healthy within 300s" >&2
+        exit 1
+    fi
+    if [ "${attempt}" -eq 1 ] || [ $((attempt % 6)) -eq 0 ]; then
+        echo "Still waiting for Ray GCS at ${address} (attempt ${attempt}/${max_attempts})..."
+    fi
+    sleep 5
+done
+echo "Ray GCS at ${address} is healthy"
+`
+
 // k8sVarPattern matches Kubernetes $(VAR) env-var expansion syntax.
 var k8sVarPattern = regexp.MustCompile(`\$\((\w+)\)`)
 
@@ -238,7 +266,7 @@ func GetWaitLeaderConfigMapName(dgdName string) string {
 }
 
 // GenerateWaitLeaderConfigMap creates a ConfigMap containing the wait-for-leader
-// Python script. One ConfigMap is created per DGD and owned by the DGD.
+// scripts. One ConfigMap is created per DGD and owned by the DGD.
 func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
@@ -249,18 +277,30 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 			},
 		},
 		Data: map[string]string{
-			waitLeaderScriptKey: WaitLeaderScript,
+			waitLeaderScriptKey:    WaitLeaderScript,
+			waitRayLeaderScriptKey: WaitRayLeaderScript,
 		},
 	}
 }
 
+type leaderWaitInitConfig struct {
+	name          string
+	port          string
+	scriptCommand string
+}
+
+// UpdatePodSpec injects backend-specific pod settings. podSpec and
+// multinodeDeployer must be non-nil.
 func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, _ *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
-	if !b.shouldInjectVLLMMpWaitLeaderInit(podSpec, numberOfNodes, role) {
+	// Select a wait contract only for operator-generated multinode workers.
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	waitConfig, ok := b.resolveLeaderWaitInitConfig(podSpec, numberOfNodes, role, leaderHostname)
+	if !ok {
 		return
 	}
 
+	// Mount the DGD-owned wait scripts into an init container using the main image.
 	mainContainer := &podSpec.Containers[0]
-	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
@@ -282,11 +322,11 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	// definition order.
 	shellHostname := k8sToShellVarSyntax(leaderHostname)
 	initContainer := corev1.Container{
-		Name:  "wait-for-leader-mp",
+		Name:  waitConfig.name,
 		Image: mainImage,
 		Command: []string{"sh", "-c", fmt.Sprintf(
-			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
-			shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)},
+			`export LEADER_HOST="%s" LEADER_PORT="%s" && %s`,
+			shellHostname, waitConfig.port, waitConfig.scriptCommand)},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      waitLeaderVolumeName,
@@ -299,12 +339,37 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 	podSpec.InitContainers = append(podSpec.InitContainers, initContainer)
 }
 
-func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, numberOfNodes int32, role Role) bool {
+// resolveLeaderWaitInitConfig returns the wait contract for an operator-generated
+// multinode worker. podSpec must be non-nil.
+func (b *VLLMBackend) resolveLeaderWaitInitConfig(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, leaderHostname string) (leaderWaitInitConfig, bool) {
 	if b.ParentGraphDeploymentName == "" || numberOfNodes <= 1 || role != RoleWorker || len(podSpec.Containers) == 0 {
-		return false
+		return leaderWaitInitConfig{}, false
 	}
 
-	return containerCommandLineHasArg(&podSpec.Containers[0], distributedExecutorFlag, "mp")
+	// MP workers keep their existing TCP-based master-port wait contract.
+	container := &podSpec.Containers[0]
+	if containerCommandLineHasArg(container, distributedExecutorFlag, "mp") {
+		return leaderWaitInitConfig{
+			name:          "wait-for-leader-mp",
+			port:          commonconsts.VLLMMpMasterPort,
+			scriptCommand: fmt.Sprintf("exec python3 %s/%s", waitLeaderMountPath, waitLeaderScriptKey),
+		}, true
+	}
+
+	// Match the complete plain TP/PP Ray worker command emitted by
+	// injectRayDistributedLaunchFlags. This excludes custom Ray addresses,
+	// data-parallel Ray, and elastic-EP workers with their own /live gate.
+	expectedRayArgs := fmt.Sprintf("ray start --address=%s:%s --block", leaderHostname, VLLMPort)
+	if slices.Equal(container.Command, []string{"/bin/sh", "-c"}) &&
+		len(container.Args) == 1 && strings.TrimSpace(container.Args[0]) == expectedRayArgs {
+		return leaderWaitInitConfig{
+			name:          "wait-for-leader-ray",
+			port:          VLLMPort,
+			scriptCommand: fmt.Sprintf("exec sh %s/%s", waitLeaderMountPath, waitRayLeaderScriptKey),
+		}, true
+	}
+
+	return leaderWaitInitConfig{}, false
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
@@ -403,6 +468,9 @@ func injectMpDistributedLaunchFlags(container *corev1.Container, role Role, serv
 	injectFlagsIntoContainerCommand(container, mpFlags, needsShell, "vllm")
 }
 
+// injectRayDistributedLaunchFlags injects the Ray launch commands for
+// multi-node TP/PP deployments. Worker pod rendering adds a Ray GCS health
+// gate before this generated worker command starts.
 func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
 	case RoleLeader:
