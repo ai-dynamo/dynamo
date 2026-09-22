@@ -91,13 +91,13 @@ def test_block_pool_hbm_directory_survives_engine_replacement(monkeypatch):
                 state.held.get(lease.block_id, (None,))[0] != lease.generation
                 for lease in leases
             ):
-                return False
+                return None
             for lease in leases:
                 state.readers[lease.block_id] += 1
-            return True
+            return tuple(leases)
 
-        def unpin_read(self, leases):
-            for lease in leases:
+        def unpin_read(self, claim):
+            for lease in claim:
                 state.readers[lease.block_id] -= 1
 
         def release(self, released):

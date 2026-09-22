@@ -54,15 +54,12 @@ def _backend_env_name(backend_name: str, suffix: str) -> str:
 
 
 def _post_lock_fence_ms(backend_name: str) -> int:
-    # Non-zero default: on a SIGKILL failover the kernel releases the flock
-    # instantly, but the dead leader's engine subprocesses and already-enqueued
-    # CUDA work can keep writing the shared VMM KV pages for a short window. This
-    # quiescence gap between acquiring the lock and the new owner writing shared
-    # KV mitigates (does not eliminate) that dual-writer overlap; hard
-    # elimination needs daemon-side mapping revocation. The cohort lock proves
-    # userspace writers closed their guards; the delay covers outstanding asynchronous
-    # CUDA work.
-    default_ms = 250
+    # vLLM and SGLang use kernel-held cohort guards. Acquiring the predecessor's
+    # exclusive guard proves every process capable of submitting CUDA work has
+    # exited and its CUDA context has been torn down. Keep an explicit delay knob
+    # for diagnostics and platform workarounds, but correctness never depends on
+    # elapsed wall time.
+    default_ms = 0
     backend_env = _backend_env_name(backend_name, "GMS_FAILOVER_POST_LOCK_FENCE_MS")
     if backend_env in os.environ:
         return max(0, _int_env(backend_env, default_ms))
@@ -422,6 +419,12 @@ async def run_gms_failover_post_lock_fence(
 
     if backend_name == "sglang":
         from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            fence_predecessor_writers,
+        )
+
+        await fence_predecessor_writers()
+    elif backend_name == "vllm":
+        from gpu_memory_service.integrations.vllm.writer_lifecycle import (
             fence_predecessor_writers,
         )
 

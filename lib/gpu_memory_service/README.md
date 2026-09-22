@@ -221,7 +221,7 @@ This ensures the "new writer gets fresh allocations" workflow can wait for memor
 - Any non-OOM CUDA VMM failure on either client or server is fatal and exits the process.
 - On the server, an untrusted client connection is isolated to that connection: transport loss and response-send failures unwind the connection state, and only server invariant violations or CUDA failures kill the server.
 - Runtime-state `allocation_count` and `allocations_cleared` report server-owned allocation handles only. Imported handles in other processes can still keep VRAM alive after the server clears its own layout state.
-- GMS *does not* prove that a disconnected or already-submitted writer has no in-flight GPU work left on the device. The mitigation in this design is that new RW layouts use fresh allocations and may wait for memory reclamation before allocation succeeds.
+- GMS by itself does not prove that a disconnected writer has no in-flight GPU work. Persistent-KV failover therefore adds an engine writer-cohort guard: every CUDA-capable process holds a shared kernel lock, and a successor must acquire the predecessor cohort exclusively before adopting or reclaiming blocks. Process exit tears down the CUDA context before the kernel releases its descriptors. Deployments that do not enable this integration must use fresh allocations or provide an equivalent external fence.
 
 ---
 
@@ -592,7 +592,12 @@ Under the hood, pausing calls `unmap_all_vas()` + `abort()` to release GPU memor
 
 Tensor pointers remain valid because the original virtual addresses are preserved.
 
-This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim the memory after the primary is killed. The mutable KV cache always moves through a fresh RW layout in its own GMS tag before it is reallocated.
+This enables a shadow engine to release its GPU memory, let a primary engine use the GPU, and then reclaim memory after the primary exits. Two KV modes have different recovery semantics:
+
+- Without persistent KV leases and the content directory, mutable KV starts a fresh RW layout on resume.
+- With persistent KV leases and an authoritative content directory, daemon-owned HBM allocations survive process exit. A replacement may adopt generation-matching, sealed blocks only after a kernel-held writer-cohort fence proves every predecessor CUDA-capable process has exited. Directory publication occurs at an engine scheduler completion boundary; an unacknowledged publication is a safe miss.
+
+Persistent KV recovers cache bytes and native block/page identities, not arbitrary request scheduler or sampler state. The current vLLM integration can reuse prefixes published after worker completion; it does not promise to continue an interrupted request at its exact token boundary. Request replay recomputes any missing or unpublished suffix.
 
 ### Configuration via `model_loader_extra_config`
 

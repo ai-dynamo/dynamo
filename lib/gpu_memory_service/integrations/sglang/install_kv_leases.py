@@ -238,14 +238,15 @@ def _state(self) -> dict[str, object] | None:
 
 
 def hidden_recoverable_tokens(allocator) -> int:
-    """Return externally recoverable capacity withheld from native allocation."""
+    """Return shared capacity withheld from this native allocator."""
     st = _STATE.get(id(allocator))
     if st is None:
         return 0
     hidden = st.get("exclusive_hidden_pages")
-    if not isinstance(hidden, set):
-        return 0
-    return len(hidden) * int(getattr(allocator, "page_size", 1))
+    standby = st.get("standby_headroom_pages")
+    hidden_count = len(hidden) if isinstance(hidden, set) else 0
+    standby_count = len(standby) if isinstance(standby, set) else 0
+    return (hidden_count + standby_count) * int(getattr(allocator, "page_size", 1))
 
 
 def activate_hidden_recovery_capacity(allocator, required_tokens: int) -> int:
@@ -751,6 +752,13 @@ def enter_exclusive_steady_state(self) -> int:
     candidates = [
         page for page in common_free if page not in lease_map and page not in retained
     ]
+    headroom_count = min(
+        max(0, int(getattr(self, "_gms_standby_headroom_pages", 0))),
+        len(candidates),
+    )
+    standby_headroom = set(candidates[-headroom_count:]) if headroom_count else set()
+    if standby_headroom:
+        candidates = [page for page in candidates if page not in standby_headroom]
     acquired: list[KVLease] = []
     try:
 
@@ -784,7 +792,10 @@ def enter_exclusive_steady_state(self) -> int:
     )
     if len(local) != len(common) or set(local) != set(common):
         raise RuntimeError("SGLang TP writable-page ownership diverged")
-    st["exclusive_hidden_pages"] = set(common_free).difference(local)
+    st["standby_headroom_pages"] = standby_headroom
+    st["exclusive_hidden_pages"] = (
+        set(common_free).difference(local).difference(standby_headroom)
+    )
     self.free_pages = torch.tensor(
         local, dtype=self.free_pages.dtype, device=self.free_pages.device
     )
@@ -1342,6 +1353,7 @@ def _initialize_allocator(self) -> None:
         "steady_state": False,
         "exclusive_steady_state": False,
         "exclusive_hidden_pages": set(),
+        "standby_headroom_pages": set(),
         # Populated once the writer owns one stable native free-page set. The
         # mirror lets request-aware allocation record physical page ownership
         # without synchronizing SGLang's GPU allocator tensor back to Python.
@@ -1425,6 +1437,21 @@ def _gms_token_free(self, free_index):
     return result
 
 
+def _revoke_allocator_fast_path(st) -> None:
+    """Invalidate every derived allocator view before native clear mutates pages."""
+    st["exclusive_steady_state"] = False
+    st["steady_state"] = False
+    st["tp_reservation_aligned"] = False
+    st["exclusive_hidden_pages"] = set()
+    st["standby_headroom_pages"] = set()
+    st["cpu_free_pages"] = None
+    for name in ("cpu_staged_pages", "cpu_release_pages", "tp_reserved_pages"):
+        values = st.get(name)
+        if isinstance(values, list):
+            values.clear()
+    st["active_batch"] = None
+
+
 def _gms_token_clear(self):
     st = _state(self)
     outstanding = []
@@ -1439,6 +1466,8 @@ def _gms_token_clear(self):
                 getattr(st["client"], "namespace", "?"),
                 getattr(st["client"], "owner_id", "?"),
             )
+    if st is not None:
+        _revoke_allocator_fast_path(st)
     result = orig_token_clear(self)
     if st is not None:
         client = st["client"]
@@ -1758,9 +1787,13 @@ def hint_hbm_page_release(self, pages: list[int]) -> bool:
 
 
 def _gms_paged_merge_and_sort_free(self):
+    # Native PagedTokenToKVPoolAllocator is an exact no-op with no staged
+    # pages. Preserve that ordering: sorting only the CPU mirror would make
+    # subsequent exact-page reservations disagree with the device free list.
+    had_staged_pages = bool(getattr(self, "staged_pages", ()))
     result = orig_paged_merge_and_sort_free(self)
     st = _state(self)
-    if st is not None and st.get("exclusive_steady_state", False):
+    if had_staged_pages and st is not None and st.get("exclusive_steady_state", False):
         cpu_free = st.get("cpu_free_pages")
         cpu_staged = st.get("cpu_staged_pages")
         if isinstance(cpu_free, (list, deque)) and isinstance(cpu_staged, list):
@@ -1869,6 +1902,8 @@ def _gms_paged_clear(self):
                 getattr(st["client"], "namespace", "?"),
                 getattr(st["client"], "owner_id", "?"),
             )
+    if st is not None:
+        _revoke_allocator_fast_path(st)
     result = orig_paged_clear(self)
     if st is not None:
         client = st["client"]

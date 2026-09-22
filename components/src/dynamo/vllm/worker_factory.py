@@ -1380,11 +1380,18 @@ class WorkerFactory:
         Setting ``DYN_VLLM_GMS_LOCK_BEFORE_INIT=0`` selects the explicitly
         configured preinitialized-standby path handled after setup.
         """
+        if not config.gms_shadow_mode:
+            return None, False
+        from gpu_memory_service.integrations.vllm.writer_lifecycle import (
+            prepare_writer_cohort,
+        )
+
+        # Snapshot restore already owns the active failover lock, but its newly
+        # spawned EngineCore/CUDA workers still need a fresh boot cohort.
+        prepare_writer_cohort()
         if snapshot_engine_present:
             return None, False
         lock_before_init = os.environ.get("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1").lower()
-        if not config.gms_shadow_mode:
-            return None, False
         if lock_before_init in {"0", "false", "no", "off"}:
             logger.warning(
                 "[Shadow] Preinitialized standby explicitly enabled; shared-KV "

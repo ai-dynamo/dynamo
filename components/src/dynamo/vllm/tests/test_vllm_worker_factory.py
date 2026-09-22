@@ -1980,12 +1980,32 @@ async def test_prefill_acquires_failover_lock_before_engine_init(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_non_failover_startup_does_not_create_writer_cohort(monkeypatch):
+    factory = _make_factory()
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: (_ for _ in ()).throw(AssertionError("unexpected cohort")),
+    )
+
+    result = await factory._maybe_acquire_failover_lock_before_init(
+        Mock(), SimpleNamespace(gms_shadow_mode=False)
+    )
+
+    assert result == (None, False)
+
+
+@pytest.mark.asyncio
 async def test_snapshot_restore_does_not_reacquire_failover_lock(monkeypatch):
     factory = _make_factory()
     factory._acquire_failover_lock = AsyncMock(
         side_effect=AssertionError("snapshot lifecycle already owns the lock")
     )
     monkeypatch.setenv("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1")
+    prepared = []
+    monkeypatch.setattr(
+        "gpu_memory_service.integrations.vllm.writer_lifecycle.prepare_writer_cohort",
+        lambda: prepared.append(True),
+    )
 
     result = await factory._maybe_acquire_failover_lock_before_init(
         Mock(),
@@ -1994,4 +2014,5 @@ async def test_snapshot_restore_does_not_reacquire_failover_lock(monkeypatch):
     )
 
     assert result == (None, False)
+    assert prepared == [True]
     factory._acquire_failover_lock.assert_not_awaited()

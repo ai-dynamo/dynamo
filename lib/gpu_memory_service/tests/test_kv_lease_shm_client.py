@@ -173,12 +173,15 @@ def test_read_pin_blocks_release_and_adoption_until_unpinned(tmp_path):
         primary.seal(old)
         free_before = primary.raw_free_count()
 
-        assert shadow.pin_read(old)
+        claim = shadow.pin_read(old)
+        assert claim is not None
         primary.release(old)
         assert primary.raw_free_count() == free_before
         assert shadow.adopt(old) == []
 
-        shadow.unpin_read(old)
+        shadow.unpin_read(claim)
+        with pytest.raises(RuntimeError, match="already released"):
+            shadow.unpin_read(claim)
         adopted = shadow.adopt(old)
         assert adopted == [KVLease(1, old[0].generation + 1)]
         primary.release(old)
@@ -188,6 +191,37 @@ def test_read_pin_blocks_release_and_adoption_until_unpinned(tmp_path):
     finally:
         primary.close()
         shadow.close()
+
+
+def test_read_claim_cannot_release_another_reader(tmp_path):
+    path = str(tmp_path / "leases-independent-read-claims.shm")
+    primary = SharedMemoryKVLeaseClient(
+        path, namespace="independent-read-claims", owner_id="primary", total_blocks=4
+    )
+    first = SharedMemoryKVLeaseClient(
+        path, namespace="independent-read-claims", owner_id="first", total_blocks=4
+    )
+    second = SharedMemoryKVLeaseClient(
+        path, namespace="independent-read-claims", owner_id="second", total_blocks=4
+    )
+    try:
+        leases = primary.acquire(1, preferred_blocks=[1], strict_preferred=True)
+        primary.seal(leases)
+        first_claim = first.pin_read(leases)
+        second_claim = second.pin_read(leases)
+        assert first_claim is not None and second_claim is not None
+
+        first.unpin_read(first_claim)
+        with pytest.raises(RuntimeError, match="already released"):
+            first.unpin_read(first_claim)
+        assert primary.adopt(leases) == []
+
+        second.unpin_read(second_claim)
+        assert len(primary.adopt(leases)) == 1
+    finally:
+        primary.close()
+        first.close()
+        second.close()
 
 
 def test_read_pin_batch_failure_rolls_back_every_partial_pin(tmp_path):
@@ -203,7 +237,7 @@ def test_read_pin_batch_failure_rolls_back_every_partial_pin(tmp_path):
         primary.seal(leases)
         stale = KVLease(leases[1].block_id, leases[1].generation + 1)
 
-        assert shadow.pin_read([leases[0], stale]) is False
+        assert shadow.pin_read([leases[0], stale]) is None
 
         # The first pin was rolled back when the second generation failed.
         primary.release(leases)
@@ -211,6 +245,37 @@ def test_read_pin_batch_failure_rolls_back_every_partial_pin(tmp_path):
     finally:
         primary.close()
         shadow.close()
+
+
+def test_native_read_pin_rejects_duplicate_block_ids(tmp_path):
+    path = str(tmp_path / "leases-native-duplicate-read-pin.shm")
+    client = SharedMemoryKVLeaseClient(
+        path, namespace="native-duplicate", owner_id="owner", total_blocks=4
+    )
+    try:
+        lease = client.acquire(1, preferred_blocks=[1], strict_preferred=True)[0]
+        client.seal([lease])
+
+        with pytest.raises(ValueError, match="duplicate block_ids"):
+            client._rust.kv_lease_pin_read(
+                client._mmap,
+                [lease.block_id, lease.block_id],
+                [lease.generation, lease.generation],
+            )
+
+        claim = client.pin_read([lease])
+        assert claim is not None
+        with pytest.raises(ValueError, match="duplicate block_ids"):
+            client._rust.kv_lease_unpin_read(
+                client._mmap,
+                [lease.block_id, lease.block_id],
+                [lease.generation, lease.generation],
+            )
+        client.unpin_read(claim)
+        client.release([lease])
+        assert client.raw_free_count() == 4
+    finally:
+        client.close()
 
 
 def test_post_fence_recovery_clears_abandoned_read_pins(tmp_path):
@@ -227,7 +292,7 @@ def test_post_fence_recovery_clears_abandoned_read_pins(tmp_path):
     try:
         leases = primary.acquire(2, preferred_blocks=[1, 2], strict_preferred=True)
         primary.seal(leases)
-        assert dead_reader.pin_read(leases)
+        assert dead_reader.pin_read(leases) is not None
         dead_reader.close()
 
         assert shadow.reclaim_foreign(protected_blocks={1}) == 1
