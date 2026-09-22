@@ -130,6 +130,22 @@ Tool calling lets Dynamo connect models to external tools and services by return
   </Step>
 </Steps>
 
+## Harmony Vocabulary for Air-Gapped Clusters
+
+The `harmony` tool call parser and the `gpt_oss` reasoning parser both tokenize model output, so both need the `o200k_base.tiktoken` vocabulary file. The frontend downloads it on first use from `https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken` and caches it in the container's temporary directory. A cluster without outbound internet access never completes that download.
+
+To serve the vocabulary from local storage, set `TIKTOKEN_ENCODINGS_BASE` on the **frontend** to a directory that holds the file. Both parsers read that directory before attempting any download, and verify the contents against a pinned SHA256 checksum:
+
+```bash
+TIKTOKEN_ENCODINGS_BASE=/model-cache/tiktoken python3 -m dynamo.frontend
+```
+
+Name the file exactly `o200k_base.tiktoken`; the parsers build the path themselves. Its SHA256 is `446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d`. At roughly 3.5 MB it exceeds the 1 MiB ConfigMap limit, so stage it on a volume. For a Kubernetes manifest, see the [gpt-oss-120b recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gpt-oss-120b/README.md).
+
+<Warning>
+Set `TIKTOKEN_ENCODINGS_BASE` only when the file is present at that path. Once the variable is set, the parsers do not fall back to downloading. A missing or mismatched file leaves `tool_calls` empty and passes raw Harmony channel markers through in `message.content`.
+</Warning>
+
 ## Supported Tool Call Parsers
 
 Choose a model family, then expand the matching model option to see its parser name and configuration details.
@@ -276,7 +292,7 @@ The **Upstream name** column shows where the vLLM or SGLang parser name differs 
 
         **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
 
-        **Notes:** Harmony channel format
+        **Notes:** Harmony channel format. Air-gapped clusters need a staged vocabulary file. See [Harmony Vocabulary for Air-Gapped Clusters](#harmony-vocabulary-for-air-gapped-clusters).
       </Accordion>
     </AccordionGroup>
   </Accordion>
