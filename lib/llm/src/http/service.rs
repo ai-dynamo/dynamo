@@ -267,7 +267,9 @@ mod tests {
                         "name": "lookup",
                         "parameters": {
                             "type": "object",
-                            "properties": {"query": {"type": "string"}}
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                            "additionalProperties": false
                         },
                         "strict": true
                     }]
