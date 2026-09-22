@@ -292,7 +292,7 @@ class TestUsageStatistics:
             "prompt_tokens": 4,
             "gpu_hit_tokens": 3,
             "cpu_hit_tokens": 0,
-            "cpu_lookup_tokens": 0,
+            "cpu_lookup_tokens": None,
         }
 
     def test_kv_cache_hit_engine_data_uses_stock_external_counter(self):
@@ -309,5 +309,5 @@ class TestUsageStatistics:
             "prompt_tokens": 4,
             "gpu_hit_tokens": 2,
             "cpu_hit_tokens": 1,
-            "cpu_lookup_tokens": 1,
+            "cpu_lookup_tokens": None,
         }

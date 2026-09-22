@@ -454,6 +454,15 @@ where
                 guard
                     .request_metrics()
                     .input_sequence_tokens
+                    .with_label_values(&[
+                        request
+                            .tracker
+                            .as_ref()
+                            .map(|tracker| tracker.phase())
+                            .unwrap_or_default()
+                            .as_str(),
+                        &request.model,
+                    ])
                     .observe(request.token_ids.len() as f64);
             }
             Ok(())

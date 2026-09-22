@@ -3200,10 +3200,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
         external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
         if not isinstance(external_lookups, int):
-            # Stock vLLM reports successful external computation but not lookup
-            # attempts. Successful hits are a conservative lower bound.
-            external_lookups = external_hits
-        values = (local_hits, external_hits, external_lookups)
+            external_lookups = None
+        values = (local_hits, external_hits)
         if prompt_tokens is None or any(not isinstance(value, int) for value in values):
             return {"complete": False}
         return {

@@ -714,27 +714,25 @@ async fn terminal_item_does_not_skip_transport_eof() {
 }
 
 struct KvHitSnapshot {
-    best: (f64, u64),
-    selected: (f64, u64),
-    lookup: (f64, u64),
-    reused: (f64, u64),
+    best: u64,
+    selected: u64,
+    lookup: u64,
+    reused: u64,
     complete: u64,
     incomplete: u64,
+    lookup_unavailable: u64,
 }
 
 fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
     // The fixture request carries no tracker, so the guard labels it `aggregated`.
     let phase = RequestPhase::Aggregated.as_str();
     let model = "test";
-    let hist = |h: &prometheus::HistogramVec| {
-        let child = h.with_label_values(&[phase, model]);
-        (child.get_sample_sum(), child.get_sample_count())
-    };
+    let counter = |h: &prometheus::IntCounterVec| h.with_label_values(&[phase, model]).get();
     KvHitSnapshot {
-        best: hist(&metrics.kv_best_eligible_cached_prefix_tokens),
-        selected: hist(&metrics.kv_selected_cached_prefix_tokens),
-        lookup: hist(&metrics.kv_worker_lookup_tokens),
-        reused: hist(&metrics.kv_worker_reused_tokens),
+        best: counter(&metrics.kv_best_eligible_cached_prefix_tokens),
+        selected: counter(&metrics.kv_selected_cached_prefix_tokens),
+        lookup: counter(&metrics.kv_worker_lookup_tokens),
+        reused: counter(&metrics.kv_worker_reused_tokens),
         complete: metrics
             .kv_worker_outcomes_total
             .with_label_values(&[phase, model, "complete"])
@@ -742,6 +740,10 @@ fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) ->
         incomplete: metrics
             .kv_worker_outcomes_total
             .with_label_values(&[phase, model, "incomplete"])
+            .get(),
+        lookup_unavailable: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&[phase, model, "lookup_unavailable"])
             .get(),
     }
 }
@@ -802,14 +804,10 @@ async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
     })
     .await;
     // Router estimates at selection, worker tokens at completion, each exactly once across finish + Drop.
-    assert_eq!(after.best.0 - before.best.0, 75.0);
-    assert_eq!(after.best.1 - before.best.1, 1);
-    assert_eq!(after.selected.0 - before.selected.0, 60.0);
-    assert_eq!(after.selected.1 - before.selected.1, 1);
-    assert_eq!(after.lookup.0 - before.lookup.0, 90.0);
-    assert_eq!(after.lookup.1 - before.lookup.1, 1);
-    assert_eq!(after.reused.0 - before.reused.0, 85.0);
-    assert_eq!(after.reused.1 - before.reused.1, 1);
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 90);
+    assert_eq!(after.reused - before.reused, 85);
     assert_eq!(after.complete - before.complete, 1);
     assert_eq!(after.incomplete - before.incomplete, 0);
 }
@@ -822,10 +820,35 @@ async fn kv_cache_hit_attempt_without_worker_report_is_incomplete_once() {
         ..Default::default()
     })
     .await;
-    assert_eq!(after.best.1 - before.best.1, 1);
-    assert_eq!(after.selected.1 - before.selected.1, 1);
-    assert_eq!(after.lookup.1 - before.lookup.1, 0);
-    assert_eq!(after.reused.1 - before.reused.1, 0);
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 0);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 1);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_cancelled_attempt_discards_valid_report() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Cancelled),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": 20,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 0);
     assert_eq!(after.complete - before.complete, 0);
     assert_eq!(after.incomplete - before.incomplete, 1);
 }
@@ -835,6 +858,86 @@ fn cancelled_frame() -> Annotated<LLMEngineOutput> {
         finish_reason: Some(FinishReason::Cancelled),
         ..Default::default()
     })
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_completion_keeps_selection_phase() {
+    let (router, runtime) = router(None).await;
+    let metrics =
+        crate::kv_router::metrics::RouterRequestMetrics::for_test(&prometheus::Registry::new());
+    let tracker = Arc::new(RequestTracker::new());
+    let permit = tracker.set_phase(RequestPhase::Prefill).await;
+    let mut req = request();
+    req.tracker = Some(tracker.clone());
+    let mut guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        metrics.clone(),
+        "phase-test".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &req,
+        Some(RouteObservation {
+            prompt_tokens: 1,
+            best_router_tokens: 1,
+            selected_router_tokens: 1,
+        }),
+    );
+    drop(permit);
+    let _permit = tracker.set_phase(RequestPhase::Decode).await;
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+                "complete": true, "prompt_tokens": 1, "gpu_hit_tokens": 1,
+                "cpu_hit_tokens": 0, "cpu_lookup_tokens": 0
+            }})),
+            ..Default::default()
+        }))
+        .await;
+    guard.finish().await;
+    drop(guard);
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["prefill", "test"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["decode", "test"])
+            .get(),
+        0
+    );
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_without_lookup_records_only_reuse_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": null,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 85);
+    assert_eq!(after.lookup_unavailable - before.lookup_unavailable, 1);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 0);
 }
 
 fn engine_shutdown_frame() -> Annotated<LLMEngineOutput> {
