@@ -76,7 +76,7 @@ kubectl wait --for=condition=complete job/model-download -n ${NAMESPACE} --timeo
 
 ```bash
 kubectl apply -f recipes/k-exaone-2.0/vllm/agg-b200-chat/deploy-generic.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Ready dgd/k-exaone-2-vllm-b200-agg-chat -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
@@ -85,7 +85,7 @@ kubectl wait --for=condition=Ready dgd/k-exaone-2-agg -n ${NAMESPACE} --timeout=
 
 ```bash
 kubectl apply -f recipes/k-exaone-2.0/vllm/disagg-b200-chat/deploy-ib.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dgd/k-exaone-2-disagg -n ${NAMESPACE} --timeout=7200s
+kubectl wait --for=condition=Ready dgd/k-exaone-2-vllm-b200-disagg-chat -n ${NAMESPACE} --timeout=7200s
 ```
 
 </div>
@@ -97,7 +97,7 @@ First start takes **40–120 minutes**: 53 shards load, then autotune, then CUDA
 <div data-variant="agg">
 
 ```bash
-kubectl port-forward svc/k-exaone-2-agg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/k-exaone-2-vllm-b200-agg-chat-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>
@@ -105,7 +105,7 @@ kubectl port-forward svc/k-exaone-2-agg-frontend 8000:8000 -n ${NAMESPACE}
 <div data-variant="disagg">
 
 ```bash
-kubectl port-forward svc/k-exaone-2-disagg-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/k-exaone-2-vllm-b200-disagg-chat-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 </div>

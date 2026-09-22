@@ -11,5 +11,5 @@ patches:
       group: nvidia.com
       version: v1beta1
       kind: DynamoGraphDeployment
-      name: k-exaone-2-disagg
+      name: k-exaone-2-vllm-b200-disagg-chat
     path: patch-dgd.yaml

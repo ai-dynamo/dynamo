@@ -20,7 +20,7 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: k-exaone-2-disagg
+  name: k-exaone-2-vllm-b200-disagg-chat
 spec:
   env:
     - {name: UCX_TLS, value: "rc_x,rc,cuda_copy,cuda_ipc"}

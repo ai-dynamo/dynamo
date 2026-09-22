@@ -14,9 +14,9 @@
 #
 # Prerequisites:
 # - Target DGD is Ready (see ../README.md)
-# - model-cache PVC mounted in the namespace and contains TRACE_FILE
+# - shared-model-cache PVC mounted in the namespace and contains TRACE_FILE
 #
-# Results: /model-cache/perf/<epoch>_<job-name>/
+# Results: /shared-model-cache/perf/<epoch>_<job-name>/
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -45,8 +45,8 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
-                - k-exaone-2-agg
-                - k-exaone-2-disagg
+                - k-exaone-2-vllm-b200-agg-chat
+                - k-exaone-2-vllm-b200-disagg-chat
             topologyKey: kubernetes.io/hostname
       # tolerations: # uncomment to populate any tolerations for the gpu nodes
       containers:
@@ -154,9 +154,9 @@ spec:
         env:
         # --- Edit these to target the DGD + trace you want to benchmark ---
         - name: ENDPOINT
-          value: k-exaone-2-agg-frontend:8000
+          value: k-exaone-2-vllm-b200-agg-chat-frontend:8000
         - name: TRACE_FILE
-          value: /model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
+          value: /shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
         # Operating point is per variant: 7 for agg-b200-chat, 14 for disagg-b200-chat.
         # Set this to match the variant ENDPOINT points at.
         - name: CONCURRENCY
@@ -178,16 +178,16 @@ spec:
               apiVersion: v1
               fieldPath: metadata.labels['job-name']
         - name: ROOT_ARTIFACT_DIR
-          value: /model-cache/perf
+          value: /shared-model-cache/perf
         - name: HF_HOME
-          value: /model-cache
+          value: /shared-model-cache
         - name: PYTHONUNBUFFERED
           value: "1"
         volumeMounts:
         - name: model-cache
-          mountPath: /model-cache
+          mountPath: /shared-model-cache
       restartPolicy: Never
       volumes:
       - name: model-cache
         persistentVolumeClaim:
-          claimName: model-cache
+          claimName: shared-model-cache

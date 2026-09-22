@@ -20,8 +20,8 @@ Edit the `env` block in [`perf.yaml`](perf.yaml) and update the `podAffinity` `v
 
 | Variant target | `ENDPOINT` | `TRACE_FILE` |
 | --- | --- | --- |
-| B200 aggregated (4 GPU) | `k-exaone-2-agg-frontend:8000` | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` |
-| B200 disaggregated (8 GPU) | `k-exaone-2-disagg-frontend:8000` | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` |
+| B200 aggregated (4 GPU) | `k-exaone-2-vllm-b200-agg-chat-frontend:8000` | `/shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` |
+| B200 disaggregated (8 GPU) | `k-exaone-2-vllm-b200-disagg-chat-frontend:8000` | `/shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` |
 
 If you run more than one benchmark in the same namespace, also update
 `metadata.name` and `labels.app` so Jobs and artifact directories stay
@@ -75,13 +75,13 @@ git lfs pull --include='recipes/kimi-k2.6/perf/traces/8k_1k_70kv_chat_new_nosche
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/shared-model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}' \
   --command -- sleep 3600
 
 TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/kimi-k2.6/perf/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl"
-kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
+kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /shared-model-cache/traces
 kubectl cp "${TRACE_SOURCE}" \
-  "${NAMESPACE}/pvc-helper:/model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl"
+  "${NAMESPACE}/pvc-helper:/shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl"
 ```
 
 Keep `pvc-helper` for fetching artifacts, or delete it after staging.
@@ -106,7 +106,7 @@ to synthesize the trace prompts, so a different one is a different workload.
 
 ```bash
 kubectl cp \
-  ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_k-exaone-2-bench \
+  ${NAMESPACE}/pvc-helper:/shared-model-cache/perf/<epoch>_k-exaone-2-bench \
   ./results
 ```
 
@@ -125,7 +125,7 @@ state and Dynamo frontend/router state between independent runs:
 ```bash
 kubectl delete job k-exaone-2-bench -n ${NAMESPACE} --ignore-not-found
 
-DGD=k-exaone-2-agg            # or k-exaone-2-disagg
+DGD=k-exaone-2-vllm-b200-agg-chat            # or k-exaone-2-vllm-b200-disagg-chat
 kubectl delete pods -n ${NAMESPACE} \
   -l nvidia.com/dynamo-graph-deployment-name=${DGD}
 kubectl wait --for=condition=Ready pod -n ${NAMESPACE} \
@@ -145,8 +145,8 @@ errored, and unfinished requests before reporting aggregate throughput.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `ENDPOINT` | `k-exaone-2-agg-frontend:8000` | Change per DGD variant |
-| `TRACE_FILE` | `/model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` | 1,805-request 15% chat trace |
+| `ENDPOINT` | `k-exaone-2-vllm-b200-agg-chat-frontend:8000` | Change per DGD variant |
+| `TRACE_FILE` | `/shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` | 1,805-request 15% chat trace |
 | `CONCURRENCY` | `7` | per-variant operating point: **7 for `agg-b200-chat`, 14 for `disagg-b200-chat`**. Set it to match the variant `ENDPOINT` points at, or the result will not reproduce the published row. |
 | `TARGET_MODEL` | `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B-NVFP4` | Must match `--served-model-name` |
 
@@ -155,7 +155,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 Results are written to:
 
 ```text
-/model-cache/perf/<epoch>_<job-name>/
+/shared-model-cache/perf/<epoch>_<job-name>/
   warmup/
   K-EXAONE-2.0-750B-A37B-NVFP4_trace_c<concurrency>_<timestamp>/
     profile_export_aiperf.json
