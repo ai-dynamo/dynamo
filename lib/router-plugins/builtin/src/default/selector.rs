@@ -73,7 +73,7 @@ impl std::fmt::Debug for DefaultWorkerSelector {
 }
 impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD
+        <WorkerSelectionPolicy as WorkerSelector<C>>::required_worker_inputs(&self.policy.lock())
     }
     fn uses_exclusive_affinity_target(&self) -> bool {
         true

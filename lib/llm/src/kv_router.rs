@@ -2367,6 +2367,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builtin_load_only_modes_skip_indexing_and_subscriptions() {
+        for role in [WorkerType::Aggregated, WorkerType::Decode] {
+            let router = make_router(
+                "builtin-load-only",
+                HashMap::from([(7, ModelRuntimeConfig::default())]),
+                2,
+                SelectionPolicySource::Registry,
+                None,
+                Some(role),
+                role.default_selector_label(),
+                KvRouterConfig {
+                    overlap_score_credit: if role == WorkerType::Decode { 1.0 } else { 0.0 },
+                    use_kv_events: role == WorkerType::Decode,
+                    router_assume_kv_reuse: false,
+                    skip_initial_worker_wait: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert!(
+                !router
+                    .required_worker_inputs()
+                    .contains(WorkerInputs::CACHE)
+            );
+            assert!(matches!(router.indexer, Indexer::None));
+            assert!(!router.ingress.has_subscription());
+            let tokens = vec![11, 12, 13, 14];
+            for _ in 0..2 {
+                router
+                    .record_routing_decision(
+                        TokensWithHashes::new(tokens.clone(), 2),
+                        WorkerWithDpRank::from_worker_id(7),
+                    )
+                    .await
+                    .unwrap();
+                let FindBestMatchOutcome::Routed { cached_tokens, .. } =
+                    find_best_match(&router, &tokens, false).await.unwrap()
+                else {
+                    panic!("load-only request must route");
+                };
+                assert_eq!(cached_tokens, 0);
+                assert_eq!(
+                    router
+                        .prefill_load_hint_for(tokens.len(), cached_tokens, true)
+                        .unwrap()
+                        .initial_effective_prefill_tokens,
+                    tokens.len()
+                );
+            }
+            router.cancellation_token.cancel();
+        }
+    }
+
+    #[tokio::test]
     async fn indexer_features_require_declared_cache_inputs() {
         for feature in ["serve_indexer", "enable_session_prefix_index"] {
             let config = KvRouterConfig {
@@ -2586,7 +2641,7 @@ mod tests {
             workers,
             Some(membership),
             2,
-            SelectionPolicySource::Registry,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
             Some(KvRouterConfig {
                 enable_session_prefix_index: true,
                 router_event_threads: threads,

@@ -215,23 +215,36 @@ fn exact_prompt_and_accounting_inputs_are_available_to_external_pickers() {
 #[test]
 fn configured_default_resolves_for_every_role_and_uses_exclusive_affinity() {
     let registry = default_registry();
-    for role in [
-        WorkerType::Aggregated,
-        WorkerType::Prefill,
-        WorkerType::Decode,
-        WorkerType::Encode,
-    ] {
-        let config = KvRouterConfig::default();
-        let factory = registry
-            .resolve_for_worker_type(&config, role)
-            .unwrap()
-            .unwrap();
-        let policy = factory(&config, role, RoutingPartitionRef::new("model", "default"));
-        assert!(
-            <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::uses_exclusive_affinity_target(
-                &policy
-            )
-        );
+    for conditional_disagg_enabled in [false, true] {
+        for role in [
+            WorkerType::Aggregated,
+            WorkerType::Prefill,
+            WorkerType::Decode,
+            WorkerType::Encode,
+        ] {
+            let config = KvRouterConfig {
+                conditional_disagg_enabled,
+                ..Default::default()
+            };
+            let factory = registry
+                .resolve_for_worker_type(&config, role)
+                .unwrap()
+                .unwrap();
+            let policy = factory(&config, role, RoutingPartitionRef::new("model", "default"));
+            let inputs =
+                <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::required_worker_inputs(
+                    &policy,
+                );
+            assert_eq!(
+                inputs.contains(WorkerInputs::CACHE),
+                role != WorkerType::Decode || conditional_disagg_enabled
+            );
+            assert!(
+                <WorkerSelectionPolicy as WorkerSelector<TestWorker>>::uses_exclusive_affinity_target(
+                    &policy
+                )
+            );
+        }
     }
 }
 

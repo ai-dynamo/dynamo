@@ -165,41 +165,43 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         context: &WorkerSelectionContext<'_>,
         candidate: WorkerCandidate<'_>,
     ) -> Result<f64, WorkerSelectionPolicyError> {
-        let cache = candidate
-            .cache()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("cache input unavailable"))?;
         let load = candidate
             .load()
             .ok_or_else(|| WorkerSelectionPolicyError::failed("load input unavailable"))?;
-        let (estimated_overlap, cached_tokens) = cache.accounting_cache_estimate();
-        let device = if cache.has_tier_matches() {
-            cache.device_overlap_blocks()
+        let (cached_tokens, credit) = if let Some(cache) = candidate.cache() {
+            let (estimated_overlap, cached_tokens) = cache.accounting_cache_estimate();
+            let device = if cache.has_tier_matches() {
+                cache.device_overlap_blocks()
+            } else {
+                estimated_overlap
+            };
+            let shared_credit = if SHARED_CREDIT {
+                let shared = cache
+                    .shared_hits()
+                    .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
+                self.shared_cache_multiplier * shared as f64
+            } else {
+                // Preserve signed zero when the configured weight is -0.0.
+                self.shared_cache_multiplier
+            };
+            let decay = if self.prepared.needs_decay {
+                let excess = self.prepared.block_size.divide(
+                    load.active_prefill_tokens()
+                        .saturating_sub(self.prepared.min_prefill) as f64,
+                );
+                1.0 / (1.0
+                    + self.overlap_score_credit_decay * self.prepared.request_blocks.divide(excess))
+            } else {
+                1.0
+            };
+            let credit = self.prepared.overlap_credit * decay * device
+                + self.host_cache_hit_weight * cache.host_overlap_blocks()
+                + self.disk_cache_hit_weight * cache.disk_overlap_blocks()
+                + shared_credit;
+            (cached_tokens, credit)
         } else {
-            estimated_overlap
+            (0, 0.0)
         };
-        let shared_credit = if SHARED_CREDIT {
-            let shared = cache
-                .shared_hits()
-                .map_or(0, |hits| hits.hits_beyond(device.round().max(0.0) as u32));
-            self.shared_cache_multiplier * shared as f64
-        } else {
-            // Preserve signed zero when the configured weight is -0.0.
-            self.shared_cache_multiplier
-        };
-        let decay = if self.prepared.needs_decay {
-            let excess = self.prepared.block_size.divide(
-                load.active_prefill_tokens()
-                    .saturating_sub(self.prepared.min_prefill) as f64,
-            );
-            1.0 / (1.0
-                + self.overlap_score_credit_decay * self.prepared.request_blocks.divide(excess))
-        } else {
-            1.0
-        };
-        let credit = self.prepared.overlap_credit * decay * device
-            + self.host_cache_hit_weight * cache.host_overlap_blocks()
-            + self.disk_cache_hit_weight * cache.disk_overlap_blocks()
-            + shared_credit;
         let request_cost = if REQUEST_COST {
             self.decode_active_request_weight * load.active_requests() as f64
         } else {
@@ -228,7 +230,14 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool> WorkerScorer
     for DefaultScorer<REQUEST_COST, SHARED_CREDIT>
 {
     fn required_worker_inputs(&self) -> WorkerInputs {
-        WorkerInputs::CACHE | WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT
+        // The builtin's load-only modes must book the full prompt without cache credit.
+        // Hosts still start indexing solely from the policy's declared inputs.
+        let inputs = WorkerInputs::LOAD | WorkerInputs::PREFERRED_TAINT;
+        if !self.is_plain_decode && self.overlap_score_credit != 0.0 {
+            inputs | WorkerInputs::CACHE
+        } else {
+            inputs
+        }
     }
 
     fn score(

@@ -300,7 +300,7 @@ class KvRouterArgGroup(ArgGroup):
                 "This preset sets overlap_score_credit=0, disables KV events and "
                 "KV-reuse assumptions, enables active-block "
                 "and prefill-token load tracking, and disables remote/shared cache indexers. "
-                "The policy's CACHE input declaration still controls local approximate indexing."
+                "The builtin policy does not request cache inputs in this mode."
             ),
         )
         add_argument(
