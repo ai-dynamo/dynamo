@@ -1035,7 +1035,8 @@ pub fn run_input<'p>(
             .router_config()
             .router_mode
             .is_kv_routing(),
-    )?;
+    )
+    .map_err(PyValueError::new_err)?;
     crate::future_into_py(py, async move {
         if matches!(&input_enum, Input::Http) {
             HttpFrontend::default()
@@ -1062,17 +1063,13 @@ fn validate_router_plugin_input(
     plugins: &dynamo_kv_router::plugins::RouterPlugins,
     input: &Input,
     is_kv_routing: bool,
-) -> PyResult<()> {
+) -> Result<(), &'static str> {
     if plugins.has_custom_plugins() {
         if !is_kv_routing {
-            return Err(PyValueError::new_err(
-                "linked router plugins require --router-mode kv",
-            ));
+            return Err("linked router plugins require --router-mode kv");
         }
         if !matches!(input, Input::Http) {
-            return Err(PyValueError::new_err(
-                "linked router plugins require HTTP frontend input",
-            ));
+            return Err("linked router plugins require HTTP frontend input");
         }
     }
     Ok(())
@@ -1106,7 +1103,13 @@ mod plugin_input_tests {
         let plugins = RouterPlugins::default()
             .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
         assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
-        assert!(validate_router_plugin_input(&plugins, &Input::Http, false).is_err());
-        assert!(validate_router_plugin_input(&plugins, &Input::Grpc, true).is_err());
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Http, false),
+            Err("linked router plugins require --router-mode kv")
+        );
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Grpc, true),
+            Err("linked router plugins require HTTP frontend input")
+        );
     }
 }
