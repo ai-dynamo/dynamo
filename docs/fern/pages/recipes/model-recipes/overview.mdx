@@ -14,17 +14,17 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
-<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-google" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-thinkingmachines" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-lg" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
@@ -51,17 +51,17 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   </div>
 
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Provider</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-google">Google</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label>
-  <label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
@@ -86,6 +86,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="lg" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat-reuse">
     <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/lgai.webp" alt="" />
       <div><h3>K-EXAONE 2.0</h3><p>LG AI Research</p></div>
     </div>
     <p className="dynamo-model-summary">750B-A37B MoE in NVFP4 on B200, aggregated or disaggregated 1P1D, with MTP speculative decoding and KV-aware routing on an 8K/1K chat trace.</p>
@@ -158,7 +159,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.png" alt="" />
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.webp" alt="" />
       <div><h3>Inkling NVFP4</h3><p>Thinking Machines</p></div>
     </div>
     <p className="dynamo-model-summary">Thinking Machines' first open-weights model — a multimodal MoE with controllable reasoning effort. vLLM GB300 targets serve agentic traffic at 1M context with MTP speculation and KV-aware routing, aggregated or disaggregated; the Day-0 SGLang B200 target adds image and audio input.</p>

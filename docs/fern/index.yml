@@ -914,12 +914,12 @@ navigation:
           - section: DGD
             collapsed: open-by-default
             contents:
-              - page: vLLM
-                path: pages/recipes/kubernetes-templates/dgd/vllm.mdx
-              - page: TensorRT-LLM
-                path: pages/recipes/kubernetes-templates/dgd/tensorrt-llm.mdx
               - page: SGLang
                 path: pages/recipes/kubernetes-templates/dgd/sglang.mdx
+              - page: TensorRT-LLM
+                path: pages/recipes/kubernetes-templates/dgd/tensorrt-llm.mdx
+              - page: vLLM
+                path: pages/recipes/kubernetes-templates/dgd/vllm.mdx
           - page: DGDR
             path: pages/recipes/kubernetes-templates/dgdr.mdx
 
@@ -928,12 +928,12 @@ navigation:
         slug: cli-templates
         icon: rectangle-terminal
         contents:
-          - page: vLLM
-            path: pages/recipes/cli-templates/vllm.mdx
-          - page: TensorRT-LLM
-            path: pages/recipes/cli-templates/tensorrt-llm.mdx
           - page: SGLang
             path: pages/recipes/cli-templates/sglang.mdx
+          - page: TensorRT-LLM
+            path: pages/recipes/cli-templates/tensorrt-llm.mdx
+          - page: vLLM
+            path: pages/recipes/cli-templates/vllm.mdx
 
       # ==================== Feature Benchmarks ====================
       # Evidence pages behind the recipes: controlled A/B benchmarks whose
