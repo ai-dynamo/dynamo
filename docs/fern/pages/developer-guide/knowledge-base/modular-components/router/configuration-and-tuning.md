@@ -270,6 +270,12 @@ The first successfully dispatched request binds the session ID to its selected w
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
 
+**Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
+
+One behavior is known and unresolved: because siblings share one binding, a concurrent fan-out waits for the first sibling's dispatch to commit before the others are placed.
+
+Dynamo resolves the parent session id from the agent headers it already recognizes (`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`, `x-parent-session-id`). On a backend that routes again internally the group can still split across ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled, set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the one the engine records.
+
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 
 ```bash

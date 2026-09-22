@@ -23,6 +23,7 @@ pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
     pytest.mark.gpu_0,
+    pytest.mark.xpu_1,
     pytest.mark.pre_merge,
 ]
 
@@ -197,14 +198,39 @@ class TestDiffusionParallelConfigCoverage:
             OmniDiffusionKwargs(),
             task_type="fl2va",
             lora_path=["/models/fasth3/adapter_model.safetensors"],
-            diffusion_attention_backend="TRTLLM_ATTN",
+            diffusion_attention_backend="FASTVIDEO_VSA",
+            fastvideo_vsa_topk=64,
         )
 
         kwargs = _build_kwargs(config)
 
         assert kwargs["task_type"] == "fl2va"
         assert kwargs["lora_path"] == ["/models/fasth3/adapter_model.safetensors"]
-        assert kwargs["diffusion_attention_backend"] == "TRTLLM_ATTN"
+        assert kwargs["diffusion_attention_backend"] == "FASTVIDEO_VSA"
+        assert kwargs["fastvideo_vsa_topk"] == 64
+
+    def test_diffusion_only_defaults_not_forwarded_to_async_omni(self):
+        kwargs = _build_kwargs(_make_config())
+
+        for field in (
+            "enable_layerwise_offload",
+            "vae_use_slicing",
+            "vae_use_tiling",
+            "boundary_ratio",
+            "enable_cache_dit_summary",
+            "enable_cpu_offload",
+        ):
+            assert field not in kwargs
+
+    def test_explicit_false_diffusion_option_forwarded_to_async_omni(self):
+        config = _make_config()
+        config.diffusion = dataclasses.replace(
+            OmniDiffusionKwargs(), vae_use_tiling=False
+        )
+
+        kwargs = _build_kwargs(config)
+
+        assert kwargs["vae_use_tiling"] is False
 
     def test_lora_disabled_resolves_no_capacity(self):
         config = _make_config()

@@ -635,8 +635,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
-        validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
+        let effective_tools = validate::validated_effective_tools(&self.inner)?;
+        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -1108,6 +1108,157 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_kimi_extensions_survive_nv_request_roundtrip() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "The answer is", "partial": true}
+            ],
+            "prompt_cache_key": "session-key"
+        }))
+        .expect("Kimi extensions must deserialize through the Dynamo wrapper");
+
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).expect("Kimi extensions must pass request validation");
+        assert!(request.inner.has_effective_tools());
+        assert!(request.inner.effective_tool_contains("lookup"));
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["messages"][0]["tools"][0]["name"], "lookup");
+        assert_eq!(serialized["messages"][2]["partial"], true);
+        assert_eq!(serialized["messages"][2]["content"], "The answer is");
+        assert_eq!(serialized["prompt_cache_key"], "session-key");
+    }
+
+    #[test]
+    fn test_system_message_without_content_or_tools_is_still_rejected() {
+        let request = serde_json::from_value::<NvCreateChatCompletionRequest>(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system"},
+                {"role": "user", "content": "Hello"}
+            ]
+        }));
+        assert!(request.is_err());
+    }
+
+    #[test]
+    fn test_validate_forced_tool_choice_accepts_dynamic_system_tools() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "Hello"}
+                ],
+                "tool_choice": tool_choice
+            });
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)
+                .expect("dynamic-tool request must deserialize");
+            ValidateRequest::validate(&request)
+                .expect("dynamic tools must satisfy forced tool_choice validation");
+        }
+    }
+
+    #[test]
+    fn test_validate_named_tool_choice_rejects_absent_dynamic_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{"name": "lookup"}]
+                },
+                {"role": "user", "content": "Hello"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "missing"}
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("request must deserialize");
+        let error = ValidateRequest::validate(&request).expect_err("missing tool must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("tool named \"missing\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_dynamic_tool_names() {
+        for (name, expected_error) in [
+            ("bad name".to_string(), "has an invalid name".to_string()),
+            (
+                "x".repeat(validate::MAX_FUNCTION_NAME_LENGTH + 1),
+                format!(
+                    "exceeds {} character limit",
+                    validate::MAX_FUNCTION_NAME_LENGTH
+                ),
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "tools": [{"name": name}]},
+                    {"role": "user", "content": "Hello"}
+                ]
+            }))
+            .expect("dynamic-tool request must deserialize");
+
+            let error = ValidateRequest::validate(&request)
+                .expect_err("invalid dynamic tool name must fail validation");
+            assert!(
+                error.to_string().contains(&expected_error),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_combined_effective_tool_count_over_limit() {
+        let tools = (0..validate::MAX_TOOLS)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "function": {"name": format!("tool_{index}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "tools": [{"name": "dynamic_tool"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": tools
+        }))
+        .expect("combined-tool request must deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("combined effective tool count over the limit must fail validation");
+        assert!(
+            error.to_string().contains(&format!(
+                "Maximum of {} tools are supported, got {}",
+                validate::MAX_TOOLS,
+                validate::MAX_TOOLS + 1
+            )),
+            "unexpected validation error: {error}"
         );
     }
 
