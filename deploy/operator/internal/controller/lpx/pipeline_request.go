@@ -4,13 +4,11 @@
 package lpx
 
 import (
-	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"hash"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -32,16 +30,19 @@ const (
 	pipelineRequestModelAnnotation = "scheduling.lpu.nvidia.com/dynamo-model"
 )
 
-// getPipelineRequests returns only the non-nil PCS's requests, in stable order.
+// getPipelineRequests returns only the non-nil PCS's requests, indexed by name.
 // The UID index establishes ownership; callers do not recheck it. The supported
 // foreground replacement path needs no discovery of LPRs after their PCS is gone.
-func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet) ([]lpxv1alpha1.LPUPipelineRequest, error) {
-	requests := &lpxv1alpha1.LPUPipelineRequestList{}
-	if err := r.List(ctx, requests, client.InNamespace(pcs.Namespace), client.MatchingFields{pipelineRequestPCSOwnerUIDIndex: string(pcs.UID)}); err != nil {
+func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1alpha1.PodCliqueSet) (map[string]*lpxv1alpha1.LPUPipelineRequest, error) {
+	requestList := &lpxv1alpha1.LPUPipelineRequestList{}
+	if err := r.List(ctx, requestList, client.InNamespace(pcs.Namespace), client.MatchingFields{pipelineRequestPCSOwnerUIDIndex: string(pcs.UID)}); err != nil {
 		return nil, err
 	}
-	slices.SortFunc(requests.Items, func(a, b lpxv1alpha1.LPUPipelineRequest) int { return cmp.Compare(a.Name, b.Name) })
-	return requests.Items, nil
+	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest)
+	for _, request := range requestList.Items {
+		requests[request.Name] = &request
+	}
+	return requests, nil
 }
 
 // resolvePipelineRequests combines desired intent with matching observed LPRs and
@@ -193,12 +194,11 @@ func (r *graphReconciler) reconcilePipelineRequests(
 // pipelineRequestsPendingDeletion selects removed requests and current terminating
 // names that must disappear before publication. All requests belong to the observed PCS.
 func pipelineRequestsPendingDeletion(
-	requests []lpxv1alpha1.LPUPipelineRequest,
+	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	desiredRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) []*lpxv1alpha1.LPUPipelineRequest {
 	var pending []*lpxv1alpha1.LPUPipelineRequest
-	for index := range requests {
-		request := &requests[index]
+	for _, request := range requests {
 		if _, desired := desiredRequests[request.Name]; !desired || !request.DeletionTimestamp.IsZero() {
 			pending = append(pending, request)
 		}

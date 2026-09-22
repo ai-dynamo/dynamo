@@ -13,20 +13,18 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// EvaluateLPXGroveReadiness observes every role and replica of one component group.
+// EvaluateLPXGroveReadiness evaluates every observed role and replica of one component group.
 // source is non-nil and admitted; groupName and componentNames identify one entry
-// from ComponentGroups. pcs and group may be nil while materializing; otherwise
-// the caller has verified ownership and deletion state. reader may be nil until
-// both pcs and group are available. Inputs remain read-only.
-func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source *v1beta1.DynamoGraphDeployment, groupName string, componentNames []string, pcs *grovev1alpha1.PodCliqueSet, pcsg *grovev1alpha1.PodCliqueScalingGroup) (GroveReadiness, error) {
+// from ComponentGroups. pcs and pcsg may be nil while materializing. The caller
+// verifies ownership and deletion state before passing pclqs.
+// Missing cliques are pending. Inputs remain read-only.
+func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphDeployment, groupName string, componentNames []string, pcs *grovev1alpha1.PodCliqueSet, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique) GroveReadiness {
 	component := source.GetComponentByName(groupName)
 	status := v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup, RuntimeNamespace: source.GetDynamoNamespaceForComponent(component)}
 	// Draft instances are counted from their own complete Agent cliques.
@@ -56,25 +54,25 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 		return result(false, v1beta1.DGDReadyReasonSomeResourcesNotReady, message)
 	}
 	if pcs == nil {
-		return pending("Waiting for the exact LPX PodCliqueSet"), nil
+		return pending("Waiting for the exact LPX PodCliqueSet")
 	}
 	hash := getAcceptedPCSRevisionHash(pcs)
 	if hash == nil {
-		return pending("Waiting for Grove to accept the LPX PodCliqueSet revision"), nil
+		return pending("Waiting for Grove to accept the LPX PodCliqueSet revision")
 	}
 	if pcsg == nil {
-		return pending("Waiting for the LPX scaling group"), nil
+		return pending("Waiting for the LPX scaling group")
 	}
 	status.ComponentNames = []string{pcsg.Name}
 	status.Replicas, status.UpdatedReplicas = pcsg.Status.Replicas, pcsg.Status.UpdatedReplicas
 	status.AvailableReplicas = ptr.To(pcsg.Status.AvailableReplicas)
 	if pcsg.Status.ObservedGeneration == nil || *pcsg.Status.ObservedGeneration != pcsg.Generation {
-		return pending("Waiting for the exact observed LPX scaling group"), nil
+		return pending("Waiting for the exact observed LPX scaling group")
 	}
 	status.ScheduledReplicas = ptr.To(pcsg.Status.ScheduledReplicas)
 	replicas := ptr.Deref(component.Replicas, pcsg.Spec.Replicas)
 	if pcsg.Spec.Replicas != replicas || pcsg.Status.CurrentPodCliqueSetGenerationHash == nil || *pcsg.Status.CurrentPodCliqueSetGenerationHash != *hash {
-		return result(false, v1beta1.DGDReadyReasonUpdating, "LPX scaling group has not applied the desired revision and capacity"), nil
+		return result(false, v1beta1.DGDReadyReasonUpdating, "LPX scaling group has not applied the desired revision and capacity")
 	}
 	// Observe every member before returning so partial draft readiness remains visible.
 	unreadyClassification, unreadyMessage := "", ""
@@ -83,7 +81,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 			unreadyClassification, unreadyMessage = classification, message
 		}
 	}
-	for replica := int32(0); replica < replicas; replica++ {
+	for replica := range replicas {
 		replicaReady := true
 		for _, template := range pcs.Spec.Template.Cliques {
 			if !slices.Contains(pcsg.Spec.CliqueNames, template.Name) {
@@ -91,9 +89,17 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 			}
 			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(replica)}, template.Name)
 			memberName := template.Labels[lpx.StageLabel]
-			readiness, err := observeLPXRole(ctx, reader, pcsg, name, template.Spec.Replicas)
-			if err != nil {
-				return GroveReadiness{}, err
+
+			// Revision checks precede the pure per-clique readiness calculation.
+			pclq := pclqs[name]
+			readiness := groveComponentReadiness{}
+			switch {
+			case pclq == nil:
+				readiness = readiness.withResult(false, fmt.Sprintf("Waiting for LPX role %s", name), v1beta1.DGDReadyReasonSomeResourcesNotReady)
+			case pclq.Status.CurrentPodCliqueSetGenerationHash == nil || *pclq.Status.CurrentPodCliqueSetGenerationHash != *hash:
+				readiness = readiness.withResult(false, fmt.Sprintf("LPX role %s has not applied the desired revision", name), v1beta1.DGDReadyReasonUpdating)
+			default:
+				readiness = observeLPXRole(ctx, pclq)
 			}
 			// Sum complete model instances, never physical Agent Pod counts.
 			if draft, isDraft := statuses[memberName]; isDraft {
@@ -116,56 +122,43 @@ func EvaluateLPXGroveReadiness(ctx context.Context, reader client.Reader, source
 		}
 	}
 	if unreadyMessage != "" {
-		return result(false, unreadyClassification, unreadyMessage), nil
+		return result(false, unreadyClassification, unreadyMessage)
 	}
 	ready, message, classification := pcsgStatusReady(pcsg, replicas)
 	if ready {
 		classification = v1beta1.DGDReadyReasonAllResourcesReady
 	}
-	return result(ready, classification, message), nil
+	return result(ready, classification, message)
 }
 
-// observeLPXRole fences one clique by ownership and revision, then reports its
-// counts in complete model instances. The group must already be observed at the
-// accepted PCS revision; all pointer inputs are non-nil.
-func observeLPXRole(ctx context.Context, reader client.Reader, group *grovev1alpha1.PodCliqueScalingGroup, name string, width int32) (groveComponentReadiness, error) {
+// observeLPXRole calculates readiness and complete-instance counts from a non-nil
+// PodClique at the accepted PCS revision. Capacity reconciliation has already
+// applied explicit counts; omitted counts retain the observed external capacity.
+func observeLPXRole(ctx context.Context, pclq *grovev1alpha1.PodClique) groveComponentReadiness {
 	role := groveComponentReadiness{}
-	clique := &grovev1alpha1.PodClique{}
-	if err := reader.Get(ctx, client.ObjectKey{Namespace: group.Namespace, Name: name}, clique); err != nil {
-		if apierrors.IsNotFound(err) {
-			return role.withResult(false, fmt.Sprintf("Waiting for LPX role %s", name), v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-		}
-		return role, err
-	}
-	if !metav1.IsControlledBy(clique, group) || !clique.DeletionTimestamp.IsZero() {
-		return role.withResult(false, fmt.Sprintf("Waiting for exact LPX role %s", name), v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-	}
-	if clique.Spec.Replicas != width || clique.Status.CurrentPodCliqueSetGenerationHash == nil ||
-		*clique.Status.CurrentPodCliqueSetGenerationHash != *group.Status.CurrentPodCliqueSetGenerationHash {
-		return role.withResult(false, fmt.Sprintf("LPX role %s has not applied the desired revision and capacity", name), v1beta1.DGDReadyReasonUpdating), nil
-	}
+	replicas := pclq.Spec.Replicas
 
 	// A model instance is counted only after the complete build width is observed.
-	readiness := podCliqueReadiness(clique, log.FromContext(ctx))
+	readiness := podCliqueReadiness(pclq, log.FromContext(ctx))
 	role = role.withResult(readiness.ready, readiness.reason, readiness.classification)
-	if clique.Status.ObservedGeneration == nil || *clique.Status.ObservedGeneration != clique.Generation {
-		return role, nil
+	if pclq.Status.ObservedGeneration == nil || *pclq.Status.ObservedGeneration != pclq.Generation {
+		return role
 	}
-	if clique.Status.Replicas >= width {
+	if pclq.Status.Replicas >= replicas {
 		role.status.Replicas = 1
 	}
-	if clique.Status.UpdatedReplicas >= width {
+	if pclq.Status.UpdatedReplicas >= replicas {
 		role.status.UpdatedReplicas = 1
 	}
 	scheduled, ready := int32(0), int32(0)
-	if clique.Status.ScheduledReplicas >= width || readiness.ready {
+	if pclq.Status.ScheduledReplicas >= replicas || readiness.ready {
 		scheduled = 1
 	}
 	if readiness.ready {
 		ready = 1
 	}
 	role.status.ScheduledReplicas, role.status.ReadyReplicas = &scheduled, &ready
-	return role, nil
+	return role
 }
 
 func pcsgStatusReady(pcsg *grovev1alpha1.PodCliqueScalingGroup, desiredReplicas int32) (bool, string, string) {

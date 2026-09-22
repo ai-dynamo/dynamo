@@ -13,6 +13,7 @@ SPDX-License-Identifier: Apache-2.0
 - Recovery from direct edits, force-deletion, or orphaning of managed
   resources are out of scope unless explicitly requested.
 - Do not add migration or recovery machinery solely for unsupported cases.
+- Minimize or exclude self-evident comments.
 
 # Reconciliation
 
@@ -95,11 +96,11 @@ SPDX-License-Identifier: Apache-2.0
   PCS replacement.
 - Seed the PCS's scaling-group template from immutable `MinAvailable` (default
   one), never from live or desired capacity. Apply explicit desired capacity
-  through PCSG `/scale` before publishing requests. The seed stays positive and
-  unchanged even when live capacity is zero.
+  through the PCSG `/scale` subresource before publishing requests. The seed stays
+  positive and unchanged even when live capacity is zero.
 - Explicit DGD replicas give this controller capacity ownership. Omitted
   replicas leave capacity externally managed: derive request ordinals from the
-  observed PCSG and never write `/scale`, including during deadline cleanup.
+  observed PCSG and never change its capacity, including during deadline cleanup.
 - External capacity is not persisted across PCS or PCSG replacement. A new
   group starts from the immutable template seed; its external scaler must
   reapply the desired count. Explicit DGD replicas are reapplied by this controller.
@@ -238,3 +239,4 @@ SPDX-License-Identifier: Apache-2.0
   using the repository's envtest assets. Run LPX race tests for lifecycle changes.
 - Regenerate the condition golden with
   `go test ./internal/controller/lpx -run TestPipelineRequestReadyConditionGolden -args -update`.
+- Do not write tautological tests.

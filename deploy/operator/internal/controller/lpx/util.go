@@ -115,46 +115,107 @@ func getPodCliqueScalingGroups(ctx context.Context, reader client.Reader, pcs *g
 	}
 
 	// Establish each expected group's identity and lifetime once for downstream operations.
-	groups := make(map[string]*grovev1alpha1.PodCliqueScalingGroup, len(configs))
+	pcsgs := make(map[string]*grovev1alpha1.PodCliqueScalingGroup, len(configs))
 	for i := range observed.Items {
-		group := &observed.Items[i]
-		if _, selected := expected[group.Name]; !selected {
+		pcsg := &observed.Items[i]
+		if _, selected := expected[pcsg.Name]; !selected {
 			continue
 		}
-		if !metav1.IsControlledBy(group, pcs) {
-			return nil, fmt.Errorf("PodCliqueScalingGroup %q is not controlled by PodCliqueSet %q", group.Name, pcs.Name)
+		if !metav1.IsControlledBy(pcsg, pcs) {
+			return nil, fmt.Errorf("PodCliqueScalingGroup %q is not controlled by PodCliqueSet %q", pcsg.Name, pcs.Name)
 		}
-		if group.DeletionTimestamp.IsZero() {
-			groups[group.Name] = group
+		if pcsg.DeletionTimestamp.IsZero() {
+			pcsgs[pcsg.Name] = pcsg
 		}
 	}
-	return groups, nil
+	return pcsgs, nil
+}
+
+// getPodCliques observes the cliques under the non-nil, owned PCS and pcsgs.
+// pcs is non-nil.
+// reader uses the cache. Ownership is validated here;
+// missing or deleting cliques are omitted and wait for their existing watches.
+func getPodCliques(ctx context.Context, reader client.Reader, pcs *grovev1alpha1.PodCliqueSet, pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup) (map[string]*grovev1alpha1.PodClique, error) {
+	observed := &grovev1alpha1.PodCliqueList{}
+	if err := reader.List(ctx, observed, client.InNamespace(pcs.Namespace), client.MatchingLabels{
+		grovecommon.LabelPartOfKey: pcs.Name, grovecommon.LabelPodCliqueSetReplicaIndex: "0",
+	}); err != nil {
+		return nil, err
+	}
+
+	// Keep every observed ordinal, including children whose group's cache entry still lags scale-out.
+	pclqs := make(map[string]*grovev1alpha1.PodClique, len(observed.Items))
+	for i := range observed.Items {
+		pclq := &observed.Items[i]
+		pcsg := pcsgs[pclq.Labels[grovecommon.LabelPodCliqueScalingGroup]]
+		if pcsg == nil || !metav1.IsControlledBy(pclq, pcsg) {
+			return nil, fmt.Errorf("PodClique %q is not controlled by an observed LPX PodCliqueScalingGroup", pclq.Name)
+		}
+		if !pclq.DeletionTimestamp.IsZero() {
+			continue
+		}
+		pclqs[pclq.Name] = pclq
+	}
+	return pclqs, nil
 }
 
 // scaleDownPodCliqueScalingGroup lowers capacity before asynchronous request cleanup.
 // pcsg must be non-nil, owned and not deleting. Call only for explicitly managed
 // capacity. Scale-out must wait until terminating request names disappear.
-func scaleDownPodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) error {
+func scaleDownPodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) (bool, error) {
 	if replicas >= pcsg.Spec.Replicas {
-		return nil
+		return false, nil
 	}
 	return scalePodCliqueScalingGroup(ctx, cl, pcsg, replicas)
 }
 
 // scalePodCliqueScalingGroup updates the non-nil, already-owned PCSG using its
-// observed resource version. Call only for explicitly managed capacity.
-// A successful write updates the supplied observation for the rest of this pass.
-func scalePodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) error {
+// observed resource version. It leaves the observation unchanged; a successful
+// scale write requires another reconciliation before using the new capacity.
+func scalePodCliqueScalingGroup(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, replicas int32) (bool, error) {
 	if pcsg.Spec.Replicas == replicas {
-		return nil
+		return false, nil
 	}
+
+	if err := updateScale(ctx, cl, pcsg, replicas); err != nil {
+		return false, fmt.Errorf("scale LPX PodCliqueScalingGroup %q: %w", pcsg.Name, err)
+	}
+
+	return true, nil
+}
+
+// scalePodCliques scales the named template's clique in every replica of the
+// non-nil pcsg. Call only for explicitly managed capacity.
+// The provided PCLQs remain unchanged; the returned bool reports whether they were updated.
+func scalePodCliques(ctx context.Context, cl client.Client, pcsg *grovev1alpha1.PodCliqueScalingGroup, pclqs map[string]*grovev1alpha1.PodClique, templateName string, replicas int32) (bool, error) {
+	var changed bool
+
+	for index := range pcsg.Spec.Replicas {
+		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, templateName)
+		pclq := pclqs[name]
+		if pclq == nil || pclq.Spec.Replicas == replicas {
+			continue
+		}
+
+		if err := updateScale(ctx, cl, pclq, replicas); err != nil {
+			return changed, fmt.Errorf("scale PodClique %q: %w", name, err)
+		}
+
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// updateScale writes only capacity using the non-nil resource's observed version.
+// The scale response does not replace or mutate the complete resource observation.
+func updateScale(ctx context.Context, cl client.Client, resource client.Object, replicas int32) error {
 	scale := &autoscalingv1.Scale{
-		ObjectMeta: metav1.ObjectMeta{ResourceVersion: pcsg.ResourceVersion},
-		Spec:       autoscalingv1.ScaleSpec{Replicas: replicas},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: resource.GetName(), Namespace: resource.GetNamespace(), ResourceVersion: resource.GetResourceVersion(),
+		},
+		Spec: autoscalingv1.ScaleSpec{Replicas: replicas},
 	}
-	if err := cl.SubResource("scale").Update(ctx, pcsg, client.WithSubResourceBody(scale)); err != nil {
-		return fmt.Errorf("scale LPX PodCliqueScalingGroup %q: %w", pcsg.Name, err)
-	}
-	pcsg.Spec.Replicas = replicas
-	return nil
+
+	return cl.SubResource("scale").Update(ctx, resource, client.WithSubResourceBody(scale))
 }

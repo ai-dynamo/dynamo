@@ -473,16 +473,37 @@ func TestLPXRenderingMetadata(t *testing.T) {
 }
 
 func TestLPXReplicaChangesPreserveRenderedTemplates(t *testing.T) {
-	t.Log("Render a hybrid workload at its initial capacity")
-	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
+	t.Log("Render omitted hybrid capacity for two I/O endpoints with two clients each")
+	root := t.TempDir()
+	const buildID = "split-io"
+	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, buildID, testV2GraphManifestFixture{
+		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
+		partitionCount: 1, numChips: 8, devicesPerNode: 8,
+		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
+		nonLPUDeviceTypes: []manifestcapnpv2.DeviceType{manifestcapnpv2.DeviceType_cuda},
+		ioFPGACount:       2, ioFanoutFactor: 2,
+	}))
+	registry, err := lpx.NewModelRegistry(root, nil)
+	require.NoError(t, err)
+	dgd := loadTestDGD(t, lpx.PipelineLPX, buildID)
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = nil
+	child := newLPXTestDeployment(t, dgd)
 	r := newLPXTestReconciler(t, registry, child, dgd)
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	before, beforeResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
+	cyborgIndex := slices.IndexFunc(before.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
+		return clique.Name == plans["lpx"].CyborgTemplate
+	})
+	require.NotEqual(t, -1, cyborgIndex)
+	cyborg := before.Spec.Template.Cliques[cyborgIndex]
+	require.EqualValues(t, 4, cyborg.Spec.Replicas)
+	require.Equal(t, ptr.To(int32(1)), cyborg.Spec.MinAvailable)
 
-	t.Log("Changing only workload capacity preserves templates, configuration and the graph digest")
+	t.Log("Changing backbone and Cyborg capacity preserves templates, configuration and the graph digest")
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(12))
+	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(8))
 	workloads, plans, err = r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
@@ -829,6 +850,19 @@ func testV2GraphManifestCapnp(t *testing.T, buildID string, fixture testV2GraphM
 	populateTestGraphBuild(t, manifest, filepath.Base(buildID))
 
 	deployment, program := newTestGraphProgram(t, manifest, fixture.compilationMode, uint32(fixture.partitionCount)*fixture.numChips/fixture.devicesPerNode, 8192)
+
+	// Describe a complete batch when a fixture uses multiple endpoints or clients.
+	runtimeIO, err := deployment.RuntimeIo()
+	require.NoError(t, err)
+	if fixture.ioFPGACount != 0 {
+		runtimeIO.SetProtocol(1)
+		runtimeIO.SetIoFpgaCount(fixture.ioFPGACount)
+	}
+	if fixture.ioFanoutFactor != 0 {
+		runtimeIO.SetFanoutFactor(fixture.ioFanoutFactor)
+	}
+	program.SetBatchSize(runtimeIO.IoFpgaCount() * runtimeIO.FanoutFactor())
+
 	if len(fixture.selectedPropSyncChain) != 0 {
 		chains, err := deployment.NewSelectedPropSyncChains(1)
 		require.NoError(t, err)
@@ -888,6 +922,8 @@ type testV2GraphManifestFixture struct {
 	selectedPropSyncChain []uint32
 	compilationMode       manifestcapnpv2.CompilationMode
 	nonLPUDeviceTypes     []manifestcapnpv2.DeviceType
+	ioFPGACount           uint32
+	ioFanoutFactor        uint32
 }
 
 func testV3GraphManifestCapnp(t *testing.T, buildID string, fixture testV3GraphManifestFixture) []byte {

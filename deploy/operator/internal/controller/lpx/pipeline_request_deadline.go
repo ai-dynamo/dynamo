@@ -127,9 +127,9 @@ func requeueForPipelineRequestDeadline(
 func (r *graphReconciler) reconcileSchedulingFailure(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
-	groups map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	explicitReplicas map[string]*int32,
-	requests []lpxv1alpha1.LPUPipelineRequest,
+	requests []*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 ) (ctrl.Result, error) {
 	// Persist evidence covering every expired cycle before deleting any expired request.
@@ -145,7 +145,7 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
 		expiredByGroup[name] = append(expiredByGroup[name], request)
 	}
-	requestsByGroup := make(map[string][]lpxv1alpha1.LPUPipelineRequest)
+	requestsByGroup := make(map[string][]*lpxv1alpha1.LPUPipelineRequest)
 	for _, request := range requests {
 		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
 		requestsByGroup[name] = append(requestsByGroup[name], request)
@@ -153,7 +153,7 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 
 	// An interior failure in one workload does not prevent another workload's suffix cleanup.
 	for _, name := range slices.Sorted(maps.Keys(expiredByGroup)) {
-		if err := r.reconcileExpiredPipelineRequests(ctx, groups[name], requestsByGroup[name], expiredByGroup[name], explicitReplicas[name] != nil); err != nil {
+		if err := r.reconcileExpiredPipelineRequests(ctx, pcsgs[name], requestsByGroup[name], expiredByGroup[name], explicitReplicas[name] != nil); err != nil {
 			return ctrl.Result{}, err
 		}
 	}
@@ -167,7 +167,7 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 func (r *graphReconciler) reconcileExpiredPipelineRequests(
 	ctx context.Context,
 	pcsg *grovev1alpha1.PodCliqueScalingGroup,
-	requests []lpxv1alpha1.LPUPipelineRequest,
+	requests []*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 	manageReplicas bool,
 ) error {
@@ -179,7 +179,7 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 
 	// Persist the lower PCSG count before asynchronous LPR/pod cleanup starts.
 	if manageReplicas {
-		if err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, replicas); err != nil {
+		if _, err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, replicas); err != nil {
 			return err
 		}
 	}
@@ -194,7 +194,7 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 // scale-down so a healthy higher ordinal is never removed.
 // For four replicas, expiry at {2,3} removes that suffix; {0,3} removes nothing.
 func expiredPipelineRequestSuffix(
-	requests []lpxv1alpha1.LPUPipelineRequest,
+	requests []*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 	replicas int32,
 ) (int32, []*lpxv1alpha1.LPUPipelineRequest, error) {
@@ -239,8 +239,7 @@ func expiredPipelineRequestSuffix(
 	}
 	siblings := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(requests))
 	failed := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(expired))
-	for index := range requests {
-		request := &requests[index]
+	for _, request := range requests {
 		name, replica, err := pipelineRequestScalingGroupTarget(request)
 		if err != nil {
 			return 0, nil, err

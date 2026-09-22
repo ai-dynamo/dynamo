@@ -19,6 +19,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -81,6 +82,7 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
+// +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
 
 // Reconcile observes dependencies once, then persists the final child status.
@@ -151,7 +153,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 
 	var (
 		pcsgs    map[string]*grovev1alpha1.PodCliqueScalingGroup
-		requests []lpxv1alpha1.LPUPipelineRequest
+		pclqs    map[string]*grovev1alpha1.PodClique
+		requests map[string]*lpxv1alpha1.LPUPipelineRequest
 	)
 
 	if pcs != nil {
@@ -166,7 +169,11 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 			return ctrl.Result{}, nil
 		}
 
-		// Foreground PCS replacement waits for its blocking LPRs; discover them only by owner UID.
+		pclqs, err = getPodCliques(ctx, r.Client, pcs, pcsgs)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
 		requests, err = r.getPipelineRequests(ctx, pcs)
 		if err != nil {
 			return ctrl.Result{}, err
@@ -177,20 +184,21 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return result, err
 	}
 
-	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, requests)
+	return r.reconcileWorkloads(ctx, deployment, dgd, pcs, pcsgs, pclqs, requests)
 }
 
 // reconcileWorkloads consumes owned observations; DGD and deployment are non-nil.
-// A nil pcs means initial creation, with no pcsgs or requests. Otherwise pcsgs
-// contains every configured, non-deleting group. On error, Reconcile persists
-// status before applying deadline retries.
+// A nil pcs means initial creation, with no pcsgs, pclqs or requests. Otherwise
+// pcsgs contains every configured group; pclqs contains owned, non-deleting cliques.
+// On error, Reconcile persists status before applying deadline retries.
 func (r *graphReconciler) reconcileWorkloads(
 	ctx context.Context,
 	deployment *v1alpha1.LPXGraphDeployment,
 	dgd *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
-	requests []lpxv1alpha1.LPUPipelineRequest,
+	pclqs map[string]*grovev1alpha1.PodClique,
+	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) (result ctrl.Result, err error) {
 	// Resolve and render every workload before deleting the running PCS.
 	workloads, plans, err := r.resolveWorkloads(ctx, deployment, dgd)
@@ -204,7 +212,7 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
-	// Immutable composition changes replace the PCS; replica-only changes use /scale.
+	// Immutable composition changes replace the PCS; replica-only changes patch live capacity.
 	if pcs != nil && pcs.Annotations[lpx.WorkloadDigestAnnotation] != desiredPCS.Annotations[lpx.WorkloadDigestAnnotation] {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
 		return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
@@ -218,13 +226,6 @@ func (r *graphReconciler) reconcileWorkloads(
 		explicitReplicas = make(map[string]*int32, len(plans))
 		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
 	)
-
-	// Index the graph's observed requests once, retaining scheduler-owned receipts.
-	requestsByName := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(requests))
-	for i := range requests {
-		request := &requests[i]
-		requestsByName[request.Name] = request
-	}
 
 	// Resolve each workload in the same order used for request publication.
 	for _, groupName := range groupNames {
@@ -241,7 +242,7 @@ func (r *graphReconciler) reconcileWorkloads(
 			}
 		}
 
-		desired, missing, intentChanged := resolvePipelineRequests(deployment, requestsByName, workload, plan)
+		desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
 
 		if intentChanged {
 			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
@@ -259,11 +260,15 @@ func (r *graphReconciler) reconcileWorkloads(
 	}()
 
 	// Scale only existing groups with explicitly managed capacity.
+	var capacityChanged bool
 	for groupName, pcsg := range pcsgs {
 		if replicas := explicitReplicas[groupName]; replicas != nil {
-			if err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, *replicas); err != nil {
+			changed, err := scaleDownPodCliqueScalingGroup(ctx, r, pcsg, *replicas)
+			if err != nil {
 				return ctrl.Result{}, err
 			}
+
+			capacityChanged = capacityChanged || changed
 		}
 	}
 
@@ -273,9 +278,14 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, err
 	}
 
+	if capacityChanged {
+		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting to observe LPX capacity changes")
+		return ctrl.Result{}, nil
+	}
+
 	// Failure blocks publication while each workload independently cleans up expired suffixes.
 	if len(expiredRequests) > 0 || isSchedulingFailedConditionCurrent(deployment) {
-		retained := slices.DeleteFunc(slices.Clone(requests), func(request lpxv1alpha1.LPUPipelineRequest) bool {
+		retained := slices.DeleteFunc(slices.Collect(maps.Values(requests)), func(request *lpxv1alpha1.LPUPipelineRequest) bool {
 			_, desired := desiredRequests[request.Name]
 			return !desired
 		})
@@ -305,18 +315,26 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Observe the created or updated PCS before scaling or publishing requests.
-	if pcs == nil || modified {
+	if modified {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for Grove to observe the workload")
 		return ctrl.Result{}, nil
 	}
 
 	// Scale-out proceeds after deleting old names, without waiting for Pods.
 	for _, groupName := range groupNames {
+		workload := workloads[groupName]
 		plan := plans[groupName]
-		if replicas := explicitReplicas[plan.LPXScalingGroup]; replicas != nil {
-			if err := scalePodCliqueScalingGroup(ctx, r, pcsgs[plan.LPXScalingGroup], *replicas); err != nil {
-				return ctrl.Result{}, err
-			}
+		pcsg := pcsgs[plan.LPXScalingGroup]
+		component := dgd.GetComponentByName(groupName)
+
+		changed, err := r.reconcileWorkloadCapacity(ctx, component, pcsg, pclqs, workload, plan)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if changed {
+			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting to observe LPX capacity changes")
+			return ctrl.Result{}, nil
 		}
 	}
 
@@ -324,14 +342,50 @@ func (r *graphReconciler) reconcileWorkloads(
 		return ctrl.Result{}, r.reconcilePipelineRequests(ctx, deployment, pcs, missingRequests)
 	}
 
-	defer func() {
-		// Old configmaps remain available until all workloads are Ready.
-		if err == nil {
-			err = r.deleteUnusedConfigMaps(ctx, deployment, resources)
-		}
-	}()
+	result = r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, pclqs, plans, desiredRequests)
+	// Old configmaps remain available until all workloads are Ready.
+	return result, r.deleteUnusedConfigMaps(ctx, deployment, resources)
+}
 
-	return r.reconcileReadiness(ctx, deployment, dgd, pcs, pcsgs, plans, desiredRequests)
+// reconcileWorkloadCapacity applies explicit capacity and validates external Cyborg counts.
+// Component, pcsg, workload and plan are non-nil. Omitted replica counts are never written.
+// The returned bool reports successful scale writes that require a fresh observation.
+func (r *graphReconciler) reconcileWorkloadCapacity(
+	ctx context.Context,
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+	pclqs map[string]*grovev1alpha1.PodClique,
+	workload *lpx.Workload,
+	plan *lpx.MaterializationPlan,
+) (bool, error) {
+	if replicas := component.Replicas; replicas != nil {
+		changed, err := scalePodCliqueScalingGroup(ctx, r, pcsg, *replicas)
+		if changed || err != nil {
+			return changed, err
+		}
+	}
+
+	if plan.CyborgTemplate == "" {
+		return false, nil
+	}
+
+	if replicas := component.ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas; replicas != nil {
+		return scalePodCliques(ctx, r, pcsg, pclqs, plan.CyborgTemplate, *replicas)
+	}
+
+	for index := range pcsg.Spec.Replicas {
+		name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(index)}, plan.CyborgTemplate)
+		pclq := pclqs[name]
+		if pclq == nil {
+			continue
+		}
+
+		if err := workload.ValidateCyborgReplicas(pclq.Spec.Replicas); err != nil {
+			return false, err
+		}
+	}
+
+	return false, nil
 }
 
 // reconcileRuntimeResources synchronizes additional resources for the LPX deployment.
@@ -354,9 +408,10 @@ func (r *graphReconciler) reconcileReadiness(
 	dgd *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
+	pclqs map[string]*grovev1alpha1.PodClique,
 	plans map[string]*lpx.MaterializationPlan,
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
-) (ctrl.Result, error) {
+) ctrl.Result {
 	readiness := dynamo.GroveReadiness{Ready: true}
 	deployment.Status.Components = make(map[string]v1beta1.ComponentReplicaStatus)
 
@@ -365,10 +420,7 @@ func (r *graphReconciler) reconcileReadiness(
 	for _, groupName := range slices.Sorted(maps.Keys(plans)) {
 		plan := plans[groupName]
 
-		observed, err := dynamo.EvaluateLPXGroveReadiness(ctx, r.Client, dgd, groupName, componentGroups[groupName], pcs, pcsgs[plan.LPXScalingGroup])
-		if err != nil {
-			return ctrl.Result{}, err
-		}
+		observed := dynamo.EvaluateLPXGroveReadiness(ctx, dgd, groupName, componentGroups[groupName], pcs, pcsgs[plan.LPXScalingGroup], pclqs)
 
 		maps.Copy(deployment.Status.Components, observed.ComponentStatuses)
 
@@ -378,12 +430,12 @@ func (r *graphReconciler) reconcileReadiness(
 	}
 
 	if !setPipelineRequestReadyCondition(deployment, requests) {
-		return ctrl.Result{}, nil
+		return ctrl.Result{}
 	}
 
 	if !readiness.Ready {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, readiness.Message)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}
 	}
 
 	setReadyCondition(deployment, v1beta1.DGDStateSuccessful, readiness.Message)
@@ -393,7 +445,7 @@ func (r *graphReconciler) reconcileReadiness(
 		delay = max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))
 	}
 
-	return ctrl.Result{RequeueAfter: delay}, nil
+	return ctrl.Result{RequeueAfter: delay}
 }
 
 // deleteUnusedConfigMaps runs only after readiness so existing pods keep their

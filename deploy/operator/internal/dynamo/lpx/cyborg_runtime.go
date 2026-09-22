@@ -7,12 +7,29 @@ package lpx
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 
 	corev1 "k8s.io/api/core/v1"
 )
 
 const gbuildManifestPathEnv = "GBUILD_MANIFEST_PATH"
+
+// MinimumCyborgReplicas returns one complete client group for a resolved hybrid workload.
+func (w *Workload) MinimumCyborgReplicas() (int32, error) {
+	build := &w.modelProjections[0].configuredBuild
+	replicas := int64(build.IOFPGACount) * int64(build.IOFanoutFactor)
+	if replicas > math.MaxInt32 {
+		return 0, fmt.Errorf("minimum Cyborg replicas %d exceeds the PodClique replica limit %d", replicas, math.MaxInt32)
+	}
+	return int32(replicas), nil
+}
+
+// ValidateCyborgReplicas ensures that the specified Cyborg replicas are in a valid configuration.
+func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
+	build := &w.modelProjections[0].configuredBuild
+	return validateCyborgReplicas(build, replicas)
+}
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
 func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) error {

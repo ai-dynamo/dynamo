@@ -225,6 +225,13 @@ func RenderNodeLocal(
 		); err != nil {
 			return nil, err
 		}
+
+		minimumReplicas, err := workload.MinimumCyborgReplicas()
+		if err != nil {
+			return nil, err
+		}
+		cyborg.Spec.Replicas = minimumReplicas
+		cyborg.Spec.MinAvailable = ptr.To(int32(1))
 	}
 
 	// Each workload contributes its own scaling group to the shared PCS.

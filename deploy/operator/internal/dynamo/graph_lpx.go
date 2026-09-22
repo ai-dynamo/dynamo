@@ -298,8 +298,12 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 			continue
 		}
 
-		// Hybrid conductors use their authored GPU template and replica count.
-		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, 1)
+		// Omitted hybrid capacity starts with one complete compiled client group.
+		minimumReplicas, err := workload.MinimumCyborgReplicas()
+		if err != nil {
+			return nil, err
+		}
+		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		role.Replicas = ptr.To(replicas)
@@ -328,8 +332,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 			return nil, fmt.Errorf("rendering %s.conductor: %w", component.ComponentName, err)
 		}
 
-		// Every GPU worker is required by the same compiled workload replica.
-		clique.Spec.MinAvailable = ptr.To(clique.Spec.Replicas)
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
 		clique.Labels[dynamolpx.StageLabel] = component.ComponentName
 		input.Cyborg = clique

@@ -157,8 +157,8 @@ func isLPXPodClique(obj client.Object) bool {
 }
 
 func isLPXPodCliqueScalingGroup(obj client.Object) bool {
-	group := obj.(*grovev1alpha1.PodCliqueScalingGroup)
-	return group.Annotations[lpx.WorkloadDigestAnnotation] != ""
+	pcsg := obj.(*grovev1alpha1.PodCliqueScalingGroup)
+	return pcsg.Annotations[lpx.WorkloadDigestAnnotation] != ""
 }
 
 func podCliquePredicate() predicate.Funcs {
@@ -188,17 +188,17 @@ func podCliqueScalingGroupPredicate() predicate.Funcs {
 		CreateFunc: func(e event.CreateEvent) bool { return isLPXPodCliqueScalingGroup(e.Object) },
 		DeleteFunc: func(e event.DeleteEvent) bool { return isLPXPodCliqueScalingGroup(e.Object) },
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldGroup := e.ObjectOld.(*grovev1alpha1.PodCliqueScalingGroup)
-			newGroup := e.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)
-			if !isLPXPodCliqueScalingGroup(oldGroup) && !isLPXPodCliqueScalingGroup(newGroup) {
+			oldPCSG := e.ObjectOld.(*grovev1alpha1.PodCliqueScalingGroup)
+			newPCSG := e.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)
+			if !isLPXPodCliqueScalingGroup(oldPCSG) && !isLPXPodCliqueScalingGroup(newPCSG) {
 				return false
 			}
-			return commoncontroller.PodCliqueScalingGroupStatusChangeIsSignificant(oldGroup, newGroup) ||
-				oldGroup.Generation != newGroup.Generation ||
-				!maps.Equal(oldGroup.Annotations, newGroup.Annotations) ||
-				!maps.Equal(oldGroup.Labels, newGroup.Labels) ||
-				!apiequality.Semantic.DeepEqual(oldGroup.OwnerReferences, newGroup.OwnerReferences) ||
-				!apiequality.Semantic.DeepEqual(oldGroup.DeletionTimestamp, newGroup.DeletionTimestamp)
+			return commoncontroller.PodCliqueScalingGroupStatusChangeIsSignificant(oldPCSG, newPCSG) ||
+				oldPCSG.Generation != newPCSG.Generation ||
+				!maps.Equal(oldPCSG.Annotations, newPCSG.Annotations) ||
+				!maps.Equal(oldPCSG.Labels, newPCSG.Labels) ||
+				!apiequality.Semantic.DeepEqual(oldPCSG.OwnerReferences, newPCSG.OwnerReferences) ||
+				!apiequality.Semantic.DeepEqual(oldPCSG.DeletionTimestamp, newPCSG.DeletionTimestamp)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}

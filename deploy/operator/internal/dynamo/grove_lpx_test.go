@@ -45,11 +45,9 @@ func TestEvaluateLPXGroveReadinessUsesEachComponentRuntimeNamespace(t *testing.T
 			},
 		},
 	} {
-		readiness, err := EvaluateLPXGroveReadiness(t.Context(), nil, source, "serving", []string{"draft", "serving"}, pcs, nil)
-		require.NoError(t, err)
+		readiness := EvaluateLPXGroveReadiness(t.Context(), source, "serving", []string{"draft", "serving"}, pcs, nil, nil)
 		require.False(t, readiness.Ready)
-		require.NotEqual(t, source.GetDynamoNamespaceForComponent(&draft), source.GetDynamoNamespaceForComponent(&serving))
-		require.Equal(t, source.GetDynamoNamespaceForComponent(&draft), readiness.ComponentStatuses[draft.ComponentName].RuntimeNamespace)
-		require.Equal(t, source.GetDynamoNamespaceForComponent(&serving), readiness.ComponentStatuses[serving.ComponentName].RuntimeNamespace)
+		require.Equal(t, "dynamo", readiness.ComponentStatuses[draft.ComponentName].RuntimeNamespace)
+		require.Equal(t, "tenant-graph", readiness.ComponentStatuses[serving.ComponentName].RuntimeNamespace)
 	}
 }

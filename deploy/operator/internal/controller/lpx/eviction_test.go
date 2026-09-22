@@ -57,7 +57,7 @@ func newLPUEvictionReconciler(objs ...client.Object) (*lpuEvictionReconciler, cl
 		Name: lpuEvictionTestPCS, Namespace: lpuEvictionTestNamespace, UID: "test-pcs-uid",
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(deployment, nvidiacomv1alpha1.LPXGraphDeploymentGVK)},
 	}}
-	group := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metav1.ObjectMeta{
 		Name: lpuEvictionTestPCSG, Namespace: lpuEvictionTestNamespace, UID: "test-pcsg-uid",
 		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
 	}}
@@ -69,7 +69,7 @@ func newLPUEvictionReconciler(objs ...client.Object) (*lpuEvictionReconciler, cl
 			dynamolpx.WorkloadDigestAnnotation: "test-digest",
 			lpxv1alpha1.PodRoleAnnotation:      lpxv1alpha1.PodRoleAgent,
 		},
-		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(group, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcsg, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueScalingGroup"))},
 	}}
 
 	config := &corev1.ConfigMap{
@@ -86,7 +86,7 @@ func newLPUEvictionReconciler(objs ...client.Object) (*lpuEvictionReconciler, cl
 	cb := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&corev1.Pod{}).
-		WithObjects(deployment, pcs, group, clique, config)
+		WithObjects(deployment, pcs, pcsg, clique, config)
 	for _, o := range objs {
 		cb = cb.WithObjects(o)
 	}
