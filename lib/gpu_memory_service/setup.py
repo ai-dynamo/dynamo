@@ -90,6 +90,9 @@ setup(
         "gpu_memory_service.v1.integrations",
         "gpu_memory_service.v1.integrations.sglang",
         "gpu_memory_service.v1.integrations.vllm",
+        "gms_kv_ring",
+        "gms_kv_ring.common",
+        "gms_kv_ring.daemon",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -111,6 +114,9 @@ setup(
         "gpu_memory_service.integrations.vllm": "integrations/vllm",
         "gpu_memory_service.snapshot": "snapshot",
         "gpu_memory_service.snapshot.backends": "snapshot/backends",
+        "gms_kv_ring": "../gms_kv_ring",
+        "gms_kv_ring.common": "../gms_kv_ring/common",
+        "gms_kv_ring.daemon": "../gms_kv_ring/daemon",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
