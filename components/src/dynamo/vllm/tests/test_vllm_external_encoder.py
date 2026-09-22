@@ -13,15 +13,21 @@ import pytest
 import torch
 from vllm.inputs import EmbedsPrompt
 
-from dynamo.common.external_encoder import (
-    ExternalEncoderResult,
-    encode_request_plane_tensor,
-)
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.handlers import BYPASS_REMOTE_PREFILL_ANNOTATION, DecodeWorkerHandler
-from dynamo.vllm.multimodal_utils import external_encoder as external_encoder_module
-from dynamo.vllm.multimodal_utils.external_encoder import ExternalEncoderPromptLoader
+from dynamo.vllm.multimodal_utils.custom_encoder import handoff as handoff_module
+from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
+    LinearEmbedsAdapter,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.backend import VisionEncoderBackend
+from dynamo.vllm.multimodal_utils.custom_encoder.external import (
+    ExternalEncoderPromptLoader,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.handoff import (
+    ExternalEncoderResult,
+    encode_request_plane_tensor,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -94,12 +100,51 @@ async def test_loader_builds_mixed_prompt_from_request_plane_features() -> None:
     torch.testing.assert_close(prompt["prompt_embeds"][4], packed[2])
 
 
+class _AdapterBackend(VisionEncoderBackend):
+    image_token_id = _IMAGE_TOKEN_ID
+
+    def build(self, model_id: str) -> None:
+        pass
+
+    def forward_batch(self, items, target_bucket=None):
+        raise NotImplementedError
+
+
+async def test_external_loader_matches_inline_linear_adapter() -> None:
+    artifacts = [
+        torch.arange(8, dtype=torch.bfloat16).reshape(2, _HIDDEN),
+        torch.full((1, _HIDDEN), 12, dtype=torch.bfloat16),
+    ]
+    token_ids = [1, _IMAGE_TOKEN_ID, 2, _IMAGE_TOKEN_ID, 3]
+    adapter = LinearEmbedsAdapter(
+        _AdapterBackend(),
+        _model_config(),
+        _engine_args(),
+    )
+    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+
+    inline_prompt = adapter.prepare_prompt(token_ids, artifacts)
+    remote_prompt = await loader.load(
+        ExternalEncoderResult.from_artifacts(
+            artifacts,
+            image_token_id=_IMAGE_TOKEN_ID,
+        ).to_dict(),
+        token_ids,
+    )
+
+    assert remote_prompt["prompt_token_ids"] == inline_prompt["prompt_token_ids"]
+    assert remote_prompt["prompt_is_token_ids"] == inline_prompt["prompt_is_token_ids"]
+    torch.testing.assert_close(
+        remote_prompt["prompt_embeds"], inline_prompt["prompt_embeds"]
+    )
+
+
 async def test_loader_reconstructs_prompt_off_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event_loop_thread = get_ident()
     decode_thread: int | None = None
-    original_decode = external_encoder_module.decode_request_plane_tensor
+    original_decode = handoff_module.decode_request_plane_tensor
 
     def tracked_decode(payload: Mapping[str, Any]) -> torch.Tensor:
         nonlocal decode_thread
@@ -107,7 +152,7 @@ async def test_loader_reconstructs_prompt_off_event_loop(
         return original_decode(payload)
 
     monkeypatch.setattr(
-        external_encoder_module,
+        handoff_module,
         "decode_request_plane_tensor",
         tracked_decode,
     )

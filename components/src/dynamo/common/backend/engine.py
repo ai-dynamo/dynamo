@@ -47,8 +47,10 @@ class GenerateRequest(TypedDict, total=False):
     the request carries media. ``encoder_result`` may be set by the frontend
     when forwarding a request from an Encode worker or by an application
     orchestrator before calling an Aggregated peer; engines read it via
-    :func:`dynamo.common.backend.multimodal.require_encoder_result`. All
-    four are object-shaped (``dict``) by contract.
+    :func:`dynamo.common.backend.multimodal.require_encoder_result`.
+    ``encoder_result`` is deliberately opaque at this common layer; its
+    producer and consuming engine own the concrete schema. All four are
+    object-shaped (``dict``) by contract.
 
     ``model`` carries the requested model name (set by the Rust
     preprocessor). Engines that support dynamic LoRA read it to route a

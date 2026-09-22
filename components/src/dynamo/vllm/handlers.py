@@ -102,7 +102,8 @@ from .multimodal_utils.custom_encoder import (
     VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
-from .multimodal_utils.external_encoder import ExternalEncoderPromptLoader
+from .multimodal_utils.custom_encoder.external import ExternalEncoderPromptLoader
+from .multimodal_utils.custom_encoder.handoff import external_encoder_request_conflicts
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -121,25 +122,6 @@ _FULL_VOCAB_LOGPROBS_SENTINEL = 2**32 - 1
 # DECODE-mode worker, the request runs as local prefill+decode instead of
 # expecting KV-transfer metadata from an upstream prefill worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
-
-_EXTERNAL_ENCODER_REQUEST_CONFLICTS = (
-    "multi_modal_data",
-    "multi_modal_uuids",
-    "prompt_embeds",
-    "mm_processor_kwargs",
-    "mm_routing_info",
-    "media_io_kwargs",
-)
-_EXTERNAL_ENCODER_EXTRA_ARG_CONFLICTS = (
-    "mm_processor_kwargs",
-    "mm_kwargs_shm",
-    "mm_kwargs_nixl",
-    "mm_hashes",
-    "mm_hashes_by_modality",
-    "mm_placeholders",
-    "mm_placeholders_by_modality",
-    "expanded_token_ids",
-)
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
@@ -3597,18 +3579,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> EmbedsPrompt:
         """Decode an external encoder result and prepare the vLLM prompt."""
 
-        conflicts = [
-            key
-            for key in _EXTERNAL_ENCODER_REQUEST_CONFLICTS
-            if request.get(key) is not None
-        ]
-        extra_args = request.get("extra_args")
-        if isinstance(extra_args, Mapping):
-            conflicts.extend(
-                f"extra_args.{key}"
-                for key in _EXTERNAL_ENCODER_EXTRA_ARG_CONFLICTS
-                if extra_args.get(key) is not None
-            )
+        conflicts = external_encoder_request_conflicts(request)
 
         if conflicts:
             raise InvalidArgument(
