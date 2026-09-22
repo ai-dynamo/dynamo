@@ -4,16 +4,13 @@
 use tonic_v14 as tonic;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
 };
-use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
-use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
 use dynamo_runtime::component::Endpoint;
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
@@ -698,7 +695,8 @@ impl LLMEngine for VllmSidecarEngine {
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
         let engine_config = observed.engine_config(!self.mode.is_encode())?;
-        let routing_image_token_id = resolve_routing_image_token_id(&observed).await;
+        let routing_image_token_id =
+            resolve_routing_image_token_id(&observed, startup_deadline).await;
         self.routing_image_token_id
             .set(routing_image_token_id)
             .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
@@ -1123,7 +1121,16 @@ impl LLMEngine for VllmSidecarEngine {
     }
 }
 
-async fn resolve_routing_image_token_id(model: &DiscoveredModel) -> Option<u32> {
+#[cfg(feature = "mm-routing")]
+async fn resolve_routing_image_token_id(
+    model: &DiscoveredModel,
+    startup_deadline: Instant,
+) -> Option<u32> {
+    use dynamo_llm::local_model::LocalModel;
+    use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
+    use std::path::PathBuf;
+    use tokio::time::timeout_at;
+
     if !model.supports_multimodal {
         return None;
     }
@@ -1132,7 +1139,10 @@ async fn resolve_routing_image_token_id(model: &DiscoveredModel) -> Option<u32> 
     let model_dir = if source_path.is_dir() {
         source_path
     } else {
-        match LocalModel::fetch(&model.source, true).await {
+        let fetched = timeout_at(startup_deadline, LocalModel::fetch(&model.source, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("exceeded the vLLM startup deadline")));
+        match fetched {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(
@@ -1158,6 +1168,14 @@ async fn resolve_routing_image_token_id(model: &DiscoveredModel) -> Option<u32> 
         ),
     }
     image_token_id
+}
+
+#[cfg(not(feature = "mm-routing"))]
+async fn resolve_routing_image_token_id(
+    _model: &DiscoveredModel,
+    _startup_deadline: Instant,
+) -> Option<u32> {
+    None
 }
 
 fn zmq_connect_endpoint(endpoint: &str, grpc_endpoint: &GrpcEndpoint) -> String {
