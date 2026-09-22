@@ -11,7 +11,7 @@ on:
         required: true
         type: string
       framework:
-        description: 'Backend the test image was built with (vllm, sglang, trtllm, dynamo); labels test metadata and coverage/Allure artifacts'
+        description: 'Backend the test image was built with (dynamo, sglang, triton, trtllm, vllm); labels test metadata and coverage/Allure artifacts'
         required: true
         type: string
       test_type:
@@ -117,7 +117,7 @@ on:
         type: boolean
         default: true
       source_ref:
-        description: 'Git ref/SHA to checkout and to resolve image tags against. Empty = caller SHA (github.sha).'
+        description: 'Git ref/SHA for image tags and checkout. Sidecar jobs always check out the caller SHA. Empty = caller SHA (github.sha).'
         required: false
         type: string
         default: ''
@@ -136,6 +136,16 @@ on:
         required: false
         type: string
         default: 'true'
+      sidecar_backend:
+        description: 'Backend name (vllm/sglang/trtllm) to install a dynamo-*-sidecar binary for before running tests. Empty = skip (non-sidecar callers).'
+        required: false
+        type: string
+        default: ''
+      sidecar_binary_artifact:
+        description: 'Name of the workflow artifact (from shared-build-sidecar.yml) containing the amd64 dynamo-*-sidecar binaries. Required when sidecar_backend is set.'
+        required: false
+        type: string
+        default: ''
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -193,9 +203,15 @@ jobs:
         DD_CIVISIBILITY_ENABLED: 'true'
         DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
         DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
-        PYTEST_ADDOPTS: --ddtrace
+        PYTEST_ADDOPTS: >
+          --ddtrace
+          ${{ inputs.framework == 'triton' && '--ignore=tests/fault_tolerance/test_canary_rank_pause.py' || '' }}
+          ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_vllm.py' || '' }}
+          ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_sglang.py' || '' }}
+          ${{ inputs.framework == 'triton' && '--ignore=tests/serve/test_trtllm.py' || '' }}
     permissions:
       contents: read
+      actions: read
     services:
       minio:
         image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
@@ -212,7 +228,39 @@ jobs:
         id: checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}
+          ref: ${{ inputs.sidecar_backend != '' && github.sha || inputs.source_ref || github.sha }}
+      - name: Download sidecar binary
+        if: ${{ inputs.sidecar_backend != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: ${{ inputs.sidecar_binary_artifact }}
+          path: sidecar-artifact
+      - name: Install sidecar binary
+        if: ${{ inputs.sidecar_backend != '' }}
+        shell: bash
+        env:
+          SIDECAR_BACKEND: ${{ inputs.sidecar_backend }}
+          CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        run: |
+          set -euo pipefail
+          # Use a workspace-local directory writable by the container user.
+          bin_dir="${GITHUB_WORKSPACE}/.sidecar-bin"
+          mkdir -p "${bin_dir}"
+          install -m755 "sidecar-artifact/dynamo-${SIDECAR_BACKEND}-sidecar" \
+            "${bin_dir}/dynamo-${SIDECAR_BACKEND}-sidecar"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          if [ -z "${CONTAINER_WORKSPACE}" ]; then
+            echo "::error::container_workspace is empty; refusing to replace test files"
+            exit 1
+          fi
+          if [ ! "${GITHUB_WORKSPACE}" -ef "${CONTAINER_WORKSPACE}" ]; then
+            # Replace the test inputs so files deleted by the PR cannot linger.
+            for path in lib/sidecar tests examples/common conftest.py pyproject.toml Cargo.toml; do
+              rm -rf "${CONTAINER_WORKSPACE}/${path}"
+              mkdir -p "$(dirname "${CONTAINER_WORKSPACE}/${path}")"
+              cp -r "${GITHUB_WORKSPACE}/${path}" "${CONTAINER_WORKSPACE}/${path}"
+            done
+          fi
       - name: Export KVBM MLA backend
         if: ${{ inputs.kvbm_mla_backend != '' }}
         shell: bash
@@ -238,6 +286,7 @@ jobs:
           fi
 
       - name: Run CPU-only tests (parallelized)
+        id: cpu-only-tests
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
         uses: $/.github/actions/pytest-local
@@ -253,6 +302,7 @@ jobs:
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run CPU end-to-end tests (isolated)
+        id: cpu-e2e-tests
         # Long-lived deployment tests should not compete with the xdist unit
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
@@ -271,6 +321,7 @@ jobs:
           gpu_tests: 'false'
           dd_flaky_retry_enabled: 'false'
       - name: Run GPU tests (parallel)
+        id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: $/.github/actions/pytest-local
@@ -290,6 +341,7 @@ jobs:
           gpu_tests: 'true'
           verify_gpu: ${{ inputs.verify_gpu }}
       - name: Run GPU tests (sequential)
+        id: gpu-sequential-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         # !cancelled() so a parallel-stage failure doesn't hide sequential results,
         # but require checkout to have succeeded so an infra/prereq failure (e.g. the
@@ -324,3 +376,96 @@ jobs:
           path: test-results/pytest_test_report_*.xml
           retention-days: 7
           if-no-files-found: warn
+
+      # A stage cut off mid-run is still reported as a successful step, so real
+      # test failures go green. Take the verdict only from the status file
+      # pytest-local writes last, never from the step outcome. Placed after the
+      # upload so results survive a failure here, and once per job rather than
+      # per stage to avoid three more container-hook round trips.
+      - name: Verify test stages completed
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        shell: bash
+        env:
+          STAGE_OUTCOMES: |
+            pre_merge_cpu ${{ steps.cpu-only-tests.outcome }}
+            pre_merge_cpu_e2e ${{ steps.cpu-e2e-tests.outcome }}
+            pre_merge_gpu_parallel ${{ steps.gpu-parallel-tests.outcome }}
+            pre_merge_gpu ${{ steps.gpu-sequential-tests.outcome }}
+        run: |
+          # Runs inside the job's test container. The planner image is
+          # distroless and ships only the binaries listed in
+          # container/Dockerfile.test, so this stays on bash builtins.
+          set -uo pipefail
+          status_dir="${GITHUB_WORKSPACE}/test-results/status"
+          failed=0
+          checked=""
+
+          while read -r stage outcome; do
+            [[ -z "${stage}" ]] && continue
+            exitcode_file="${status_dir}/${stage}.exitcode"
+
+            case "${outcome}" in
+              ''|skipped)
+                # An unresolvable id renders empty, which would otherwise read
+                # as "skipped" and exempt a stage that really ran.
+                if [[ -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: wrote a status file but its outcome is"
+                  echo "   '${outcome:-<empty>}'. Its id in STAGE_OUTCOMES does not"
+                  echo "   resolve, so the stage ran unverified."
+                  failed=1
+                else
+                  echo "⏭️  ${stage}: did not run"
+                fi
+                ;;
+              success)
+                if [[ ! -f "${exitcode_file}" ]]; then
+                  echo "❌ ${stage}: reported success but wrote no status file."
+                  echo "   Its script did not run to completion, so the result is"
+                  echo "   unknown and cannot be treated as a pass."
+                  failed=1
+                else
+                  # An empty file means the stage created it on entry and never
+                  # reached the line that records an exit code. read is a
+                  # builtin and returns non-zero on an empty file.
+                  code=""
+                  read -r code < "${exitcode_file}" || true
+                  if [[ -z "${code}" ]]; then
+                    echo "❌ ${stage}: reported success but recorded no exit code."
+                    echo "   Its script was cut off mid-run, so the result is"
+                    echo "   unknown and cannot be treated as a pass."
+                    failed=1
+                  elif [[ "${code}" != "0" ]]; then
+                    echo "❌ ${stage}: pytest exited ${code}"
+                    failed=1
+                  else
+                    echo "✅ ${stage}: pytest exited 0"
+                  fi
+                fi
+                ;;
+              *)
+                echo "❌ ${stage}: step outcome '${outcome}'"
+                failed=1
+                ;;
+            esac
+            checked+=" ${stage}"
+          done <<< "${STAGE_OUTCOMES}"
+
+          # A stage added above but not listed here would escape this check.
+          shopt -s nullglob
+          for f in "${status_dir}"/*.exitcode; do
+            stage="${f##*/}"
+            stage="${stage%.exitcode}"
+            if [[ " ${checked} " != *" ${stage} "* ]]; then
+              echo "❌ ${stage}: ran but is not listed in STAGE_OUTCOMES, so its"
+              echo "   result is unverified. Add it to this step."
+              failed=1
+            fi
+          done
+
+          # Without this the checks tab shows only "Process completed with exit
+          # code 1" and the stage name stays buried in this step's log.
+          if [[ "${failed}" -ne 0 ]]; then
+            echo "::error title=Test stage verification failed::A pytest stage did not record a passing result. See this step's log for the stage."
+          fi
+
+          exit "${failed}"

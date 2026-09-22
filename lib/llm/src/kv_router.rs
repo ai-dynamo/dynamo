@@ -26,6 +26,7 @@ use dynamo_kv_router::{
     },
     scheduling::{
         CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider, PotentialLoad,
+        RequestClassifier, RequestClassifierContext, RequestClassifierWorker,
         WorkerAvailabilityProvider, effective_prefill_tokens,
         overlap::cache_hit_estimates_from_tiered_matches,
         queue::{BookingHandle, SchedulerBookingDescriptor},
@@ -59,6 +60,7 @@ pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
 pub(crate) mod metrics_subscriber;
+pub mod plugins;
 pub mod prefill_router;
 pub mod publisher;
 mod request_lease;
@@ -68,9 +70,13 @@ pub mod sequence;
 pub mod shared_cache;
 
 pub use dynamo_kv_router::scheduling::OverlapScoresResponse;
-pub use embedded::{install_worker_selection_policy_registry, worker_selection_policy_registry};
+// TODO(v1.7): Remove these compatibility aliases; use kv_router::plugins instead.
 pub use encoder_router::EncoderRouter;
 pub use indexer::Indexer;
+pub use plugins::{
+    install_router_plugin_registry as install_worker_selection_policy_registry,
+    router_plugin_registry as worker_selection_policy_registry,
+};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
 pub use routing_load::{
@@ -525,6 +531,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
+        scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -533,6 +540,14 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     let error = DynamoError::builder()
         .error_type(error_type)
         .message(message.clone());
+    let error = if error_type == ErrorType::DeadlineExceeded {
+        error.reason(
+            dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                .expect("registered queue deadline reason"),
+        )
+    } else {
+        error
+    };
     if overloaded {
         error
             .cause(PipelineError::ServiceOverloaded(message))
@@ -804,8 +819,38 @@ impl KvRouter {
             Arc::new(move || client_for_overload.overloaded_instance_ids());
 
         let client_for_availability = client.clone();
-        let available_worker_provider: WorkerAvailabilityProvider =
-            Arc::new(move || client_for_availability.available_instance_ids());
+        let workers_for_availability = workers_with_configs.clone();
+        let available_worker_provider: WorkerAvailabilityProvider = Arc::new(move |request| {
+            let available = client_for_availability.available_instance_ids();
+            let (Some(filter), Some(lora_name)) =
+                (lora_filter.as_ref(), request.lora_name.as_deref())
+            else {
+                return available;
+            };
+            let candidates: Vec<_> = match (&request.allowed_worker_ids, available.as_ref()) {
+                (Some(allowed), _) => allowed
+                    .iter()
+                    .filter(|id| {
+                        available
+                            .as_ref()
+                            .is_none_or(|workers| workers.contains(*id))
+                    })
+                    .copied()
+                    .collect(),
+                (None, Some(available)) => available.iter().copied().collect(),
+                (None, None) => workers_for_availability.borrow().keys().copied().collect(),
+            };
+            Some(Arc::new(
+                filter
+                    .filter_worker_ids_for_lora_with_pin(
+                        Some(lora_name),
+                        &candidates,
+                        request.pinned_worker.map(|worker| worker.worker_id),
+                    )
+                    .into_iter()
+                    .collect(),
+            ))
+        });
 
         let request_leases =
             request_lease::RequestLeaseManager::new(cancellation_token.child_token());
@@ -821,9 +866,8 @@ impl KvRouter {
                 overloaded_worker_provider,
                 available_worker_provider,
                 shared_cache: shared_cache.clone(),
-                lora_worker_filter: lora_filter.map(|filter| {
-                    filter as Arc<dyn dynamo_kv_router::scheduling::LoraWorkerFilter>
-                }),
+                // The availability provider refreshes LoRA eligibility at admission.
+                lora_worker_filter: None,
                 ingress: Arc::clone(&ingress)
                     as Arc<dyn dynamo_kv_router::services::selection::KvEventIngress>,
                 scheduler_load,
@@ -870,6 +914,56 @@ impl KvRouter {
         registration: dynamo_runtime::discovery::EndpointRegistrationLease,
     ) {
         self.endpoint_registration = Some(registration);
+    }
+
+    /// Attach a request classifier before placing this router into service.
+    /// Classifier lifecycles belong to decode/aggregated routing; prefill hops bypass them.
+    pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        self.install_request_classifier(Box::new(classifier))?;
+        Ok(self)
+    }
+
+    /// Attach a catalog-created request classifier before placing this router into service.
+    pub fn install_request_classifier(&self, classifier: Box<dyn RequestClassifier>) -> Result<()> {
+        if !self
+            .selection
+            .scheduler()
+            .install_request_classifier(classifier, self.cancellation_token.child_token())
+        {
+            anyhow::bail!("request classifier is already configured");
+        }
+        tracing::info!(model = %self.tracking_model_name, "installed linked request classifier");
+        Ok(())
+    }
+
+    /// Cached per-rank capacity and registration state for this router's classifier.
+    pub fn request_classifier_context(&self) -> RequestClassifierContext {
+        let workers = self.workers_with_configs.clone();
+        RequestClassifierContext::new(self.block_size, move || {
+            workers
+                .borrow()
+                .iter()
+                .flat_map(|(&worker_id, config)| {
+                    let start = config.data_parallel_start_rank();
+                    let end = start.saturating_add(config.data_parallel_size());
+                    (start..end).map(move |rank| {
+                        RequestClassifierWorker::new(
+                            WorkerWithDpRank::new(worker_id, rank),
+                            config.total_kv_blocks(),
+                        )
+                    })
+                })
+                .collect()
+        })
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.selection
+            .scheduler()
+            .begin_request_lifecycle(request_id)
     }
 
     pub(crate) fn set_teardown_task_guard(
@@ -1922,6 +2016,19 @@ mod tests {
     }
 
     #[test]
+    fn queue_deadline_keeps_its_reason_through_serialization() {
+        let error = map_scheduler_error(KvSchedulerError::DeadlineExceeded);
+        let error = error.downcast_ref::<DynamoError>().unwrap();
+        let decoded: DynamoError =
+            serde_json::from_value(serde_json::to_value(error).unwrap()).unwrap();
+        assert_eq!(decoded.class(), ErrorType::DeadlineExceeded);
+        assert_eq!(decoded.reason().as_str(), "router.queue_deadline_exceeded");
+        assert!(crate::http::service::metrics::request_deadline_exceeded(
+            &decoded
+        ));
+    }
+
+    #[test]
     fn worker_selection_receives_complete_session_context() {
         use crate::protocols::common::extensions::{AgentContext, InputTrigger};
         use dynamo_kv_router::WorkerSelectionInputTrigger;
@@ -2194,6 +2301,55 @@ mod tests {
             },
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn classifier_context_tracks_capacity_and_registered_ranks() {
+        let mut router = make_router_without_membership(Some(WorkerType::Decode))
+            .await
+            .unwrap();
+        let (tx, workers) = watch::channel(HashMap::from([
+            (
+                7,
+                ModelRuntimeConfig {
+                    total_kv_blocks: Some(100),
+                    data_parallel_start_rank: 2,
+                    data_parallel_size: 2,
+                    ..Default::default()
+                },
+            ),
+            (8, ModelRuntimeConfig::default()),
+        ]));
+        router.workers_with_configs = workers;
+        let context = router.request_classifier_context();
+        assert_eq!(context.block_size(), 16);
+        let mut snapshot = context.workers();
+        snapshot.sort_by_key(RequestClassifierWorker::worker);
+        assert_eq!(
+            snapshot,
+            vec![
+                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 2), Some(100)),
+                RequestClassifierWorker::new(WorkerWithDpRank::new(7, 3), Some(100)),
+                RequestClassifierWorker::new(WorkerWithDpRank::new(8, 0), None),
+            ]
+        );
+        tx.send(HashMap::from([(
+            8,
+            ModelRuntimeConfig {
+                total_kv_blocks: Some(200),
+                ..Default::default()
+            },
+        )]))
+        .unwrap();
+        assert_eq!(
+            context.workers(),
+            vec![RequestClassifierWorker::new(
+                WorkerWithDpRank::new(8, 0),
+                Some(200)
+            ),]
+        );
+        tx.send(HashMap::new()).unwrap();
+        assert!(context.workers().is_empty());
     }
 
     #[tokio::test]
@@ -2875,6 +3031,161 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn queued_lora_requests_refresh_registration_without_widening_constraints() {
+        use crate::lora::state_tracker::LoraWorkerProjection;
+        use crate::lora::{LoraFilter, LoraReplicaConfig, LoraRoutingTable, LoraStateTracker};
+        use crate::model_card::LoraInfo;
+
+        let tracker = LoraStateTracker::new();
+        let publish = |loaded: &[u64]| {
+            tracker.replace_endpoint_projection(
+                [1, 2]
+                    .into_iter()
+                    .map(|id| {
+                        (
+                            WorkerWithDpRank::new(id, 0),
+                            LoraWorkerProjection {
+                                capacity: 4,
+                                loras: loaded
+                                    .contains(&id)
+                                    .then(|| LoraInfo {
+                                        name: "adapter".into(),
+                                        max_gpu_lora_count: Some(4),
+                                    })
+                                    .into_iter()
+                                    .collect(),
+                                is_registration_required: true,
+                            },
+                        )
+                    })
+                    .collect(),
+            );
+        };
+        let routing = LoraRoutingTable::new();
+        routing.update_allocation(
+            "adapter".into(),
+            LoraReplicaConfig {
+                lora_name: "adapter".into(),
+                replica_factor: 1,
+                replica_set: vec![WorkerWithDpRank::new(1, 0)],
+                updated_at: Instant::now(),
+                is_active: false,
+            },
+        );
+        let component = make_test_component("queued-lora-router").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(
+            [1, 2]
+                .into_iter()
+                .map(|id| (id, ModelRuntimeConfig::default()))
+                .collect(),
+        );
+        let router = KvRouter::new(
+            endpoint,
+            client,
+            workers,
+            None,
+            2,
+            SelectionPolicySource::Registry,
+            Some(KvRouterConfig {
+                overlap_score_credit: 0.0,
+                router_temperature: 0.0,
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                skip_initial_worker_wait: true,
+                router_queue_threshold: Some(0.0),
+                ..Default::default()
+            }),
+            None,
+            "decode",
+            None,
+            false,
+            None,
+            Some(Arc::new(LoraFilter::new(routing, tracker.clone()))),
+        )
+        .await
+        .unwrap();
+        let route = |id, lora_name, pinned_worker, allowed_worker_ids| {
+            router.find_best_match_details_with_policy_class(
+                Some(id),
+                &[1, 2],
+                None,
+                None,
+                true,
+                false,
+                lora_name,
+                None,
+                0.0,
+                0,
+                None,
+                None,
+                None,
+                pinned_worker,
+                allowed_worker_ids,
+                RoutingConstraints::default(),
+            )
+        };
+
+        for (pin, allowed, retained, expected) in [
+            (None, Some(HashSet::from([1, 2])), vec![2], Some(2)),
+            (Some(WorkerWithDpRank::new(1, 0)), None, vec![2], None),
+            (None, Some(HashSet::from([1])), vec![2], None),
+            (None, None, vec![], None),
+        ] {
+            publish(&[1, 2]);
+            for (id, worker) in [("busy-a", 1), ("busy-b", 2)] {
+                route(id, None, Some(WorkerWithDpRank::new(worker, 0)), None)
+                    .await
+                    .unwrap();
+            }
+            let queued = route("queued", Some("adapter".into()), pin, allowed);
+            tokio::pin!(queued);
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::select! {
+                    _ = &mut queued => panic!("request bypassed queue"),
+                    _ = async {
+                        while router.pending_count() != 1 {
+                            tokio::task::yield_now().await;
+                        }
+                    } => {}
+                }
+            })
+            .await
+            .unwrap();
+
+            publish(&retained);
+            router.mark_prefill_completed("busy-a").await.unwrap();
+            if expected.is_some() {
+                assert_eq!(router.pending_count(), 1, "remaining replica is still busy");
+            }
+            router.mark_prefill_completed("busy-b").await.unwrap();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), queued)
+                .await
+                .unwrap();
+            match expected {
+                Some(id) => {
+                    assert!(
+                        matches!(result.unwrap(), FindBestMatchOutcome::Routed { worker, .. } if worker.worker_id == id)
+                    );
+                    router.free("queued").await.unwrap();
+                }
+                None => assert!(matches!(
+                    result
+                        .err()
+                        .expect("no eligible worker")
+                        .downcast_ref::<KvSchedulerError>(),
+                    Some(KvSchedulerError::NoEndpoints)
+                )),
+            }
+            assert_eq!(router.pending_count(), 0);
+            for id in ["busy-a", "busy-b"] {
+                router.free(id).await.unwrap();
+            }
+        }
     }
 
     /// Picks worker 0 and records which construction it belongs to. Its
