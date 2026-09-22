@@ -1156,11 +1156,21 @@ pub fn chat_completion_to_response(
         // or not the caller asked for reasoning.summary: the backend/parser already did
         // the work, and dropping it silently loses information the caller can otherwise
         // only get via reasoning.summary. See issue #14069.
+        //
+        // Whitespace-only reasoning counts as empty — matching aggregator.rs's
+        // `move_reasoning_to_content_when_empty` check — so a bare trailing
+        // newline after `</think>` doesn't open a reasoning item with nothing
+        // in it.
         if let Some(reasoning_text) = choice.message.reasoning_content
-            && !reasoning_text.is_empty()
+            && !reasoning_text.trim().is_empty()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
+                // `reasoning.summary` is no longer read anywhere after the
+                // reasoning_summary_requested() gate was removed (#14069):
+                // the raw text above is always returned in `content`, so a
+                // populated `summary` would just duplicate it. This is
+                // deliberately always empty, not a TODO.
                 summary: vec![],
                 content: Some(vec![ReasoningItemContent::ReasoningText(
                     ReasoningTextContent {
@@ -1218,7 +1228,20 @@ pub fn chat_completion_to_response(
             }
         }
 
-        if output.is_empty() {
+        // A reasoning-only turn now leaves `output` non-empty (it always
+        // carries the reasoning item above), so `output.is_empty()` no
+        // longer detects "no visible answer yet." Check for a message or
+        // function-call item directly instead. Only backfill the empty
+        // message when the turn actually completed: an incomplete
+        // reasoning-only turn (cut off by the output budget before any
+        // answer text) is not required to carry an assistant message, and
+        // the status/terminal-item logic below already marks the reasoning
+        // item itself as Incomplete in that case.
+        if !output_limit_reached
+            && !output
+                .iter()
+                .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)))
+        {
             output.push(make_text_message(message_id, String::new()));
         }
     } else {
@@ -3501,6 +3524,77 @@ thinking
             .expect("requested reasoning output");
         assert!(reasoning.summary.is_empty());
         assert_eq!(reasoning_text(reasoning), "summary");
+    }
+
+    /// Reasoning-only turn (no message text, no tool calls) that finished
+    /// normally: the reasoning item alone is not a valid completed response
+    /// on its own, so a synthetic empty assistant message is still
+    /// appended, exactly as it would be if there had been no reasoning and
+    /// no other output at all.
+    #[test]
+    fn test_reasoning_only_completed_turn_still_gets_empty_message() {
+        let mut chat_resp = make_chat_resp_with_text("");
+        chat_resp.inner.choices[0].message.reasoning_content = Some("thinking it over".into());
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Completed);
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [OutputItem::Reasoning(_), OutputItem::Message(_)]
+        ));
+        let OutputItem::Message(message) = &response.inner.output[1] else {
+            unreachable!()
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
+    }
+
+    /// Same reasoning-only shape, but the turn was cut off by the output
+    /// budget before any answer text. The empty-message backfill above must
+    /// NOT fire here: an incomplete reasoning-only turn is a valid shape on
+    /// its own (the reasoning item itself carries the Incomplete status),
+    /// unlike a *completed* reasoning-only turn.
+    #[test]
+    fn test_reasoning_only_incomplete_turn_stays_reasoning_only() {
+        let mut chat_resp = make_chat_resp_with_text("");
+        chat_resp.inner.choices[0].message.reasoning_content = Some("still thinking".into());
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::Length);
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [OutputItem::Reasoning(_)]
+        ));
+        let OutputItem::Reasoning(reasoning) = &response.inner.output[0] else {
+            unreachable!()
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
+    }
+
+    /// Whitespace-only reasoning_content (e.g. a lone trailing newline after
+    /// `</think>`) is treated as absent, matching aggregator.rs's
+    /// `move_reasoning_to_content_when_empty` check — it must not open a
+    /// reasoning item with nothing meaningful in it. With no other output,
+    /// this is indistinguishable from a turn with no reasoning at all: it
+    /// still gets the usual synthetic empty message.
+    #[test]
+    fn test_whitespace_only_reasoning_is_dropped() {
+        let mut chat_resp = make_chat_resp_with_text("");
+        chat_resp.inner.choices[0].message.reasoning_content = Some("\n\n".into());
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Completed);
+        assert!(matches!(
+            response.inner.output.as_slice(),
+            [OutputItem::Message(_)]
+        ));
     }
 
     #[test]
