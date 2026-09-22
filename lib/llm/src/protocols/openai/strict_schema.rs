@@ -7,15 +7,24 @@ use anyhow::{Result, anyhow};
 use dynamo_protocols::types::FunctionObject;
 use serde_json::{Map, Value};
 
+// OpenAI's documented composition exclusions, plus `oneOf` (the API answers
+// "'oneOf' is not permitted") and the array keywords absent from its supported list.
 const UNSUPPORTED_KEYWORDS: &[&str] = &[
     "allOf",
+    "oneOf",
     "not",
     "dependentRequired",
     "dependentSchemas",
     "if",
     "then",
     "else",
+    "uniqueItems",
+    "contains",
+    "minContains",
+    "maxContains",
+    "unevaluatedItems",
 ];
+const MAX_OBJECT_DEPTH: usize = 10;
 const TYPES: &[&str] = &[
     "null", "boolean", "object", "array", "number", "integer", "string",
 ];
@@ -84,7 +93,7 @@ impl Budgets {
 }
 
 fn validate_schema(root: &Value) -> Result<()> {
-    let mut nodes = vec![(String::new(), root)];
+    let mut nodes = vec![(String::new(), root, 0)];
     let mut budgets = Budgets::default();
     let mut nested_id = None;
     let mut references = Vec::new();
@@ -92,7 +101,7 @@ fn validate_schema(root: &Value) -> Result<()> {
     // Breadth-first traversal, sorted map keys, and fixed keyword order make diagnostics stable
     // even when serde_json's preserve_order feature is enabled by another workspace dependency.
     while index < nodes.len() {
-        let (path, value) = nodes[index].clone();
+        let (path, value, depth) = nodes[index].clone();
         index += 1;
         if value.is_boolean() {
             continue;
@@ -123,6 +132,14 @@ fn validate_schema(root: &Value) -> Result<()> {
             nested_id = Some(path.clone());
         }
         validate_shapes(schema, &path)?;
+        let is_object = is_object_schema(schema);
+        if is_object && depth > MAX_OBJECT_DEPTH {
+            return Err(invalid(
+                &path,
+                format!("exceeds {MAX_OBJECT_DEPTH} levels of object nesting"),
+            ));
+        }
+        let child_depth = depth + usize::from(is_object);
         validate_object(schema, &path)?;
         if let Some(reference) = schema.get("$ref") {
             references.push((index - 1, reference.as_str().unwrap()));
@@ -159,22 +176,22 @@ fn validate_schema(root: &Value) -> Result<()> {
                     if keyword != "patternProperties" {
                         budgets.characters += name.chars().count();
                     }
-                    nodes.push((child_path(&location, name), value));
+                    nodes.push((child_path(&location, name), value, child_depth));
                 }
             }
         }
-        for keyword in ["anyOf", "oneOf", "prefixItems", "items"] {
+        for keyword in ["anyOf", "prefixItems", "items"] {
             if let Some(value) = schema.get(keyword) {
                 let location = child_path(&path, keyword);
                 if keyword == "items" && !value.is_array() {
-                    nodes.push((location, value));
+                    nodes.push((location, value, child_depth));
                 } else {
                     let values = value
                         .as_array()
                         .filter(|a| !a.is_empty())
                         .ok_or_else(|| invalid(&location, "must be a nonempty array of schemas"))?;
                     for (i, value) in values.iter().enumerate() {
-                        nodes.push((child_path(&location, &i.to_string()), value));
+                        nodes.push((child_path(&location, &i.to_string()), value, child_depth));
                     }
                 }
             }
@@ -182,14 +199,12 @@ fn validate_schema(root: &Value) -> Result<()> {
         for keyword in [
             "additionalProperties",
             "additionalItems",
-            "contains",
             "propertyNames",
             "unevaluatedProperties",
-            "unevaluatedItems",
             "contentSchema",
         ] {
             if let Some(value) = schema.get(keyword) {
-                nodes.push((child_path(&path, keyword), value));
+                nodes.push((child_path(&path, keyword), value, child_depth));
             }
         }
         if let Some(value) = schema.get("dependencies") {
@@ -205,7 +220,7 @@ fn validate_schema(root: &Value) -> Result<()> {
                 if value.is_array() {
                     unique_strings(value, &location)?;
                 } else {
-                    nodes.push((location, value));
+                    nodes.push((location, value, child_depth));
                 }
             }
         }
@@ -222,7 +237,7 @@ fn validate_schema(root: &Value) -> Result<()> {
     let locations: HashMap<_, _> = nodes
         .iter()
         .enumerate()
-        .map(|(i, (path, _))| (path.as_str(), i))
+        .map(|(i, (path, _, _))| (path.as_str(), i))
         .collect();
     let mut targets = vec![None; nodes.len()];
     for (index, reference) in references {
@@ -295,8 +310,6 @@ fn validate_shapes(schema: &Map<String, Value>, path: &str) -> Result<()> {
         "maxLength",
         "minItems",
         "maxItems",
-        "minContains",
-        "maxContains",
         "minProperties",
         "maxProperties",
     ] {
@@ -312,23 +325,29 @@ fn validate_shapes(schema: &Map<String, Value>, path: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
-    let has_properties =
-        schema.contains_key("properties") || schema.contains_key("patternProperties");
+fn declares_properties(schema: &Map<String, Value>) -> bool {
+    schema.contains_key("properties") || schema.contains_key("patternProperties")
+}
+
+fn is_object_schema(schema: &Map<String, Value>) -> bool {
     let object_type = schema.get("type").is_some_and(|value| {
         value == "object"
             || value
                 .as_array()
                 .is_some_and(|types| types.iter().any(|t| t == "object"))
     });
-    let local_constraints = has_properties
+    object_type || declares_properties(schema)
+}
+
+fn validate_object(schema: &Map<String, Value>, path: &str) -> Result<()> {
+    let local_constraints = declares_properties(schema)
         || schema.contains_key("required")
         || schema.contains_key("additionalProperties");
     // A type-only $ref sibling constrains the target, not a second local property set.
     let needs_object_checks = if schema.contains_key("$ref") {
         local_constraints
     } else {
-        object_type || has_properties
+        is_object_schema(schema)
     };
     if !needs_object_checks {
         return Ok(());
@@ -419,14 +438,17 @@ fn reference_pointer(reference: &str, path: &str) -> Result<String> {
     Ok(pointer.into_owned())
 }
 
-fn validate_reference_cycles(nodes: &[(String, &Value)], targets: &[Option<usize>]) -> Result<()> {
+fn validate_reference_cycles(
+    nodes: &[(String, &Value, usize)],
+    targets: &[Option<usize>],
+) -> Result<()> {
     let mut finished = HashSet::new();
     for start in 0..nodes.len() {
         let mut chain = HashSet::new();
         let mut current = start;
         while !finished.contains(&current) {
             let schema = nodes[current].1;
-            if ["type", "properties", "patternProperties", "anyOf", "oneOf"]
+            if ["type", "properties", "patternProperties", "anyOf"]
                 .iter()
                 .any(|key| schema.get(key).is_some())
             {
@@ -449,12 +471,12 @@ fn validate_reference_cycles(nodes: &[(String, &Value)], targets: &[Option<usize
     Ok(())
 }
 
-fn validate_root(nodes: &[(String, &Value)], targets: &[Option<usize>]) -> Result<()> {
+fn validate_root(nodes: &[(String, &Value, usize)], targets: &[Option<usize>]) -> Result<()> {
     let mut current = 0;
     let mut seen = HashSet::new();
     let mut object = false;
     while seen.insert(current) {
-        let (path, schema) = &nodes[current];
+        let (path, schema, _) = &nodes[current];
         if schema.get("anyOf").is_some() {
             return Err(invalid(path, "root must not use anyOf"));
         }
@@ -553,10 +575,6 @@ mod tests {
                 json!({"type": "object", "additionalProperties": false, "anyOf": [true]}),
                 "root must not use anyOf",
             ),
-            (
-                json!({"oneOf": [object()]}),
-                "unsupported root representation",
-            ),
             (nested(json!({"type": "object"})), "additionalProperties"),
             (nested(json!({"properties": {}})), "additionalProperties"),
             (
@@ -626,7 +644,7 @@ mod tests {
             schema[keyword]["x"] = object();
             check(schema).unwrap();
         }
-        for keyword in ["anyOf", "oneOf", "prefixItems", "items"] {
+        for keyword in ["anyOf", "prefixItems", "items"] {
             let mut schema = json!({});
             schema[keyword] = json!([{"type": "object"}]);
             rejects(nested(schema.clone()), &format!("/{keyword}/0"));
@@ -637,10 +655,8 @@ mod tests {
             "items",
             "additionalProperties",
             "additionalItems",
-            "contains",
             "propertyNames",
             "unevaluatedProperties",
-            "unevaluatedItems",
             "contentSchema",
         ] {
             let mut schema = json!({});
@@ -684,8 +700,6 @@ mod tests {
             ("maxLength", json!(0.5)),
             ("minItems", json!("1")),
             ("maxItems", json!(null)),
-            ("minContains", json!(-1)),
-            ("maxContains", json!(false)),
             ("minProperties", json!(0.5)),
             ("maxProperties", json!(-1)),
             ("properties", json!([])),
@@ -693,7 +707,6 @@ mod tests {
             ("$defs", json!([])),
             ("definitions", json!(null)),
             ("anyOf", json!([])),
-            ("oneOf", json!({})),
             ("prefixItems", json!([null])),
             ("items", json!([])),
             ("items", json!(null)),
@@ -726,7 +739,10 @@ mod tests {
         })))
         .unwrap();
         check(nested(json!({"type": "number", "minimum": 0, "maximum": 10, "exclusiveMinimum": -1, "exclusiveMaximum": 11, "multipleOf": 0.5}))).unwrap();
-        check(nested(json!({"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 2, "minContains": 0, "maxContains": 1}))).unwrap();
+        check(nested(
+            json!({"type": "array", "items": {"type": "string"}, "minItems": 0, "maxItems": 2}),
+        ))
+        .unwrap();
         check(json!({"type": "object", "properties": {"not": true}, "required": ["not"], "additionalProperties": false, "dependencies": {"not": ["not"]}, "$schema": "https://example.com/schema"})).unwrap();
     }
 
@@ -894,11 +910,17 @@ mod tests {
     }
 
     #[test]
-    fn traversal_has_no_schema_depth_limit() {
+    fn object_nesting_depth() {
         let mut schema = json!(true);
         for _ in 0..512 {
             schema = json!({"items": schema});
         }
         check(nested(schema)).unwrap();
+        let mut schema = object();
+        for _ in 0..10 {
+            schema = nested(schema);
+        }
+        check(schema.clone()).unwrap();
+        rejects(nested(schema), "10 levels of object nesting");
     }
 }
