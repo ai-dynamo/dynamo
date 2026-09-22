@@ -94,12 +94,13 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 	shortCtx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 	for _, testCase := range []struct {
-		ref string
-		ctx context.Context
+		registryURL string
+		ref         string
+		ctx         context.Context
 	}{
-		{ref: "model/build", ctx: t.Context()},
+		{registryURL: "gs://bucket/registry", ref: "model/build", ctx: t.Context()},
 		{ref: "gs://bucket/registry/model/build", ctx: t.Context()},
-		{ref: "model/build", ctx: shortCtx},
+		{registryURL: "gs://bucket/registry", ref: "model/build", ctx: shortCtx},
 	} {
 		t.Run(testCase.ref, func(t *testing.T) {
 			t.Log("Create an independent client and registry for this reference form")
@@ -110,7 +111,7 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 				},
 				list: &modelpb.ModelFileList{Files: []*modelpb.ModelFileInfo{{RelativePath: gbuildManifestV2CapnpFile}}},
 			}
-			registry, err := NewModelRegistry("gs://bucket/registry", client)
+			registry, err := NewModelRegistry(testCase.registryURL, client)
 			require.NoError(t, err)
 
 			t.Log("Normalize the manifest and retain the current registry locator")

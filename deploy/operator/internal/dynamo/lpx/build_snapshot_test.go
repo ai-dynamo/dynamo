@@ -105,7 +105,7 @@ func TestAcquireBuildSnapshotRejectsLegacyCompilerMetadata(t *testing.T) {
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(buildDir, path), []byte(`{}`), 0o600))
 	}
-	registry, err := NewModelRegistry(buildDir, nil)
+	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
 
 	t.Log("Require revision-2 binary compiler metadata without fallback")

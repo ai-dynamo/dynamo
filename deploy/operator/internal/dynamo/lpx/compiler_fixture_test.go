@@ -80,7 +80,7 @@ func testLPXPodTemplate(image string) *corev1.PodTemplateSpec {
 
 func acquireTestSnapshot(t *testing.T, buildDir string) *BuildSnapshot {
 	t.Helper()
-	registry, err := NewModelRegistry(buildDir, nil)
+	registry, err := NewModelRegistry("", nil)
 	require.NoError(t, err)
 	snapshot, err := registry.AcquireBuildSnapshot(t.Context(), buildDir)
 	require.NoError(t, err)

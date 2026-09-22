@@ -1392,7 +1392,7 @@ func TestLPXValidatesIntentBeforeDownloadsOrPublication(t *testing.T) {
 				delete(source.Annotations, consts.KubeAnnotationLPXSchedulerBackend)
 				source.Annotations[consts.KubeAnnotationWorkloadProvider] = consts.WorkloadProviderComponent
 			}
-			registry, err := lpx.NewModelRegistry("gs://bucket/registry", nil)
+			registry, err := lpx.NewModelRegistry("", nil)
 			require.NoError(t, err)
 			observedRegistry := &fakeModelDownloadRegistry{ModelRegistry: registry}
 			child := newLPXTestDeployment(t, source)

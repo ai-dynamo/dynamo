@@ -121,11 +121,14 @@ func (r *defaultModelRegistry) EnsureDownloaded(ctx context.Context, buildURL ur
 	}
 }
 
-// BuildURL resolves id against the configured registry URL. The receiver must
-// be non-nil and is not mutated.
+// BuildURL resolves id against the configured registry URL. Absolute references
+// require an unconfigured registry. The receiver must be non-nil and is not mutated.
 func (r *defaultModelRegistry) BuildURL(id string) (*url.URL, error) {
 	refURL, err := parseBuildRef(id)
 	if err == nil {
+		if r.registryURL != nil {
+			return nil, fmt.Errorf("build ID %q must be relative when model registry URL is configured", id)
+		}
 		return refURL, nil
 	}
 	if !errors.Is(err, errRelativeBuildRef) {
