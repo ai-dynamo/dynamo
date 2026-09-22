@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 from _deps import HAS_GMS
@@ -33,6 +34,105 @@ def test_v1_socket_path_rejects_af_unix_overflow(monkeypatch):
 
     with pytest.raises(ValueError, match="too long for AF_UNIX"):
         v1_device.get_socket_path(0, "weights")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, ("weights", "kv_cache")),
+        ("kv_cache", ("kv_cache",)),
+        (" weights, kv_cache ", ("weights", "kv_cache")),
+    ],
+)
+def test_server_tags_from_env(monkeypatch, raw, expected):
+    if raw is None:
+        monkeypatch.delenv("GMS_SERVER_TAGS", raising=False)
+    else:
+        monkeypatch.setenv("GMS_SERVER_TAGS", raw)
+
+    assert server._tags_from_env() == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        (" , ", "at least one tag"),
+        ("weights,unknown", "unsupported"),
+        ("kv_cache,kv_cache", "duplicate"),
+    ],
+)
+def test_server_tags_from_env_rejects_invalid_values(monkeypatch, raw, match):
+    monkeypatch.setenv("GMS_SERVER_TAGS", raw)
+
+    with pytest.raises(RuntimeError, match=match):
+        server._tags_from_env()
+
+
+def test_directory_command_uses_distinct_protocol_server():
+    assert server._directory_command("/run/gms/directory.sock") == [
+        sys.executable,
+        "-m",
+        "gms_kv_ring.daemon.directory_server",
+        "/run/gms/directory.sock",
+    ]
+
+
+def test_main_supervises_optional_directory_with_cuda_servers(monkeypatch):
+    commands = []
+    supervised = []
+
+    class Process:
+        pid = 123
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+    class Vmm:
+        @staticmethod
+        def list_devices():
+            return [3]
+
+    monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+    monkeypatch.setenv("GMS_DIRECTORY_SOCKET", "/run/gms/directory.sock")
+    monkeypatch.setenv("GMS_SERVER_TAGS", "kv_cache")
+    monkeypatch.setattr(server, "init_vmm", lambda *_args: None)
+    monkeypatch.setattr(server, "get_vmm", lambda: Vmm())
+    monkeypatch.setattr(
+        server.subprocess,
+        "Popen",
+        lambda command: (commands.append(command), Process())[1],
+    )
+    monkeypatch.setattr(server.signal, "signal", lambda *_args: None)
+
+    def supervise(servers, loaders):
+        supervised.extend(servers)
+        assert loaders == []
+        return 0
+
+    monkeypatch.setattr(server, "_supervise", supervise)
+
+    with pytest.raises(SystemExit) as exc:
+        server.main([])
+
+    assert exc.value.code == 0
+    assert commands == [
+        server._directory_command("/run/gms/directory.sock"),
+        [
+            sys.executable,
+            "-m",
+            "gpu_memory_service",
+            "--device",
+            "3",
+            "--device-type",
+            "cuda",
+            "--tag",
+            "kv_cache",
+        ],
+    ]
+    assert len(supervised) == 2
 
 
 class _Process:

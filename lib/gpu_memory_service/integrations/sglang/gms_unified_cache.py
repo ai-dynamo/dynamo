@@ -53,6 +53,27 @@ def _directory_hashes(key, page_size: int, get_hash_str) -> list[bytes]:
     return result
 
 
+def _logical_layout_digest(items: list[dict]) -> bytes:
+    """Digest generation-independent fields used for cross-rank agreement."""
+    digest = sha256(b"sglang-gms-layout-v1\0")
+    for item in items:
+        content_hash = bytes(item["content_hash"])
+        engine_id = str(item["engine_id"]).encode("utf-8")
+        tier = str(item["tier"]).encode("utf-8")
+        digest.update(len(content_hash).to_bytes(4, "little"))
+        digest.update(content_hash)
+        digest.update(len(engine_id).to_bytes(4, "little"))
+        digest.update(engine_id)
+        slots = item["slot_ids"]
+        digest.update(len(slots).to_bytes(4, "little"))
+        for slot in slots:
+            digest.update(int(slot).to_bytes(8, "little", signed=False))
+        digest.update(len(tier).to_bytes(4, "little"))
+        digest.update(tier)
+        digest.update(bytes([bool(item["active"])]))
+    return digest.digest()
+
+
 def _engine_id() -> str:
     return str(
         os.environ.get("GMS_SGLANG_ENGINE_ID")
@@ -188,19 +209,14 @@ def make_gms_unified_cache_class():
                 )
             if len(set(pages)) != len(pages):
                 raise RuntimeError("completed SGLang prefix reuses a physical KV page")
-            self._gms_tp.agree(
-                "publish:layout",
-                [
-                    {key: value for key, value in item.items() if key != "generations"}
-                    for item in items
-                ],
-            )
-
+            logical_layout_digest = _logical_layout_digest(items)
             retained = self.token_to_kv_pool_allocator._gms_retained_pages
             retained_before = set(retained)
             newly_retained = set(pages).difference(retained_before)
+            publication_attempted = False
 
-            def seal():
+            def seal_and_publish():
+                nonlocal publication_attempted
                 leases = retain_hbm_indices(self.token_to_kv_pool_allocator, indices)
                 retained_leases = {
                     int(lease.block_id): int(lease.generation) for lease in leases
@@ -210,34 +226,35 @@ def make_gms_unified_cache_class():
                 }
                 if len(leases) != expected or retained_leases != expected_leases:
                     raise RuntimeError("could not seal every completed SGLang HBM page")
+                publication_attempted = True
+                if self._gms_directory.publish_deferred(items) != len(items):
+                    raise RuntimeError("incomplete SGLang HBM directory publication")
                 return retained_leases
 
             try:
-                self._gms_tp.run("publish:seal", seal)
+                # Layout validation, lease sealing, ordered publication enqueue,
+                # and the peer vote form one compensatable transaction. The old
+                # path used three serialized Python-object collectives here,
+                # stalling other streams whenever one request finished.
+                self._gms_tp.transact_digest(
+                    "publish:commit", logical_layout_digest, seal_and_publish
+                )
             except Exception:
-                # No directory mutation was attempted. Removing only new flags
-                # lets a later native eviction release its still-live lease.
-                retained.difference_update(newly_retained)
-                raise
-
-            # Directory batch publication is atomic per daemon. The TP vote can
-            # still expose a partial cross-daemon commit when one rank fails.
-            def publish():
-                if self._gms_directory.publish(items) != len(items):
-                    raise RuntimeError("incomplete SGLang HBM directory publication")
-
-            try:
-                self._gms_tp.run("publish:commit", publish)
-            except Exception:
+                if not publication_attempted:
+                    # No directory mutation was attempted. Removing only new
+                    # flags lets native eviction release its still-live lease.
+                    retained.difference_update(newly_retained)
+                    raise
                 try:
-                    self._gms_tp.run(
-                        "publish:invalidate",
-                        lambda: _invalidate_and_verify(self._gms_directory, items),
-                    )
+                    # Preserve queue order: a synchronous tombstone must not
+                    # race ahead of the publication it compensates.
+                    if not self._gms_directory.flush_deferred(timeout=2.0):
+                        raise RuntimeError("timed out draining failed publication")
+                    _invalidate_and_verify(self._gms_directory, items)
                 except Exception as cleanup_error:
-                    # An ambiguous directory record is less dangerous while
-                    # its exact-generation lease remains sealed. Keep the
-                    # retention flags and terminate this rank cohort.
+                    # An ambiguous record is safe only while its exact lease
+                    # generation stays sealed. The failed cohort is fenced,
+                    # and a replacement accepts only a common TP prefix.
                     raise RuntimeError(
                         "could not verify failed SGLang HBM publication cleanup; "
                         "retaining leases and failing closed"
@@ -276,6 +293,11 @@ def make_gms_unified_cache_class():
 
             hashes = self._hashes_for_key(key, self.page_size)
             suffix_hashes = hashes[matched_len // self.page_size :]
+            if not self._gms_tp.leader_true(
+                "adopt:candidate",
+                self._gms_directory.may_have_hbm_candidate(suffix_hashes),
+            ):
+                return False
             claim_token = None
             leases = []
             staged_records = []
@@ -316,10 +338,10 @@ def make_gms_unified_cache_class():
                     ]
                 )
 
-            try:
-                entries, claim_token = self._gms_tp.run(
-                    "adopt:lookup",
-                    lambda: self._gms_directory.lookup_and_claim(suffix_hashes),
+            def lookup_usable():
+                nonlocal claim_token
+                entries, claim_token = self._gms_directory.lookup_and_claim(
+                    suffix_hashes
                 )
                 usable = []
                 for entry in entries:
@@ -334,10 +356,14 @@ def make_gms_unified_cache_class():
                     if len(slots) != 1 or len(generations) != 1:
                         break
                     usable.append((int(slots[0]), int(generations[0])))
-                # Page layout is collective; generations fence rank-local
-                # rings and directories and may differ after a rolled-back CAS.
-                common_pages = self._gms_tp.common_prefix(
-                    "adopt:prefix", [page for page, _generation in usable]
+                return usable, [page for page, _generation in usable]
+
+            try:
+                # A single vote covers both local lookup failure and the
+                # common logical page prefix. Generations remain rank-local
+                # fencing tokens and deliberately need not compare equal.
+                usable, common_pages = self._gms_tp.run_common_prefix(
+                    "adopt:lookup", lookup_usable
                 )
                 usable = usable[: len(common_pages)]
                 if not usable or self._gms_directory.mode == "shadow":
@@ -510,11 +536,11 @@ def make_gms_unified_cache_class():
 
         def match_prefix(self, params):
             result = super().match_prefix(params)
-            if self._gms_directory.authoritative:
-                self._gms_tp.agree(
-                    "match:native",
-                    (len(params.key), len(result.device_indices)),
-                )
+            # Native SGLang cache state is replicated by the scheduler, while
+            # GMS page allocation is already agreed by the TP allocator. A
+            # collective here would serialize every lookup, including native
+            # hits. Directory adoption performs its own fail-closed agreement
+            # before any native state is mutated.
             if self._gms_directory.authoritative and self._adopt_directory_suffix(
                 params, result
             ):

@@ -272,6 +272,14 @@ class ContentDirectory:
                 if not self._mutations:
                     return
                 sequence, kind, payload = self._mutations.popleft()
+                payload = list(payload)
+                # One completed request can enqueue many pages, and concurrent
+                # completions can enqueue many adjacent batches while the first
+                # daemon RPC is in flight. Preserve mutation order while folding
+                # adjacent operations of the same kind into one RPC.
+                while self._mutations and self._mutations[0][1] == kind:
+                    sequence, _same_kind, following = self._mutations.popleft()
+                    payload.extend(following)
             try:
                 if kind == "publish":
                     self.publish(payload)
@@ -488,6 +496,26 @@ class ContentDirectory:
                     break
             return result
 
+    def may_have_hbm_candidate(self, content_hashes: list[bytes]) -> bool:
+        """Cheaply test whether an authoritative HBM claim may be useful.
+
+        An unavailable or not-yet-synchronized local view must return true so
+        callers fall back to the authoritative path. Once synchronized, a
+        definite miss can stay entirely on the local read path.
+        """
+        if not self._async_read or not self._view_ready.is_set():
+            return True
+        with self._view_lock:
+            if not self._view_caught_up:
+                return True
+            return any(
+                entry is not None
+                and entry.get("tier") == "hbm"
+                and entry.get("state") in ("ready", "active")
+                for content_hash in content_hashes
+                if (entry := self._view.get(content_hash)) is not None
+            )
+
     def _read_view_lookup(self, content_hashes: list[bytes]) -> list[Optional[dict]]:
         if not self._view_ready.is_set():
             return [None] * len(content_hashes)
@@ -568,15 +596,23 @@ class ContentDirectory:
                 break
         raise RuntimeError(f"GMS KV directory rejected stale writer {self.writer_id!r}")
 
-    def promote(self) -> int:
-        """Claim writer ownership after the external failover lock is held."""
+    def promote(self, *, force_new_epoch: bool = False) -> int:
+        """Claim writer ownership after the external failover lock is held.
+
+        Force a new epoch only at a proven external-fence boundary. Normal
+        calls remain idempotent for clients in the same live engine cohort.
+        """
         epoch, active = self.status()
-        if active == self.writer_id:
+        if active == self.writer_id and not force_new_epoch:
             self._writer_epoch = int(epoch)
             self._has_owned = True
             return epoch
         promoted, observed_epoch, observed = self._call(
-            lambda client: client.directory_promote(epoch, self.writer_id)
+            lambda client: client.directory_promote(
+                epoch,
+                self.writer_id,
+                force_new_epoch=force_new_epoch,
+            )
         )
         if not promoted or observed != self.writer_id:
             raise RuntimeError(

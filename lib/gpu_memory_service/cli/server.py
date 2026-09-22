@@ -22,7 +22,7 @@ from contextlib import closing
 from gpu_memory_service.cli.snapshot import start_per_device
 from gpu_memory_service.client.session import _GMSClientSession as v0_session
 from gpu_memory_service.common.locks import RequestedLockType
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.common.utils import GMS_TAGS, get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.client.session import _GMSClientSession as v1_session
 from gpu_memory_service.v1.device import get_socket_path as v1_get_socket_path
@@ -34,6 +34,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 0.5
+
+
+def _tags_from_env() -> tuple[str, ...]:
+    raw = os.environ.get("GMS_SERVER_TAGS")
+    if not raw:
+        return tuple(GMS_TAGS)
+    tags = tuple(tag.strip() for tag in raw.split(",") if tag.strip())
+    if not tags:
+        raise RuntimeError("GMS_SERVER_TAGS must contain at least one tag")
+    unknown = sorted(set(tags) - set(GMS_TAGS))
+    if unknown:
+        raise RuntimeError(
+            f"unsupported GMS_SERVER_TAGS: {', '.join(unknown)}; "
+            f"expected a subset of {', '.join(GMS_TAGS)}"
+        )
+    if len(tags) != len(set(tags)):
+        raise RuntimeError("GMS_SERVER_TAGS must not contain duplicate tags")
+    return tags
+
+
+def _directory_command(socket_path: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "gms_kv_ring.daemon.directory_server",
+        socket_path,
+    ]
 
 
 def _terminate_all(processes: list[subprocess.Popen]) -> None:
@@ -105,6 +132,12 @@ def main(argv: list[str] | None = None) -> None:
     use_v1 = os.environ.get("DYN_GMS_USE_V1") == "true"
     if use_v1 and args.device_type != VMMDeviceType.CUDA.value:
         parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
+    tags = _tags_from_env()
+    if use_v1 and tags != tuple(GMS_TAGS):
+        parser.error(
+            "GMS_SERVER_TAGS subsets are not supported by GMS V1 because its "
+            "weights and kv_cache domains share one checkpoint lifecycle"
+        )
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
@@ -132,6 +165,16 @@ def main(argv: list[str] | None = None) -> None:
     servers: list[subprocess.Popen] = []
     loaders: list[subprocess.Popen] = []
 
+    directory_socket = os.environ.get("GMS_DIRECTORY_SOCKET")
+    if directory_socket:
+        process = subprocess.Popen(_directory_command(directory_socket))
+        logger.info(
+            "Started GMS content directory socket=%s pid=%d",
+            directory_socket,
+            process.pid,
+        )
+        servers.append(process)
+
     def terminate(*_args) -> None:
         _terminate_all([*servers, *loaders])
         raise SystemExit(0)
@@ -145,11 +188,14 @@ def main(argv: list[str] | None = None) -> None:
             command.extend(["--device", str(device)])
             if not use_v1:
                 command.extend(["--device-type", args.device_type])
+                for tag in tags:
+                    command.extend(["--tag", tag])
             process = subprocess.Popen(command)
             logger.info(
-                "Started GMS%s device=%d pid=%d",
+                "Started GMS%s device=%d tags=%s pid=%d",
                 " V1" if use_v1 else "",
                 device,
+                ",".join(tags),
                 process.pid,
             )
             servers.append(process)
