@@ -576,8 +576,8 @@ impl Discovery for KubeDiscoveryClient {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
-    use futures::StreamExt;
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -640,14 +640,6 @@ mod tests {
         (client, state_tx)
     }
 
-    async fn next_event(stream: &mut DiscoveryStream) -> DiscoveryEvent {
-        tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
-            .await
-            .expect("the watch sent no event")
-            .expect("the watch ended")
-            .expect("the watch reported an error")
-    }
-
     #[tokio::test]
     async fn watch_reports_the_initial_set_as_added_events_then_one_resync() {
         let first = endpoint_instance(1, "127.0.0.1:8000");
@@ -661,13 +653,13 @@ mod tests {
 
         let mut added = HashSet::new();
         for _ in 0..2 {
-            let DiscoveryEvent::Added(instance) = next_event(&mut events).await else {
+            let DiscoveryEvent::Added(instance) = contract::next(&mut events).await else {
                 panic!("expected an initial Added event");
             };
             added.insert(instance.id());
         }
         assert_eq!(added, HashSet::from([first.id(), second.id()]));
-        let DiscoveryEvent::Resync(snapshot) = next_event(&mut events).await else {
+        let DiscoveryEvent::Resync(snapshot) = contract::next(&mut events).await else {
             panic!("expected the establishment snapshot after the Added burst");
         };
         assert_eq!(
@@ -683,11 +675,16 @@ mod tests {
             .event_tx
             .send(DiscoveryEvent::Added(third.clone()))
             .unwrap();
-        assert_eq!(next_event(&mut events).await, DiscoveryEvent::Added(third));
+        assert_eq!(
+            contract::next(&mut events).await,
+            DiscoveryEvent::Added(third)
+        );
     }
 
+    /// A pending daemon holds `list_and_watch` until `Ready` or the caller's cancellation; a
+    /// daemon that stopped or failed first fails both `list_and_watch` and `list`.
     #[tokio::test]
-    async fn list_and_watch_waits_for_ready_unless_cancelled() {
+    async fn list_and_watch_waits_for_ready_unless_cancelled_or_the_daemon_ended() {
         let (client, state_tx) = client_with(&[]);
         let client = Arc::new(client);
         let open_watch = |token: Option<CancellationToken>| {
@@ -698,6 +695,7 @@ mod tests {
                     .await
             })
         };
+        let finish = |task| tokio::time::timeout(std::time::Duration::from_secs(1), task);
 
         let token = CancellationToken::new();
         let cancelled = open_watch(Some(token.clone()));
@@ -707,7 +705,7 @@ mod tests {
             "a pending daemon must hold the watch"
         );
         token.cancel();
-        let Err(error) = tokio::time::timeout(std::time::Duration::from_secs(1), cancelled)
+        let Err(error) = finish(cancelled)
             .await
             .expect("cancellation must release the wait")
             .unwrap()
@@ -726,19 +724,13 @@ mod tests {
             "a pending daemon must hold the watch"
         );
         state_tx.send_replace(DaemonState::Ready);
-        let mut events = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+        let mut events = finish(waiting)
             .await
             .expect("Ready must release the wait")
             .unwrap()
             .unwrap();
-        assert_eq!(
-            next_event(&mut events).await,
-            DiscoveryEvent::Resync(vec![])
-        );
-    }
+        contract::expect_empty_snapshot(&mut events).await;
 
-    #[tokio::test]
-    async fn a_stopped_or_failed_daemon_fails_list_and_watch_instead_of_an_empty_set() {
         for (state, expected) in [
             (
                 DaemonState::Failed("reflector stopped".to_string()),
@@ -746,9 +738,7 @@ mod tests {
             ),
             (DaemonState::Stopped, "daemon is stopped"),
         ] {
-            let (client, state_tx) = client_with(&[]);
             state_tx.send_replace(state);
-
             let Err(error) = client
                 .list_and_watch(DiscoveryQuery::AllEndpoints, None)
                 .await

@@ -777,6 +777,7 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
     use crate::discovery::{
         EventChannelQuery, EventSourceQuery, EventTransport, ModelTaintsUpdate,
     };
@@ -1095,11 +1096,7 @@ mod tests {
             "kv-events",
         ));
         let mut stream = client.list_and_watch(query, None).await.unwrap();
-        // The watch opened on an empty registry, so its snapshot is empty.
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            DiscoveryEvent::Resync(vec![])
-        );
+        contract::expect_empty_snapshot(&mut stream).await;
         let spec = |publisher_id| DiscoverySpec::EventSource {
             scope: EventScope::Endpoint {
                 endpoint: endpoint.clone(),
@@ -1222,10 +1219,7 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            DiscoveryEvent::Resync(vec![])
-        );
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let client_clone = client.clone();
         let register_task = tokio::spawn(async move {
@@ -1288,12 +1282,10 @@ mod tests {
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
         // The snapshot predates the unregister.
-        let snapshot = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(snapshot, DiscoveryEvent::Resync(vec![instance.clone()]));
+        assert_eq!(
+            contract::next(&mut stream).await,
+            DiscoveryEvent::Resync(vec![instance.clone()])
+        );
 
         let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
             .await
@@ -1318,10 +1310,7 @@ mod tests {
             .await
             .unwrap();
         // Consume the startup snapshot so the resync asserted below can only come from the lag.
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            DiscoveryEvent::Resync(vec![])
-        );
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let instance = client
             .register(DiscoverySpec::Endpoint {
@@ -1359,27 +1348,17 @@ mod tests {
 
     #[tokio::test]
     async fn memory_backend_keeps_the_startup_contract() {
-        use crate::discovery::startup_contract as contract;
-
-        let discovery = || KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
-        contract::empty_registry_sends_one_empty_resync(&discovery()).await;
-        contract::changes_follow_the_complete_initial_snapshot(&discovery()).await;
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        contract::check(&client).await;
     }
 
     #[tokio::test]
     async fn file_backend_keeps_the_startup_contract() {
-        use crate::discovery::startup_contract as contract;
-
         let cancel_token = CancellationToken::new();
-        let discovery = || {
-            let root = tempfile::tempdir().unwrap();
-            let store = kv::Manager::file(cancel_token.clone(), root.path());
-            (KVStoreDiscovery::new(store, cancel_token.clone()), root)
-        };
-        let (client, _root) = discovery();
-        contract::empty_registry_sends_one_empty_resync(&client).await;
-        let (client, _root) = discovery();
-        contract::changes_follow_the_complete_initial_snapshot(&client).await;
+        let root = tempfile::tempdir().unwrap();
+        let store = kv::Manager::file(cancel_token.clone(), root.path());
+        let client = KVStoreDiscovery::new(store, cancel_token.clone());
+        contract::check(&client).await;
         cancel_token.cancel();
     }
 
@@ -1486,10 +1465,7 @@ mod tests {
             endpoint: "generate".to_string(),
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
-        assert_eq!(
-            stream.next().await.unwrap().unwrap(),
-            DiscoveryEvent::Resync(vec![])
-        );
+        contract::expect_empty_snapshot(&mut stream).await;
 
         client.register(model_spec("first")).await.unwrap();
         let DiscoveryEvent::Added(first) = stream.next().await.unwrap().unwrap() else {

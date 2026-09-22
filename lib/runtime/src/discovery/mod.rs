@@ -1695,7 +1695,8 @@ pub trait Discovery: Send + Sync {
     fn shutdown(&self) {}
 }
 
-/// The `list_and_watch` startup contract, checked the same way against every backend.
+/// The `list_and_watch` startup contract, checked the same way against every backend, and the
+/// helpers backend tests use to consume the startup events.
 #[cfg(test)]
 pub(crate) mod startup_contract {
     use super::*;
@@ -1728,12 +1729,17 @@ pub(crate) mod startup_contract {
         }
     }
 
-    async fn next(stream: &mut DiscoveryStream) -> DiscoveryEvent {
+    pub(crate) async fn next(stream: &mut DiscoveryStream) -> DiscoveryEvent {
         tokio::time::timeout(EVENT_TIMEOUT, stream.next())
             .await
             .expect("the stream sent no event")
             .expect("the stream ended")
             .expect("the stream reported an error")
+    }
+
+    /// Consumes the startup snapshot of a watch opened on an empty registry.
+    pub(crate) async fn expect_empty_snapshot(stream: &mut DiscoveryStream) {
+        assert_eq!(next(stream).await, DiscoveryEvent::Resync(vec![]));
     }
 
     async fn assert_quiet(stream: &mut DiscoveryStream) {
@@ -1742,18 +1748,18 @@ pub(crate) mod startup_contract {
         }
     }
 
-    /// A watch on an empty registry sends one empty `Resync` and nothing else.
-    pub(crate) async fn empty_registry_sends_one_empty_resync(discovery: &dyn Discovery) {
-        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
-
-        assert_eq!(next(&mut stream).await, DiscoveryEvent::Resync(vec![]));
-        assert_quiet(&mut stream).await;
-    }
-
-    /// The registry arrives as `Added` events then one `Resync` of the same set. A registration,
-    /// an update, and a removal made right after `list_and_watch` returns follow that snapshot,
+    /// Checks the startup contract against an empty `discovery`.
+    ///
+    /// A watch on the empty registry sends one empty `Resync` and nothing else. A populated
+    /// registry arrives as `Added` events then one `Resync` of the same set. A registration, an
+    /// update, and a removal made right after `list_and_watch` returns follow that snapshot,
     /// which still holds the pre-update state, in whatever order the backend chooses.
-    pub(crate) async fn changes_follow_the_complete_initial_snapshot(discovery: &dyn Discovery) {
+    pub(crate) async fn check(discovery: &dyn Discovery) {
+        let mut stream = discovery.list_and_watch(query(), None).await.unwrap();
+        expect_empty_snapshot(&mut stream).await;
+        assert_quiet(&mut stream).await;
+        drop(stream);
+
         let first = discovery.register(model_spec("first")).await.unwrap();
         let second = discovery.register(model_spec("second")).await.unwrap();
         let DiscoveryInstanceId::Model(second_id) = second.id() else {
