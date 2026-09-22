@@ -1,14 +1,32 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 """Runtime capability metadata for vLLM's native Generate API."""
 
-import json
+from __future__ import annotations
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+import json
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any
+
+import msgspec
+import torch
+
+if TYPE_CHECKING:
+    from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+
+from vllm.inputs import TokensPrompt, mm_input
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
+DYNAMO_CACHE_SALT_PREFIX = "dynamo-cache-salt:"
 
 
 def publish_engine_generate_capability(
@@ -19,15 +37,13 @@ def publish_engine_generate_capability(
     tower_connector_lora_enabled: bool,
 ) -> bool:
     """Publish native Generate support and its MM-routing-relevant config."""
-    if model_input != ModelInput.Tokens:
-        return False
-    if worker_type == WorkerType.Prefill:
-        supported = model_type == ModelType.Prefill
-    else:
-        supported = worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
-            model_type.supports_chat() or model_type == ModelType.Completions
-        )
-    if not supported:
+    from dynamo.llm import ModelInput, ModelType, WorkerType
+
+    if (
+        model_input != ModelInput.Tokens
+        or worker_type != WorkerType.Aggregated
+        or not (model_type.supports_chat() or model_type == ModelType.Completions)
+    ):
         return False
 
     runtime_config.set_engine_specific(
@@ -39,3 +55,208 @@ def publish_engine_generate_capability(
         json.dumps(tower_connector_lora_enabled),
     )
     return True
+
+
+@dataclass(frozen=True)
+class EngineGenerateInput:
+    prompt: Any
+    sampling_params: SamplingParams
+    priority: int
+
+
+@lru_cache(maxsize=1)
+def _native_generate_api() -> tuple[Any, Any]:
+    try:
+        from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
+            decode_mm_kwargs_item,
+        )
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            GenerateRequest,
+        )
+    except ModuleNotFoundError as exc:
+        expected_module = "vllm.entrypoints.scale_out.token_in_token_out"
+        if exc.name is None or not expected_module.startswith(exc.name):
+            raise
+        from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
+        from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+
+    return decode_mm_kwargs_item, GenerateRequest
+
+
+def _image_features(
+    request: dict[str, Any],
+    features: dict[str, Any],
+) -> tuple[
+    dict[str, list[str]],
+    MultiModalKwargsItems,
+    dict[str, list[PlaceholderRange]],
+]:
+    mm_hashes = features.get("mm_hashes")
+    mm_placeholders = features.get("mm_placeholders")
+    kwargs_data = features.get("kwargs_data")
+    if not isinstance(mm_hashes, dict) or not isinstance(mm_placeholders, dict):
+        raise TypeError("TITO features require mm_hashes and mm_placeholders objects")
+
+    modalities = set(mm_hashes) | set(mm_placeholders)
+    if isinstance(kwargs_data, dict):
+        modalities.update(kwargs_data)
+    if modalities != {"image"}:
+        raise ValueError("TITO preprocessed features currently support image only")
+
+    hashes = mm_hashes["image"]
+    ranges = mm_placeholders["image"]
+    if not isinstance(hashes, list) or not isinstance(ranges, list):
+        raise TypeError("TITO image hashes and placeholders must be lists")
+    if len(hashes) != len(ranges):
+        raise ValueError("TITO image hash and placeholder counts must match")
+    if not all(isinstance(value, str) and value for value in hashes):
+        raise ValueError("TITO image hashes must be non-empty strings")
+
+    routing_hashes = (request.get("extra_args") or {}).get("dynamo_mm_routing_hashes")
+    if routing_hashes is not None:
+        if (
+            not isinstance(routing_hashes, list)
+            or len(routing_hashes) != len(hashes)
+            or not all(isinstance(value, str) and value for value in routing_hashes)
+        ):
+            raise ValueError("TITO image routing hash count or value is invalid")
+        hashes = routing_hashes
+
+    prompt_length = len(request["token_ids"])
+    restored_ranges: list[PlaceholderRange] = []
+    for item in ranges:
+        if not isinstance(item, dict):
+            raise TypeError("TITO image placeholders must be objects")
+        offset = item.get("offset")
+        length = item.get("length")
+        if (
+            isinstance(offset, bool)
+            or not isinstance(offset, int)
+            or offset < 0
+            or isinstance(length, bool)
+            or not isinstance(length, int)
+            or length < 1
+            or offset + length > prompt_length
+        ):
+            raise ValueError("TITO image placeholder range is invalid")
+        is_embed_raw = item.get("is_embed")
+        is_embed = (
+            None
+            if is_embed_raw is None
+            else torch.as_tensor(is_embed_raw, dtype=torch.bool)
+        )
+        if is_embed is not None and (is_embed.ndim != 1 or is_embed.numel() != length):
+            raise ValueError(
+                "TITO image placeholder is_embed must be one-dimensional and match length"
+            )
+        restored_ranges.append(
+            PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
+        )
+
+    restored_kwargs: list[MultiModalKwargsItem | None]
+    if kwargs_data is None:
+        restored_kwargs = [None] * len(hashes)
+    else:
+        image_data = kwargs_data.get("image")
+        if not isinstance(image_data, list) or len(image_data) != len(hashes):
+            raise ValueError("TITO image tensor and hash counts must match")
+        decode_mm_kwargs_item, _ = _native_generate_api()
+        restored_kwargs = [
+            decode_mm_kwargs_item(value) if value is not None else None
+            for value in image_data
+        ]
+
+    return (
+        {"image": hashes},
+        MultiModalKwargsItems({"image": restored_kwargs}),
+        {"image": restored_ranges},
+    )
+
+
+def adapt_engine_generate_request(
+    request: dict[str, Any],
+    *,
+    enable_multimodal: bool,
+    aggregated: bool,
+    vllm_config: Any,
+    default_sampling_params: dict[str, Any],
+) -> EngineGenerateInput | None:
+    """Adapt one Rust-frontend TITO envelope at the Python engine boundary."""
+    extra_args = request.get("extra_args")
+    if not isinstance(extra_args, dict) or "vllm_tito" not in extra_args:
+        return None
+    envelope = extra_args["vllm_tito"]
+    if not isinstance(envelope, dict):
+        raise TypeError("extra_args.vllm_tito must be an object")
+    if not aggregated:
+        raise ValueError("TITO requests currently require an aggregated vLLM worker")
+    if envelope.get("content_parts"):
+        raise ValueError("TITO raw multimodal content_parts are not supported")
+
+    raw_sampling_params = envelope.get("sampling_params")
+    if not isinstance(raw_sampling_params, dict):
+        raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
+    token_ids = list(request.get("token_ids") or [])
+    reconstructed = {**envelope, "token_ids": token_ids}
+    _, generate_request_type = _native_generate_api()
+    native_request = generate_request_type.model_validate(reconstructed)
+    sampling_params = native_request.sampling_params
+    if isinstance(sampling_params, dict):
+        sampling_params = msgspec.convert(sampling_params, type=SamplingParams)
+    if not isinstance(sampling_params, SamplingParams):
+        raise TypeError("vLLM GenerateRequest returned invalid sampling_params")
+    sampling_params.detokenize = False
+    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+    if sampling_params.n > max_num_seqs:
+        raise ValueError(
+            "sampling_params.n must be at most the server's max_num_seqs "
+            f"({max_num_seqs}), got {sampling_params.n}."
+        )
+    if not native_request.is_sampling_param_provided("max_tokens"):
+        model_config = vllm_config.model_config
+        generation_config = getattr(model_config, "generation_config", "vllm")
+        override_generation_config = (
+            getattr(model_config, "override_generation_config", {}) or {}
+        )
+        override_max_tokens = (
+            default_sampling_params.get("max_tokens")
+            if generation_config not in ("auto", "vllm")
+            else override_generation_config.get("max_new_tokens")
+        )
+        sampling_params.max_tokens = get_max_tokens(
+            max_model_len=model_config.max_model_len,
+            max_tokens=None,
+            input_length=len(token_ids),
+            default_sampling_params=default_sampling_params,
+            override_max_tokens=override_max_tokens,
+        )
+    sampling_params.output_kind = RequestOutputKind.DELTA
+
+    features = envelope.get("features")
+    cache_salt = envelope.get("cache_salt")
+    engine_cache_salt = (
+        f"{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}" if cache_salt else None
+    )
+    if features is None:
+        prompt = TokensPrompt(prompt_token_ids=token_ids)
+        if engine_cache_salt is not None:
+            prompt["cache_salt"] = engine_cache_salt
+    else:
+        if not enable_multimodal:
+            raise ValueError("TITO multimodal features require --enable-multimodal")
+        if not isinstance(features, dict):
+            raise ValueError("extra_args.vllm_tito.features must be an object")
+        mm_hashes, mm_kwargs, mm_placeholders = _image_features(request, features)
+        prompt = mm_input(
+            prompt_token_ids=token_ids,
+            mm_kwargs=mm_kwargs,
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+            cache_salt=engine_cache_salt,
+        )
+
+    return EngineGenerateInput(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        priority=native_request.priority,
+    )

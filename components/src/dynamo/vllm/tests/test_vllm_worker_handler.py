@@ -40,6 +40,36 @@ pytestmark = [
 ]
 
 
+def test_rl_weight_world_size_accepts_tensor_parallel_topology():
+    parallel_config = SimpleNamespace(
+        data_parallel_size=1,
+        distributed_executor_backend="mp",
+        world_size=4,
+    )
+
+    assert mod.resolve_rl_weight_world_size(parallel_config) == 4
+
+
+@pytest.mark.parametrize(
+    "parallel_config",
+    [
+        SimpleNamespace(
+            data_parallel_size=2,
+            distributed_executor_backend="mp",
+            world_size=4,
+        ),
+        SimpleNamespace(
+            data_parallel_size=1,
+            distributed_executor_backend="external_launcher",
+            world_size=4,
+        ),
+    ],
+)
+def test_rl_weight_world_size_rejects_unsupported_topologies(parallel_config):
+    with pytest.raises(ValueError, match="data parallelism and external launcher"):
+        mod.resolve_rl_weight_world_size(parallel_config)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -65,9 +95,7 @@ def _make_config(
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
-    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = (
-        {}
-    )
+    config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = {}
     return config
 
 
@@ -142,6 +170,51 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     resp.metrics = None
     resp.kv_transfer_params = {"do_remote_decode": False}
     return resp
+
+
+def test_lora_discovery_publishes_engine_generate_capability():
+    config = _make_config()
+    handler = _make_handler(config)
+    handler.config = config
+    handler.generate_endpoint = MagicMock()
+    handler.dp_range = (0, 1)
+    handler.model_max_len = 4096
+    handler.config.route_to_encoder = False
+    handler.config.engine_args.max_loras = 2
+    handler.engine_client = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            lora_config=SimpleNamespace(enable_tower_connector_lora=True)
+        )
+    )
+    runtime_config = MagicMock()
+
+    with (
+        patch.object(mod, "ModelRuntimeConfig", return_value=runtime_config),
+        patch.object(mod, "apply_data_parallel_runtime_config"),
+        patch.object(mod, "publish_kv_hint_capabilities"),
+        patch.object(mod, "publish_vllm_token_budget"),
+        patch.object(mod, "state_agent_settings", return_value=None),
+        patch.object(mod, "get_configured_kv_event_block_size", return_value=16),
+        patch.object(
+            mod,
+            "publish_engine_generate_capability",
+            create=True,
+            return_value=True,
+        ) as publish_generate,
+        patch.object(mod, "register_model", new=AsyncMock()) as register_model,
+    ):
+        asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
+
+    publish_generate.assert_called_once()
+    runtime_arg, input_arg, model_type_arg, worker_arg, tower_lora_arg = (
+        publish_generate.call_args.args
+    )
+    assert runtime_arg is runtime_config
+    assert input_arg == mod.ModelInput.Tokens
+    assert model_type_arg.supports_chat()
+    assert worker_arg == mod.WorkerType.Aggregated
+    assert tower_lora_arg is True
+    assert register_model.await_args.kwargs["runtime_config"] is runtime_config
 
 
 @pytest.mark.asyncio
@@ -392,6 +465,90 @@ class TestReasoningParserForwarding:
         np.testing.assert_array_equal(decoded, routed_experts.reshape(-1))
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_emits_sampling_mask_only_on_final_chunk(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        routed_experts=None,
+                        sampling_mask=None,
+                        finish_reason=None,
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11, 21], [12, 22]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=2),
+            "req-mask",
+        ):
+            chunks.append(chunk)
+
+        assert "engine_data" not in chunks[0]
+        assert chunks[1]["engine_data"]["sampling_mask"] == [[11, 21], [12, 22]]
+
+    @pytest.mark.asyncio
+    async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11, 12],
+                        routed_experts=None,
+                        sampling_mask=SimpleNamespace(token_ids=[[11]]),
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        with pytest.raises(ValueError, match="sampling mask"):
+            async for _ in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=2),
+                "req-mask",
+            ):
+                pass
+
     async def test_generate_tokens_routed_experts_start_echoes_prompt_start(self):
         """routed_experts.start echoes SamplingParams.routed_experts_prompt_start
         (the offset vLLM trimmed) so the RL consumer can align the completion."""

@@ -98,6 +98,10 @@ from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
 from .constants import DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
+from .engine_generate import (
+    adapt_engine_generate_request,
+    publish_engine_generate_capability,
+)
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
 from .multimodal_utils.custom_encoder import (
@@ -522,6 +526,14 @@ def _attach_routed_experts_engine_data(
     engine_data = tok.setdefault("engine_data", {})
     if isinstance(engine_data, dict):
         engine_data["routed_experts"] = routed_experts
+
+
+def _attach_sampling_mask_engine_data(
+    tok: Dict[str, Any], sampling_mask: list[list[int]]
+) -> None:
+    engine_data = tok.setdefault("engine_data", {})
+    if isinstance(engine_data, dict):
+        engine_data["sampling_mask"] = sampling_mask
 
 
 def _iter_nvext_sources(request: Dict[str, Any]) -> Iterator[Dict[str, Any]]:
@@ -1098,6 +1110,18 @@ def apply_data_parallel_runtime_config(
     runtime_config.data_parallel_size = dp_range[1]
 
 
+def resolve_rl_weight_world_size(parallel_config: Any) -> int:
+    """Return the NCCL receiver count for the supported RL topology."""
+    if (
+        parallel_config.data_parallel_size != 1
+        or parallel_config.distributed_executor_backend == "external_launcher"
+    ):
+        raise ValueError(
+            "Dynamo vLLM RL currently does not support data parallelism and external launcher"
+        )
+    return parallel_config.world_size
+
+
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 
@@ -1266,7 +1290,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         self.shutdown_event = shutdown_event
         # Request-plane RL method map served by rl_dispatch on
         # dyn://<namespace>.<component>.rl when --enable-rl / DYN_ENABLE_RL is set.
-        self.rl_route_registry = RLRouteRegistry(self.runtime, logger_=logger)
+        rl_world_size = None
+        if config.enable_rl:
+            rl_world_size = resolve_rl_weight_world_size(
+                engine.vllm_config.parallel_config
+            )
+        self.rl_route_registry = RLRouteRegistry(
+            self.runtime,
+            logger_=logger,
+            world_size=rl_world_size,
+        )
 
         # Load the custom encoder last. If a later init step raised, executor
         # GC would eventually reap the idle actor thread — but only once the
@@ -2534,6 +2567,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
+        lora_config = self.engine_client.vllm_config.lora_config
+        publish_engine_generate_capability(
+            runtime_config,
+            ModelInput.Tokens,
+            lora_model_type,
+            lora_worker_type,
+            bool(
+                lora_config
+                and getattr(lora_config, "enable_tower_connector_lora", False)
+            ),
+        )
+
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
         await register_model(
@@ -3310,6 +3355,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             total_output_tokens_by_index: dict[int, int] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
+            raw_sampling_mask_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
             # carries None. Capture the first non-None payload and attach it to
@@ -3344,9 +3390,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    )
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3373,6 +3419,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     raw_routed_experts = getattr(output, "routed_experts", None)
                     if raw_routed_experts is not None:
                         raw_routed_experts_by_output[output_idx] = raw_routed_experts
+                    raw_sampling_mask = getattr(output, "sampling_mask", None)
+                    if raw_sampling_mask is not None:
+                        raw_sampling_mask_by_output[output_idx] = raw_sampling_mask
 
                     # vLLM DELTA outputs already align token_ids/logprobs to this chunk.
                     tokenizer = getattr(self.engine_client, "tokenizer", None)
@@ -3386,11 +3435,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if finish_reason:
                         out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                completion_token_counts=total_output_tokens_by_index,
+                            )
                         )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
@@ -3414,6 +3463,25 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         if routed_experts is not None:
                             _attach_routed_experts_engine_data(out, routed_experts)
+                        sampling_mask = raw_sampling_mask_by_output.get(output_idx)
+                        if sampling_mask is not None:
+                            rows = getattr(sampling_mask, "token_ids", None)
+                            if rows is None:
+                                raise TypeError(
+                                    "vLLM sampling mask is missing token_ids"
+                                )
+                            normalized_rows = [list(row) for row in rows]
+                            output_token_count = total_output_tokens_by_index.get(
+                                output_idx, 0
+                            )
+                            if len(normalized_rows) != output_token_count:
+                                raise ValueError(
+                                    "vLLM sampling mask row count "
+                                    f"{len(normalized_rows)} does not match "
+                                    f"completion token count {output_token_count}"
+                                )
+                            _attach_sampling_mask_engine_data(out, normalized_rows)
+
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3674,7 +3742,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
             is_decode_only = False
             mode = DisaggregationMode.AGGREGATED
-
         has_external_encoder_result = request.get("encoder_result") is not None
         if has_external_encoder_result and mode != DisaggregationMode.AGGREGATED:
             yield {
@@ -3688,6 +3755,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return
         has_mm_data = request.get("multi_modal_data") is not None
         assembled_prompt: EmbedsPrompt | TokensPrompt | None = None
+        engine_generate_input = adapt_engine_generate_request(
+            request,
+            enable_multimodal=self._multimodal_request_processor.enable_multimodal,
+            aggregated=mode == DisaggregationMode.AGGREGATED,
+            vllm_config=self.engine_client.vllm_config,
+            default_sampling_params=self.default_sampling_params,
+        )
 
         if has_external_encoder_result:
             assembled_prompt = await self._assemble_external_encoder_prompt(
@@ -3696,6 +3770,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             multi_modal_data = None
             mm_processor_kwargs = None
             pre_rendered = None
+        elif engine_generate_input is not None:
+            multi_modal_data = None
+            mm_processor_kwargs = None
+            pre_rendered = engine_generate_input.prompt
         elif (
             mode == DisaggregationMode.AGGREGATED
             and self._custom_encoder is not None
@@ -3764,11 +3842,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         _apply_nvext_cache_salt(request, prompt)
 
         # Build sampling params from request
-        sampling_params = build_sampling_params(
-            request,
-            self.default_sampling_params,
-            self.model_max_len,
-            enable_rl=self.config.enable_rl,
+        sampling_params = (
+            engine_generate_input.sampling_params
+            if engine_generate_input is not None
+            else build_sampling_params(
+                request,
+                self.default_sampling_params,
+                self.model_max_len,
+                enable_rl=self.config.enable_rl,
+            )
         )
 
         if kv_params is not None:
@@ -3793,7 +3875,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             )
         routing = request.get("routing") or {}
         dp_rank = self._to_local_dp_rank(routing.get("dp_rank"))
-        priority = -int(routing.get("priority", 0))
+        priority = (
+            engine_generate_input.priority
+            if engine_generate_input is not None
+            else -int(routing.get("priority", 0))
+        )
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
@@ -3851,9 +3937,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"][
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            tok["completion_usage"]["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -4192,9 +4278,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params[
-                "expanded_prompt_token_ids"
-            ] = expanded_prompt_token_ids
+            disaggregated_params["expanded_prompt_token_ids"] = (
+                expanded_prompt_token_ids
+            )
 
         return disaggregated_params if disaggregated_params else None
 
