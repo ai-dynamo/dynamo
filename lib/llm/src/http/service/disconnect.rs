@@ -359,10 +359,20 @@ async fn connection_monitor(
 
 type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
 
-#[derive(Default)]
 struct StreamMonitorOptions {
     activity_rx: Option<mpsc::UnboundedReceiver<()>>,
     error_signal: Option<StreamErrorSignal>,
+    emit_done_sentinel: bool,
+}
+
+impl Default for StreamMonitorOptions {
+    fn default() -> Self {
+        Self {
+            activity_rx: None,
+            error_signal: None,
+            emit_done_sentinel: true,
+        }
+    }
 }
 
 fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
@@ -491,6 +501,30 @@ pub(super) fn monitor_for_disconnects_with_error_signal(
     )
 }
 
+/// Responses streams terminate with typed events rather than a [DONE] sentinel.
+/// Preserve error accounting and disconnect monitoring for this route.
+pub(super) fn monitor_for_responses_disconnects(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            error_signal: Some(error_signal),
+            emit_done_sentinel: false,
+            ..Default::default()
+        },
+    )
+}
+
 pub fn monitor_for_disconnects_with_activity(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
@@ -530,6 +564,7 @@ pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
         StreamMonitorOptions {
             activity_rx: Some(activity_rx),
             error_signal: Some(error_signal),
+            ..Default::default()
         },
     )
 }
@@ -567,6 +602,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     let StreamMonitorOptions {
         mut activity_rx,
         error_signal,
+        emit_done_sentinel,
     } = options;
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
@@ -620,9 +656,8 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 error_signal.set(error_type.clone());
                             }
                             // We're terminating the stream intentionally here with a
-                            // structured error + [DONE]; disarm so the stream handle
-                            // doesn't later record this as ClosedUnexpectedly (which
-                            // would mis-attribute the fault as a client disconnect).
+                            // structured error and optional sentinel. Disarm the handle
+                            // to avoid recording this as a client disconnect.
                             stream_handle.disarm();
                             if let Some(error_signal) = &inflight_guard.error_signal {
                                 error_signal.mark_terminal_event_emitted();
@@ -653,7 +688,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                 tracing::error!(%error_type, %err, "Streaming failure");
                             }
                             yield Event::default().data(error_body);
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
@@ -667,7 +704,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
                             // async-openai client will chomp it.
-                            yield Event::default().data("[DONE]");
+                            if emit_done_sentinel {
+                                yield Event::default().data("[DONE]");
+                            }
                             break;
                         }
                     }
@@ -829,6 +868,129 @@ mod tests {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let handle = ConnectionHandle::create_disabled(tx);
         (metrics, guard, context, handle)
+    }
+
+    #[tokio::test]
+    async fn test_responses_terminal_events_have_no_done_sentinel() {
+        for terminal in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            let model = "responses-terminal";
+            let (metrics, _, context, handle) = setup_test(model, terminal);
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Responses, true, terminal);
+            let signal = StreamErrorSignal::default();
+            if terminal == "response.failed" {
+                signal.set(ErrorType::Internal);
+                signal.mark_terminal_event_emitted();
+            }
+            let data = serde_json::json!({"type": terminal}).to_string();
+            let expected = format!("event: {terminal}\ndata: {data}\n\n");
+            let stream = futures::stream::iter([Ok(Event::default().event(terminal).data(data))]);
+            let body = collect_sse_body(monitor_for_responses_disconnects(
+                stream, context, guard, handle, signal,
+            ))
+            .await;
+            assert_eq!(body, expected, "unexpected trailer after {terminal}");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+            let (status, error) = if terminal == "response.failed" {
+                (Status::Error, ErrorType::Internal)
+            } else {
+                (Status::Success, ErrorType::None)
+            };
+            assert_eq!(
+                metrics.get_request_counter(
+                    model,
+                    &Endpoint::Responses,
+                    &RequestType::Stream,
+                    &status,
+                    &error,
+                ),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_responses_stream_error_has_no_done_sentinel() {
+        let model = "responses-stream-error";
+        let (metrics, _, context, handle) = setup_test(model, "req-stream-error");
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-stream-error",
+        );
+        let stream = futures::stream::iter([Err(axum::Error::new(std::io::Error::other(
+            "private backend diagnostic",
+        )))]);
+        let body = collect_sse_body(monitor_for_responses_disconnects(
+            stream,
+            context,
+            guard,
+            handle,
+            StreamErrorSignal::default(),
+        ))
+        .await;
+        let frames: Vec<_> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect();
+        assert_eq!(frames.len(), 1, "unexpected frame after error: {body}");
+        let error: serde_json::Value = serde_json::from_str(frames[0]).unwrap();
+        assert!(error.get("error").is_some());
+        assert!(!body.contains("private backend diagnostic"));
+        assert_eq!(metrics.get_inflight_count(model), 0);
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_chat_and_completions_preserve_done_sentinel() {
+        for endpoint in [Endpoint::ChatCompletions, Endpoint::Completions] {
+            let model = "sentinel-compatibility";
+            let (metrics, _, context, handle) = setup_test(model, "req-sentinel");
+            let guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, endpoint, true, "req-sentinel");
+            let stream = futures::stream::iter([Ok(Event::default().data(r#"{"choices":[]}"#))]);
+            let body = if matches!(endpoint, Endpoint::ChatCompletions) {
+                let (_tx, rx) = mpsc::unbounded_channel();
+                collect_sse_body(monitor_for_disconnects_with_activity_and_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    rx,
+                    StreamErrorSignal::default(),
+                ))
+                .await
+            } else {
+                collect_sse_body(monitor_for_disconnects_with_error_signal(
+                    stream,
+                    context,
+                    guard,
+                    handle,
+                    StreamErrorSignal::default(),
+                ))
+                .await
+            };
+            assert_eq!(body, "data: {\"choices\":[]}\n\ndata: [DONE]\n\n");
+            assert_eq!(metrics.get_inflight_count(model), 0);
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1041,17 +1203,12 @@ mod tests {
         })
         .chain(futures::stream::pending());
 
-        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        let mut monitored = Box::pin(monitor_for_responses_disconnects(
             stream,
             engine_context,
             guard,
             stream_handle,
-            None,
-            openai_stream_error,
-            StreamMonitorOptions {
-                error_signal: Some(error_signal),
-                ..Default::default()
-            },
+            error_signal,
         ));
         assert!(monitored.next().await.is_some());
         drop(monitored);
