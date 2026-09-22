@@ -54,6 +54,19 @@ func shellQuoteForBashC(s string) string {
 	return s
 }
 
+// shellQuoteForSh preserves one argv token through a single sh -c layer. Keep
+// double quotes to preserve existing JSON and whitespace argument renderings.
+// The nested bash -c wrapper used by mpirun needs shellQuoteForBashC instead.
+func shellQuoteForSh(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\{}[]$`!;|&()<>*?#~") {
+		return s
+	}
+
+	// Single quotes are literal inside double quotes and need no outer-shell escape.
+	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `$`, `\$`, "`", "\\`").Replace(s)
+	return `"` + escaped + `"`
+}
+
 // shellSafeToken matches tokens that are literal to the shell in every context
 // and therefore need no quoting inside sh -c.
 var shellSafeToken = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
@@ -145,12 +158,12 @@ func injectFlagsIntoContainerCommand(container *corev1.Container, flags string, 
 			// characters survive shell interpretation.
 			quotedCmd := make([]string, len(container.Command))
 			for i, tok := range container.Command {
-				quotedCmd[i] = shellQuoteForBashC(tok)
+				quotedCmd[i] = shellQuoteForSh(tok)
 			}
 			fullCommand := strings.Join(quotedCmd, " ")
 			quotedArgs := make([]string, len(container.Args))
 			for i, arg := range container.Args {
-				quotedArgs[i] = shellQuoteForBashC(arg)
+				quotedArgs[i] = shellQuoteForSh(arg)
 			}
 			originalArgs := strings.Join(quotedArgs, " ")
 			var shellCommand string
