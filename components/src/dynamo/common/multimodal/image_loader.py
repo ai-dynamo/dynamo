@@ -9,7 +9,7 @@ import os
 from collections import OrderedDict
 from io import BytesIO
 from typing import Any, Coroutine, Dict, Final, List, Literal, overload
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
 from PIL import Image
 
@@ -209,13 +209,13 @@ class ImageLoader:
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:
-        parsed_url = urlparse(image_url)
+        parsed_url = urlsplit(image_url)
         if parsed_url.scheme in ("", "file"):
             raise ValueError(
                 "Invalid image source scheme: local file access is not allowed"
             )
         normalized_url = await validate_media_url(image_url, self._url_policy)
-        parsed_url = urlparse(normalized_url)
+        parsed_url = urlsplit(normalized_url)
 
         if parsed_url.scheme in ("http", "https"):
             # Scheme and host are case-insensitive (RFC 3986); userinfo, path,
@@ -223,6 +223,10 @@ class ImageLoader:
             # fragment never reaches the origin, so it is dropped from the key.
             # Rebuild from parsed components rather than slicing the raw string
             # so that whitespace stripped by the parser cannot skew offsets.
+            # urlsplit, not urlparse: urlparse peels a trailing ";params" off
+            # the last path segment and geturl() cannot put an empty one back,
+            # so "/img.png;" would round-trip to "/img.png" and share its key
+            # even though aiohttp requests the two as distinct targets.
             userinfo, at, hostport = parsed_url.netloc.rpartition("@")
             key = parsed_url._replace(
                 netloc=f"{userinfo}{at}{hostport.lower()}", fragment=""

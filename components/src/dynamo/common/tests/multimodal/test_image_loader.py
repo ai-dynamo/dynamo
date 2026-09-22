@@ -253,12 +253,6 @@ def _png_bytes_of(color: tuple[int, int, int]) -> bytes:
 async def test_case_differing_paths_do_not_share_cache_entry(
     loader: ImageLoader,
 ) -> None:
-    """URL paths are case-sensitive, so two spellings are two distinct resources.
-
-    Folding the whole URL into the cache key would serve the first image for the
-    second URL without ever reaching the origin.
-    """
-
     async def _fetch(url: str, *args, **kwargs) -> bytes:
         color = (255, 0, 0) if "Cat" in url else (0, 0, 255)
         return _png_bytes_of(color)
@@ -267,6 +261,46 @@ async def test_case_differing_paths_do_not_share_cache_entry(
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         first = await loader.load_image("https://example.com/Cat.png")
         second = await loader.load_image("https://example.com/cat.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_trailing_semicolon_path_does_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if url.endswith(";") else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/img.png;")
+        second = await loader.load_image("https://example.com/img.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_trailing_semicolon_path_does_not_dedupe_inflight() -> None:
+    # cache_size=0 turns caching off, leaving _inflight as the only dedup, so
+    # this covers the concurrent path independently of the LRU.
+    uncached_loader = ImageLoader(
+        cache_size=0, http_timeout=30.0, url_policy=_permissive_policy()
+    )
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        await asyncio.sleep(0.05)
+        return _png_bytes_of((255, 0, 0) if url.endswith(";") else (0, 0, 255))
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first, second = await asyncio.gather(
+            uncached_loader.load_image("https://example.com/img.png;"),
+            uncached_loader.load_image("https://example.com/img.png"),
+        )
 
     assert mock_fetch.call_count == 2
     assert first.getpixel((0, 0)) == (255, 0, 0)
