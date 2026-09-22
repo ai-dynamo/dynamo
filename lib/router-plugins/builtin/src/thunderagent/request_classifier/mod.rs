@@ -144,33 +144,53 @@ impl Inner {
         let before = state.telemetry();
         let changed = state.reconcile(&capacities, Instant::now());
         let after = state.telemetry();
-        tracing::info!(
-            target: "thunderagent",
-            changed,
-            programs = after.programs,
-            active_programs = after.active_programs,
-            paused_before = before.paused_programs,
-            paused_programs = after.paused_programs,
-            marked_before = before.marked_for_pause,
-            marked_for_pause = after.marked_for_pause,
-            waiting_requests = after.waiting_requests,
-            tracked_requests = after.tracked_requests,
-            "ThunderAgent reconcile"
-        );
+        macro_rules! reconcile_log {
+            ($level:expr) => {
+                tracing::event!(
+                    target: "thunderagent",
+                    $level,
+                    changed,
+                    programs = after.programs,
+                    active_programs = after.active_programs,
+                    paused_before = before.paused_programs,
+                    paused_programs = after.paused_programs,
+                    marked_before = before.marked_for_pause,
+                    marked_for_pause = after.marked_for_pause,
+                    waiting_requests = after.waiting_requests,
+                    tracked_requests = after.tracked_requests,
+                    "ThunderAgent reconcile"
+                );
+            };
+        }
+        if changed {
+            reconcile_log!(tracing::Level::INFO);
+        } else {
+            reconcile_log!(tracing::Level::DEBUG);
+        }
     }
 
     fn on_event(&self, event: ClassifyEvent) {
+        let request_id = match &event {
+            ClassifyEvent::Sent { request_id, .. }
+            | ClassifyEvent::Completed { request_id, .. }
+            | ClassifyEvent::Aborted { request_id, .. } => request_id,
+            _ => return,
+        };
+        let mut state = self.state.lock();
+        if !state.requests.contains_key(request_id) {
+            return;
+        }
         let capacities = self.capacity_provider.snapshot();
-        self.state
-            .lock()
-            .on_event(event, &capacities, Instant::now());
+        state.on_event(event, &capacities, Instant::now());
     }
 
-    fn cancel_request(&self, request_id: &str) {
+    fn cancel_request(&self, request_id: &str, notify: &Arc<Notify>) {
+        let mut state = self.state.lock();
+        if state.wait_status(request_id, notify) == WaitStatus::Missing {
+            return;
+        }
         let capacities = self.capacity_provider.snapshot();
-        self.state
-            .lock()
-            .cancel_request(request_id, &capacities, Instant::now());
+        state.cancel_request(request_id, &capacities, Instant::now());
     }
 }
 
@@ -199,7 +219,7 @@ impl PendingClassification {
 impl Drop for PendingClassification {
     fn drop(&mut self) {
         if self.armed {
-            self.inner.cancel_request(&self.request_id);
+            self.inner.cancel_request(&self.request_id, &self.notify);
         }
     }
 }
@@ -214,7 +234,7 @@ async fn await_release<T>(
     loop {
         let notify = Arc::clone(&pending.notify);
         let notified = notify.notified();
-        let status = inner.state.lock().wait_status(&request_id);
+        let status = inner.state.lock().wait_status(&request_id, &notify);
         match status {
             WaitStatus::Released(worker) => {
                 pending.disarm();
@@ -351,6 +371,10 @@ mod tests {
         ThunderAgentClassifier::new(config(), provider).unwrap()
     }
 
+    fn status(state: &State, request_id: &str) -> WaitStatus {
+        state.wait_status(request_id, &state.requests[request_id].notify)
+    }
+
     fn register(
         classifier: &ThunderAgentClassifier,
         request_id: &str,
@@ -415,6 +439,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dropping_an_old_classification_preserves_a_reused_request_id() {
+        let mut classifier = classifier(&[(1, 1_000)]);
+        register(&classifier, "reused", "old-session", 100, false);
+        let old = await_release(pending(&classifier, "reused"), ());
+        classifier.inner.on_event(ClassifyEvent::Aborted {
+            request_id: "reused".into(),
+            worker: None,
+            error: None,
+        });
+        register(&classifier, "reused", "new-session", 100, false);
+        let replacement = pending(&classifier, "reused");
+
+        drop(old);
+
+        assert!(
+            classifier
+                .inner
+                .state
+                .lock()
+                .requests
+                .contains_key("reused")
+        );
+        await_release(replacement, ()).await.unwrap();
+        completed(&mut classifier, "reused", 100).await;
+    }
+
+    #[tokio::test]
+    async fn an_old_waiter_cannot_read_a_reused_request_id() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        let classifier = classifier(&[(1, 1_000)]);
+        register(&classifier, "reused", "old-session", 1_500, false);
+        let mut old = Box::pin(await_release(pending(&classifier, "reused"), ()));
+        assert!(poll_fn(|cx| Poll::Ready(old.as_mut().poll(cx).is_pending())).await);
+        classifier.inner.on_event(ClassifyEvent::Aborted {
+            request_id: "reused".into(),
+            worker: None,
+            error: None,
+        });
+        register(&classifier, "reused", "new-session", 100, false);
+
+        assert!(matches!(old.await, Err(ThunderAgentError::RequestEnded(id)) if id == "reused"));
+        assert!(
+            classifier
+                .inner
+                .state
+                .lock()
+                .requests
+                .contains_key("reused")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reused_request_id_does_not_revive_a_canceled_queue_entry() {
+        for replacement_session in ["session-a", "session-b"] {
+            let mut classifier = classifier(&[(1, 1_000)]);
+            register(&classifier, "first-a", "session-a", 100, false);
+            register(&classifier, "second-a", "session-a", 100, false);
+            register(&classifier, "reused", "session-a", 100, false);
+            register(&classifier, "tail-a", "session-a", 100, false);
+            drop(pending(&classifier, "reused"));
+            register(&classifier, "first-b", "session-b", 100, false);
+            register(&classifier, "reused", replacement_session, 100, false);
+
+            completed(&mut classifier, "first-a", 100).await;
+            completed(&mut classifier, "second-a", 100).await;
+            assert!(matches!(
+                status(&classifier.inner.state.lock(), "tail-a"),
+                WaitStatus::Released(_)
+            ));
+            assert_eq!(
+                status(&classifier.inner.state.lock(), "reused"),
+                WaitStatus::Waiting
+            );
+
+            completed(&mut classifier, "tail-a", 100).await;
+            completed(&mut classifier, "first-b", 100).await;
+            assert!(matches!(
+                status(&classifier.inner.state.lock(), "reused"),
+                WaitStatus::Released(_)
+            ));
+            completed(&mut classifier, "reused", 100).await;
+            assert!(classifier.inner.state.lock().requests.is_empty());
+        }
+    }
+
+    #[test]
+    fn ignored_and_untracked_events_do_not_read_capacity() {
+        use std::sync::atomic::AtomicUsize;
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let snapshot = capacities(&[(1, 1_000)]);
+        let provider: Arc<dyn WorkerCapacityProvider> = {
+            let reads = Arc::clone(&reads);
+            Arc::new(move || {
+                reads.fetch_add(1, Ordering::Relaxed);
+                Arc::clone(&snapshot)
+            })
+        };
+        let classifier = ThunderAgentClassifier::new(config(), provider).unwrap();
+        register(&classifier, "tracked", "session", 100, false);
+        reads.store(0, Ordering::Relaxed);
+        let worker = WorkerWithDpRank::new(1, 0);
+        for event in [
+            ClassifyEvent::Responding {
+                request_id: "tracked".into(),
+                worker,
+            },
+            ClassifyEvent::Responding {
+                request_id: "sessionless".into(),
+                worker,
+            },
+            ClassifyEvent::Sent {
+                request_id: "sessionless".into(),
+                worker,
+            },
+            ClassifyEvent::Completed {
+                request_id: "sessionless".into(),
+                worker,
+                context_tokens: Some(100),
+            },
+            ClassifyEvent::Aborted {
+                request_id: "sessionless".into(),
+                worker: None,
+                error: None,
+            },
+        ] {
+            classifier.inner.on_event(event);
+        }
+        assert_eq!(reads.load(Ordering::Relaxed), 0);
+        assert!(
+            classifier
+                .inner
+                .state
+                .lock()
+                .requests
+                .contains_key("tracked")
+        );
+    }
+
+    /// Run with `cargo test -p dynamo-custom-policy-builtin --release benchmark_ignored_events -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual CPU benchmark"]
+    fn benchmark_ignored_events() {
+        use std::hint::black_box;
+
+        for programs in [256, 10_000] {
+            let classifier = classifier(&[(1, 1_000_000)]);
+            register(&classifier, "tracked", "session", 100, false);
+            {
+                let mut state = classifier.inner.state.lock();
+                for i in 1..programs {
+                    let mut program = scheduler::Program::new(100);
+                    program.assigned_worker = Some(WorkerWithDpRank::new(1, 0));
+                    state.programs.insert(format!("session-{i}"), program);
+                }
+            }
+            for responding in [true, false] {
+                let mut samples = Vec::new();
+                for iteration in 0..35 {
+                    let start = Instant::now();
+                    for _ in 0..100 {
+                        let worker = WorkerWithDpRank::new(1, 0);
+                        let event = if responding {
+                            ClassifyEvent::Responding {
+                                request_id: "tracked".into(),
+                                worker,
+                            }
+                        } else {
+                            ClassifyEvent::Completed {
+                                request_id: "sessionless".into(),
+                                worker,
+                                context_tokens: None,
+                            }
+                        };
+                        classifier.inner.on_event(black_box(event));
+                    }
+                    if iteration >= 5 {
+                        samples.push(start.elapsed().as_nanos() / 100);
+                    }
+                }
+                samples.sort_unstable();
+                println!(
+                    "programs={programs} responding={responding} median_ns={} p95_ns={}",
+                    samples[samples.len() / 2],
+                    samples[samples.len() * 95 / 100]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn serializes_requests_for_one_session() {
         let mut classifier = classifier(&[(1, 1_000)]);
         register(&classifier, "request-1", "session-a", 100, false);
@@ -465,7 +682,7 @@ mod tests {
 
         register(&classifier, "request-2", "session-b", 100, false);
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
 
@@ -480,7 +697,7 @@ mod tests {
                 .contains_key("session-a")
         );
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
 
@@ -518,7 +735,7 @@ mod tests {
         register(&classifier, "request-2", "session-a", 1, true);
 
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
         assert!(
@@ -563,7 +780,7 @@ mod tests {
         sent(&mut classifier, "request-1", 1).await;
         register(&classifier, "request-2", "session-b", 100, false);
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
 
@@ -753,14 +970,14 @@ mod tests {
         sent(&mut classifier, "request-1", 1).await;
         register(&classifier, "request-2", "session-b", 100, false);
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
 
         *current.lock() = Arc::new(WorkerCapacitySnapshot::default().with_live_workers([worker]));
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-2"),
+            status(&classifier.inner.state.lock(), "request-2"),
             WaitStatus::Waiting
         );
 
@@ -866,7 +1083,7 @@ mod tests {
             let session_id = format!("session-{sequence}");
             register(&classifier, &request_id, &session_id, 1, true);
             assert!(matches!(
-                classifier.inner.state.lock().wait_status(&request_id),
+                status(&classifier.inner.state.lock(), &request_id),
                 WaitStatus::Released(_)
             ));
             completed(&mut classifier, &request_id, 1).await;
@@ -901,7 +1118,7 @@ mod tests {
             (0..REQUESTS)
                 .filter(|sequence| {
                     matches!(
-                        state.wait_status(&format!("request-{sequence}")),
+                        status(&state, &format!("request-{sequence}")),
                         WaitStatus::Released(_)
                     )
                 })
@@ -986,7 +1203,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            classifier.inner.state.lock().wait_status("request-1"),
+            status(&classifier.inner.state.lock(), "request-1"),
             WaitStatus::Released(Some(WorkerWithDpRank::new(1, 0)))
         );
     }

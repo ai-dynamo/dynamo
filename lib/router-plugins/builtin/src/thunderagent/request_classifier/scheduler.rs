@@ -99,10 +99,24 @@ impl RequestRegistration {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct WaitingRequest {
+    request_id: String,
+    notify: Arc<Notify>,
+}
+
+impl WaitingRequest {
+    fn is_waiting(&self, requests: &HashMap<String, RequestState>) -> bool {
+        requests.get(&self.request_id).is_some_and(|request| {
+            request.phase == RequestPhase::Waiting && Arc::ptr_eq(&self.notify, &request.notify)
+        })
+    }
+}
+
 #[derive(Default)]
 struct SessionRequests {
     current: Option<String>,
-    waiting: VecDeque<String>,
+    waiting: VecDeque<WaitingRequest>,
     stale_waiting: usize,
 }
 
@@ -154,7 +168,7 @@ pub(crate) struct State {
     normal_usage: HashMap<WorkerWithDpRank, usize>,
     pub(crate) requests: HashMap<String, RequestState>,
     sessions: HashMap<String, SessionRequests>,
-    pub(crate) arrival_order: VecDeque<String>,
+    pub(crate) arrival_order: VecDeque<WaitingRequest>,
     waiting_arrivals: HashSet<String>,
     next_retention_expiry: Option<Instant>,
     capacity_snapshot_id: Option<u64>,
@@ -204,13 +218,18 @@ impl State {
         }
         self.clear_removed_workers(capacities);
         let notify = Arc::new(Notify::new());
+        // Keep registration identity with tombstones so reused IDs cannot revive them.
+        let waiting = WaitingRequest {
+            request_id: request_id.clone(),
+            notify: Arc::clone(&notify),
+        };
 
         self.sessions
             .entry(session_id.clone())
             .or_default()
             .waiting
-            .push_back(request_id.clone());
-        self.arrival_order.push_back(request_id.clone());
+            .push_back(waiting.clone());
+        self.arrival_order.push_back(waiting);
         self.waiting_arrivals.insert(request_id.clone());
         self.requests.insert(
             request_id.clone(),
@@ -232,8 +251,9 @@ impl State {
         Ok(notify)
     }
 
-    pub(crate) fn wait_status(&self, request_id: &str) -> WaitStatus {
+    pub(crate) fn wait_status(&self, request_id: &str, notify: &Arc<Notify>) -> WaitStatus {
         match self.requests.get(request_id) {
+            Some(request) if !Arc::ptr_eq(&request.notify, notify) => WaitStatus::Missing,
             Some(request) if request.phase == RequestPhase::Waiting => WaitStatus::Waiting,
             Some(request) => WaitStatus::Released(request.placement_target),
             None => WaitStatus::Missing,
@@ -407,11 +427,12 @@ impl State {
         let candidates: Vec<String> = self
             .arrival_order
             .iter()
-            .filter(|request_id| self.waiting_arrivals.contains(request_id.as_str()))
-            .filter_map(|request_id| {
+            .filter_map(|waiting| {
+                let request_id = &waiting.request_id;
                 let request = self.requests.get(request_id)?;
                 (request.phase == RequestPhase::Waiting
-                    && self.is_front_and_idle(request_id, &request.session_id))
+                    && Arc::ptr_eq(&waiting.notify, &request.notify)
+                    && self.is_front_and_idle(request_id, request))
                 .then(|| request_id.clone())
             })
             .collect();
@@ -432,9 +453,7 @@ impl State {
         let Some(request) = self.requests.get(request_id) else {
             return false;
         };
-        if request.phase != RequestPhase::Waiting
-            || !self.is_front_and_idle(request_id, &request.session_id)
-        {
+        if request.phase != RequestPhase::Waiting || !self.is_front_and_idle(request_id, request) {
             return false;
         }
         if request.session_final {
@@ -574,7 +593,7 @@ impl State {
         };
         if request.phase != RequestPhase::Waiting
             || !request.began_program
-            || !self.is_front_and_idle(request_id, &request.session_id)
+            || !self.is_front_and_idle(request_id, request)
         {
             return false;
         }
@@ -592,7 +611,7 @@ impl State {
             .sessions
             .get(&session_id)
             .and_then(|session| session.waiting.front())
-            .map(String::as_str)
+            .map(|waiting| waiting.request_id.as_str())
             != Some(request_id)
         {
             return false;
@@ -813,7 +832,12 @@ impl State {
             session
                 .current
                 .is_none()
-                .then(|| session.waiting.front().cloned())
+                .then(|| {
+                    session
+                        .waiting
+                        .front()
+                        .map(|waiting| waiting.request_id.clone())
+                })
                 .flatten()
         });
         if let Some(request_id) = pending {
@@ -1030,7 +1054,12 @@ impl State {
             session
                 .current
                 .is_none()
-                .then(|| session.waiting.front().cloned())
+                .then(|| {
+                    session
+                        .waiting
+                        .front()
+                        .map(|waiting| waiting.request_id.clone())
+                })
                 .flatten()
         });
         if let Some(next) = next {
@@ -1058,7 +1087,7 @@ impl State {
         while session
             .waiting
             .front()
-            .is_some_and(|request_id| !self.waiting_arrivals.contains(request_id))
+            .is_some_and(|waiting| !waiting.is_waiting(&self.requests))
         {
             session.waiting.pop_front();
             session.stale_waiting = session.stale_waiting.saturating_sub(1);
@@ -1069,7 +1098,7 @@ impl State {
         {
             session
                 .waiting
-                .retain(|request_id| self.waiting_arrivals.contains(request_id));
+                .retain(|waiting| waiting.is_waiting(&self.requests));
             session.stale_waiting = 0;
         }
     }
@@ -1204,11 +1233,16 @@ impl State {
         });
     }
 
-    fn is_front_and_idle(&self, request_id: &str, session_id: &str) -> bool {
-        self.sessions.get(session_id).is_some_and(|session| {
-            session.current.is_none()
-                && session.waiting.front().map(String::as_str) == Some(request_id)
-        })
+    fn is_front_and_idle(&self, request_id: &str, request: &RequestState) -> bool {
+        self.sessions
+            .get(&request.session_id)
+            .is_some_and(|session| {
+                session.current.is_none()
+                    && session.waiting.front().is_some_and(|waiting| {
+                        waiting.request_id == request_id
+                            && Arc::ptr_eq(&waiting.notify, &request.notify)
+                    })
+            })
     }
 
     fn remove_waiting_arrival(&mut self, request_id: &str) -> bool {
@@ -1221,7 +1255,7 @@ impl State {
             return;
         }
         self.arrival_order
-            .retain(|request_id| self.waiting_arrivals.contains(request_id));
+            .retain(|waiting| waiting.is_waiting(&self.requests));
     }
 }
 
@@ -1350,7 +1384,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            state.wait_status("request-1"),
+            state.wait_status("request-1", &state.requests["request-1"].notify),
             WaitStatus::Released(Some(worker))
         );
         assert_eq!(
@@ -1500,12 +1534,15 @@ mod tests {
                 now,
             )
             .unwrap();
-        assert_eq!(state.wait_status("request"), WaitStatus::Waiting);
+        assert_eq!(
+            state.wait_status("request", &state.requests["request"].notify),
+            WaitStatus::Waiting
+        );
 
         state.reconcile(&capacities, now + Duration::from_secs(2));
 
         assert_eq!(
-            state.wait_status("request"),
+            state.wait_status("request", &state.requests["request"].notify),
             WaitStatus::Released(Some(worker))
         );
         assert!(state.programs["session"].marked_for_pause);
