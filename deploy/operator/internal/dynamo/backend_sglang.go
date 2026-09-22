@@ -19,6 +19,8 @@ const (
 	maxTCPPort = 65535
 
 	sglangEmbeddingWorkerFlag           = "--embedding-worker"
+	sglangNoEmbeddingWorkerFlag         = "--no-embedding-worker"
+	sglangEmbeddingWorkerEnv            = "DYN_SGL_EMBEDDING_WORKER"
 	healthCheckPayloadEnv               = "DYN_HEALTH_CHECK_PAYLOAD"
 	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
 )
@@ -46,7 +48,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Supply the embedding request shape that Dynamo 1.5.0 cannot derive for its active canary.
 	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
 		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
-		hasFlag(getExpandedCommandLine(container), sglangEmbeddingWorkerFlag) &&
+		sglangEmbeddingWorkerEnabled(container) &&
 		findEnvVar(container.Env, healthCheckPayloadEnv) == nil {
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  healthCheckPayloadEnv,
@@ -84,6 +86,31 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 	injectFlagsIntoContainerCommand(container, flags, needsShell, "sglang")
 	return nil
+}
+
+// sglangEmbeddingWorkerEnabled resolves literal environment and CLI configuration with runtime-equivalent precedence.
+func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
+	enabled := false
+
+	// A literal environment value supplies argparse's default; valueFrom remains unknown until container startup.
+	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil && env.ValueFrom == nil {
+		switch strings.ToLower(strings.TrimSpace(env.Value)) {
+		case "true", "1", "yes", "on":
+			enabled = true
+		}
+	}
+
+	// CLI flags override the environment-derived default in their original order.
+	for _, arg := range getExpandedCommandLine(container) {
+		switch arg {
+		case sglangEmbeddingWorkerFlag:
+			enabled = true
+		case sglangNoEmbeddingWorkerFlag:
+			enabled = false
+		}
+	}
+
+	return enabled
 }
 
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.

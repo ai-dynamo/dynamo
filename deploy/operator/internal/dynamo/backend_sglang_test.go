@@ -582,6 +582,19 @@ func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
 			wantEnv:     true,
 		},
 		{
+			name:        "Dynamo 1.5 embedding worker environment gets compatible payload",
+			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			env:         []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
+			wantPayload: sglang15EmbeddingHealthCheckPayload,
+			wantEnv:     true,
+		},
+		{
+			name:  "negative CLI flag overrides embedding environment and earlier flag",
+			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			args:  []string{"--embedding-worker", "--no-embedding-worker"},
+			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
+		},
+		{
 			name:  "Dynamo 1.5 chat worker is unchanged",
 			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
 		},
