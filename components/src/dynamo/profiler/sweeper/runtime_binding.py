@@ -48,11 +48,13 @@ class SupportChecker(Protocol):
         backend: str,
         version: str,
         architecture: str | None,
-    ) -> Any: ...
+    ) -> Any:
+        ...
 
 
 class NumGPUsPerNodeLookup(Protocol):
-    def __call__(self, system: str) -> int: ...
+    def __call__(self, system: str) -> int:
+        ...
 
 
 @dataclass(frozen=True)
