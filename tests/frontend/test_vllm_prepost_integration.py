@@ -453,6 +453,7 @@ def test_vllm_responses_processor_forwards_max_thinking_tokens(
 
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["zmq"], indirect=True)
+@pytest.mark.timeout(90)  # ~25s including setup/teardown; 3x rounded up.
 def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
     start_services: tuple[int, Path],
 ) -> None:
