@@ -261,7 +261,11 @@ func (r *graphReconciler) completeReconcile(
 		)
 		deadlineAt, err = wake, errors.Join(err, deadlineErr)
 		if classification != nil {
-			state, result = lpxResult(classification), projectLPXLifecycleStatus(classification)
+			state = lpxResult(classification)
+			// Preserve independent work such as polling an unfinished model download.
+			if deadlineResult := projectLPXLifecycleStatus(classification); deadlineResult.RequeueAfter > 0 {
+				result = deadlineResult
+			}
 			deadlineExceeded, recordDeadlineFailure = lpxDeadlineFlags(classification)
 		}
 	}

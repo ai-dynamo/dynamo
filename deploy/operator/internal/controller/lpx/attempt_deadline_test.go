@@ -52,6 +52,7 @@ func TestLPXDeadlineUsesEachSchedulingCycleStart(t *testing.T) {
 	require.NoError(t, err)
 	require.IsType(t, &lpxDeadlineExceeded{}, classification)
 	require.True(t, firstStarted.Add(30*time.Second).Equal(wake))
+	require.Zero(t, projectLPXLifecycleStatus(classification), "the finalizer watch needs no additional poll")
 }
 
 func TestLPXDeadlineIgnoresRequestsOutsideCurrentPublication(t *testing.T) {
@@ -226,10 +227,11 @@ func TestLPXDeadlineRetainsOnlyRecordedRequestUIDs(t *testing.T) {
 			request = getLPXRequest(t, t.Context(), r.Client, request.Namespace, request.Name)
 			classification, _, err := r.reconcileLPXRequestDeadlines(t.Context(), dgd, source, nil, nil)
 			require.NoError(t, err)
-			require.Positive(t, projectLPXLifecycleStatus(classification).RequeueAfter)
 			if uid == "recorded" {
+				require.Zero(t, projectLPXLifecycleStatus(classification))
 				require.Equal(t, []types.UID{uid}, dgd.Status.ExpiredRequestUIDs)
 			} else {
+				require.Positive(t, projectLPXLifecycleStatus(classification).RequeueAfter)
 				require.Nil(t, dgd.Status.ExpiredRequestUIDs)
 			}
 			require.Equal(t, request, getLPXRequest(t, t.Context(), r.Client, request.Namespace, request.Name))

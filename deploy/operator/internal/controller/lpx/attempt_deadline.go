@@ -136,9 +136,12 @@ func (r *graphReconciler) reconcileLPXRequestDeadlines(
 		return nil, nextDeadline, nil
 	}
 
-	// Lower Grove before deleting the affected engine suffix; convergence is asynchronous.
-	// Requeue even after the last recorded UID disappears so an authorized retry can proceed.
+	// Request and Grove watches drive cleanup while expired UIDs remain.
 	retirementErr := r.retireExpiredLPXRequests(ctx, deployment, source, pcs, requests, expired)
+	if len(deployment.Status.ExpiredRequestUIDs) > 0 {
+		return &lpxDeadlineExceeded{}, nextDeadline, retirementErr
+	}
+	// Clearing the last UID only changes status; explicitly wake an authorized retry.
 	return &lpxDeadlineExceeded{requeueAfter: lpxRetirementRequeueAfter}, nextDeadline, retirementErr
 }
 

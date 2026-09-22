@@ -16,7 +16,9 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
@@ -134,13 +136,16 @@ func TestLPXExpiredInteriorReplicaDoesNotScaleDown(t *testing.T) {
 	createLPXTestObjects(t, ctx, r.Client, objects...)
 	publishSelectedLPXForTest(t, ctx, r, child, desired)
 	group := findLPXTestScalingGroup(t, objects, desired.plan.LPXScalingGroup)
-	pcs := findLPXTestPodCliqueSet(t, objects)
 	expired := getLPXRequest(t, ctx, r.Client, child.Namespace, desired.requests[1].requestName)
-	requests, err := r.listOwnedLPXRequests(ctx, child, pcs)
-	require.NoError(t, err)
+	child.Status.ExpiredRequestUIDs = []types.UID{expired.UID}
+	require.NoError(t, r.Status().Update(ctx, child))
 
-	t.Log("Leave the PCSG, its PodCliques, and the interior LPR untouched")
-	require.NoError(t, r.retireExpiredLPXRequests(ctx, child, source, pcs, requests, []*lpxv1alpha1.LPUPipelineRequest{expired}))
+	t.Log("Wait for watched changes without polling or changing the live engines")
+	result, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+	require.NoError(t, err)
+	require.Zero(t, result)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	require.Equal(t, []types.UID{expired.UID}, child.Status.ExpiredRequestUIDs)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(group), group))
 	require.Equal(t, int32(3), group.Spec.Replicas)
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(expired), &lpxv1alpha1.LPUPipelineRequest{}))

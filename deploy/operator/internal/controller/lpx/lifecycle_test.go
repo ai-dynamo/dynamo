@@ -219,6 +219,7 @@ func TestSelectedLPXSuccessorBuildDownloadsBeforePublication(t *testing.T) {
 	t.Log("Publish the previous build before switching to an uncached successor")
 	ctx := t.Context()
 	child, source, baseRegistry := newLPXTestDGD(t, lpx.PipelineSingle)
+	lpx.ServingComponent(source).Replicas = ptr.To(int32(2))
 	r, selected := newPreparedLPXTestReconciler(t, baseRegistry, ctx, child, source)
 	objects := lpxMaterializedObjects(t, r, child, source, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -235,13 +236,15 @@ func TestSelectedLPXSuccessorBuildDownloadsBeforePublication(t *testing.T) {
 	source.Generation++
 	require.NoError(t, r.Update(ctx, source))
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(child), child))
+	child.Status.ExpiredRequestUIDs = []types.UID{previous.UID}
+	require.NoError(t, r.Status().Update(ctx, child))
 	child.Generation++
 	var err error
 	child.Spec.InputRevision, err = dynamo.LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.NoError(t, r.Update(ctx, child))
 
-	t.Log("Start downloading despite snapshot unavailability, preserving the existing request")
+	t.Log("Keep the download poll despite an interior expiry, preserving the existing request")
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
 	result, err := r.Reconcile(ctx, request)
 	require.NoError(t, err)
@@ -250,6 +253,7 @@ func TestSelectedLPXSuccessorBuildDownloadsBeforePublication(t *testing.T) {
 	require.Equal(t, previous, getLPXRequest(t, ctx, r.Client, previous.Namespace, previous.Name))
 	require.NoError(t, r.Get(ctx, request.NamespacedName, child))
 	require.Equal(t, child.Generation, child.Status.ObservedGeneration)
+	require.Equal(t, []types.UID{previous.UID}, child.Status.ExpiredRequestUIDs)
 
 	t.Log("Resolve the successor after download completes on the next reconciliation")
 	_, err = r.Reconcile(ctx, request)
