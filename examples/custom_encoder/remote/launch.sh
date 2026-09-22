@@ -50,6 +50,6 @@ python -m dynamo.vllm \
 
 CUDA_VISIBLE_DEVICES="$ENCODER_GPU" \
 DYN_SYSTEM_PORT="${DYN_ORCHESTRATOR_SYSTEM_PORT:-8082}" \
-python -m examples.custom_encoder.remote.worker &
+python -m examples.custom_encoder.remote.orchestrator_worker &
 
 wait_any_exit

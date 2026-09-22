@@ -15,10 +15,8 @@ from dynamo.common.external_encoder import (
 )
 from dynamo.experimental.llm import LLMUnaryClient
 from dynamo.llm.exceptions import InvalidArgument
-from examples.custom_encoder.remote.orchestrator_worker import (
-    ExternalEncoderOrchestrator,
-    InlineEncoder,
-)
+from examples.custom_encoder.remote.encoder import InlineEncoder
+from examples.custom_encoder.remote.orchestrator import ExternalEncoderOrchestrator
 
 pytestmark = [
     pytest.mark.unit,
