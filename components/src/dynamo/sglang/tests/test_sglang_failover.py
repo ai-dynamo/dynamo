@@ -3,6 +3,7 @@
 
 # ruff: noqa: E402
 import asyncio
+import os
 import threading
 import time
 from types import SimpleNamespace
@@ -42,6 +43,26 @@ def _load_sglang_failover_modules():
     init_llm = init_llm_module
     _scheduler_dead = scheduler_dead
     maybe_start_gms_failover_child_watchdog = start_child_watchdog
+
+
+@pytest.mark.parametrize(
+    ("node_rank", "expected"),
+    [
+        (0, "/shared/failover.lock"),
+        (1, "/shared/failover.lock.rank-1"),
+        (7, "/shared/failover.lock.rank-7"),
+    ],
+)
+def test_multinode_failover_lock_is_rank_scoped(monkeypatch, node_rank, expected):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+    monkeypatch.delenv("DYN_SGLANG_GMS_FAILOVER_BASE_LOCK_PATH", raising=False)
+
+    args = SimpleNamespace(nnodes=8, node_rank=node_rank)
+    init_llm._scope_failover_lock_to_node_rank(args)
+    init_llm._scope_failover_lock_to_node_rank(args)
+
+    assert os.environ["FAILOVER_LOCK_PATH"] == expected
 
 
 @pytest.mark.parametrize(("tp_size", "nnodes"), [(2, 1), (4, 2)])
@@ -102,7 +123,24 @@ class _FakePublisher:
 async def test_non_leader_decode_prepares_failover_before_publisher_loop(monkeypatch):
     events = []
 
-    async def fake_prepare(engine, runtime, early_failover_activation):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(
+        writer_lifecycle,
+        "prepare_writer_cohort",
+        lambda: events.append("prepare_writer_cohort"),
+    )
+
+    async def fake_acquire(*, backend_name):
+        assert backend_name == "sglang"
+        events.append("acquire_active_lock")
+        return object()
+
+    async def fake_prepare(
+        engine, runtime, early_failover_activation, **_activation_kwargs
+    ):
         events.append("prepare")
         return object()
 
@@ -115,6 +153,7 @@ async def test_non_leader_decode_prepares_failover_before_publisher_loop(monkeyp
         metrics_task.cancel()
 
     monkeypatch.setattr(init_llm, "_prepare_non_leader_failover", fake_prepare)
+    monkeypatch.setattr(init_llm, "acquire_gms_failover_lock_before_init", fake_acquire)
     monkeypatch.setattr(init_llm, "setup_sgl_metrics", fake_setup_sgl_metrics)
     monkeypatch.setattr(init_llm, "handle_non_leader_node", fake_handle_non_leader_node)
 
@@ -144,7 +183,12 @@ async def test_non_leader_decode_prepares_failover_before_publisher_loop(monkeyp
         snapshot_engine=engine,
     )
 
-    assert events == ["prepare", "handle_non_leader"]
+    assert events == [
+        "prepare_writer_cohort",
+        "acquire_active_lock",
+        "prepare",
+        "handle_non_leader",
+    ]
 
 
 @pytest.mark.asyncio
@@ -188,6 +232,58 @@ async def test_prepare_non_leader_failover_attaches_lock_owner(monkeypatch):
         "tags": ["kv_cache"],
         "promotion_warmup": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_non_leader_waits_for_leader_runtime_arm_before_resume(monkeypatch):
+    events = []
+    captured = {}
+
+    class FakeActivation:
+        enabled = True
+
+        def attach_to(self, _owner):
+            events.append("attach")
+
+    class FakeClient:
+        def wait_for_runtime_arm(self, timeout):
+            captured["timeout"] = timeout
+            events.append("wait_for_runtime_arm")
+            return True
+
+    async def fake_prepare(_owner, _runtime, **kwargs):
+        captured.update(kwargs)
+        events.append("prepare")
+        await kwargs["activation_barrier"]()
+        events.append("resume")
+        return FakeActivation()
+
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
+    monkeypatch.setattr(init_llm, "prepare_gms_failover", fake_prepare)
+    monkeypatch.setattr(
+        init_llm,
+        "maybe_start_rank_liveness",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+
+    owner = await init_llm._prepare_non_leader_failover(
+        SimpleNamespace(tokenizer_manager=SimpleNamespace()),
+        object(),
+        None,
+        node_rank=3,
+        leader_host="leader.example",
+        cohort_identity="cohort",
+    )
+
+    assert owner is not None
+    assert events == [
+        "prepare",
+        "wait_for_runtime_arm",
+        "resume",
+        "attach",
+    ]
+    assert captured["timeout"] > 0
 
 
 def test_sglang_failover_watchdog_detects_dead_scheduler_process():

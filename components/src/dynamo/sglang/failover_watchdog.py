@@ -483,6 +483,7 @@ def maybe_start_rank_liveness(
     loop: asyncio.AbstractEventLoop | None = None,
     expected_ranks: Iterable[int] | None = None,
     cohort_identity: str | None = None,
+    runtime_armed: bool = True,
 ):
     """Start the cross-node ZMQ rank-liveness channel for SGLang.
 
@@ -546,6 +547,7 @@ def maybe_start_rank_liveness(
         on_rank_lost,
         bind_addr=rl.leader_bind_addr(cohort_identity),
         expected_ranks=expected_ranks,
+        runtime_armed=runtime_armed,
     )
     target._gms_rank_liveness_monitor = monitor
     monitor.start()
