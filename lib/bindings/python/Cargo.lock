@@ -2411,6 +2411,7 @@ dependencies = [
  "dynamo-vllm-sidecar",
  "dynamo-worker-selection-policy-catalog",
  "futures",
+ "libc",
  "once_cell",
  "opentelemetry",
  "opentelemetry_sdk",
