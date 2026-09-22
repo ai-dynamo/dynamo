@@ -10,7 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
-from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._compat import kv_hints_kwargs, require_reasoning_kwargs
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.agent_session import agent_session_kwargs
 from dynamo.sglang.args import Config
@@ -219,6 +219,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, inner_request),
+                **kv_hints_kwargs(self.engine, inner_request),
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,

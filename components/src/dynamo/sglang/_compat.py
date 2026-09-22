@@ -27,7 +27,7 @@ import uuid
 from collections.abc import Mapping
 from functools import lru_cache, wraps
 from types import ModuleType
-from typing import Any
+from typing import Any, Optional
 
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
@@ -366,6 +366,57 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
     return kwargs
 
 
+# Where the router places a request's KV hint: the preprocessor's top-level
+# ``kv_hint`` field (lib/llm/src/protocols/common/preprocessor.rs), or the
+# older ``extra_args.kv_transfer_params.kv_hint`` nesting the vLLM handler
+# still accepts. SGLang consumes the envelope as the ``kv_hints`` kwarg.
+_KV_HINT_REQUEST_KEY = "kv_hint"
+_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY = "kv_transfer_params"
+_SGLANG_KV_HINTS_KWARG = "kv_hints"
+
+
+@lru_cache(maxsize=1)
+def _warn_kv_hints_unsupported() -> None:
+    logger.warning(
+        "Dropping the router KV hint because SGLang Engine.async_generate does "
+        f"not accept {_SGLANG_KV_HINTS_KWARG}; requests will recompute prefixes a "
+        "peer already holds. Upgrade SGLang to enable hint-driven KV reuse."
+    )
+
+
+def request_kv_hint(request: Mapping[str, Any]) -> Optional[dict[str, Any]]:
+    """The KV-hint envelope attached to a Dynamo request, if any."""
+    hint = request.get(_KV_HINT_REQUEST_KEY)
+    if isinstance(hint, Mapping):
+        return dict(hint)
+    extra_args = request.get("extra_args")
+    if isinstance(extra_args, Mapping):
+        transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
+        if isinstance(transfer_params, Mapping):
+            nested = transfer_params.get(_KV_HINT_REQUEST_KEY)
+            if isinstance(nested, Mapping):
+                return dict(nested)
+    return None
+
+
+def kv_hints_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the optional SGLang per-request KV-hint envelope argument.
+
+    The envelope is forwarded untouched: SGLang selects the actions it
+    implements. An engine without the kwarg recomputes the prefix, so a missing
+    hint degrades instead of failing the request.
+    """
+    hint = request_kv_hint(request)
+    if hint is None:
+        return {}
+    kwargs = filter_supported_async_generate_kwargs(
+        engine, {_SGLANG_KV_HINTS_KWARG: hint}
+    )
+    if _SGLANG_KV_HINTS_KWARG not in kwargs:
+        _warn_kv_hints_unsupported()
+    return kwargs
+
+
 __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
@@ -373,9 +424,11 @@ __all__ = [
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",
     "get_sglang_model_config",
+    "kv_hints_kwargs",
     "mm_encode",
     "override_server_args",
     "publish_server_args",
+    "request_kv_hint",
     "require_reasoning_kwargs",
     "resolved_server_args",
     "sglang_uses_mla_backend",
