@@ -1188,3 +1188,307 @@ async def test_shutdown_survives_ordered_abort_cleanup(decode_cancellation_case)
 
     with pytest.raises(EngineShutdown):
         await operation
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("exit_kind", ["error", "close"])
+async def test_stream_exit_before_monitor_runs_aborts_dispatched_request(
+    decode_cancellation_case, exit_kind
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+    case.dispatched.set()
+    exception = {
+        "error": RuntimeError,
+        "close": GeneratorExit,
+    }[exit_kind]
+    with pytest.raises(exception):
+        async with case.handler._cancellation_monitor(
+            asyncio.get_running_loop().create_future(),
+            case.context,
+            submitted_request_id=rid,
+        ):
+            # No scheduling point: the stream exits before its monitor can run.
+            raise exception()
+    assert case.abort_calls == [(rid, False)]
+    assert case.aborted.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("registered", [False, True])
+async def test_stream_exit_does_not_abort_before_dispatch(
+    decode_cancellation_case, registered
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    if registered:
+        case.registry[rid] = SimpleNamespace(
+            time_stats=SimpleNamespace(api_server_dispatch_finish_time=0.0)
+        )
+    with pytest.raises(GeneratorExit):
+        async with case.handler._cancellation_monitor(
+            asyncio.get_running_loop().create_future(),
+            case.context,
+            submitted_request_id=rid,
+        ):
+            raise GeneratorExit()
+    assert not case.abort_calls
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("abort_fails", [False, True])
+@pytest.mark.parametrize("empty_chunk", [False, True])
+async def test_cancelled_consumer_aborts_before_first_output(
+    decode_cancellation_case, abort_fails, empty_chunk, caplog
+):
+    case = decode_cancellation_case
+    if abort_fails:
+
+        def abort_request(*, rid, abort_all):
+            case.abort_calls.append((rid, abort_all))
+            raise ValueError("abort submission failed")
+
+        case.handler.engine.tokenizer_manager.abort_request = abort_request
+    case.first_response = empty_chunk
+    case.allow_registration.set()
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    await asyncio.wait_for(case.dispatched.wait(), timeout=1)
+    if empty_chunk:
+        await asyncio.wait_for(case.first_response_consumed.wait(), timeout=1)
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert case.abort_calls == [("internal-request-id", False)]
+    assert case.aborted.is_set() is not abort_fails
+    if abort_fails:
+        assert "Failed to abort SGLang request during stream cleanup" in caplog.text
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("exit_kind", ["error", "close"])
+async def test_stream_exit_preserves_original_error_when_abort_fails(
+    decode_cancellation_case, exit_kind, caplog
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+
+    def abort_request(*, rid, abort_all):
+        case.abort_calls.append((rid, abort_all))
+        raise ValueError("abort submission failed")
+
+    case.handler.engine.tokenizer_manager.abort_request = abort_request
+    original = (
+        RuntimeError("stream failed") if exit_kind == "error" else GeneratorExit()
+    )
+    request_id_future = asyncio.get_running_loop().create_future()
+    with pytest.raises(type(original)) as exc_info:
+        async with case.handler._cancellation_monitor(
+            request_id_future, case.context, submitted_request_id=rid
+        ) as monitor:
+            raise original
+
+    assert exc_info.value is original
+    assert case.abort_calls == [(rid, False)]
+    assert monitor.cancelled()
+    assert request_id_future.cancelled()
+    assert not case.handler._abort_tasks
+    assert "Failed to abort SGLang request during stream cleanup" in caplog.text
+    assert "abort submission failed" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "server_args, expect_retry",
+    [
+        ({"pp_size": 2}, True),
+        ({"enable_dp_attention": True}, True),
+        (
+            {
+                "enable_dp_attention": True,
+                "enable_dp_attention_local_control_broadcast": True,
+            },
+            False,
+        ),
+    ],
+)
+async def test_stream_exit_preserves_abort_retry_policy(
+    decode_cancellation_case, server_args, expect_retry
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.handler.config.server_args = SimpleNamespace(**server_args)
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+
+    def abort_request(*, rid, abort_all):
+        case.abort_calls.append((rid, abort_all))
+        # Simulate a topology that only propagates the second abort.
+        if len(case.abort_calls) == 2:
+            case.registry.pop(rid)
+            case.aborted.set()
+
+    case.handler.engine.tokenizer_manager.abort_request = abort_request
+    exception = RuntimeError
+    with pytest.raises(exception):
+        async with case.handler._cancellation_monitor(
+            asyncio.get_running_loop().create_future(),
+            case.context,
+            submitted_request_id=rid,
+        ):
+            raise exception()
+
+    assert case.abort_calls == [(rid, False)]
+    assert bool(case.handler._abort_tasks) is expect_retry
+    await asyncio.wait_for(asyncio.gather(*tuple(case.handler._abort_tasks)), timeout=1)
+    assert case.abort_calls == [(rid, False)] * (2 if expect_retry else 1)
+    assert case.aborted.is_set() is expect_retry
+    assert (rid in case.registry) is not expect_retry
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_empty_chunk_stream_error_retains_abort_retry(decode_cancellation_case):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.handler.config.server_args.pp_size = 2
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+
+    def abort_request(*, rid, abort_all):
+        case.abort_calls.append((rid, abort_all))
+        if len(case.abort_calls) == 2:
+            case.registry.pop(rid)
+
+    case.handler.engine.tokenizer_manager.abort_request = abort_request
+
+    async def stream():
+        yield {"output_ids": [], "meta_info": {"id": rid, "finish_reason": None}}
+        raise RuntimeError("stream failed after empty chunk")
+
+    with pytest.raises(RuntimeError, match="stream failed after empty chunk"):
+        await _collect(
+            case.handler._process_token_stream(
+                stream(), case.context, submitted_request_id=rid
+            )
+        )
+    assert case.abort_calls == [(rid, False)]
+    assert case.handler._abort_tasks
+    await asyncio.wait_for(asyncio.gather(*tuple(case.handler._abort_tasks)), timeout=1)
+    assert case.abort_calls == [(rid, False), (rid, False)]
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("output_mode", ["tokens", "text", "native"])
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_processed_response_does_not_trigger_early_abort(
+    decode_cancellation_case, output_mode, terminal, monkeypatch
+):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=1.0)
+    )
+
+    async def unexpected_early_abort(*args):
+        pytest.fail("processed response must retain the existing cleanup path")
+
+    monkeypatch.setattr(case.handler, "_abort_sglang_request", unexpected_early_abort)
+    chunk = {
+        "output_ids": [] if terminal else [42],
+        "text": "" if terminal else "hello",
+        "meta_info": {
+            "id": rid,
+            "finish_reason": {"type": "stop"} if terminal else None,
+        },
+    }
+
+    async def stream():
+        yield {
+            "engine_data": {"sglang_response": chunk}
+        } if output_mode == "native" else chunk
+
+    process = {
+        "tokens": case.handler._process_token_stream,
+        "text": case.handler._process_text_stream,
+        "native": case.handler._process_native_generate_stream,
+    }[output_mode]
+    responses = await _collect(
+        process(stream(), case.context, submitted_request_id=rid)
+    )
+    assert len(responses) == 1
+    # A finished request needs no abort; an unfinished visible stream still uses
+    # the existing response-ID fallback, exactly once.
+    assert case.abort_calls == ([] if terminal else [(rid, False)])
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_empty_chunk_does_not_bypass_dispatch_guard(decode_cancellation_case):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    case.registry[rid] = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=0.0)
+    )
+
+    async def stream():
+        yield {"output_ids": [], "meta_info": {"id": rid, "finish_reason": None}}
+        raise RuntimeError("stream failed before dispatch")
+
+    with pytest.raises(RuntimeError, match="stream failed before dispatch"):
+        await _collect(
+            case.handler._process_token_stream(
+                stream(), case.context, submitted_request_id=rid
+            )
+        )
+    assert not case.abort_calls
+    assert not case.handler._abort_tasks
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_stream_exit_keeps_shutdown_abort_ownership(decode_cancellation_case):
+    case = decode_cancellation_case
+    rid = "internal-request-id"
+    state = SimpleNamespace(
+        time_stats=SimpleNamespace(api_server_dispatch_finish_time=0.0)
+    )
+    case.registry[rid] = state
+    request_id_future = asyncio.get_running_loop().create_future()
+    with pytest.raises(EngineShutdown):
+        async with case.handler._cancellation_monitor(
+            request_id_future, case.context, submitted_request_id=rid
+        ):
+            case.handler.shutdown_event.set()
+            # The shutdown monitor owns an ordered abort waiting for dispatch.
+            await asyncio.wait_for(case.polling.get(), timeout=1)
+            assert case.handler._abort_tasks
+            state.time_stats.api_server_dispatch_finish_time = 1.0
+            case.dispatched.set()
+            raise GeneratorExit()
+
+    assert not request_id_future.cancelled()
+    await asyncio.wait_for(asyncio.gather(*tuple(case.handler._abort_tasks)), timeout=1)
+    assert case.abort_calls == [(rid, False)]
+    assert not case.handler._abort_tasks
+    request_id_future.cancel()
