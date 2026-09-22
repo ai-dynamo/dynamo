@@ -23,7 +23,7 @@ impl DefaultWorkerSelector {
     pub fn new(config: Option<KvRouterConfig>, worker_type: &'static str) -> Self {
         Self::with_rng(config.unwrap_or_default(), worker_type, None)
     }
-    /// Construct a reproducible selector. Clones share its random stream, as before.
+    /// Construct a reproducible selector. Clones share its random stream.
     pub fn new_seeded(
         config: Option<KvRouterConfig>,
         worker_type: &'static str,

@@ -31,9 +31,9 @@ fn policy_with_rng(
     parameters: PolicyParameters,
     worker_label: &'static str,
     rng: Option<Arc<Mutex<fastrand::Rng>>>,
-    plain_decode: bool,
+    is_plain_decode: bool,
 ) -> WorkerSelectionPolicy {
-    let scorer = scorer::build(&parameters, worker_label, plain_decode);
+    let scorer = scorer::build(&parameters, worker_label, is_plain_decode);
     let picker = picker::DefaultPicker::new(parameters.router_temperature, rng);
     WorkerSelectionPolicy::new(config, worker_label, vec![scorer], Box::new(picker))
         .with_exclusive_affinity(true)
@@ -51,13 +51,13 @@ fn policy_for_role(
     role: dynamo_kv_router::WorkerType,
     parameters: PolicyParameters,
 ) -> WorkerSelectionPolicy {
-    let plain_decode =
+    let is_plain_decode =
         role == dynamo_kv_router::WorkerType::Decode && !config.conditional_disagg_enabled;
     policy_with_rng(
         config,
         parameters,
         role.default_selector_label(),
         None,
-        plain_decode,
+        is_plain_decode,
     )
 }

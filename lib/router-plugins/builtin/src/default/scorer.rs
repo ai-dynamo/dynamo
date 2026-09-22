@@ -14,7 +14,7 @@ use dynamo_kv_router::plugins::worker_selection::{
 pub(super) fn build(
     config: &PolicyParameters,
     worker_label: &'static str,
-    plain_decode: bool,
+    is_plain_decode: bool,
 ) -> Box<dyn WorkerScorer> {
     match (
         config.decode_active_request_weight != 0.0,
@@ -23,22 +23,22 @@ pub(super) fn build(
         (false, false) => Box::new(DefaultScorer::<false, false>::new(
             config,
             worker_label,
-            plain_decode,
+            is_plain_decode,
         )),
         (false, true) => Box::new(DefaultScorer::<false, true>::new(
             config,
             worker_label,
-            plain_decode,
+            is_plain_decode,
         )),
         (true, false) => Box::new(DefaultScorer::<true, false>::new(
             config,
             worker_label,
-            plain_decode,
+            is_plain_decode,
         )),
         (true, true) => Box::new(DefaultScorer::<true, true>::new(
             config,
             worker_label,
-            plain_decode,
+            is_plain_decode,
         )),
     }
 }
@@ -52,7 +52,7 @@ struct DefaultScorer<const REQUEST_COST: bool, const SHARED_CREDIT: bool> {
     decode_active_request_weight: f64,
     prefill_load_scale: f64,
     is_decode: bool,
-    plain_decode: bool,
+    is_plain_decode: bool,
     prepared: PreparedRequest,
 }
 
@@ -64,8 +64,8 @@ struct PreparedRequest {
     block_size: IntegerDivisor,
     request_blocks: IntegerDivisor,
     overlap_credit: f64,
-    use_decay: bool,
-    subtract_from_decode: bool,
+    needs_decay: bool,
+    needs_decode_subtraction: bool,
 }
 
 /// Division by a power-of-two integer has an exact reciprocal. Both inputs to this helper
@@ -106,7 +106,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
     pub(super) fn new(
         config: &PolicyParameters,
         worker_label: &'static str,
-        plain_decode: bool,
+        is_plain_decode: bool,
     ) -> Self {
         Self {
             overlap_score_credit: config.overlap_score_credit,
@@ -117,7 +117,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             decode_active_request_weight: config.decode_active_request_weight,
             prefill_load_scale: config.prefill_load_scale,
             is_decode: worker_label == "decode",
-            plain_decode,
+            is_plain_decode,
             prepared: PreparedRequest::default(),
         }
     }
@@ -132,7 +132,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         candidates: WorkerCandidates<'_>,
     ) -> Result<(), WorkerSelectionPolicyError> {
         // Plain disaggregated decode is load-only. Conditional decode retains cache credit.
-        let overlap_credit = if self.plain_decode && !context.tracks_prefill_tokens() {
+        let overlap_credit = if self.is_plain_decode && !context.tracks_prefill_tokens() {
             0.0
         } else {
             self.overlap_score_credit
@@ -142,12 +142,12 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             block_size: IntegerDivisor::new(u64::from(context.block_size())),
             request_blocks: IntegerDivisor::new(context.request_blocks()),
             overlap_credit,
-            use_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
-            subtract_from_decode: self.is_decode
+            needs_decay: context.tracks_prefill_tokens() && self.overlap_score_credit_decay > 0.0,
+            needs_decode_subtraction: self.is_decode
                 && !context.tracks_prefill_tokens()
                 && overlap_credit > 0.0,
         };
-        if self.prepared.use_decay {
+        if self.prepared.needs_decay {
             let mut minimum = usize::MAX;
             for candidate in candidates.iter() {
                 let load = candidate
@@ -186,7 +186,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
             // Preserve signed zero when the configured weight is -0.0.
             self.shared_cache_multiplier
         };
-        let decay = if self.prepared.use_decay {
+        let decay = if self.prepared.needs_decay {
             let excess = self.prepared.block_size.divide(
                 load.active_prefill_tokens()
                     .saturating_sub(self.prepared.min_prefill) as f64,
@@ -205,7 +205,7 @@ impl<const REQUEST_COST: bool, const SHARED_CREDIT: bool>
         } else {
             self.decode_active_request_weight
         };
-        let logit = if self.prepared.subtract_from_decode {
+        let logit = if self.prepared.needs_decode_subtraction {
             (load.decode_cost_blocks() - credit).max(0.0) + request_cost
         } else {
             let raw_tokens = if !context.tracks_prefill_tokens() {
