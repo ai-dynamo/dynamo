@@ -264,6 +264,7 @@ impl Request {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -952,6 +953,7 @@ mod context_length_validation {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         }
     }
@@ -1023,6 +1025,13 @@ mod context_length_validation {
             "error message should tell user what to do, got: {}",
             dynamo_err.message()
         );
+        let Some(dynamo_runtime::error::PublicDetails::ContextLength { limit, actual }) =
+            dynamo_err.public_details()
+        else {
+            panic!("context overflow should expose structured length details");
+        };
+        assert_eq!(*limit, 5);
+        assert!(actual.is_some_and(|actual| actual > *limit));
     }
 
     #[tokio::test]
@@ -1325,6 +1334,7 @@ mod embedding_without_chat_template {
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
             unsupported_fields: Default::default(),
+            thinking_token_budget: None,
         }
     }
 
