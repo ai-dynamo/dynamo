@@ -41,7 +41,7 @@ Write your own policy when no shipped policy expresses the rule you need. The re
 | `WorkerPicker` | All eligible workers and their total costs | One row index | The rule samples, breaks ties, tracks policy state, or ignores total cost |
 | Policy factory | Router configuration, worker type, and routing partition | One `WorkerSelectionPolicy` | Prefill, decode, models, or routing groups need different components |
 
-An external policy owns its filters, scorers, and picker. The default scorer and picker are private components of `dynamo-custom-policy-builtin`. They implement the same public traits as external policies.
+An external policy owns its filters, scorers, and picker. Dynamo's default scorer and picker implement the same public traits as external policies.
 
 
 ## Public Plugin API and Compatibility
@@ -395,19 +395,13 @@ The discovery-backed HTTP frontend and Python `KvRouter.generate` path install c
 
 The catalog registers plugin providers once. `RouterPluginRegistry::resolve_plugins` validates the selected configuration and returns a `RouterPlugins` bundle containing the configured factories. Both the HTTP frontend and Python router pass this bundle to the shared router construction path. Each router receives fresh plugin instances; factories run during construction, not for each request.
 
-Rust embedders can use the same setup. From the embedding application's directory, add the builtin policy crate from the same Dynamo checkout:
-
-```bash
-cargo add --path "$DYNAMO_DIR/lib/router-plugins/builtin" dynamo-custom-policy-builtin
-```
-
-Start with `default_registry()` so omitted worker roles use the builtin policy, then register the custom catalog:
+Rust embedders using `dynamo-llm` start with the host's `router_plugin_registry()`, which includes Dynamo's default policy. Register the custom catalog before resolving the configuration. Plugin authors and frontend embedders do not need a direct dependency on the default policy's implementation crate:
 
 ```rust
-use dynamo_custom_policy_builtin::default_registry;
 use dynamo_llm::entrypoint::input::http::HttpFrontend;
+use dynamo_llm::kv_router::plugins::router_plugin_registry;
 
-let mut registry = default_registry();
+let mut registry = router_plugin_registry();
 acme_routing_catalog::register(&mut registry)?;
 let plugins = registry.resolve_plugins(&kv_router_config)?;
 HttpFrontend::default()
@@ -650,9 +644,9 @@ The [example README](https://github.com/ai-dynamo/dynamo/blob/main/examples/rout
 
 ## Default Policy Plugin
 
-The default worker selector lives in `dynamo-custom-policy-builtin`, beside the two-tier policy. Routing hosts install its default factory once, even without a custom catalog. An omitted policy or the reserved `default` selection uses that factory. Optional catalogs register named providers without replacing the default or existing classifiers.
+Routing hosts install Dynamo's default policy automatically, even without a custom catalog. An omitted policy or the reserved `default` selection uses that policy. Optional catalogs register named providers without replacing the default or existing classifiers.
 
-A Rust embedding that constructs `SelectionServiceBuilder` must supply a registry with a default factory, such as `default_registry()`, or an explicit policy factory. A missing factory fails construction before workers or synchronization resources start. Each routing partition receives its own policy instance.
+Applications that construct the low-level `SelectionServiceBuilder` directly must supply a registry with a default factory or an explicit policy factory. A missing factory fails construction before workers or synchronization resources start. Each routing partition receives its own policy instance.
 
 Resolving `RouterPlugins` from the host registry includes the default factory even when no named policy is selected. `RouterPlugins::default()` remains an empty builder input. Use `has_custom_worker_selection()` to detect an explicit named or programmatic policy, and `has_custom_plugins()` to detect that policy or a classifier. Factory presence alone does not imply a custom selection. These checks preserve stock frontend modes and avoid waiting for a typed model card solely because the builtin factory is present. A classifier-only configuration still uses the builtin default for worker selection.
 
@@ -676,6 +670,4 @@ The provider also accepts `overlap_score_credit_decay`, `decode_active_request_w
 
 The default scorer owns the cache and load formula, including preferred-taint costs. Its private `prepare` helper finds the minimum prefill load used to reduce cache credit on busier workers. The picker reads only the final costs and owns temperature sampling and tie-breaking. The host checks scorer costs and the selected row before booking; diagnostics use the selected row's summed scorer cost. `with_exclusive_affinity(true)` asks the host to constrain candidates to an eligible session-affinity target; explicit request pins remain mandatory for every policy.
 
-Direct Rust callers and replay import `DefaultWorkerSelector` from `dynamo_custom_policy_builtin`. Scheduler actors use `default_policy()` directly. The core's old selector is available only as a test and benchmark reference, not in production builds.
-
-The builtin crate keeps composition in `default/mod.rs`, the cost formula in `default/scorer.rs`, selection in `default/picker.rs`, startup parameters in `default/parameters.rs`, and the synchronous adapter in `default/selector.rs`. The two-tier policy remains in its own module. Preparation reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.
+Preparation reads the existing snapshot; it adds no tracker synchronization. The routing core still projects load, selects and books serially, and processes request lifecycle updates.
