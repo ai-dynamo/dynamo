@@ -87,8 +87,8 @@ _CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
 }
 
 _DEPRECATED_OVERLAP_WEIGHT_MESSAGE = (
-    "router KV overlap score weight is deprecated; use "
-    "--router-prefill-load-scale or DYN_ROUTER_PREFILL_LOAD_SCALE for equivalent behavior"
+    "router KV overlap score weight is deprecated; set prefill_load_scale in the "
+    "default policy parameters through --router-policy-config"
 )
 _LOAD_AWARE_KWARG_OVERRIDES = {
     "overlap_score_credit": 0.0,
@@ -102,6 +102,56 @@ _LOAD_AWARE_KWARG_OVERRIDES = {
     "shared_cache_type": "none",
     "router_predicted_ttl_secs": None,
 }
+
+
+_LOAD_AWARE_DEPRECATION = (
+    "--load-aware / DYN_ROUTER_LOAD_AWARE is deprecated; set overlap_score_credit=0 "
+    "and shared_cache_multiplier=0 in the default policy parameters through "
+    "--router-policy-config, and configure router tracking separately"
+)
+
+
+def _policy_parameter_deprecation(name: str, parameter: str) -> str:
+    return (
+        f"{name} is deprecated; set {parameter} in the default policy parameters "
+        "through --router-policy-config"
+    )
+
+
+class _DeprecatedPolicyParameterAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        warnings.warn(
+            _policy_parameter_deprecation(option_string or self.dest, self.dest),
+            FutureWarning,
+            stacklevel=2,
+        )
+        setattr(namespace, self.dest, values)
+
+
+class _DeprecatedLoadAwareAction(argparse.BooleanOptionalAction):
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        warnings.warn(_LOAD_AWARE_DEPRECATION, FutureWarning, stacklevel=2)
+        super().__call__(parser, namespace, values, option_string)
+
+
+def _add_policy_parameter(parser, *, flag_name: str, env_var: str, **kwargs) -> None:
+    parameter = kwargs.get("dest", flag_name.removeprefix("--").replace("-", "_"))
+    if env_var in os.environ:
+        warnings.warn(
+            _policy_parameter_deprecation(env_var, parameter),
+            FutureWarning,
+            stacklevel=2,
+        )
+    kwargs["help"] = (
+        _policy_parameter_deprecation(flag_name, parameter) + ". " + kwargs["help"]
+    )
+    add_argument(
+        parser,
+        flag_name=flag_name,
+        env_var=env_var,
+        action=_DeprecatedPolicyParameterAction,
+        **kwargs,
+    )
 
 
 class _DeprecatedOverlapScoreWeightAction(argparse.Action):
@@ -124,7 +174,7 @@ def _default_overlap_score_weight() -> Optional[float]:
 
     env_var, value = legacy
     warnings.warn(
-        f"{env_var} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE",
+        _policy_parameter_deprecation(env_var, "prefill_load_scale"),
         FutureWarning,
         stacklevel=3,
     )
@@ -288,13 +338,18 @@ class KvRouterArgGroup(ArgGroup):
     def add_arguments(self, parser) -> None:
         g = parser.add_argument_group("KV Router Options")
 
-        add_negatable_bool_argument(
+        if "DYN_ROUTER_LOAD_AWARE" in os.environ:
+            warnings.warn(_LOAD_AWARE_DEPRECATION, FutureWarning, stacklevel=2)
+        add_argument(
             g,
             flag_name="--load-aware",
+            arg_type=None,
+            action=_DeprecatedLoadAwareAction,
             env_var="DYN_ROUTER_LOAD_AWARE",
             default=False,
             dest="load_aware",
             help=(
+                _LOAD_AWARE_DEPRECATION + ". "
                 "KV Router: Enable the load-aware routing preset. "
                 "On the frontend, this implies --router-mode kv. "
                 "This preset sets overlap_score_credit=0, disables KV events and "
@@ -303,7 +358,7 @@ class KvRouterArgGroup(ArgGroup):
                 "The builtin policy does not request cache inputs in this mode."
             ),
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--router-kv-overlap-score-credit",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
@@ -316,7 +371,7 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=float,
             dest="overlap_score_credit",
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--router-kv-overlap-score-credit-decay",
             env_var="DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
@@ -339,7 +394,7 @@ class KvRouterArgGroup(ArgGroup):
             default=_default_overlap_score_weight(),
             help=argparse.SUPPRESS,
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--router-prefill-load-scale",
             env_var="DYN_ROUTER_PREFILL_LOAD_SCALE",
@@ -351,7 +406,7 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=float,
             dest="prefill_load_scale",
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--router-decode-active-request-weight",
             env_var="DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
@@ -392,7 +447,7 @@ class KvRouterArgGroup(ArgGroup):
             arg_type=float,
             dest="disk_cache_hit_weight",
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--router-temperature",
             env_var="DYN_ROUTER_TEMPERATURE",
@@ -672,7 +727,7 @@ class KvRouterArgGroup(ArgGroup):
             ),
             dest="enable_session_prefix_index",
         )
-        add_argument(
+        _add_policy_parameter(
             g,
             flag_name="--shared-cache-multiplier",
             env_var="DYN_SHARED_CACHE_MULTIPLIER",

@@ -70,14 +70,8 @@ its configuration even if the endpoint is unchanged.
 
 ## Routing Behavior
 
-- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit, but the adjusted prefill contribution is clamped at zero. When set to `0`, device-local overlap receives no score credit. Cache setup still follows the policy's `WorkerInputs::CACHE` declaration. Defaults to `1.0`.
-- `--router-kv-overlap-score-credit-decay`: Decays device-local overlap credit for workers whose active prefill load exceeds the least-loaded eligible worker. `0` disables decay. Defaults to 0.
-- `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
-- `--router-decode-active-request-weight`: Experimental finite, nonnegative block-equivalent decode cost added for each active request on a candidate worker. Defaults to 0.
-- `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to `--router-kv-overlap-score-credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
+- `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to the policy’s `overlap_score_credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
-- `--load-aware`: Preset for load-aware KV routing. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`. The policy's `WorkerInputs::CACHE` declaration still controls local approximate indexing; the builtin default declares `CACHE`.
-- `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
 - `--router-prefill-load-model`: Selects the router's prompt-side load model. `none` keeps the existing static prompt load accounting. `aic` predicts one expected prefill duration per admitted request and lazily decays only the oldest active prefill request on each worker.
@@ -111,6 +105,7 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
@@ -132,6 +127,57 @@ yours to choose; `type` must be one of the policy types above.
 ```bash
 python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml
 ```
+
+#### Configure the Default Policy
+
+Set the default policy’s scoring parameters in the YAML passed to `--router-policy-config`:
+
+```yaml
+worker_selection:
+  aggregated: tuned-default
+  prefill: tuned-default
+  decode: tuned-default
+  instances:
+    - name: tuned-default
+      type: dynamo-default-cost-fn
+      parameters:
+        overlap_score_credit: 1.0
+        overlap_score_credit_decay: 0.0
+        prefill_load_scale: 1.0
+        decode_active_request_weight: 0.0
+        shared_cache_multiplier: 0.0
+        router_temperature: 0.0
+```
+
+Explicit parameters take precedence over router flags and environment variables. Omitted parameters inherit their existing values or defaults. Select the instance for each stage you want to tune; stages omitted from `worker_selection` keep the default selector.
+
+> [!WARNING]
+> The flags below and their environment variables are deprecated. They still work and emit a warning. Move their values into the policy’s `parameters` mapping.
+
+| Deprecated Flag | Policy Parameter |
+|---|---|
+| `--router-kv-overlap-score-credit` | `overlap_score_credit` |
+| `--router-kv-overlap-score-credit-decay` | `overlap_score_credit_decay` |
+| `--router-prefill-load-scale` | `prefill_load_scale` |
+| `--router-decode-active-request-weight` | `decode_active_request_weight` |
+| `--shared-cache-multiplier` | `shared_cache_multiplier` |
+| `--router-temperature` | `router_temperature` |
+
+The host and disk cache-weight flags remain supported because they also configure cached-token estimates used for load accounting.
+
+##### Replace the Load-Aware Preset
+
+`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated. To route by load without cache credit, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0` in the default policy. The policy then needs no cache inputs. Keep router tracking configured separately:
+
+```bash
+python3 -m dynamo.frontend --router-mode kv --router-policy-config worker-selection.yaml \
+  --no-router-kv-events --router-track-active-blocks \
+  --router-track-prefill-tokens --no-router-assume-kv-reuse \
+  --no-use-remote-indexer --no-serve-indexer \
+  --shared-cache-type none
+```
+
+Remove `--router-predicted-ttl-secs` and unset `DYN_ROUTER_PREDICTED_TTL_SECS` if configured; the old preset disabled prediction too.
 
 #### Tune a Policy
 
@@ -445,23 +491,19 @@ For details on per-request agent hints (`priority`, `osl`, `speculative_prefill`
 
 ## Tuning Guidelines
 
-`--router-kv-overlap-score-credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be finite and nonnegative. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Values above `1.0` can saturate the adjusted prefill contribution at zero, so use them deliberately: additional credit cannot make that contribution negative. Lower values distribute load more evenly and reduce ITL. The default of `1.0` is a reasonable starting point. For direct router APIs and EPP integrations, the same router policy can be overridden per request with `router_config_override.overlap_score_credit`; it is not an `nvext.agent_hints` field.
+The default policy’s `overlap_score_credit` is the primary knob for cache reuse. It credits device-local prefix overlap against the prefill load and must be finite and nonnegative. Higher values steer requests toward workers with better cache overlap and reduce TTFT. Values above `1.0` can saturate the adjusted prefill contribution at zero, so use them deliberately: additional credit cannot make that contribution negative. Lower values distribute load more evenly and reduce ITL. The default of `1.0` is a reasonable starting point.
 
-Use `--router-kv-overlap-score-credit-decay` to reduce that device-local credit when a worker has more active prefill work than the least-loaded eligible worker. This helps prevent busy, cache-rich workers from repeatedly winning while newly autoscaled or lightly loaded workers receive too little traffic. The router normalizes the excess active prefill blocks by the incoming request size and multiplies the configured overlap credit by `1 / (1 + decay * normalized_excess)`. For example, a decay of `1` halves device credit at one request-equivalent of excess prefill load. Host, disk, and shared-cache credits are unchanged. This setting requires prefill-token tracking to have an effect and defaults to `0`.
+Use `overlap_score_credit_decay` to reduce that device-local credit when a worker has more active prefill work than the least-loaded eligible worker. This helps prevent busy, cache-rich workers from repeatedly winning while newly autoscaled or lightly loaded workers receive too little traffic. The router normalizes the excess active prefill blocks by the incoming request size and multiplies the configured overlap credit by `1 / (1 + decay * normalized_excess)`. For example, a decay of `1` halves device credit at one request-equivalent of excess prefill load. Host, disk, and shared-cache credits are unchanged. This setting requires prefill-token tracking to have an effect and defaults to `0`.
 
-Use `--load-aware` when you want the KV scheduler's active load model without prefix/cache reuse. This is equivalent to using KV mode with overlap credit set to 0, KV events disabled, KV reuse assumptions disabled, active load tracking enabled, and shared-cache routing disabled. `--router-prefill-load-scale` remains available to tune prompt-side load relative to decode blocks.
+When migrating the older `--router-kv-overlap-score-weight` or `--kv-overlap-score-weight` aliases, move the value to the policy’s `prefill_load_scale`. A legacy value of `0` also requires `overlap_score_credit: 0` to preserve its behavior. Remove the old flag or environment variable after migrating.
 
-Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, and `DYN_OVERLAP_SCORE_WEIGHT` are still accepted, but emit deprecation warnings. Nonzero legacy values map to `prefill_load_scale` to preserve existing behavior without changing overlap credit. A legacy value of 0 maps to both `prefill_load_scale=0` and `overlap_score_credit=0`, which zeros those scoring weights. Indexer setup follows the policy's `WorkerInputs::CACHE` declaration independently of these values. If a deprecated overlap score weight is still present, it takes precedence over the newer prefill load scale field; a legacy value of 0 also takes precedence over the newer overlap credit field. When migrating to `--router-prefill-load-scale` or `DYN_ROUTER_PREFILL_LOAD_SCALE`, remove the deprecated flag, env var, or JSON field from the deployment config. Use `--router-kv-overlap-score-credit` or `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` only when you mean to tune the cache-overlap credit itself.
+Use `prefill_load_scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks + decode_active_request_weight * active_requests`.
 
-When migrating the deprecated overlap score weight, use `--router-prefill-load-scale` to preserve its scaling role. Tune `--router-kv-overlap-score-credit` separately only when you intend to change device-local cache credit; values above `1.0` are supported, with adjusted prefill cost clamped at zero.
-
-Use `--router-prefill-load-scale` when prompt-side load should count more or less than decode-side block load after cache-hit credits are applied. The final score is `prefill_load_scale * adjusted_prefill_blocks + potential_decode_blocks + decode_active_request_weight * active_requests`.
-
-Use `--router-decode-active-request-weight` when decode forward-pass time depends more on the number of active requests than on their resident KV footprint. The value is measured in block-equivalent cost per active request. For example, a weight of `32` makes four active requests contribute the same routing cost as 128 potential decode blocks. The router captures active-request count with the same worker-load snapshot used for prefill tokens and potential decode blocks, so enabling the term does not add a second slot-tracker lookup.
+Use `decode_active_request_weight` when decode forward-pass time depends more on the number of active requests than on their resident KV footprint. The value is measured in block-equivalent cost per active request. For example, a weight of `32` makes four active requests contribute the same routing cost as 128 potential decode blocks. The router captures active-request count with the same worker-load snapshot used for prefill tokens and potential decode blocks, so enabling the term does not add a second slot-tracker lookup.
 
 This setting is experimental and defaults to `0`, which preserves block-only decode scoring. A positive value trades some KV locality for batch-size balance and can help model, runtime, and hardware combinations near a compute-bound roofline knee, including some MLA or MTP configurations. It can regress throughput, TTFT, and ITL when decode remains primarily memory-bound, so benchmark representative traffic and start with a small weight before increasing it.
 
-Use `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` when the backend exposes lower-tier prefix cache via a KV connector (for example, vLLM's `OffloadingConnector` for CPU offload, or a disk-backed tier). These multipliers control how much each lower-tier hit credits against the prefill load, mirroring the role of `--router-kv-overlap-score-credit` for the device tier. A worker holding a full prefix in CPU offload gets `host_cache_hit_weight * matched_blocks` credit against its prefill cost; raising the weight makes the router more willing to route prefix-matched requests to that worker even if a different worker has a partial device-local match.
+Use `--router-host-cache-hit-weight` and `--router-disk-cache-hit-weight` when the backend exposes lower-tier prefix cache via a KV connector (for example, vLLM's `OffloadingConnector` for CPU offload, or a disk-backed tier). These multipliers control how much each lower-tier hit credits against the prefill load, mirroring the role of `overlap_score_credit` for the device tier. A worker holding a full prefix in CPU offload gets `host_cache_hit_weight * matched_blocks` credit against its prefill cost; raising the weight makes the router more willing to route prefix-matched requests to that worker even if a different worker has a partial device-local match.
 
 Use `--no-router-kv-events` when you are not confident that your backend engine emits KV events correctly. In this mode the router falls back to approximate routing. Keep the default TTL policy unless you are explicitly testing the experimental per-rank capacity-bounded LRU with workers that publish a positive `total_kv_blocks` value.
 

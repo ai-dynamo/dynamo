@@ -211,6 +211,18 @@ fn kv_router_config_from_lookup(
         get_env(key).and_then(|value| value.parse().ok())
     }
 
+    fn parse_policy_parameter(
+        get_env: &impl Fn(&str) -> Option<String>,
+        key: &str,
+        parameter: &str,
+    ) -> Option<f64> {
+        let value = parse_f64(get_env, key)?;
+        tracing::warn!(
+            "{key} is deprecated; set {parameter} in the default policy parameters through DYN_ROUTER_POLICY_CONFIG"
+        );
+        Some(value)
+    }
+
     fn parse_usize(get_env: &impl Fn(&str) -> Option<String>, key: &str) -> Option<usize> {
         get_env(key).and_then(|value| value.parse().ok())
     }
@@ -226,16 +238,32 @@ fn kv_router_config_from_lookup(
 
     let mut config = KvRouterConfig::default();
 
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT") {
+    if let Some(value) = parse_policy_parameter(
+        &get_env,
+        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+        "overlap_score_credit",
+    ) {
         config.overlap_score_credit = value;
     }
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY") {
+    if let Some(value) = parse_policy_parameter(
+        &get_env,
+        "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+        "overlap_score_credit_decay",
+    ) {
         config.overlap_score_credit_decay = value;
     }
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_PREFILL_LOAD_SCALE") {
+    if let Some(value) = parse_policy_parameter(
+        &get_env,
+        "DYN_ROUTER_PREFILL_LOAD_SCALE",
+        "prefill_load_scale",
+    ) {
         config.prefill_load_scale = value;
     }
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT") {
+    if let Some(value) = parse_policy_parameter(
+        &get_env,
+        "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+        "decode_active_request_weight",
+    ) {
         config.decode_active_request_weight = value;
     }
     for key in [
@@ -243,7 +271,9 @@ fn kv_router_config_from_lookup(
         "DYN_OVERLAP_SCORE_WEIGHT",
     ] {
         if let Some(value) = parse_f64(&get_env, key) {
-            tracing::warn!("{key} is deprecated; use DYN_ROUTER_PREFILL_LOAD_SCALE");
+            tracing::warn!(
+                "{key} is deprecated; set prefill_load_scale in the default policy parameters through DYN_ROUTER_POLICY_CONFIG"
+            );
             apply_deprecated_overlap_score_weight_override(
                 value,
                 &mut config.overlap_score_credit,
@@ -252,7 +282,9 @@ fn kv_router_config_from_lookup(
             break;
         }
     }
-    if let Some(value) = parse_f64(&get_env, "DYN_ROUTER_TEMPERATURE") {
+    if let Some(value) =
+        parse_policy_parameter(&get_env, "DYN_ROUTER_TEMPERATURE", "router_temperature")
+    {
         config.router_temperature = value;
     }
     // Read the canonical name first, then the Rust-only alias for backward compatibility.
@@ -345,7 +377,11 @@ fn kv_router_config_from_lookup(
         config.use_remote_indexer = value;
     }
     let mut shared_cache_multiplier_set = false;
-    if let Some(value) = parse_f64(&get_env, "DYN_SHARED_CACHE_MULTIPLIER") {
+    if let Some(value) = parse_policy_parameter(
+        &get_env,
+        "DYN_SHARED_CACHE_MULTIPLIER",
+        "shared_cache_multiplier",
+    ) {
         config.shared_cache_multiplier = value;
         shared_cache_multiplier_set = true;
     }

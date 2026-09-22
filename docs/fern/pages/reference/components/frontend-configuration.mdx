@@ -134,14 +134,20 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 
 ### KV scoring and cache locality
 
+Configure scoring through [default policy parameters](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#configure-the-default-policy) in `--router-policy-config`. Deprecated flags and their environment variables remain accepted during migration.
+
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
+  **Deprecated.** Use [policy parameters and explicit tracking settings](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#replace-the-load-aware-preset).
+
   Preset for KV load-aware routing; implies `--router-mode kv`. Disables device-cache credit, KV event consumption, and remote/shared cache indexers. The worker-selection policy's `CACHE` declaration still controls local approximate indexing.
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
-  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Setting it to zero does not disable indexing; cache setup follows the worker-selection policy's `WorkerInputs::CACHE` declaration.
+  **Deprecated.** Set `overlap_score_credit` in the default policy parameters.
+
+  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Cache setup follows the policy’s input requirements; the default policy skips cache inputs at zero overlap credit.
   Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
   clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
@@ -149,6 +155,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit-decay" type="float" default="0.0">
+  **Deprecated.** Set `overlap_score_credit_decay` in the default policy parameters.
+
   Decay rate for device-local overlap credit as active prefill load rises above the least-loaded
   eligible worker. `0` disables decay; `1` halves the credit at one request-equivalent of excess
   active prefill load.
@@ -157,10 +165,18 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-prefill-load-scale" type="float" default="1.0">
+  **Deprecated.** Set `prefill_load_scale` in the default policy parameters.
+
   Scale applied to adjusted prompt-side prefill load after overlap and lower-tier cache-hit credits
   are subtracted. The minimum is `0.0`; there is no hard maximum.
 
   Environment variable: `DYN_ROUTER_PREFILL_LOAD_SCALE`
+</ParamField>
+
+<ParamField path="--router-decode-active-request-weight" type="float" default="0.0">
+  **Deprecated.** Set `decode_active_request_weight` in the default policy parameters. Adds a block-equivalent decode cost for each active request on a worker.
+
+  Environment variable: `DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT`
 </ParamField>
 
 <ParamField path="--router-host-cache-hit-weight" type="float" default="0.75">
@@ -176,6 +192,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--shared-cache-multiplier" type="float" default="0.5">
+  **Deprecated.** Set `shared_cache_multiplier` in the default policy parameters.
+
   **Experimental.** Credit multiplier from `0.0` through `1.0` for external shared-cache hits.
 
   Environment variable: `DYN_SHARED_CACHE_MULTIPLIER`
@@ -190,6 +208,8 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 </ParamField>
 
 <ParamField path="--router-temperature" type="float" default="0.0">
+  **Deprecated.** Set `router_temperature` in the default policy parameters.
+
   Softmax temperature for normalized worker sampling. `0` selects the lowest-cost worker
   deterministically; higher values add randomness.
 

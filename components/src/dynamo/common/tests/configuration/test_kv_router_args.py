@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import warnings
 from pathlib import Path
 
 import pytest
@@ -171,7 +172,11 @@ def test_deprecated_overlap_score_weight_env_coexists_with_canonical_settings(
         parser = argparse.ArgumentParser()
         KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(cli_args)
+    if cli_args:
+        with pytest.warns(FutureWarning, match="deprecated"):
+            args = parser.parse_args(cli_args)
+    else:
+        args = parser.parse_args(cli_args)
 
     assert args.overlap_score_credit == expected_credit
     assert args.prefill_load_scale == expected_scale
@@ -185,7 +190,8 @@ def test_decode_active_request_weight_flows_to_binding_kwargs() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--router-decode-active-request-weight", "64"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--router-decode-active-request-weight", "64"])
     kwargs = KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()
 
     assert kwargs["decode_active_request_weight"] == 64.0
@@ -231,7 +237,8 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--load-aware"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--load-aware"])
 
     assert args.load_aware is True
     config = KvRouterConfigBase.from_cli_args(args)
@@ -253,7 +260,8 @@ def test_load_aware_cli_applies_no_cache_load_balancing_preset() -> None:
 def test_load_aware_env_applies_no_cache_load_balancing_preset(monkeypatch) -> None:
     monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
     parser = argparse.ArgumentParser()
-    KvRouterArgGroup().add_arguments(parser)
+    with pytest.warns(FutureWarning, match="DYN_ROUTER_LOAD_AWARE"):
+        KvRouterArgGroup().add_arguments(parser)
 
     args = parser.parse_args([])
 
@@ -271,7 +279,8 @@ def test_load_aware_preserves_prefill_load_scale() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--load-aware", "--router-prefill-load-scale", "2.5"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--load-aware", "--router-prefill-load-scale", "2.5"])
 
     config = KvRouterConfigBase.from_cli_args(args)
     kwargs = config.kv_router_kwargs()
@@ -324,15 +333,16 @@ def test_load_aware_preserves_cache_hit_weights() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(
-        [
-            "--load-aware",
-            "--router-host-cache-hit-weight",
-            "0.9",
-            "--router-disk-cache-hit-weight",
-            "0.1",
-        ]
-    )
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(
+            [
+                "--load-aware",
+                "--router-host-cache-hit-weight",
+                "0.9",
+                "--router-disk-cache-hit-weight",
+                "0.1",
+            ]
+        )
 
     config = KvRouterConfigBase.from_cli_args(args)
     kwargs = config.kv_router_kwargs()
@@ -387,7 +397,8 @@ def test_load_aware_clears_predicted_ttl() -> None:
     parser = argparse.ArgumentParser()
     KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--load-aware", "--router-predicted-ttl-secs", "5"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--load-aware", "--router-predicted-ttl-secs", "5"])
 
     config = KvRouterConfigBase.from_cli_args(args)
     kwargs = config.kv_router_kwargs()
@@ -403,7 +414,8 @@ def test_load_aware_preserves_deprecated_overlap_score_weight_env(monkeypatch) -
         parser = argparse.ArgumentParser()
         KvRouterArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--load-aware"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--load-aware"])
 
     config = KvRouterConfigBase.from_cli_args(args)
     kwargs = config.kv_router_kwargs()
@@ -417,7 +429,8 @@ def test_load_aware_frontend_implies_kv_router_mode() -> None:
     parser = argparse.ArgumentParser()
     FrontendArgGroup().add_arguments(parser)
 
-    args = parser.parse_args(["--load-aware"])
+    with pytest.warns(FutureWarning, match="deprecated"):
+        args = parser.parse_args(["--load-aware"])
 
     config = FrontendConfig.from_cli_args(args)
     config.validate()
@@ -955,3 +968,111 @@ def test_session_affinity_ttl_rejects_out_of_range(ttl: int) -> None:
     )
     with pytest.raises(ValueError, match="router-session-affinity-ttl-secs"):
         config.validate()
+
+
+@pytest.mark.parametrize(
+    ("flag", "env", "parameter"),
+    [
+        (
+            "--router-kv-overlap-score-credit",
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT",
+            "overlap_score_credit",
+        ),
+        (
+            "--router-kv-overlap-score-credit-decay",
+            "DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT_DECAY",
+            "overlap_score_credit_decay",
+        ),
+        (
+            "--router-prefill-load-scale",
+            "DYN_ROUTER_PREFILL_LOAD_SCALE",
+            "prefill_load_scale",
+        ),
+        (
+            "--router-decode-active-request-weight",
+            "DYN_ROUTER_DECODE_ACTIVE_REQUEST_WEIGHT",
+            "decode_active_request_weight",
+        ),
+        ("--router-temperature", "DYN_ROUTER_TEMPERATURE", "router_temperature"),
+        (
+            "--shared-cache-multiplier",
+            "DYN_SHARED_CACHE_MULTIPLIER",
+            "shared_cache_multiplier",
+        ),
+    ],
+)
+def test_deprecated_policy_flags_preserve_values_and_cli_precedence(
+    monkeypatch, flag, env, parameter
+):
+    monkeypatch.setenv(env, "2.5")
+    parser = argparse.ArgumentParser()
+    with pytest.warns(
+        FutureWarning,
+        match=rf"{env} is deprecated; set {parameter}.*--router-policy-config",
+    ):
+        KvRouterArgGroup().add_arguments(parser)
+    config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
+    assert config.kv_router_kwargs()[parameter] == 2.5
+
+    # An explicit zero must override the environment, not fall back to it.
+    with pytest.warns(
+        FutureWarning,
+        match=rf"{flag} is deprecated; set {parameter}.*--router-policy-config",
+    ):
+        args = parser.parse_args([flag, "0"])
+    assert KvRouterConfigBase.from_cli_args(args).kv_router_kwargs()[parameter] == 0.0
+
+
+def test_no_load_aware_overrides_deprecated_environment(monkeypatch):
+    monkeypatch.setenv("DYN_ROUTER_LOAD_AWARE", "true")
+    parser = argparse.ArgumentParser()
+    with pytest.warns(FutureWarning, match="DYN_ROUTER_LOAD_AWARE"):
+        KvRouterArgGroup().add_arguments(parser)
+    with pytest.warns(FutureWarning, match="--router-policy-config"):
+        args = parser.parse_args(["--no-load-aware"])
+    config = KvRouterConfigBase.from_cli_args(args)
+    assert config.load_aware is False
+    assert config.kv_router_kwargs()["overlap_score_credit"] == 1.0
+
+
+def test_default_policy_flags_do_not_warn(monkeypatch):
+    for name in tuple(kv_router_args.os.environ):
+        if name.startswith(("DYN_ROUTER_", "DYN_SHARED_CACHE_", "DYN_OVERLAP_")):
+            monkeypatch.delenv(name)
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        parser = argparse.ArgumentParser()
+        KvRouterArgGroup().add_arguments(parser)
+        config = KvRouterConfigBase.from_cli_args(parser.parse_args([]))
+        assert config.kv_router_kwargs()["overlap_score_credit"] == 1.0
+    assert not recorded
+
+
+def test_load_aware_migration_preserves_router_tracking():
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    with pytest.warns(FutureWarning, match="--router-policy-config"):
+        legacy = FrontendConfig.from_cli_args(parser.parse_args(["--load-aware"]))
+    legacy.validate()
+    migrated = FrontendConfig.from_cli_args(
+        parser.parse_args(
+            [
+                "--router-mode",
+                "kv",
+                "--no-router-kv-events",
+                "--router-track-active-blocks",
+                "--router-track-prefill-tokens",
+                "--no-router-assume-kv-reuse",
+                "--no-use-remote-indexer",
+                "--no-serve-indexer",
+                "--shared-cache-type",
+                "none",
+            ]
+        )
+    )
+    migrated.validate()
+    assert migrated.router_mode == legacy.router_mode
+    # These two values move to YAML; the remaining settings stay host-owned.
+    migrated_kwargs = migrated.kv_router_kwargs()
+    migrated_kwargs.update(overlap_score_credit=0.0, shared_cache_multiplier=0.0)
+    assert migrated_kwargs == legacy.kv_router_kwargs()
