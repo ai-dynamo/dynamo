@@ -4029,9 +4029,12 @@ async fn parent_group_binding_resolves_siblings_to_one_key() {
     let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
 
     let key = |request: &SingleIn<PreprocessedRequest>| {
-        host.affinity_binding_id(request, None)
-            .unwrap()
-            .unwrap()
+        host.group_binding_id(request, None)
+            .unwrap_or_else(|| {
+                crate::session_affinity::affinity_id(request)
+                    .unwrap()
+                    .unwrap()
+            })
             .as_str()
             .to_string()
     };
