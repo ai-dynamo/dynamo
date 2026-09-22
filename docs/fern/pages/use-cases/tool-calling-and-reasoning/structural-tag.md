@@ -137,9 +137,11 @@ Use an object-only root. Close each object with `additionalProperties: false` an
 }
 ```
 
-Preflight checks schema shapes, object constraints, and size budgets. It rejects root `anyOf` and the generally unsupported keywords `allOf`, `not`, `dependentRequired`, `dependentSchemas`, `if`, `then`, and `else` at schema locations. String patterns and formats, numeric bounds, and array bounds can pass preflight.
+Preflight checks schema shapes, object constraints, nesting depth, and size budgets. It rejects root `anyOf`, the composition keywords `allOf`, `oneOf`, `not`, `dependentRequired`, `dependentSchemas`, `if`, `then`, and `else`, and the array keywords `uniqueItems`, `contains`, `minContains`, `maxContains`, and `unevaluatedItems` at any schema location. String patterns and formats, numeric bounds, `minItems`, and `maxItems` can pass preflight.
 
 Each supplied schema can declare at most 5,000 properties and 1,000 enum entries. Property names, definition names, string enum values, and string const values together can contain at most 120,000 Unicode characters. An all-string enum with more than 250 entries has a separate 15,000-character limit. Unused definitions count toward these budgets; repeated references do not add counts.
+
+Object schemas can be nested at most 10 levels below the root object. Only object schemas add a level; array, `anyOf`, and other schema-bearing keywords add none of their own. Dynamo counts literal nesting in the submitted document: a recursive reference does not add levels, and an object under `$defs` starts one level below the root, like a root property. OpenAI documents the same ten-level limit without stating whether the root counts; Dynamo does not count the root.
 
 Dynamo supports `#` and URI-fragment JSON Pointers to schema locations in the same document, including recursive object schemas. Remote references, named-anchor references, `$dynamicRef`, `$recursiveRef`, reference-only cycles, and references in schemas with nested identifier scopes are outside Dynamo's reference support. Root types that require broader composition analysis are also unsupported. These are Dynamo support limits, not a claim that OpenAI rejects those representations.
 
@@ -147,7 +149,7 @@ Omitted, `null`, or `false` strictness retains existing behavior. Omitted or `nu
 
 Passing preflight does not establish complete OpenAI compatibility or guarantee backend enforcement of every constraint. Structural-tag activation and the deployment schema mode remain separate controls.
 
-The keyword and reference exclusions above are the complete list of keywords rejected solely because they are present. Traversing a keyword such as `oneOf`, `contains`, or `unevaluatedItems` checks its nested schemas; it does not establish OpenAI support for that keyword. Preflight does not reject `uniqueItems`, `minContains`, or `maxContains` solely because they are present. It also does not enforce OpenAI's documented ten-level nesting limit: depth accounting through arrays, reference chains, and recursive schemas is outside this preflight contract. Backend schema compilation can still reject a schema that passes these checks.
+The keyword and reference exclusions above are the complete list of keywords rejected solely because they are present. Traversing a keyword such as `propertyNames`, `unevaluatedProperties`, or `prefixItems` checks its nested schemas; it does not establish OpenAI support for that keyword. Backend schema compilation can still reject a schema that passes these checks.
 
 ## Schema Modes
 
