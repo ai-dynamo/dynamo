@@ -37,7 +37,6 @@ pub(super) enum DaemonState {
     Ready,
     /// The daemon's cancellation token fired.
     Stopped,
-    /// The daemon ended with this error.
     Failed(String),
 }
 
@@ -252,8 +251,6 @@ impl DiscoveryDaemon {
         })
     }
 
-    /// Run the daemon until its cancellation token fires or a reflector stream ends.
-    ///
     /// The daemon reports `DaemonState::Ready` on `outputs.state_tx` after both reflectors
     /// completed their initial list and `list_state` holds the result, and reports the terminal
     /// state when it ends.
@@ -313,8 +310,6 @@ impl DiscoveryDaemon {
     }
 }
 
-/// Apply every reflector event to the join table and publish the result.
-///
 /// Each reflector sends one `Rebuild` after its initial list. The loop reports
 /// `DaemonState::Ready` once both have, because only then does the join table hold every
 /// instance the cluster had at start. Returns `Ok` when `cancel_token` fires and an error when
@@ -654,7 +649,6 @@ mod tests {
             ..Default::default()
         };
 
-        // The event loop over reflector stores that already hold both, with no cluster.
         let (pod_reader, mut pod_writer) = reflector::store();
         pod_writer.apply_watcher_event(&watcher::Event::Apply(pod));
         let (cr_reader, mut cr_writer) = reflector::store();

@@ -663,7 +663,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Two instances give two Added events in map order, then one snapshot of both.
         let mut added = HashSet::new();
         for _ in 0..2 {
             let DiscoveryEvent::Added(instance) = next_event(&mut events).await else {
@@ -683,7 +682,6 @@ mod tests {
             HashSet::from([first.id(), second.id()])
         );
 
-        // A change the daemon publishes after establishment follows the snapshot.
         let third = endpoint_instance(3, "127.0.0.1:9100");
         client
             .event_tx
@@ -705,7 +703,6 @@ mod tests {
             })
         };
 
-        // A caller that cancels stops waiting on a daemon that is still pending.
         let token = CancellationToken::new();
         let cancelled = open_watch(Some(token.clone()));
         tokio::task::yield_now().await;
@@ -726,7 +723,6 @@ mod tests {
             "unexpected error: {error}"
         );
 
-        // Ready releases a waiting watch, and its stream starts with the empty snapshot.
         let waiting = open_watch(None);
         tokio::task::yield_now().await;
         assert!(

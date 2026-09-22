@@ -206,8 +206,6 @@ impl Bucket for MemoryBucketRef {
         Ok(())
     }
 
-    /// One [`WatchEvent::Resync`] with every current value in the bucket first, then block
-    /// waiting for new values to be published.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + 'life0>>, StoreError> {
