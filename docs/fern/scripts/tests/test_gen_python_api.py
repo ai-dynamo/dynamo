@@ -507,6 +507,27 @@ def test_dynamo_runtime_re_exports_from_core_are_present(
         ), f"{expected}.qualname should preserve the canonical dynamo._core.* path"
 
 
+def test_unary_helpers_are_public_top_level_exports(
+    modules_by_name: dict[str, api_discovery.Module],
+) -> None:
+    expected_exports = {
+        "dynamo.runtime": {"UnaryClient", "serve_unary_endpoint"},
+        "dynamo.llm": {"LLMUnaryClient", "with_engine_data"},
+    }
+
+    for module_name, expected_names in expected_exports.items():
+        symbols = {
+            symbol.name: symbol for symbol in modules_by_name[module_name].symbols
+        }
+        for expected_name in expected_names:
+            symbol = symbols.get(expected_name)
+            assert (
+                symbol is not None
+            ), f"{expected_name} missing from {module_name} page"
+            assert symbol.import_path == f"{module_name}.{expected_name}"
+            assert symbol.qualname.startswith(f"{module_name}._unary.")
+
+
 def test_class_symbols_carry_their_public_methods(
     modules_by_name: dict[str, api_discovery.Module],
 ) -> None:

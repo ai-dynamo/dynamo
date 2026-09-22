@@ -10,8 +10,8 @@ from uuid import uuid4
 import pytest
 
 from dynamo._core import Context
-from dynamo.experimental.endpoint import UnaryClient, serve_unary_endpoint
-from dynamo.experimental.llm import LLMUnaryClient
+from dynamo.llm import LLMUnaryClient
+from dynamo.runtime import UnaryClient, serve_unary_endpoint
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -25,7 +25,7 @@ pytestmark = [
 
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 async def test_unary_adapters_round_trip_over_tcp(runtime: Any) -> None:
-    endpoint = runtime.endpoint(f"experimental-{uuid4().hex}.backend.generate")
+    endpoint = runtime.endpoint(f"unary-{uuid4().hex}.backend.generate")
 
     async def handler(request: dict[str, Any], *, context: Any) -> dict[str, Any]:
         return {"value": request["value"], "request_id": context.id()}
@@ -50,8 +50,8 @@ async def test_unary_client_propagates_cancellation_to_nested_endpoint(
     runtime: Any,
 ) -> None:
     suffix = uuid4().hex
-    inner_endpoint = runtime.endpoint(f"experimental-{suffix}.inner.complete")
-    outer_endpoint = runtime.endpoint(f"experimental-{suffix}.outer.generate")
+    inner_endpoint = runtime.endpoint(f"unary-{suffix}.inner.complete")
+    outer_endpoint = runtime.endpoint(f"unary-{suffix}.outer.generate")
     inner_started = asyncio.Event()
     inner_stopped = asyncio.Event()
 
@@ -103,7 +103,7 @@ async def test_unary_client_propagates_cancellation_to_nested_endpoint(
 
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 async def test_llm_unary_client_collects_a_generate_endpoint(runtime: Any) -> None:
-    endpoint = runtime.endpoint(f"experimental-{uuid4().hex}.backend.generate")
+    endpoint = runtime.endpoint(f"unary-{uuid4().hex}.backend.generate")
 
     async def generate(
         request: dict[str, Any], *, context: Any
