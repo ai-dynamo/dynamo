@@ -137,6 +137,28 @@ async fn decode_rejects_a_handoff_the_sidecar_mangled() {
             "flattened list",
             with_attribute(handoff::ATTR_FIRST_GEN_TOKENS, Kind::NumberValue(7.0)),
         ),
+        (
+            "fractional token id",
+            with_attribute(
+                handoff::ATTR_FIRST_GEN_TOKENS,
+                Kind::ListValue(prost_types::ListValue {
+                    values: vec![Value {
+                        kind: Some(Kind::NumberValue(13661.7)),
+                    }],
+                }),
+            ),
+        ),
+        (
+            "out-of-range token id",
+            with_attribute(
+                handoff::ATTR_FIRST_GEN_TOKENS,
+                Kind::ListValue(prost_types::ListValue {
+                    values: vec![Value {
+                        kind: Some(Kind::NumberValue(1e20)),
+                    }],
+                }),
+            ),
+        ),
         ("defaulted string", bad_backend),
         ("dropped repeated", no_endpoints),
         ("defaulted number", lost_port),
@@ -333,17 +355,25 @@ async fn the_replayed_logprob_is_the_one_the_handoff_carried() {
     );
 }
 
-/// Presence is decided by output position, not by token id. The replayed token
-/// can be sampled again later in the same stream, and those occurrences are the
-/// decode engine's own work -- they must keep their logprob even when the
-/// context phase computed none for position 0.
+/// A repeated token must keep its logprob even if the replayed token has none.
 #[tokio::test]
 async fn a_token_repeated_after_the_replay_keeps_its_own_logprob() {
     let prefill = prefill_service();
     let mut context = request("pf-repeat", 1);
     context.extra = Some(context_only_extra());
     let responses = drain(&prefill, context).await.unwrap();
-    let session = session_of(&responses);
+    let mut session = session_of(&responses);
+    let repeated_token = dynamo_mocker::live::deterministic_token_id(config().seed, "dc-repeat", 1);
+    session.attributes_struct.as_mut().unwrap().fields.insert(
+        handoff::ATTR_FIRST_GEN_TOKENS.to_string(),
+        Value {
+            kind: Some(Kind::ListValue(prost_types::ListValue {
+                values: vec![Value {
+                    kind: Some(Kind::NumberValue(f64::from(repeated_token))),
+                }],
+            })),
+        },
+    );
 
     // No logprobs requested on the context phase, so position 0 has none.
     let responses = drain(&decode_service(), decode_after(session, "dc-repeat"))
@@ -366,6 +396,8 @@ async fn a_token_repeated_after_the_replay_keeps_its_own_logprob() {
         tokens.len() > 1,
         "this test needs more than the replayed token"
     );
+    assert_eq!(tokens[0].tokens[0].token_id, tokens[1].tokens[0].token_id);
+    assert_eq!(tokens[0].tokens[0].logprob, None);
     for (position, token) in tokens.iter().enumerate().skip(1) {
         assert!(
             token.tokens[0].logprob.is_some(),
