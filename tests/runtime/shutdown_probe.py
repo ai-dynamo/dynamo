@@ -11,8 +11,9 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from dynamo._core import DistributedRuntime
@@ -22,6 +23,11 @@ from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput
 
 
+def signal_self():
+    print(f"SIGTERM_AT={time.monotonic()}", flush=True)
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 class ProbeEngine(RawEngine):
     @classmethod
     async def from_args(cls, argv=None):
@@ -29,7 +35,7 @@ class ProbeEngine(RawEngine):
 
     async def start(self, worker_id):
         # Signal after the Rust listener is installed but before start returns.
-        asyncio.get_running_loop().call_soon(os.kill, os.getpid(), signal.SIGTERM)
+        asyncio.get_running_loop().call_soon(signal_self)
         await asyncio.sleep(0.05)
         return EngineConfig(model="shutdown-probe")
 
@@ -40,6 +46,8 @@ class ProbeEngine(RawEngine):
         print("CLEANUP_STARTED", flush=True)
         if sys.argv[1] == "sdk-wedged":
             ctypes.PyDLL(None).sleep(30)
+        if sys.argv[1] == "sdk-failed":
+            raise RuntimeError("synthetic cleanup failure")
         print("ENGINE_CLEANED", flush=True)
 
 
@@ -53,12 +61,22 @@ async def sdk_probe():
             discovery_backend="mem",
             request_plane="tcp",
             event_plane="zmq",
-            shutdown=ShutdownConfig(total_secs=0.5, router_grace_secs=0),
+            shutdown=ShutdownConfig(
+                total_secs=0.5, router_grace_secs=0, cleanup_timeout_secs=0.2
+            ),
         ),
     )
+    if sys.argv[1] == "sdk-failed":
+        try:
+            await worker.run()
+        except Exception as error:
+            assert "synthetic cleanup failure" in str(error), error
+            print("CLEANUP_FAILED", flush=True)
+            return
+        raise AssertionError("worker reported success after cleanup failed")
     await worker.run()
     print("WORKER_RETURNED", flush=True)
-    # Stay alive past total + cleanup floor: the host must not be killed after
+    # Stay alive past the total: the host must not be killed after
     # the awaited library call has completed its engine and runtime teardown.
     await asyncio.sleep(6)
     print("HOST_SURVIVED", flush=True)
@@ -125,12 +143,14 @@ async def python_probe(group=None):
                 shutdown=shutdown,
             )
         finally:
+            if sys.argv[1] == "python-wedged":
+                ctypes.PyDLL(None).sleep(30)
             assert completed, "engine freed before its admitted request completed"
             if group is not None:
                 assert all(child.poll() == 0 for _, child in group.children)
                 print("CHILDREN_DRAINED", flush=True)
                 group.cleanup()
-            # Positive remainder < 0.3s is insufficient, but the 5s floor is.
+            # Cleanup must fit the reserved allowance inside the total.
             await asyncio.sleep(0.5)
             print("ENGINE_CLEANED", flush=True)
 
@@ -140,7 +160,7 @@ async def python_probe(group=None):
     stream = await client.direct({}, instances[0], annotated=False)
     assert await anext(stream) == {"seq": 0}
     if group is None:
-        os.kill(os.getpid(), signal.SIGTERM)
+        signal_self()
     else:
         assert os.getpgrp() == os.getpid(), "probe must own its process group"
         os.killpg(os.getpgrp(), signal.SIGTERM)
@@ -205,6 +225,66 @@ def embedding_probe():
                 child.wait(timeout=5)
 
 
+async def gateway_probe():
+    # Exercise the production supervisor and real process-group delivery;
+    # only GPU engine construction and shared-memory setup are unused stubs.
+    sgl = ModuleType("sglang")
+    sgl.Engine = SimpleNamespace(async_generate=None, _resolve_routed_dp_rank=None)
+    mixin = ModuleType("sglang.srt.managers.multi_tokenizer_mixin")
+    mixin.write_data_for_multi_tokenizer = None
+    with patch.dict(sys.modules, {"sglang": sgl, mixin.__name__: mixin}):
+        gateway = importlib.import_module("dynamo.sglang.gateway")
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
+        )
+        stop = asyncio.Event()
+        shutdown = WorkerShutdown(runtime, [], stop)
+        spawned = []
+        popen = subprocess.Popen
+
+        def launch(_command, **kwargs):
+            child = popen(
+                [sys.executable, __file__, "embedding-child", "0.1"],
+                stdout=subprocess.PIPE,
+                text=True,
+                **kwargs,
+            )
+            spawned.append(child)
+            return child
+
+        with patch.object(gateway.subprocess, "Popen", launch):
+            serving = asyncio.create_task(
+                shutdown.run(
+                    gateway.serve_via_gateway_children(
+                        SimpleNamespace(_multi_tokenizer_shm=object()),
+                        1,
+                        stop,
+                        shutdown=shutdown,
+                    )
+                )
+            )
+            try:
+                while not spawned:
+                    await asyncio.sleep(0)
+                child = spawned[0]
+                assert await asyncio.to_thread(child.stdout.readline) == "CHILD_READY\n"
+                assert os.getpgrp() == os.getpid()
+                os.killpg(os.getpgrp(), signal.SIGTERM)
+                await serving
+                assert child.returncode == 0, child.returncode
+                assert not shutdown.accepting
+                print(
+                    "ADMISSION_CLOSED\nCHILDREN_DRAINED\nENGINE_CLEANED\nRUNTIME_FINISHED",
+                    flush=True,
+                )
+            finally:
+                for child in spawned:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait(timeout=5)
+                    child.stdout.close()
+
+
 if __name__ == "__main__":
     mode = sys.argv[1]
     if mode.startswith("sdk-"):
@@ -213,5 +293,7 @@ if __name__ == "__main__":
         asyncio.run(embedding_child())
     elif mode.startswith("embedding-"):
         embedding_probe()
+    elif mode == "gateway-group":
+        asyncio.run(gateway_probe())
     else:
         asyncio.run(python_probe())

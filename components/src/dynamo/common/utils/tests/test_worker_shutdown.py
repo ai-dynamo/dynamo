@@ -7,7 +7,7 @@ import asyncio
 import inspect
 import subprocess
 import sys
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -27,12 +27,14 @@ def shutdown_env(monkeypatch):
     monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "0")
     monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "2")
     monkeypatch.setenv("DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK", "skip")
+    monkeypatch.delenv("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", raising=False)
     for name in (
         "DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS",
         "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS",
         "DYN_PREFILL_DRAIN_TIMEOUT_S",
     ):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "0.5")
     watchdog = Mock()
     monkeypatch.setattr(ws, "ShutdownWatchdog", Mock(return_value=watchdog))
     return watchdog
@@ -97,10 +99,11 @@ def test_shutdown_drains_admitted_stream_before_engine_and_runtime(shutdown_env)
     asyncio.run(run())
 
 
-def test_prefill_cleanup_floor(shutdown_env, monkeypatch):
-    # Regression: the KV stage can spend the entire total, but cleanup must
-    # still run.
-    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "0")
+def test_prefill_reserves_cleanup_inside_total(shutdown_env, monkeypatch):
+    # Regression: KV fallback must not consume the cleanup reserve or extend
+    # the SIGTERM deadline. A reserve equal to total leaves no drain allowance.
+    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "1")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "1")
     monkeypatch.setenv("DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK", "wait")
 
     async def run():
@@ -124,6 +127,9 @@ def test_prefill_cleanup_floor(shutdown_env, monkeypatch):
         owner = asyncio.create_task(shutdown.run(worker(), install_signals=False))
         await started.wait()
         shutdown.request_shutdown()
+        assert shutdown._drain_remaining() == 0
+        assert shutdown._remaining() <= 1
+        assert shutdown._hard_deadline == shutdown._deadline
         await owner
         assert cleaned.is_set()
         shutdown_env.finish.assert_called_once()
@@ -196,6 +202,30 @@ def test_push_handler_keeps_sender_and_releases_admission_on_close(shutdown_env)
         await stream.aclose()
         assert closed.is_set()
         assert shutdown.idle.is_set()
+
+    asyncio.run(run())
+
+
+def test_canonical_budget_overrides_alias_and_reserves_cleanup(
+    shutdown_env, monkeypatch
+):
+    # Regression: Python/Rust alias disagreement can arm a watchdog earlier
+    # than the drain coordinator's deadline in the same deployment.
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS", "12")
+    monkeypatch.setenv("DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT", "60")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS", "2")
+    monkeypatch.setenv("DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS", "10")
+    monkeypatch.setenv("DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS", "3")
+
+    async def run():
+        shutdown = ws.WorkerShutdown(None, [], asyncio.Event())
+        # Configuration is resolved synchronously before starting async stages.
+        with patch.object(shutdown, "_start_sequence"):
+            shutdown.request_shutdown()
+            assert 11 < shutdown._remaining() <= 12
+            assert 8 < shutdown._drain_remaining() <= 9
+            assert shutdown._caps["router_grace"] == 2
+            assert shutdown._hard_deadline == shutdown._deadline
 
     asyncio.run(run())
 

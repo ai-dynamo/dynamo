@@ -368,6 +368,9 @@ async def serve_via_gateway_children(
             procs.append(
                 subprocess.Popen(
                     [sys.executable, "-m", "dynamo.sglang", *argv],
+                    # The parent forwards signals; group delivery must not
+                    # reach children again and trigger forced termination.
+                    start_new_session=True,
                     env=child_environment(index, load_time),
                 )
             )

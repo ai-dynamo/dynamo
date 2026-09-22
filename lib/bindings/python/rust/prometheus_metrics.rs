@@ -106,8 +106,32 @@ impl RuntimeMetrics {
     }
 }
 
+#[pyclass]
+pub struct ShutdownMetrics {
+    inner: dynamo_backend_common::metrics::ShutdownMetrics,
+}
+
+#[pymethods]
+impl ShutdownMetrics {
+    fn record_stage(&self, stage: &str, reason: &str, elapsed: f64, remaining: f64) {
+        self.inner.record_stage(stage, reason, elapsed, remaining);
+    }
+
+    #[pyo3(signature = (inflight, kv_quiescent=None))]
+    fn record_state(&self, inflight: u64, kv_quiescent: Option<bool>) {
+        self.inner.record_state(Some(inflight), kv_quiescent);
+    }
+}
+
 #[pymethods]
 impl RuntimeMetrics {
+    /// Register framework shutdown instruments in this endpoint's registry.
+    fn shutdown_metrics(&self) -> PyResult<ShutdownMetrics> {
+        Ok(ShutdownMetrics {
+            inner: dynamo_backend_common::metrics::ShutdownMetrics::new(self.hierarchy.as_ref(), &[])
+                .map_err(|error| pyo3::exceptions::PyRuntimeError::new_err(error.to_string()))?,
+        })
+    }
     /// Register a callback that returns Prometheus exposition text. The
     /// returned text is appended to the `/metrics` endpoint output.
     fn register_prometheus_expfmt_callback(&self, callback: PyObject) -> PyResult<()> {
