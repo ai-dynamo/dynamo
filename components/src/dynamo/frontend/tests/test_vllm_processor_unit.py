@@ -1569,17 +1569,30 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "n,other_request,backend_usage",
-        [(1, False, False), (2, False, False), (1, True, False), (2, False, True)],
+        "n,other_request,backend_usage,natural_finish_first",
+        [
+            (1, False, False, False),
+            (2, False, False, False),
+            (1, True, False, False),
+            (2, False, True, False),
+            (2, False, True, True),
+        ],
         ids=[
             "single-choice",
             "parallel-choices",
             "concurrent-request",
             "backend-usage",
+            "earlier-backend-usage",
         ],
     )
     async def test_local_stop_releases_only_the_completed_request(
-        self, tokenizer, n, other_request, backend_usage, real_vllm_processor_module
+        self,
+        tokenizer,
+        n,
+        other_request,
+        backend_usage,
+        natural_finish_first,
+        real_vllm_processor_module,
     ):
         """Stopped choices must not inflate usage, even when the worker sends it."""
         module = real_vllm_processor_module
@@ -1605,6 +1618,7 @@ class TestRoutedEnginePath:
         stop_tokens += tokenizer.encode("OP", add_special_tokens=False)
         items = [{"token_ids": [token], "index": 0} for token in stop_tokens]
         expected_tokens = len(stop_tokens)
+        expected_prompt_tokens = 128 if backend_usage else 1
         if n > 1:
             # The shared stream may deliver more tokens for the stopped choice
             # while another choice is still active.
@@ -1620,11 +1634,16 @@ class TestRoutedEnginePath:
             expected_tokens += len(other_tokens)
             if backend_usage:
                 items[-1]["completion_usage"] = {
-                    "prompt_tokens": 1,
+                    "prompt_tokens": expected_prompt_tokens,
                     "completion_tokens": expected_tokens + 2,
-                    "total_tokens": expected_tokens + 3,
-                    "prompt_tokens_details": {"cached_tokens": 0},
+                    "total_tokens": expected_prompt_tokens + expected_tokens + 2,
+                    "prompt_tokens_details": {"cached_tokens": 64},
                 }
+            if natural_finish_first:
+                # The natural finish reports usage before the local stop; the
+                # terminal chunk must retain its metadata for aggregation.
+                items.insert(0, items.pop())
+                items.pop()  # No late chunk is consumed after both choices finish.
         expected_chunks = len(items)
         items.append({"token_ids": [42], "index": 0})
         routed_engine = _FakeRoutedEngine(items)
@@ -1677,9 +1696,13 @@ class TestRoutedEnginePath:
             if choice["finish_reason"]
         } == ({0: "stop", 1: "length"} if n > 1 else {0: "stop"})
         assert data[-1]["usage"]["completion_tokens"] == expected_tokens
-        assert data[-1]["usage"]["total_tokens"] == expected_tokens + 1
+        assert data[-1]["usage"]["prompt_tokens"] == expected_prompt_tokens
+        assert (
+            data[-1]["usage"]["total_tokens"]
+            == expected_prompt_tokens + expected_tokens
+        )
         if backend_usage:
-            assert data[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
+            assert data[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 64}
         metrics = [json.loads(chunk["comment"][0]) for chunk in chunks]
         assert metrics[-1]["output_tokens"] == expected_tokens
         assert sum(metric["chunk_tokens"] for metric in metrics) == expected_tokens

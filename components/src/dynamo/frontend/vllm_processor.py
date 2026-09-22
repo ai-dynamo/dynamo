@@ -958,6 +958,7 @@ class VllmProcessor:
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
         has_local_stop = False
+        latest_backend_usage: dict[str, Any] = {}
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -1032,6 +1033,10 @@ class VllmProcessor:
                 )
                 cumulative_output_tokens += chunk_tokens
 
+                usage = engine_response.get("completion_usage")
+                if usage:
+                    latest_backend_usage = dict(usage)
+
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
@@ -1104,9 +1109,10 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    usage = engine_response.get("completion_usage")
                     if has_local_stop and (usage or locally_finished):
-                        usage = dict(usage or {})
+                        # A sibling may have reported cache metadata before the
+                        # final local stop, which carries no backend usage.
+                        usage = dict(latest_backend_usage)
                         prompt_tokens = usage.get("prompt_tokens")
                         if prompt_tokens is None:
                             prompt_tokens = input_tokens
