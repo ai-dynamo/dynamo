@@ -110,6 +110,15 @@ impl WorkerPicker for DefaultPicker {
             }
             return Ok(best_row);
         }
+        if self.rng.is_none() {
+            return Ok(softmax_sample_index(
+                candidates,
+                |candidate| candidate.cost(),
+                self.temperature,
+                fastrand::f64(),
+                &mut self.probabilities,
+            ));
+        }
         self.entries.clear();
         self.entries.extend(
             candidates

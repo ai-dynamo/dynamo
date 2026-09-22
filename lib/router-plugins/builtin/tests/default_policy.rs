@@ -64,6 +64,39 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
 }
 
 #[test]
+fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
+    for count in [1, 8, 64] {
+        for temperature in [0.1, 0.7, 1.0, 2.0] {
+            for equal_costs in [false, true] {
+                let (workers, mut request) = fixture(count, 2048);
+                if equal_costs {
+                    request.worker_loads.clear();
+                    request.overlap = Default::default();
+                }
+                let config = KvRouterConfig {
+                    router_temperature: temperature,
+                    ..Default::default()
+                };
+                let reference =
+                    dynamo_kv_router::DefaultWorkerSelector::new(Some(config.clone()), "prefill");
+                let plugin = default_policy(config, "prefill");
+                for seed in 0..64 {
+                    let input = selection_input(&workers, &request, 16);
+                    fastrand::seed(seed);
+                    let expected = reference.select_worker(input).unwrap();
+                    let next_random = fastrand::u64(..);
+                    fastrand::seed(seed);
+                    let actual = plugin.select_worker(input).unwrap();
+                    assert_eq!(actual.worker, expected.worker);
+                    assert_eq!(actual.cached_tokens, expected.cached_tokens);
+                    assert_eq!(fastrand::u64(..), next_random);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn unseeded_minimum_picker_only_selects_workers_tied_for_lowest_cost() {
     let (workers, mut request) = fixture(8, 17);
     let policy = default_policy(
