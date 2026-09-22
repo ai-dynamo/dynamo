@@ -45,13 +45,13 @@ model IDs and request checks, but do not enforce these snapshot revisions, so
 they are functional prerequisites rather than a strict experimental control.
 
 `N2_RELEASE_LINE` is the compatibility baseline and is intentionally independent
-of the development version in `Cargo.toml`. Keep it at `1.5` while 1.5 release
-images are unavailable, which tests candidate images against the published 1.4
-and 1.3 lines. Advance it to `1.6` only after 1.5 release images are published
-and added to `releases.json`. Image tags supply `runtimeVersionOverride`
-separately for each component, keeping operator health defaults appropriate for
-historical runtimes. Kubernetes discovery and TCP requests are used across the
-supported window.
+of the development version in `Cargo.toml`. It is currently `1.6`, which tests
+candidate images against the published 1.5 and 1.4 lines. Advance it when the
+candidate moves to a new minor only after the preceding release images are
+published and added to `releases.json`. Image tags supply
+`runtimeVersionOverride` separately for each component, keeping operator health
+defaults appropriate for historical runtimes. Kubernetes discovery and TCP
+requests are used across the supported window.
 
 CI schedules cases serially to bound GPU use. Each case has its own deployment
 name and fixture; there is no cross-test baseline state. Compatibility failures

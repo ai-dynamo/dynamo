@@ -46,10 +46,10 @@ def test_matrix_uses_both_age_directions_without_candidate_controls():
         releases, DEFAULT_RELEASE_LINE, "candidate-fe", "candidate-wk"
     )
     assert [(p.frontend, p.worker) for p in pairs] == [
+        (releases["1.5"]["frontend"], "candidate-wk"),
+        ("candidate-fe", releases["1.5"]["worker"]),
         (releases["1.4"]["frontend"], "candidate-wk"),
         ("candidate-fe", releases["1.4"]["worker"]),
-        (releases["1.3"]["frontend"], "candidate-wk"),
-        ("candidate-fe", releases["1.3"]["worker"]),
     ]
 
 
@@ -68,10 +68,10 @@ def test_matrix_names_missing_release_catalog_entry():
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
 
     with pytest.raises(ValueError) as exc_info:
-        version_matrix(releases, "1.6", "candidate-fe", "candidate-wk")
+        version_matrix(releases, "1.7", "candidate-fe", "candidate-wk")
 
-    assert "release line 1.6" in str(exc_info.value)
-    assert "missing: 1.5" in str(exc_info.value)
+    assert "release line 1.7" in str(exc_info.value)
+    assert "missing: 1.6" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])

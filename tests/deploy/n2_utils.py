@@ -17,7 +17,7 @@ MODELS = {
     ),
 }
 
-DEFAULT_RELEASE_LINE = "1.5"
+DEFAULT_RELEASE_LINE = "1.6"
 
 
 @dataclass(frozen=True)
