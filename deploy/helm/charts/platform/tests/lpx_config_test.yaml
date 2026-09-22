@@ -49,7 +49,7 @@ tests:
           path: data["config.yaml"]
           pattern: '(?m)^lpu:'
 
-  - it: renders the exact inert LpuPipelineRequest manager grant
+  - it: renders the exact inert LpuPipelineRequest and Grove owner grants
     template: charts/dynamo-operator/templates/manager-rbac.yaml
     asserts:
       - contains:
@@ -65,4 +65,14 @@ tests:
               - get
               - list
               - watch
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - grove.io
+            resources:
+              - podcliquesets/finalizers
+            verbs:
+              - update
         documentIndex: 0

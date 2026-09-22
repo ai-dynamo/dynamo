@@ -125,6 +125,7 @@ func (r *graphReconciler) unavailableReason() string {
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/finalizers,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 
 func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	deployment := &v1alpha1.LPXGraphDeployment{}
