@@ -2328,9 +2328,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "6.0.1"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daa8a16e9007c954f01ac9b4e48cb9eacd43e890edf747c92f7bbbddbb6fee4d"
+checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2345,9 +2345,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.3.1"
+version = "5.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "821803eae0bcf87a9dc0ecdf9ff8a146a5de18ccfe39f341365676abbc747e61"
+checksum = "60cb5aea856f245222be9e30f01d8113c93df883b2379efbcfcfd338335e979f"
 dependencies = [
  "anyhow",
  "chrono",
