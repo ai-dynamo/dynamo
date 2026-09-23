@@ -122,18 +122,14 @@ if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
     PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
 fi
 
-# Per-worker ports. Standalone runs keep the literal defaults; under
-# DYN_MANAGED_PORTS the harness injects DYN_*_PORT{1,2} and dyn_port refuses a
-# missing or invalid value instead of letting both workers share one default
-# port, which collides when several deployments run on the same machine.
+# Per-worker ports: literal defaults standalone; under DYN_MANAGED_PORTS
+# dyn_port refuses a missing or invalid value instead of sharing a default.
 SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
 SYSTEM_PORT_PD=$(dyn_port DYN_SYSTEM_PORT 2 8082)
 NIXL_PORT_ENCODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")
 NIXL_PORT_PD=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PD:-20098}")
-# Pins the ZMQ endpoint each worker would publish KV events on. Publishing
-# stays off (KVEventsConfig.enable_kv_cache_events defaults to false, as in
-# disagg_multimodal_epd.sh), so this only keeps the endpoint off a shared
-# default.
+# Pins the ZMQ endpoint for KV events; publishing itself stays off
+# (KVEventsConfig.enable_kv_cache_events defaults to false).
 KV_PORT_ENCODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")
 KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
 

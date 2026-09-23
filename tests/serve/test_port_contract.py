@@ -21,9 +21,8 @@ _E_PD_LAUNCHER = (
     / "examples/backends/vllm/launch/disagg_multimodal_e_pd.sh"
 )
 
-# Records the ports one worker was handed, then stays alive: the launch script
-# tears its whole process group down as soon as any child exits, so an
-# instant-exit stub can race the later workers out of the record.
+# Records one worker's ports, then stays alive: the launcher tears down its
+# whole process group when a child exits, racing later workers out of the record.
 _STUB_ENGINE = """#!/bin/bash
 printf '%s\\t%s\\t%s\\n' \
     "${DYN_SYSTEM_PORT:-}" "${VLLM_NIXL_SIDE_CHANNEL_PORT:-}" "$*" >> "$PORT_RECORD"
