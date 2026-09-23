@@ -561,7 +561,6 @@ impl WorkerConfig {
         enable_kv_routing = true,
         metrics_labels = Vec::new(),
         runtime = None,
-        shutdown = None,
         disaggregation_mode = DisaggregationMode::Aggregated,
         health_check_payload = None,
         structural_tag_mode = "off".to_string(),
@@ -572,6 +571,7 @@ impl WorkerConfig {
         media_fetcher = None,
         kv_state_endpoint = None,
         default_thinking_mode = None,
+        shutdown = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -591,7 +591,6 @@ impl WorkerConfig {
         enable_kv_routing: bool,
         metrics_labels: Vec<(String, String)>,
         runtime: Option<RuntimeConfig>,
-        shutdown: Option<ShutdownConfig>,
         disaggregation_mode: DisaggregationMode,
         health_check_payload: Option<PyObject>,
         structural_tag_mode: String,
@@ -602,6 +601,7 @@ impl WorkerConfig {
         media_fetcher: Option<MediaFetcher>,
         kv_state_endpoint: Option<String>,
         default_thinking_mode: Option<String>,
+        shutdown: Option<ShutdownConfig>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {

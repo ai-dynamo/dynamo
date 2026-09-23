@@ -552,7 +552,6 @@ impl Worker {
                 .build());
         }
         if !self.cleanup_abandoned
-            && self.cleanup_error.is_none()
             && let Some(watchdog) = watchdog
         {
             let _ = watchdog.send(());
@@ -617,7 +616,8 @@ impl Worker {
                 _ = sigint.recv() => {}
             }
             tracing::warn!(
-                "Second shutdown signal received during graceful shutdown;                  exiting immediately with code {}. Engine cleanup may not have run.",
+                "Second shutdown signal received during graceful shutdown; \
+                 exiting immediately with code {}. Engine cleanup may not have run.",
                 EXIT_CODE_SHUTDOWN_TIMEOUT
             );
             std::process::exit(EXIT_CODE_SHUTDOWN_TIMEOUT);
@@ -1172,7 +1172,7 @@ impl Worker {
         // Pre-cleanup stages withhold this allowance inside the total deadline.
         // An exhausted deadline cannot be extended by cleanup.
         let budget = match self.shutdown_budget {
-            None => cleanup_timeout(),
+            None => ShutdownBudget::from_config(&self.config.shutdown).stage_max(Stage::Cleanup),
             Some(armed) => armed
                 .allowance(Stage::Cleanup)
                 .unwrap_or_else(cleanup_timeout),
@@ -3248,7 +3248,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cleanup_once_is_bounded_when_engine_hangs() {
         let mut worker = worker_with(Arc::new(HangingCleanupEngine));
-        worker.start_engine(0).await.unwrap();
+        worker.config.shutdown.cleanup_timeout_secs = Some(0.1);
+        worker.state = LifecycleState::StartFailed;
+        let started = tokio::time::Instant::now();
 
         // Outer guard is far larger than the cleanup budget: if cleanup_once
         // were still unbounded this would hang rather than fail.
@@ -3259,6 +3261,8 @@ mod tests {
         // State advances despite the timeout so shutdown continues to
         // transport teardown instead of retrying a wedged teardown.
         assert_eq!(worker.state, LifecycleState::Stopped);
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
+        assert!(worker.cleanup_abandoned);
     }
 
     // The pre-start shutdown path is handled in `run_inner` via a

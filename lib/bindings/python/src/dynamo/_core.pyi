@@ -3518,6 +3518,19 @@ class backend:
     class ShutdownConfig:
         """Shutdown timing overrides; unset fields fall back to the environment."""
 
+        @property
+        def total_secs(self) -> Optional[float]: ...
+        @property
+        def router_grace_secs(self) -> Optional[float]: ...
+        @property
+        def inflight_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def kv_transfer_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def cleanup_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def kv_transfer_fallback(self) -> Optional[str]: ...
+
         def __init__(
             self,
             total_secs: Optional[float] = None,
@@ -3546,7 +3559,6 @@ class backend:
             enable_kv_routing: bool = ...,
             metrics_labels: List[Tuple[str, str]] = ...,
             runtime: Optional["backend.RuntimeConfig"] = None,
-            shutdown: Optional["backend.ShutdownConfig"] = None,
             disaggregation_mode: "backend.DisaggregationMode" = ...,
             health_check_payload: Optional[Dict[str, Any]] = None,
             structural_tag_mode: str = ...,
@@ -3557,6 +3569,7 @@ class backend:
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
             default_thinking_mode: Optional[str] = None,
+            shutdown: Optional["backend.ShutdownConfig"] = None,
         ) -> None: ...
 
     class Worker:
