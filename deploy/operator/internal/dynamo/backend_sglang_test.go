@@ -663,6 +663,9 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
 		"nixl-4": 19094, "nixl-5": 19095, "nixl-6": 19096, "nixl-7": 19097,
 	}
+	firstFourPorts := map[string]int32{
+		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
+	}
 
 	tests := []struct {
 		name               string
@@ -692,6 +695,27 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			telemetryEnable: "y",
 			containerGPUs:   8,
 			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "a non-y truthy enable value preserves the existing port declarations",
+			ports:           workerPorts,
+			telemetryEnable: "true",
+			containerGPUs:   4,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "a leading-space enable value is rejected",
+			ports:           workerPorts,
+			telemetryEnable: " y",
+			containerGPUs:   -1,
+			expectedError:   "not a boolean value recognized by NIXL",
+		},
+		{
+			name:            "a malformed enable value is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "maybe",
+			containerGPUs:   -1,
+			expectedError:   "not a boolean value recognized by NIXL",
 		},
 		{
 			name:            "more ranks than the reserved range is rejected",
@@ -799,34 +823,36 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedError:   "exceeds the maximum port",
 		},
 		{
-			name:              "another exporter binds no port per rank, however many ranks there are",
+			name:              "an uppercase exporter reserves no Prometheus rank ports",
 			ports:             workerPorts,
 			telemetryEnable:   "y",
-			telemetryExporter: "file",
+			telemetryExporter: "PROMETHEUS",
 			containerGPUs:     -1,
 			expectedPorts:     map[string]int32{"nixl": 19090},
 		},
 		{
-			name:              "another exporter reads no base, so a sourced one is no obstacle",
+			name:              "another valid exporter reserves no Prometheus rank ports",
 			ports:             workerPorts,
 			telemetryEnable:   "y",
-			telemetryExporter: "file",
-			portValueFrom: &corev1.EnvVarSource{
-				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
-					Key:                  "nixl-port",
-				},
-			},
-			containerGPUs: -1,
-			expectedPorts: map[string]int32{"nixl": 19090},
+			telemetryExporter: "doca",
+			containerGPUs:     -1,
+			expectedPorts:     map[string]int32{"nixl": 19090},
 		},
 		{
-			name:            "no exporter selection is the Prometheus default",
+			name:              "a whitespace-padded exporter reserves no Prometheus rank ports",
+			ports:             workerPorts,
+			telemetryEnable:   "y",
+			telemetryExporter: "prometheus ",
+			containerGPUs:     -1,
+			expectedPorts:     map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "no exporter selection reserves no additional ports",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			exporterAbsent:  true,
 			containerGPUs:   8,
-			expectedPorts:   allEightPorts,
+			expectedPorts:   map[string]int32{"nixl": 19090},
 		},
 		{
 			name:            "a sourced exporter reserves the range it cannot read",
@@ -842,14 +868,20 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedPorts: allEightPorts,
 		},
 		{
-			name:            "a base padded with whitespace is still a port",
+			name:            "a base padded with whitespace is rejected",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			telemetryPort:   " 19090 ",
 			containerGPUs:   4,
-			expectedPorts: map[string]int32{
-				"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
-			},
+			expectedError:   `is set to " 19090 ", which is not a number`,
+		},
+		{
+			name:            "a hexadecimal base moves every declared port with it",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "0x4A92",
+			containerGPUs:   4,
+			expectedPorts:   firstFourPorts,
 		},
 		{
 			name:            "a base written as words is rejected",
@@ -868,12 +900,12 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			expectedError:   `is set to "", which is not a number`,
 		},
 		{
-			name:            "a base of zero is rejected rather than bound as an ephemeral port",
+			name:            "an ephemeral base is rejected because it cannot be declared",
 			ports:           workerPorts,
 			telemetryEnable: "y",
 			telemetryPort:   "0",
 			containerGPUs:   4,
-			expectedError:   "is set to 0, which is outside the port range",
+			expectedError:   "ephemeral port the operator cannot declare or scrape",
 		},
 		{
 			name:            "a base past the maximum port is rejected",
@@ -905,8 +937,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
 				{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
 			}
-			// An older deployment predating the exporter selection leaves the
-			// variable off entirely, which the runtime reads as Prometheus.
+			// Leave the exporter variable absent for the no-exporter case.
 			if !tt.exporterAbsent {
 				env = append(env, corev1.EnvVar{Name: "NIXL_TELEMETRY_EXPORTER", Value: telemetryExporter, ValueFrom: tt.exporterValueFrom})
 			}
