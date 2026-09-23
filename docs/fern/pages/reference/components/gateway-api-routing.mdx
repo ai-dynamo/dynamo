@@ -148,10 +148,6 @@ replicated EPPs keep prefix-cache and active-load state the same way replicated 
 [Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md)
 for how that state behaves across replicas and what `DYN_ROUTER_REPLICA_SYNC` synchronizes.
 
-One difference is specific to the EPP. The gateway, not the EPP, sends the request to the worker, so
-the EPP frees a booking when the gateway's `ext_proc` stream for that request ends. If the gateway
-keeps the request running after that stream ends, the EPP no longer counts that request's load.
-
 ## Generated Resource Contract
 
 For a DGD named `<dgd-name>`, the operator generates an `InferencePool` named `<dgd-name>-pool` in
