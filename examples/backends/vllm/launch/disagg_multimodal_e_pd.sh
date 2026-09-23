@@ -81,8 +81,9 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_
 
 # Start frontend (no router mode)
 echo "Starting frontend..."
-# The harness aliases DYN_SYSTEM_PORT to DYN_SYSTEM_PORT1, which belongs to the
-# encode worker; leaving it set makes the frontend bind that worker's port.
+# Keep the harness's worker system ports out of the frontend's environment, as
+# disagg_multimodal_epd.sh does. The frontend also drops DYN_SYSTEM_PORT itself
+# (components/src/dynamo/frontend/main.py), so this is defence in depth.
 env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
     python -m dynamo.frontend &
 
@@ -126,12 +127,32 @@ fi
 # dyn_port refuses a missing or invalid value instead of sharing a default.
 SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
 SYSTEM_PORT_PD=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+# vLLM binds the NIXL side channel only behind a KV connector; this script
+# passes no --kv-transfer-config, so today these only keep the two workers on
+# distinct values if one is ever configured.
 NIXL_PORT_ENCODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")
 NIXL_PORT_PD=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PD:-20098}")
 # Pins the ZMQ endpoint for KV events; publishing itself stays off
 # (KVEventsConfig.enable_kv_cache_events defaults to false).
 KV_PORT_ENCODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")
 KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
+
+# vLLM keeps only the last --kv-events-config it is given, so a passthrough copy
+# and the generated one cannot both apply. Standalone the caller's wins, as it
+# did before this script generated one; under DYN_MANAGED_PORTS it would replace
+# the reserved endpoint, so refuse rather than move the worker off its port.
+KV_EVENTS_ARGS_PD=(--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}")
+for arg in "${EXTRA_PD_ARGS[@]}"; do
+    if [[ "$arg" == "--kv-events-config" || "$arg" == --kv-events-config=* ]]; then
+        if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+            echo "Refusing a passthrough --kv-events-config under DYN_MANAGED_PORTS:" \
+                 "it would replace the endpoint reserved on DYN_VLLM_KV_EVENT_PORT2" >&2
+            exit 1
+        fi
+        KV_EVENTS_ARGS_PD=()
+        break
+    fi
+done
 
 # Start encode worker.
 #
@@ -187,8 +208,8 @@ python -m dynamo.vllm \
   $PD_GPU_MEM_ARGS \
   $FD_ARGS \
   $EXTRA_ARGS \
-  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}" \
-  "${EXTRA_PD_ARGS[@]}" &
+  "${EXTRA_PD_ARGS[@]}" \
+  "${KV_EVENTS_ARGS_PD[@]}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
