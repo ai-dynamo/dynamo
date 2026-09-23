@@ -498,6 +498,21 @@ func TestInferHardwareSystem(t *testing.T) {
 			expected: nvidiacomv1beta1.GPUSKUTypeGB10,
 		},
 		{
+			name:     "B300 SXM6 AC (DCGM format)",
+			input:    "NVIDIA B300 SXM6 AC",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "B300 bare",
+			input:    "NVIDIA B300",
+			expected: nvidiacomv1beta1.GPUSKUTypeB300SXM,
+		},
+		{
+			name:     "GB300 should not match B300",
+			input:    "NVIDIA GB300",
+			expected: "",
+		},
+		{
 			name:     "B200 SXM",
 			input:    "B200 SXM",
 			expected: nvidiacomv1beta1.GPUSKUTypeB200SXM,

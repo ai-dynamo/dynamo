@@ -101,6 +101,7 @@ from dynamo.profiler.utils.dgdr_v1beta1_types import (  # noqa: E402
     DynamoGraphDeploymentRequestSpec,
     DynamoGraphDeploymentRequestStatus,
     FeaturesSpec,
+    GPUSKUType,
     KVRouterSpec,
     MockerSpec,
     ModelCacheSpec,
@@ -227,6 +228,9 @@ def test_enums():
     # SearchStrategy — TitleCase from Go const names
     assert SearchStrategy.Rapid == "rapid"
     assert SearchStrategy.Thorough == "thorough"
+
+    # GPUSKUType — uppercase hardware model names from Go const names
+    assert GPUSKUType.B300SXM == "b300_sxm"
 
     # BackendType — mixed case from Go const names
     assert BackendType.Auto == "auto"

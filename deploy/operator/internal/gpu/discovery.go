@@ -88,6 +88,7 @@ const (
 const (
 	tokenGB200  = "GB200"
 	tokenGB10   = "GB10"
+	tokenB300   = "B300"
 	tokenB200   = "B200"
 	tokenH200   = "H200"
 	tokenH100   = "H100"
@@ -120,16 +121,18 @@ var gcpMachineSeries = []string{
 }
 
 type gpuRule struct {
-	token     string
-	sxmSKU    nvidiacomv1beta1.GPUSKUType
-	pcieSKU   nvidiacomv1beta1.GPUSKUType
-	singleSKU nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
+	token                 string
+	requiresTokenBoundary bool
+	sxmSKU                nvidiacomv1beta1.GPUSKUType
+	pcieSKU               nvidiacomv1beta1.GPUSKUType
+	singleSKU             nvidiacomv1beta1.GPUSKUType // for GPUs without form factor variants
 }
 
 var gpuRules = []gpuRule{
 	// Blackwell
 	{token: tokenGB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeGB200SXM},
 	{token: tokenGB10, singleSKU: nvidiacomv1beta1.GPUSKUTypeGB10},
+	{token: tokenB300, requiresTokenBoundary: true, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB300SXM},
 	{token: tokenB200, sxmSKU: nvidiacomv1beta1.GPUSKUTypeB200SXM},
 
 	// Hopper
@@ -138,7 +141,7 @@ var gpuRules = []gpuRule{
 
 	// Ampere
 	{token: tokenA100, sxmSKU: nvidiacomv1beta1.GPUSKUTypeA100SXM, pcieSKU: nvidiacomv1beta1.GPUSKUTypeA100PCIe},
-	{token: tokenA30, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
+	{token: tokenA30, requiresTokenBoundary: true, singleSKU: nvidiacomv1beta1.GPUSKUTypeA30},
 
 	// Ada
 	{token: tokenL40S, singleSKU: nvidiacomv1beta1.GPUSKUTypeL40S},
@@ -954,7 +957,7 @@ func InferHardwareSystem(gpuProduct string) nvidiacomv1beta1.GPUSKUType {
 	formFactor := detectFormFactor(normalized)
 
 	for _, rule := range gpuRules {
-		if rule.token == tokenA30 && !containsModelToken(gpuProduct, tokenA30) {
+		if rule.requiresTokenBoundary && !containsModelToken(gpuProduct, rule.token) {
 			continue
 		}
 		if strings.Contains(normalized, rule.token) {
