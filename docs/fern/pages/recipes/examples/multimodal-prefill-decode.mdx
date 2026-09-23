@@ -1,0 +1,44 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Multimodal Prefill and Decode"
+subtitle: "Multimodal prefill/decode separation without a dedicated encoder."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-trtllm-disagg-multimodal-sh", "target": "local:trtllm", "label": "disagg_multimodal.sh", "description": "Multimodal Prefill and Decode"},
+    {"id": "local-vllm-disagg-multimodal-p-d-sh", "target": "local:vllm", "label": "disagg_multimodal_p_d.sh", "description": "Multimodal Prefill and Decode Without a Separate Encoder"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-multimodal-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg_multimodal.sh)
+```
+
+[Source: `disagg_multimodal.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_multimodal.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg_multimodal.sh" title="disagg_multimodal.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-multimodal-p-d-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_multimodal_p_d.sh)
+```
+
+[Source: `disagg_multimodal_p_d.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_p_d.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_multimodal_p_d.sh" title="disagg_multimodal_p_d.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

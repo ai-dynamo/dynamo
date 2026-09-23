@@ -104,13 +104,13 @@ Use `--wan-size 1b` (default, 1 GPU) or `--wan-size 14b` (2 GPUs). See the launc
 
 ## Generate a Video from an Image
 
-Provide the source image alongside the prompt in the `/v1/videos` request. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) and [SGLang Examples](../../../recipes/cli-templates/sglang.mdx) for the full I2V request format and supported models.
+Provide the source image alongside the prompt in the `/v1/videos` request. See the [launch script](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/sglang/launch/text-to-video-diffusion.sh) and [Deployment Examples](../../../recipes/examples/video-generation.mdx) for the full I2V request format and supported models.
 
 ## See Also
 
 - [Text-to-Video with SGLang](text-to-video.md#sglang)
 - [Image-to-Video with vLLM-Omni](image-to-video.md#vllm-omni)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [Deployment Examples](../../../recipes/examples/video-generation.mdx)
 
 </Tab>
 </Tabs>

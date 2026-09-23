@@ -1,0 +1,44 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Request-Plane Transports"
+subtitle: "Select the transport used for worker requests."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-vllm-agg-request-planes-sh", "target": "local:vllm", "label": "agg_request_planes.sh", "description": "Request-Plane Transport Modes"},
+    {"id": "local-vllm-xpu-agg-request-planes-xpu-sh", "target": "local:vllm", "label": "xpu/agg_request_planes_xpu.sh", "description": "Request-Plane Transport Modes"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-request-planes-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_request_planes.sh)
+```
+
+[Source: `agg_request_planes.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_request_planes.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_request_planes.sh" title="agg_request_planes.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-request-planes-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_request_planes_xpu.sh)
+```
+
+[Source: `agg_request_planes_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_request_planes_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_request_planes_xpu.sh" title="agg_request_planes_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

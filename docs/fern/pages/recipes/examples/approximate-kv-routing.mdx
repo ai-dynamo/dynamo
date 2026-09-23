@@ -1,0 +1,75 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Approximate Cache Tracking"
+subtitle: "KV-aware routing without worker cache-event publishing."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-router-kv-approx-yaml", "target": "kubernetes:vllm", "label": "agg_router_kv_approx.yaml", "description": "KV routing with approximate cache tracking"},
+    {"id": "kubernetes-vllm-agg-router-kv-approx-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "agg_router_kv_approx_xpu_dra.yaml", "description": "Approximate KV routing"},
+    {"id": "local-trtllm-agg-router-approx-sh", "target": "local:trtllm", "label": "agg_router_approx.sh", "description": "KV Routing Without Cache Events"},
+    {"id": "local-vllm-agg-router-approx-sh", "target": "local:vllm", "label": "agg_router_approx.sh", "description": "KV Routing Without Cache Events"},
+    {"id": "local-vllm-xpu-agg-router-approx-xpu-sh", "target": "local:vllm", "label": "xpu/agg_router_approx_xpu.sh", "description": "KV Routing Without Cache Events"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-router-kv-approx-yaml">
+
+[Source: `agg_router_kv_approx.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router_kv_approx.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_router_kv_approx.yaml" title="agg_router_kv_approx.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-router-kv-approx-xpu-dra-yaml">
+
+[Source: `agg_router_kv_approx_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/agg_router_kv_approx_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/agg_router_kv_approx_xpu_dra.yaml" title="agg_router_kv_approx_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-router-approx-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_router_approx.sh)
+```
+
+[Source: `agg_router_approx.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_router_approx.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_router_approx.sh" title="agg_router_approx.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-router-approx-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_router_approx.sh)
+```
+
+[Source: `agg_router_approx.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router_approx.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_router_approx.sh" title="agg_router_approx.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-router-approx-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_router_approx_xpu.sh)
+```
+
+[Source: `agg_router_approx_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_router_approx_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_router_approx_xpu.sh" title="agg_router_approx_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

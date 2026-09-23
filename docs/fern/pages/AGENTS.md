@@ -24,7 +24,7 @@ differ for two of them — match on the directory.
 | `kubernetes-guide` | `kubernetes/` | Deploying and operating Dynamo **on Kubernetes** |
 | `cli-guide` | `cli/` | Running Dynamo **from the CLI** on local or bare-metal hosts |
 | `use-cases` | `use-cases/` | Workload-shaped guides (agents, multimodal, diffusion, RL, tool calling) |
-| `recipes` | `recipes/` | Model recipes, deployment templates, feature benchmarks |
+| `recipes` | `recipes/` | Model recipes, topic-first examples, feature benchmarks |
 | `developer-guide` | `developer-guide/` | Internals, architecture, customization, contributor-facing knowledge |
 | `reference` | `reference/` | Exact contracts: APIs, CRDs, flags, metrics, releases, compatibility |
 | `blog` | `blog/` | Dated posts under a year directory |
@@ -60,9 +60,10 @@ Work down this list and stop at the first match:
 1. Is it an exact contract (flag, field, endpoint, metric, CRD, version matrix)? → `reference/`
 2. Is it a dated announcement or narrative post? → `blog/`
 3. Is it about contributing to Dynamo itself? → `community/`
-4. Is it a model recipe, a deployment template, or a benchmark? → `recipes/`, and follow
-   [`recipes/_catalog/README.md`](recipes/_catalog/README.md) — those pages are a triple (page +
-   catalog entry + nav), never a lone file.
+4. Is it a model recipe, a deployment example, or a benchmark? → `recipes/`. Follow
+   [`recipes/_catalog/README.md`](recipes/_catalog/README.md) for model recipes and benchmarks, or
+   [`recipes/examples/_catalog/README.md`](recipes/examples/_catalog/README.md) for source-file examples.
+   Each is a triple (page + catalog entry + nav), never a lone file.
 5. Is it organized around a workload rather than a deployment step? → `use-cases/`
 6. Is it internals, architecture, or customization for someone extending Dynamo? → `developer-guide/`
 7. Otherwise it is a deployment or operations task → `kubernetes/` or `cli/` per the split above.

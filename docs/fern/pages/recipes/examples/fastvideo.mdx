@@ -1,0 +1,54 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "FastVideo"
+subtitle: "The custom FastVideo worker on local hosts or Kubernetes."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+<Warning>
+**Experimental.** See [Text-to-Video](../../use-cases/diffusion/workflows/text-to-video.md) for the request workflow. Follow the Kubernetes setup guide to prepare storage and dedicated workload nodes before applying a DGD.
+See the source [local setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/local/README.md) and [Kubernetes setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/deploy/README.md) for prerequisites.
+</Warning>
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-fastvideo-agg-yaml", "target": "kubernetes:fastvideo", "label": "agg.yaml", "description": "Standard FastVideo deployment"},
+    {"id": "kubernetes-fastvideo-agg-user-workload-yaml", "target": "kubernetes:fastvideo", "label": "agg_user_workload.yaml", "description": "FastVideo on dedicated workload nodes"},
+    {"id": "local-fastvideo-run-local-sh", "target": "local:fastvideo", "label": "run_local.sh", "description": "Local FastVideo Worker"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-fastvideo-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/deploy/agg.yaml)
+
+<Code src="../../../../../examples/diffusers/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-fastvideo-agg-user-workload-yaml">
+
+[Source: `agg_user_workload.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/deploy/agg_user_workload.yaml)
+
+<Code src="../../../../../examples/diffusers/deploy/agg_user_workload.yaml" title="agg_user_workload.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-fastvideo-run-local-sh">
+
+```bash
+(cd examples/diffusers/local && bash run_local.sh)
+```
+
+[Source: `run_local.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/diffusers/local/run_local.sh)
+
+<Code src="../../../../../examples/diffusers/local/run_local.sh" title="run_local.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>
