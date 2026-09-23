@@ -36,6 +36,23 @@ pytestmark = [
 # sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
+def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
+    image_loader = MagicMock()
+    monkeypatch.setattr(mmp, "ImageLoader", image_loader)
+
+    MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=200,
+        tokenizer=MagicMock(),
+    )
+
+    image_loader.assert_called_once_with(
+        enable_frontend_decoding=False,
+        max_bytes=200 * 1024 * 1024,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
@@ -101,7 +118,12 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
         ep_disaggregated_params=None,
     )
 
-    fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
+    fetch.assert_awaited_once_with(
+        url,
+        30.0,
+        policy=processor._url_policy,
+        max_bytes=processor.max_file_size_bytes,
+    )
     assert load_video.await_args.args[0] != url
 
 

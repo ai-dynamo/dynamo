@@ -23,6 +23,7 @@ from ..http import (
     HttpTimeoutError,
     fetch_bytes,
 )
+from ..http.media_reference import max_media_bytes
 from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -71,6 +72,7 @@ class ImageLoader:
         http_timeout: float = 30.0,
         enable_frontend_decoding: bool = False,
         url_policy: UrlValidationPolicy | None = None,
+        max_bytes: int | None = None,
     ):
         """
         Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for
@@ -85,9 +87,12 @@ class ImageLoader:
                 decoded images directly from frontend memory, bypassing standard
                 network transport. Defaults to False.
             url_policy: Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
+            max_bytes: Maximum remote image size in bytes. When omitted, resolve
+                DYN_MM_MAX_FILE_SIZE_MB for each request.
         """
         self._http_timeout = http_timeout
         self._cache_size = cache_size
+        self._configured_max_bytes = max_bytes
         self._image_cache: OrderedDict[str, Image.Image] = OrderedDict()
         self._inflight: dict[str, asyncio.Task[Image.Image]] = {}
         self._enable_frontend_decoding = enable_frontend_decoding
@@ -99,6 +104,11 @@ class ImageLoader:
             run_async(
                 self._nixl_connector.initialize
             )  # Synchronously wait for async init
+
+    def _max_bytes(self) -> int:
+        if self._configured_max_bytes is not None:
+            return self._configured_max_bytes
+        return max_media_bytes()
 
     @staticmethod
     def _open_image_sync(image_data: BytesIO) -> Image.Image:
@@ -135,7 +145,10 @@ class ImageLoader:
         try:
             with _nvtx.annotate("mm:img:http_fetch", color="lime"):
                 content = await fetch_bytes(
-                    image_url, self._http_timeout, policy=self._url_policy
+                    image_url,
+                    self._http_timeout,
+                    policy=self._url_policy,
+                    max_bytes=self._max_bytes(),
                 )
                 if not content:
                     raise ValueError("Empty response content from image URL")
@@ -185,7 +198,7 @@ class ImageLoader:
             raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
         except Exception as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
-            raise ValueError(f"Failed to load image: '{image_url}': {e}") from e
+            raise
 
     async def _fetch_and_cache(self, key: str, image_url: str) -> Image.Image:
         """Shared task: fetch, cache, then remove from _inflight."""
@@ -254,7 +267,7 @@ class ImageLoader:
             except Image.UnidentifiedImageError as e:
                 logger.error(f"Unsupported image format decoding: '{image_url}'")
                 raise HttpStatusError(415, "Unsupported Media Type", image_url) from e
-            except Exception as e:
+            except ValueError as e:
                 if "Unsupported image format" in str(e):
                     logger.error(f"Unsupported image format decoding: '{image_url}'")
                     raise HttpStatusError(
@@ -262,6 +275,14 @@ class ImageLoader:
                     ) from e
                 logger.error(f"{type(e).__name__} decoding image: '{image_url}': {e}")
                 raise ValueError(f"Failed to decoding image: '{image_url}': {e}") from e
+            except OSError as e:
+                logger.error(f"Invalid or truncated image data: '{image_url}'")
+                raise HttpStatusError(
+                    400, "Invalid or truncated image data", image_url
+                ) from e
+            except Exception:
+                logger.error(f"Unexpected error decoding image: '{image_url}'")
+                raise
 
         # It's not file:, http:, https:, or data:
         raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
@@ -315,6 +336,9 @@ class ImageLoader:
                 client-error code instead of 500.
             UrlValidationError: If a media URL is rejected by the SSRF policy;
                 preserved as a ValueError so the frontend returns a 4xx, not 500.
+            ValueError: If any image fails client-side input validation (e.g.
+                a malformed data: URI — invalid base64, missing ;base64 marker,
+                or non-image MIME).
             Exception: If any image fails to load for any other reason
             ValueError: If enable_frontend_decoding=True but nixl_connector is None
             ValueError: If a UUID-only slot is received without opting in
@@ -360,6 +384,7 @@ class ImageLoader:
         collective_exceptions = ""
         status_error: HttpStatusError | None = None
         url_error: UrlValidationError | None = None
+        value_error: ValueError | None = None
         for media_item, future_idx in zip(
             image_mm_items, slot_to_future_idx, strict=True
         ):
@@ -389,6 +414,10 @@ class ImageLoader:
                 # preserve it so the frontend still gets a 4xx, not a 500.
                 elif url_error is None and isinstance(result, UrlValidationError):
                     url_error = result
+                # The bindings map ValueError to Backend(InvalidArgument) → 400,
+                # so preserve the type so the frontend still gets a 4xx.
+                elif value_error is None and isinstance(result, ValueError):
+                    value_error = result
                 continue
             loaded_images.append(result)
 
@@ -397,6 +426,9 @@ class ImageLoader:
 
         if url_error is not None:
             raise url_error
+
+        if value_error is not None:
+            raise value_error
 
         if collective_exceptions:
             raise Exception(collective_exceptions)

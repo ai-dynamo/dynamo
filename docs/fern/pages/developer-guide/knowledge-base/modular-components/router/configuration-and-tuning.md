@@ -70,13 +70,13 @@ its configuration even if the endpoint is unchanged.
 
 ## Routing Behavior
 
-- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit, but the adjusted prefill contribution is clamped at zero. When set to `0`, the router ignores prefix caches and skips creating a local indexer. Defaults to `1.0`.
+- `--router-kv-overlap-score-credit`: Device-local prefix-overlap credit multiplier in the prefill cost calculation. It must be finite and nonnegative. Values greater than `1.0` give overlap extra credit, but the adjusted prefill contribution is clamped at zero. When set to `0`, device-local overlap receives no score credit. Cache setup still follows the policy's `WorkerInputs::CACHE` declaration. Defaults to `1.0`.
 - `--router-kv-overlap-score-credit-decay`: Decays device-local overlap credit for workers whose active prefill load exceeds the least-loaded eligible worker. `0` disables decay. Defaults to 0.
 - `--router-prefill-load-scale`: Scale applied to adjusted prompt-side prefill load after device, lower-tier, and shared-cache credits are subtracted. Defaults to 1.
 - `--router-decode-active-request-weight`: Experimental finite, nonnegative block-equivalent decode cost added for each active request on a candidate worker. Defaults to 0.
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to `--router-kv-overlap-score-credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
-- `--load-aware`: Preset for load-aware KV routing without cache-reuse signals. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`.
+- `--load-aware`: Preset for load-aware KV routing. On the frontend, it implies `--router-mode kv`. It sets `overlap_score_credit=0`, disables KV events and KV reuse assumptions, enables active-block and prefill-token load tracking, disables remote/shared cache indexers, and preserves `--router-prefill-load-scale`, `--router-host-cache-hit-weight`, and `--router-disk-cache-hit-weight`. The policy's `WorkerInputs::CACHE` declaration still controls local approximate indexing; the builtin default declares `CACHE`.
 - `--router-temperature`: Controls worker selection randomness through softmax sampling of normalized router cost logits. A value of 0 (default) ensures deterministic selection of the lowest-cost worker, while higher values introduce more randomness.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
 - `--router-track-prefill-tokens`: Enables prompt-side load accounting in the worker cost model. This should stay enabled if you want queue thresholds, `active_prefill_tokens`, and AIC prefill load decay to reflect prompt work.
@@ -93,8 +93,9 @@ For how queue backpressure differs from candidate filtering and busy-threshold o
 YAML accept only `fcfs` and `wspt`.
 
 For each policy, the complete pending-queue key is
-`(strict_priority, policy_key)`. Higher strict tiers always win; the selected
-policy orders requests within a tier.
+`(strict_priority, due_at, policy_key)`. Higher strict tiers always win; see
+[Priority Scheduling](../../../../use-cases/agents/priority-scheduling.md) for how due-time
+ordering applies within a tier.
 
 ### Worker-Selection Policies
 
@@ -268,6 +269,12 @@ The first successfully dispatched request binds the session ID to its selected w
 |---|---|
 | `hard` | Default. Exact-dispatch to the stored target. If the worker or rank is no longer valid, invalidate the binding and retry normal selection once |
 | `soft` | Pass the stored target through the normal selection pipeline as an advisory target. The built-in selector retains it while eligible; a custom policy can choose another worker |
+
+**Experimental.** Available since v1.6. When session affinity is enabled (`--router-session-affinity-ttl-secs`), a request that carries a parent session id binds under an internal key derived from that parent id instead of its own session, so the subagents of one parent share a binding while the parent keeps its own. Dynamo's affinity coordinator owns that binding: it commits only after a successful dispatch, is version-checked against concurrent updates, expires on the same TTL, and counts against the same global entry limit as any session binding. A request that carries an explicit worker target stays on its own session, so it is neither rejected against the group nor able to move it. Under the default `hard` mode the group is pinned to its first worker and does not migrate because of load; the binding resets only when the target becomes unusable or dispatch fails.
+
+One behavior is known and unresolved: because siblings share one binding, a concurrent fan-out waits for the first sibling's dispatch to commit before the others are placed.
+
+Dynamo resolves the parent session id from the agent headers it already recognizes (`X-Dynamo-Parent-Session-ID`, `x-claude-code-parent-agent-id`, `x-codex-parent-thread-id`, `x-parent-session-id`). On a backend that routes again internally the group can still split across ranks: with TensorRT-LLM's `attention_dp_config.kv_cache_routing_conversation_affinity` enabled, set `--conversation-affinity-dp-rank-source dynamo` so the attention-DP rank Dynamo selects is the one the engine records.
 
 For soft affinity, Dynamo commits a changed binding after dispatch returns a response stream. Selection, setup, or dispatch failure before that point leaves the old binding intact. A later stream error or cancellation does not roll back the rebind. Explicit request targets remain exact in both modes.
 
@@ -444,7 +451,7 @@ Use `--router-kv-overlap-score-credit-decay` to reduce that device-local credit 
 
 Use `--load-aware` when you want the KV scheduler's active load model without prefix/cache reuse. This is equivalent to using KV mode with overlap credit set to 0, KV events disabled, KV reuse assumptions disabled, active load tracking enabled, and shared-cache routing disabled. `--router-prefill-load-scale` remains available to tune prompt-side load relative to decode blocks.
 
-Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, and `DYN_OVERLAP_SCORE_WEIGHT` are still accepted, but emit deprecation warnings. Nonzero legacy values map to `prefill_load_scale` to preserve existing behavior without changing overlap credit. A legacy value of 0 maps to both `prefill_load_scale=0` and `overlap_score_credit=0`, which preserves the old no-overlap/no-indexer behavior. If a deprecated overlap score weight is still present, it takes precedence over the newer prefill load scale field; a legacy value of 0 also takes precedence over the newer overlap credit field. When migrating to `--router-prefill-load-scale` or `DYN_ROUTER_PREFILL_LOAD_SCALE`, remove the deprecated flag, env var, or JSON field from the deployment config. Use `--router-kv-overlap-score-credit` or `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` only when you mean to tune the cache-overlap credit itself.
+Deprecated: `--router-kv-overlap-score-weight`, `--kv-overlap-score-weight`, `DYN_ROUTER_KV_OVERLAP_SCORE_WEIGHT`, and `DYN_OVERLAP_SCORE_WEIGHT` are still accepted, but emit deprecation warnings. Nonzero legacy values map to `prefill_load_scale` to preserve existing behavior without changing overlap credit. A legacy value of 0 maps to both `prefill_load_scale=0` and `overlap_score_credit=0`, which zeros those scoring weights. Indexer setup follows the policy's `WorkerInputs::CACHE` declaration independently of these values. If a deprecated overlap score weight is still present, it takes precedence over the newer prefill load scale field; a legacy value of 0 also takes precedence over the newer overlap credit field. When migrating to `--router-prefill-load-scale` or `DYN_ROUTER_PREFILL_LOAD_SCALE`, remove the deprecated flag, env var, or JSON field from the deployment config. Use `--router-kv-overlap-score-credit` or `DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT` only when you mean to tune the cache-overlap credit itself.
 
 When migrating the deprecated overlap score weight, use `--router-prefill-load-scale` to preserve its scaling role. Tune `--router-kv-overlap-score-credit` separately only when you intend to change device-local cache credit; values above `1.0` are supported, with adjusted prefill cost clamped at zero.
 
