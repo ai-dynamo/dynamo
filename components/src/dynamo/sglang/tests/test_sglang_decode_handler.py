@@ -1710,6 +1710,210 @@ async def test_process_token_stream_treats_completion_usage_as_optional():
 
 
 @pytest.mark.asyncio
+async def test_process_token_stream_reports_cached_usage_before_finish():
+    handler = _new_decode_handler()
+    responses = [
+        {
+            "output_ids": token_ids,
+            "meta_info": {
+                "id": "cache-usage-request",
+                "finish_reason": finish_reason,
+                "prompt_tokens": 3,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": 2,
+            },
+        }
+        for token_ids, completion_tokens, finish_reason in [
+            ([101], 1, None),
+            ([102, 103], 3, None),
+            ([], 3, {"type": "length"}),
+        ]
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(_stream(responses), _Context())
+    )
+
+    assert [chunk["token_ids"] for chunk in chunks] == [[101], [102, 103], []]
+    assert all("finish_reason" not in chunk for chunk in chunks[:-1])
+    assert chunks[-1]["finish_reason"] == "length"
+    assert "completion_usage" not in chunks[1]
+    for chunk, completion_tokens in [(chunks[0], 1), (chunks[-1], 3)]:
+        expected = {
+            "prompt_tokens": 3,
+            "completion_tokens": completion_tokens,
+            "total_tokens": 3 + completion_tokens,
+            "prompt_tokens_details": {"cached_tokens": 2},
+        }
+        assert chunk["completion_usage"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_field", ["prompt_tokens", "completion_tokens"])
+async def test_process_token_stream_waits_for_complete_usage_metadata(missing_field):
+    handler = _new_decode_handler()
+    complete_meta = {
+        "id": "cache-usage-request",
+        "finish_reason": None,
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "cached_tokens": 2,
+    }
+    incomplete_meta = dict(complete_meta)
+    del incomplete_meta[missing_field]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"output_ids": [101], "meta_info": incomplete_meta},
+                    {"output_ids": [102], "meta_info": complete_meta},
+                ]
+            ),
+            _Context(),
+        )
+    )
+
+    assert "completion_usage" not in chunks[0]
+    assert "finish_reason" not in chunks[1]
+    assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_reports_cache_count_when_available():
+    handler = _new_decode_handler()
+    responses = [
+        {
+            "index": index,
+            "output_ids": [101],
+            "meta_info": {
+                "id": "cache-usage-request",
+                "finish_reason": None,
+                "prompt_tokens": 3,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+            },
+        }
+        for index, completion_tokens, cached_tokens in [
+            (0, 1, None),
+            (1, 1, 0),
+            (0, 2, 2),
+        ]
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(_stream(responses), _Context())
+    )
+
+    assert [chunk["index"] for chunk in chunks] == [0, 1, 0]
+    assert "prompt_tokens_details" not in chunks[0]["completion_usage"]
+    assert chunks[1]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0
+    }
+    assert chunks[2]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+    assert [chunk["completion_usage"]["completion_tokens"] for chunk in chunks] == [
+        1,
+        1,
+        2,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_reports_metadata_changes_per_choice():
+    handler = _new_decode_handler()
+    responses = [
+        {
+            "index": index,
+            "output_ids": [101],
+            "meta_info": {
+                "id": "cache-usage-request",
+                "finish_reason": reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "cached_tokens": cached_tokens,
+            },
+        }
+        for index, prompt_tokens, completion_tokens, cached_tokens, reason in [
+            (0, 3, 1, None, None),
+            (1, 3, 1, None, None),
+            (0, 3, 2, 0, None),
+            (1, 3, 2, None, None),
+            (0, 4, 3, 0, None),
+            (0, 4, 4, 2, None),
+            (0, 4, 5, 2, None),
+            (1, 3, 3, None, {"type": "stop"}),
+            (0, 4, 6, 2, {"type": "stop"}),
+        ]
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(_stream(responses), _Context())
+    )
+
+    assert ["completion_usage" in chunk for chunk in chunks] == [
+        True,
+        True,
+        True,
+        False,
+        True,
+        True,
+        False,
+        True,
+        True,
+    ]
+    assert chunks[2]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 0
+    }
+    assert chunks[4]["completion_usage"]["prompt_tokens"] == 4
+    assert chunks[5]["completion_usage"]["prompt_tokens_details"] == {
+        "cached_tokens": 2
+    }
+    assert chunks[-2]["completion_usage"]["completion_tokens"] == 3
+    assert chunks[-1]["completion_usage"]["completion_tokens"] == 6
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_preserves_cache_usage_before_metadata_clear():
+    handler = _new_decode_handler()
+    uploader = SimpleNamespace(upload_choice=AsyncMock())
+    metadata = [
+        {
+            "id": "cache-usage-request",
+            "finish_reason": reason,
+            "prompt_tokens": 3,
+            "completion_tokens": index + 1,
+            "cached_tokens": 2,
+        }
+        for index, reason in enumerate([None, None, {"type": "stop"}])
+    ]
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {"output_ids": [101 + index], "meta_info": meta}
+                    for index, meta in enumerate(metadata)
+                ]
+            ),
+            _Context(),
+            metadata_uploader=uploader,
+        )
+    )
+
+    assert metadata == [{}, {}, {}]
+    assert "completion_usage" not in chunks[1]
+    assert all(
+        chunk["completion_usage"]["prompt_tokens_details"] == {"cached_tokens": 2}
+        for chunk in (chunks[0], chunks[-1])
+    )
+    uploader.upload_choice.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_process_token_stream_accepts_incremental_logprob_arrays():
     handler = _new_decode_handler()
 

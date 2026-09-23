@@ -3180,16 +3180,16 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     @staticmethod
     def _build_completion_usage(
         request_output: RequestOutput,
-        completion_token_counts: dict[int, int] | None = None,
+        completion_tokens: int | None = None,
     ) -> Dict[str, Any]:
         """
         Build completion usage statistics.
 
         Args:
             request_output: vLLM RequestOutput object
-            completion_token_counts: Optional cumulative generated-token counts by
-                                     output index. DELTA-mode streams need this
-                                     because the final vLLM chunk is not cumulative.
+            completion_tokens: Optional cumulative request-wide generated-token
+                               count. DELTA-mode streams maintain this total because
+                               each vLLM chunk contains only newly generated tokens.
 
         Returns:
             Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
@@ -3200,9 +3200,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             else None
         )
 
-        if completion_token_counts is not None:
-            completion_tokens = sum(completion_token_counts.values())
-        else:
+        if completion_tokens is None:
             completion_tokens = sum(
                 len(output.token_ids) for output in request_output.outputs
             )
@@ -3305,6 +3303,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             )
 
             total_output_tokens_by_index: dict[int, int] = {}
+            total_output_tokens = 0
+            usage_metadata_by_index: dict[int, tuple[int | None, int | None]] = {}
             raw_routed_experts_by_output: dict[int, Any] = {}
             # vLLM surfaces prompt_logprobs once (at end-of-prefill) and clears
             # them on subsequent chunks, so the generation-finish chunk often
@@ -3351,6 +3351,10 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         (output, output_idx, token_ids, finish_reason, stop_reason)
                     )
 
+                usage_metadata = (
+                    len(res.prompt_token_ids) if res.prompt_token_ids else None,
+                    getattr(res, "num_cached_tokens", None),
+                )
                 for (
                     output,
                     output_idx,
@@ -3358,6 +3362,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     finish_reason,
                     stop_reason,
                 ) in prepared_outputs:
+                    total_output_tokens += len(token_ids)
                     out = {
                         "index": output_idx,
                         "token_ids": token_ids,
@@ -3380,14 +3385,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
-                    if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
+                    # The frontend retains prompt/cache metadata and counts output
+                    # tokens itself. Send changes and final totals, not per-token usage.
+                    if (
+                        finish_reason
+                        or usage_metadata_by_index.get(output_idx) != usage_metadata
+                    ):
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
                             request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
+                            completion_tokens=total_output_tokens,
                         )
+                        usage_metadata_by_index[output_idx] = usage_metadata
+
+                    if finish_reason:
+                        out["finish_reason"] = normalize_finish_reason(finish_reason)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
