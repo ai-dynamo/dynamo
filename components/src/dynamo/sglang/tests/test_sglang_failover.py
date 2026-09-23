@@ -313,6 +313,38 @@ def test_sglang_failover_watchdog_detects_dead_scheduler_process():
     assert _scheduler_dead(engine) is True
 
 
+def test_sglang_failover_watchdog_waits_on_child_sentinel(monkeypatch):
+    reasons = []
+    waits = []
+
+    class Proc:
+        pid = 123
+        sentinel = 17
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            _subprocess_watchdog=SimpleNamespace(
+                _processes=[Proc()], _names=["scheduler_0"]
+            )
+        )
+    )
+    target = SimpleNamespace(_gms_failover_lock=object())
+    watchdog = failover_watchdog.SGLangGmsFailoverChildWatchdog(
+        target, engine, object()
+    )
+    monkeypatch.setattr(
+        failover_watchdog.multiprocessing.connection,
+        "wait",
+        lambda handles, timeout: waits.append((handles, timeout)) or [17],
+    )
+    monkeypatch.setattr(watchdog, "_trigger_failure", reasons.append)
+
+    watchdog._run()
+
+    assert reasons == ["detected SGLang child failure name=scheduler_0"]
+    assert waits == [([17], 0.1)]
+
+
 @pytest.mark.asyncio
 async def test_sglang_failover_watchdog_releases_lock_after_fence(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")

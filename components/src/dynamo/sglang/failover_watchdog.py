@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import multiprocessing.connection
 import os
 import signal
 import threading
@@ -126,6 +127,25 @@ def _watchdog_processes(engine: Any) -> tuple[list[Any], list[str]]:
     return processes, names
 
 
+def _watchdog_sentinels(engine: Any) -> dict[Any, str]:
+    """Return waitable child sentinels exposed by multiprocessing.Process.
+
+    SGLang launches its scheduler workers with multiprocessing, whose sentinel
+    becomes readable exactly when the child exits. Waiting on those descriptors
+    avoids repeatedly walking ``/proc`` on the tokenizer manager's hot CPU while
+    retaining immediate local-crash detection.
+    """
+    processes, names = _watchdog_processes(engine)
+    sentinels = {}
+    for proc, name in zip(processes, names):
+        try:
+            sentinel = proc.sentinel
+        except (AttributeError, ValueError):
+            continue
+        sentinels[sentinel] = str(name)
+    return sentinels
+
+
 def _failed_watchdog_child(engine: Any) -> tuple[str, Any] | None:
     processes, names = _watchdog_processes(engine)
     for proc, name in zip(processes, names):
@@ -210,6 +230,17 @@ class SGLangGmsFailoverChildWatchdog:
         self._restore_sigquit_hook()
 
     def _run(self) -> None:
+        sentinels = _watchdog_sentinels(self._engine)
+        if sentinels:
+            logger.info(
+                "[GMS failover] watching %d SGLang child sentinels", len(sentinels)
+            )
+            self._run_sentinel_watchdog(sentinels)
+            return
+
+        # Compatibility fallback for SGLang implementations that do not expose
+        # multiprocessing sentinels. Current supported builds take the
+        # event-driven path above.
         interval = _poll_interval_s()
         while not self._stop.wait(interval):
             if (
@@ -223,6 +254,22 @@ class SGLangGmsFailoverChildWatchdog:
 
             name = failed[0] if failed is not None else "pid"
             self._trigger_failure(f"detected SGLang child failure name={name}")
+            return
+
+    def _run_sentinel_watchdog(self, sentinels: dict[Any, str]) -> None:
+        while not self._stop.is_set():
+            if (
+                self._released.is_set()
+                or getattr(self._target, "_gms_failover_lock", None) is None
+            ):
+                return
+            ready = multiprocessing.connection.wait(list(sentinels), timeout=0.1)
+            if not ready:
+                continue
+            names = sorted({sentinels[sentinel] for sentinel in ready})
+            self._trigger_failure(
+                "detected SGLang child failure name=" + ",".join(names)
+            )
             return
 
     def _install_sigquit_hook(self) -> None:
