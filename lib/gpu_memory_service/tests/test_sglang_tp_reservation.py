@@ -420,6 +420,70 @@ def test_exclusive_steady_state_reconciles_different_standby_deltas(monkeypatch)
     ]
 
 
+def test_exclusive_steady_state_withholds_asymmetric_rank_pages(monkeypatch):
+    votes = _Votes()
+    allocators = []
+    released = [[], []]
+    for rank in range(2):
+        cohort = TPConsistency(world_size=2)
+        cohort._rank = lambda rank=rank: rank
+        cohort._gather = lambda value, rank=rank: votes.gather(rank, value)
+        owned = {}
+
+        def acquire(
+            count,
+            *,
+            preferred_blocks,
+            allow_partial,
+            strict_preferred,
+            owned=owned,
+            rank=rank,
+        ):
+            assert allow_partial is True
+            assert strict_preferred is True
+            available = preferred_blocks[:-1] if rank == 0 else preferred_blocks
+            leases = [KVLease(page, 20 + rank) for page in available[:count]]
+            owned.update({lease.block_id: lease for lease in leases})
+            return leases
+
+        allocator = SimpleNamespace(
+            free_pages=torch.tensor([1, 2, 3, 4]),
+            need_sort=False,
+            _gms_tp_consistency=cohort,
+        )
+        state = {
+            "client": SimpleNamespace(
+                acquire=acquire,
+                release=lambda leases, rank=rank: released[rank].extend(leases),
+                park_idle=lambda _leases: None,
+            ),
+            "leases_by_page": owned,
+            "retained_pages": set(),
+            "tp_reserved_pages": [],
+            "tp_reservation_aligned": True,
+            "steady_state": False,
+            "exclusive_steady_state": False,
+        }
+        monkeypatch.setitem(hooks._STATE, id(allocator), state)
+        allocators.append(allocator)
+
+    monkeypatch.setattr(hooks, "torch", torch)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(hooks.enter_exclusive_steady_state, allocators))
+
+    assert results == [3, 3]
+    assert [allocator.free_pages.tolist() for allocator in allocators] == [
+        [1, 2, 3],
+        [1, 2, 3],
+    ]
+    assert [hooks._STATE[id(a)]["exclusive_hidden_pages"] for a in allocators] == [
+        {4},
+        {4},
+    ]
+    assert released[0] == []
+    assert [lease.block_id for lease in released[1]] == [4]
+
+
 def test_exclusive_steady_state_parks_tail_and_refills_bounded_window(monkeypatch):
     monkeypatch.setenv("GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES", "1")
     leases = {
@@ -646,6 +710,72 @@ def test_exclusive_decode_records_pages_without_device_read(monkeypatch):
     assert result is expected
     assert req._gms_kv_page_ids == [2, 3]
     assert list(state["cpu_free_pages"]) == [4]
+
+
+def test_startup_extend_records_reserved_pages(monkeypatch):
+    req = SimpleNamespace(_gms_kv_page_ids=[2])
+    leases = [KVLease(3, 7)]
+    allocator = SimpleNamespace(
+        page_size=64,
+        need_sort=False,
+        free_pages=torch.tensor([3, 4]),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=lambda *args, **kwargs: leases),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "active_batch": SimpleNamespace(reqs=[req]),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(
+        hooks, "orig_paged_alloc_extend", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(hooks, "get_num_new_pages", lambda **kwargs: 1)
+
+    result = hooks._gms_paged_alloc_extend(
+        allocator,
+        torch.tensor([64]),
+        torch.tensor([64]),
+        torch.tensor([65]),
+        torch.tensor([65]),
+        torch.tensor([127]),
+        1,
+    )
+
+    assert result is not None
+    assert req._gms_kv_page_ids == [2, 3]
+
+
+def test_startup_decode_records_reserved_pages(monkeypatch):
+    req = SimpleNamespace(_gms_kv_page_ids=[2])
+    leases = [KVLease(3, 7)]
+    allocator = SimpleNamespace(
+        page_size=64,
+        need_sort=False,
+        free_pages=torch.tensor([3, 4]),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=lambda *args, **kwargs: leases),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "active_batch": SimpleNamespace(reqs=[req]),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(hooks, "orig_paged_alloc_decode", lambda *args: object())
+    monkeypatch.setattr(hooks, "get_num_new_pages", lambda **kwargs: 1)
+
+    result = hooks._gms_paged_alloc_decode(
+        allocator, torch.tensor([65]), torch.tensor([65]), torch.tensor([127])
+    )
+
+    assert result is not None
+    assert req._gms_kv_page_ids == [2, 3]
 
 
 def test_exclusive_adoption_can_consume_hidden_recoverable_page(monkeypatch):

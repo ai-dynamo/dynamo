@@ -344,12 +344,13 @@ def _normalize_lease_engine_name(backend_name: str) -> str:
 def lease_transition_serving_enabled(
     backend_name: str, *, mapped_standby: bool
 ) -> bool:
-    """Validate the opt-in mode that serves before predecessor retirement.
+    """Validate the legacy transition-serving configuration.
 
-    In this mode the new owner may allocate only atomically FREE lease slots and
-    may reuse predecessor KV only through exact-generation SEALED adoption or
-    read pins. CPU writers are fenced and leases classified before admission;
-    optional GPU-quiescence reclamation remains asynchronous.
+    This flag no longer selects an earlier admission path: every takeover
+    fences CPU writers and classifies predecessor leases before admission.
+    Retain the configuration checks for existing deployments that set it.
+    Optional GPU-quiescence reclamation remains asynchronous; setting this
+    flag never authorizes reuse of quarantined pages.
     """
 
     if not _truthy_env(LEASE_TRANSITION_SERVING_ENV):
@@ -605,6 +606,12 @@ async def _finish_gpu_quiescence_recovery(
         gpu_quiesced=True,
         recovery_owner_id=recovery_owner_id,
     )
+    if backend_name == "sglang":
+        from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            mark_gpu_quiescence_ready,
+        )
+
+        await asyncio.to_thread(mark_gpu_quiescence_ready)
 
 
 def _phase_two_finished(task: asyncio.Task[None]) -> None:
@@ -727,6 +734,12 @@ async def run_gms_failover_post_lock_fence(
         protected_blocks=protected_blocks,
         protected_leases=protected_leases,
     )
+    if backend_name == "sglang":
+        from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            mark_gms_recovery_ready,
+        )
+
+        await asyncio.to_thread(mark_gms_recovery_ready)
     from gpu_memory_service.integrations.common.gpu_quiescence import (
         gpu_quiescence_provider_configured,
     )

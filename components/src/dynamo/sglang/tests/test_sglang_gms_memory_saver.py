@@ -220,6 +220,34 @@ def build_impl(monkeypatch, tmp_path):
     return build
 
 
+def test_memory_saver_registers_authoritative_sglang_node_rank(
+    monkeypatch, tmp_path, build_impl
+):
+    from gpu_memory_service.integrations.common import gpu_quiescence
+
+    cohort = tmp_path / "writers" / "primary"
+    registrations = []
+    monkeypatch.setenv("GMS_SGLANG_WRITER_COHORT_PATH", str(cohort))
+    monkeypatch.setenv("GMS_SGLANG_NODE_RANK", "15")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setattr(
+        gpu_quiescence,
+        "register_gpu_client",
+        lambda **kwargs: registrations.append(kwargs),
+    )
+
+    build_impl()
+
+    assert registrations == [
+        {
+            "backend_name": "sglang",
+            "device": 0,
+            "cohort": str(cohort),
+            "rank": 15,
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("tag", "weights_lock", "expected_pool_calls"),
     [

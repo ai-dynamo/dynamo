@@ -122,9 +122,9 @@ def _kill_process_group(process: ManagedProcess) -> None:
             try:
                 children = [
                     int(item)
-                    for item in Path(
-                        f"/proc/{parent}/task/{parent}/children"
-                    ).read_text().split()
+                    for item in Path(f"/proc/{parent}/task/{parent}/children")
+                    .read_text()
+                    .split()
                 ]
             except (FileNotFoundError, PermissionError, ProcessLookupError):
                 continue

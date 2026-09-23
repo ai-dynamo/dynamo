@@ -819,8 +819,48 @@ async def test_gpu_proof_reclaim_runs_after_phase_one_returns(monkeypatch):
     proof_allowed.set()
     await asyncio.gather(*tuple(gms_failover._gpu_quiescence_tasks))
     await asyncio.sleep(0)
+
     assert calls == [(False, calls[0][1]), (True, calls[0][1])]
     assert not gms_failover._gpu_quiescence_tasks
+
+
+@pytest.mark.asyncio
+async def test_sglang_phase_two_marks_ready_after_reclaim(monkeypatch):
+    from types import SimpleNamespace
+
+    from gpu_memory_service.integrations.common import gpu_quiescence
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    from dynamo.common import gms_failover
+
+    order = []
+
+    async def prove(**_kwargs):
+        return SimpleNamespace(
+            quiesced=True, provider="test", detail="", elapsed_ms=0.1
+        )
+
+    monkeypatch.setattr(gpu_quiescence, "prove_predecessor_gpu_quiescence", prove)
+    monkeypatch.setattr(
+        gms_failover,
+        "_recover_foreign_kv_leases_after_fence",
+        lambda *_args, **_kwargs: order.append("reclaim"),
+    )
+    monkeypatch.setattr(
+        writer_lifecycle,
+        "mark_gpu_quiescence_ready",
+        lambda: order.append("ready"),
+    )
+
+    await gms_failover._finish_gpu_quiescence_recovery(
+        backend_name="sglang",
+        role="shadow",
+        predecessor_cohort="old",
+        recovery_owner_id="new",
+        lease_device=0,
+    )
+
+    assert order == ["reclaim", "ready"]
 
 
 @pytest.mark.asyncio
