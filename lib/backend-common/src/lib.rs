@@ -25,6 +25,7 @@ pub mod snapshot_publisher;
 pub mod telemetry;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
+mod topology;
 #[cfg(debug_assertions)]
 mod validate;
 pub mod worker;

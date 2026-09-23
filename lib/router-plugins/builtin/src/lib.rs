@@ -3,26 +3,23 @@
 
 //! Worker-selection policies Dynamo ships.
 //!
-//! Any build that enables the Python bindings' `custom-policy` feature links these, and that
-//! feature is on by default, so a frontend deployment selects one through router-policy YAML
-//! without rebuilding. A build with default features off, and the standalone EPP, link no catalog
-//! at all and reject a configured policy type at startup.
-//!
-//! These do not go through the replaceable `dynamo-worker-selection-policy-catalog` alias, and they
-//! register before it, so a custom image's catalog adds its policies alongside these rather than
-//! displacing them.
-//!
-//! Each policy is one module here. To ship another, add a module and a line in [`register`], then
-//! add a row to the policy table in the router configuration guide. Keep a policy in a single file
-//! until it needs submodules, then promote it to a directory. If a policy ever needs a dependency
-//! beyond `dynamo-kv-router`, put it behind its own default-on Cargo feature so a build can drop
-//! it; every policy registered here is compiled into every artifact that links this crate.
+//! Routing hosts always link the default through `default_registry`. The optional custom
+//! catalog adds the named default and two-tier providers through `register`. The default
+//! itself uses the same public candidate inputs and scorer/picker dispatch as external policies.
+//! Sequence tracking, eligibility, and admission remain in dynamo-kv-router.
 
+mod default;
 mod two_tier_cost_fn;
+pub use default::{DefaultWorkerSelector, default_factory, default_policy};
+
+/// Registry containing the required default only, without an optional policy catalog.
+pub fn default_registry() -> RouterPluginRegistry {
+    RouterPluginRegistry::default().with_default_factory(default_factory())
+}
 
 use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegistryError};
 
-/// Register every policy Dynamo ships.
+/// Register the named providers Dynamo ships, without changing the host's default factory.
 ///
 /// `default` is reserved by the registry for Dynamo's built-in worker selector, so no policy here
 /// can shadow it. A later catalog that reuses one of these type names fails registration rather
@@ -30,6 +27,7 @@ use dynamo_kv_router::plugins::{RouterPluginRegistry, WorkerSelectionPolicyRegis
 pub fn register(
     registry: &mut RouterPluginRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
+    default::register(registry)?;
     two_tier_cost_fn::register(registry)
 }
 
@@ -55,7 +53,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut registry = RouterPluginRegistry::default();
+        let mut registry = default_registry();
         register(&mut registry).unwrap();
         let resolved = registry.resolve(&config);
         (config, resolved)

@@ -32,7 +32,7 @@ from .sglang_prepost import (
     ToolCallParserType,
     _client_wants_separate_reasoning,
     _get_history_tool_calls_count,
-    _guided_tool_choice_requires_reasoning,
+    _guided_output_requires_reasoning,
     convert_tools,
     create_parsers,
     detect_force_reasoning_from_template,
@@ -42,6 +42,7 @@ from .sglang_prepost import (
 from .thinking import runtime_default_thinking_mode
 from .utils import (
     PreprocessError,
+    as_error_envelope,
     extract_mm_urls,
     handle_engine_error,
     make_internal_error,
@@ -357,8 +358,8 @@ def _preprocess_worker(
         pre.guided_decoding,
         pre.tool_call_parser,
         pre.reasoning_parser,
-        require_reasoning=_guided_tool_choice_requires_reasoning(
-            request, pre.force_reasoning
+        require_reasoning=_guided_output_requires_reasoning(
+            request, pre.force_reasoning, _w_reasoning_parser_name
         ),
     )
 
@@ -615,8 +616,8 @@ class SglangProcessor:
                 pre.guided_decoding,
                 pre.tool_call_parser,
                 pre.reasoning_parser,
-                require_reasoning=_guided_tool_choice_requires_reasoning(
-                    request, pre.force_reasoning
+                require_reasoning=_guided_output_requires_reasoning(
+                    request, pre.force_reasoning, self.reasoning_parser_name
                 ),
             )
         except PreprocessError as exc:
@@ -867,7 +868,7 @@ class SglangProcessor:
                         request_id,
                         message,
                     )
-                    yield make_internal_error(request_id, message)
+                    yield as_error_envelope(make_internal_error(request_id, message))
                     break
                 engine_response = dynamo_response.data()
 
@@ -880,7 +881,9 @@ class SglangProcessor:
                     not isinstance(engine_response, dict)
                     or "token_ids" not in engine_response
                 ):
-                    yield handle_engine_error(engine_response, request_id, logger)
+                    yield as_error_envelope(
+                        handle_engine_error(engine_response, request_id, logger)
+                    )
                     break
 
                 new_ids = engine_response["token_ids"]
@@ -943,7 +946,7 @@ class SglangProcessor:
                     yield envelope
                     if post.locally_finished:
                         break
-        except Unknown:
+        except (InvalidArgument, Unknown):
             raise
         except Exception as e:
             logger.exception("Error generating response for request %s", request_id)

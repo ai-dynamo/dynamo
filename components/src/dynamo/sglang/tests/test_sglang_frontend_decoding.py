@@ -704,6 +704,55 @@ def _new_prefill_handler() -> PrefillWorkerHandler:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode",
+    [
+        DisaggregationMode.AGGREGATED,
+        DisaggregationMode.PREFILL,
+        DisaggregationMode.DECODE,
+    ],
+)
+async def test_cache_salt_reaches_engine(mode, unused_tcp_port):
+    handler = (
+        _new_prefill_handler()
+        if mode == DisaggregationMode.PREFILL
+        else _new_decode_handler(enable_frontend_decoding=False)
+    )
+    handler.serving_mode = mode
+    recorder = _GenerateRecorder()
+    handler.engine = recorder
+    request = {
+        "token_ids": [1, 2, 3],
+        "routing": {"cache_salt": "tenant-a"},
+        "extra_args": {"nvext": {"cache_salt": "body-salt"}},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": unused_tcp_port,
+            "bootstrap_room": 7,
+        },
+    }
+    routed_request = (
+        {"request": request, "sampling_params": {}}
+        if mode == DisaggregationMode.PREFILL
+        else request
+    )
+
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0]["cache_salt"] == "tenant-a"
+
+    del request["routing"]
+    del request["extra_args"]
+    async for _ in handler.generate(routed_request, _Context()):
+        pass
+
+    assert len(recorder.calls) == 2
+    assert "cache_salt" not in recorder.calls[1]
+
+
+@pytest.mark.asyncio
 async def test_aggregated_decode_omits_session_params_for_agent_context(
     session_agent_context: Dict[str, Any],
 ):

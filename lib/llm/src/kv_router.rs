@@ -9,10 +9,12 @@ use std::{
 };
 
 use anyhow::Result;
+#[cfg(test)]
+use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, KvSchedulerError, PrefillLoadEstimator, RoutingPartitionRef,
     SessionPrefixIndexer, SharedKvCache, TrackingHashAlgorithm, TrackingHashContext,
-    TrackingHashScope, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
+    TrackingHashScope, WorkerSelectionPolicyFactory,
     config::{KvRouterConfig, RouterConfigOverride, min_initial_workers_from_env},
     indexer::{
         ApproximateLruIncarnation, ApproximateLruStats, KvRouterError, RoutingDecisionHashes,
@@ -106,27 +108,23 @@ pub enum SelectionPolicySource {
 }
 
 impl SelectionPolicySource {
-    /// Resolve to the factory the partition will call. `label` is the worker
-    /// pool name the default policy logs under.
+    /// Resolve to the factory the partition will call. The label argument is retained for
+    /// compatibility; the factory receives the typed worker role.
     pub fn resolve(
         &self,
         config: &KvRouterConfig,
         worker_type: WorkerType,
-        label: &'static str,
+        _label: &'static str,
     ) -> Result<WorkerSelectionPolicyFactory> {
         match self {
             Self::Factory(factory) => Ok(factory.clone()),
             Self::Prepared(prepared) => Ok(prepared.factory.clone()),
-            Self::Registry => Ok(
-                match worker_selection_policy_registry()
-                    .resolve_for_worker_type(config, worker_type)?
-                {
-                    Some(factory) => factory,
-                    None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                        WorkerSelectionPolicy::default(config.clone(), label)
-                    }),
-                },
-            ),
+            Self::Registry => worker_selection_policy_registry()
+                .resolve_for_worker_type(config, worker_type)?
+                .ok_or_else(|| {
+                    dynamo_kv_router::plugins::WorkerSelectionPolicyRegistryError::MissingDefault
+                        .into()
+                }),
         }
     }
 
@@ -141,16 +139,26 @@ impl SelectionPolicySource {
         label: &'static str,
         model_name: Option<&str>,
     ) -> Result<PreparedSelectionPolicy> {
-        if let Self::Prepared(prepared) = self {
-            return Ok(prepared);
+        let prepared = match self {
+            Self::Prepared(prepared) => prepared,
+            source => PreparedSelectionPolicy::prepare(
+                source.resolve(config, worker_type, label)?,
+                config,
+                worker_type,
+                model_name,
+            ),
+        };
+        if !prepared.inputs().contains(WorkerInputs::CACHE) {
+            anyhow::ensure!(
+                !config.serve_indexer,
+                "serve_indexer requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
+            anyhow::ensure!(
+                !config.enable_session_prefix_index,
+                "enable_session_prefix_index requires the worker-selection policy to declare WorkerInputs::CACHE"
+            );
         }
-        let factory = self.resolve(config, worker_type, label)?;
-        Ok(PreparedSelectionPolicy::prepare(
-            factory,
-            config,
-            worker_type,
-            model_name,
-        ))
+        Ok(prepared)
     }
 }
 
@@ -398,20 +406,24 @@ pub(crate) enum KvEventSourceRequirement {
 }
 
 impl KvEventSourceRequirement {
-    pub(crate) fn derive(worker_role: Option<WorkerType>, config: &KvRouterConfig) -> Self {
-        let Some(worker_role) = worker_role else {
-            return Self::Unknown;
-        };
-        if config.use_remote_indexer || !config.should_subscribe_to_kv_events() {
+    pub(crate) fn derive(
+        worker_role: Option<WorkerType>,
+        config: &KvRouterConfig,
+        inputs: WorkerInputs,
+    ) -> Self {
+        if !inputs.contains(WorkerInputs::CACHE)
+            || config.use_remote_indexer
+            || !config.use_kv_events
+        {
             return Self::NotRequired;
         }
 
         match worker_role {
-            WorkerType::Prefill | WorkerType::Aggregated => Self::CacheAwareRouting,
-            WorkerType::Decode if config.conditional_disagg_enabled => {
+            Some(WorkerType::Decode) if config.conditional_disagg_enabled => {
                 Self::ConditionalDisaggDecodeCache
             }
-            WorkerType::Decode | WorkerType::Encode => Self::NotRequired,
+            Some(_) => Self::CacheAwareRouting,
+            None => Self::Unknown,
         }
     }
 
@@ -431,11 +443,8 @@ impl KvEventSourceRequirement {
         )
     }
 
-    pub(crate) fn should_subscribe(self, config: &KvRouterConfig) -> bool {
-        match self {
-            Self::Unknown => !config.use_remote_indexer && config.should_subscribe_to_kv_events(),
-            requirement => requirement.requires_source(),
-        }
+    pub(crate) fn should_subscribe(self) -> bool {
+        self != Self::NotRequired
     }
 }
 
@@ -737,16 +746,11 @@ impl KvRouter {
         let tracking_hash = TrackingHashContext::from_config(&kv_router_config)?;
         let tracking_model_name =
             resolve_tracking_model_name(tracking_hash.algorithm(), model_name.as_deref())?;
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &kv_router_config);
-        let cache_required = required_worker_inputs.contains(WorkerInputs::CACHE)
-            || kv_router_config.serve_indexer
-            || kv_router_config.enable_session_prefix_index
-            || matches!(
-                kv_event_source_requirement,
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                    | KvEventSourceRequirement::Unknown
-            );
+        let kv_event_source_requirement = KvEventSourceRequirement::derive(
+            worker_role,
+            &kv_router_config,
+            required_worker_inputs,
+        );
         let component = endpoint.component();
         // All chooser tasks are children of the routing load context owner.
         let cancellation_token = parent_token.child_token();
@@ -763,7 +767,7 @@ impl KvRouter {
             model_name: model_name.as_deref(),
             worker_role,
             metric_worker_type,
-            cache_required,
+            worker_inputs: required_worker_inputs,
             kv_event_source_requirement,
             kv_source_membership,
             cancellation_token: cancellation_token.clone(),
@@ -773,7 +777,7 @@ impl KvRouter {
         let indexer = ingress.indexer().clone();
         let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
         let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
-        let effective_policy = if kv_router_config.overlap_score_credit <= 0.0 {
+        let effective_policy = if matches!(indexer, Indexer::None) {
             "disabled"
         } else if indexer.uses_approximate_lru() {
             "lru"
@@ -1777,7 +1781,7 @@ impl KvRouter {
         Ok(self.selection.scheduler().get_potential_loads(
             maybe_seq_hashes,
             isl_tokens,
-            cache_hit_estimates.cached_tokens.into_iter().collect(),
+            cache_hit_estimates.cached_tokens,
             track_prefill_tokens,
         ))
     }
@@ -2077,95 +2081,53 @@ mod tests {
 
     #[test]
     fn kv_event_source_requirement_matrix() {
-        let default = KvRouterConfig::default();
-        let mut cases = vec![
-            (
-                Some(WorkerType::Prefill),
-                default.clone(),
-                KvEventSourceRequirement::CacheAwareRouting,
-                true,
-            ),
-            (
-                Some(WorkerType::Aggregated),
-                default.clone(),
-                KvEventSourceRequirement::CacheAwareRouting,
-                true,
-            ),
-            (
-                Some(WorkerType::Decode),
-                default.clone(),
-                KvEventSourceRequirement::NotRequired,
-                false,
-            ),
-            (
-                Some(WorkerType::Encode),
-                default.clone(),
-                KvEventSourceRequirement::NotRequired,
-                false,
-            ),
-            (
-                None,
-                default.clone(),
-                KvEventSourceRequirement::Unknown,
-                true,
-            ),
-        ];
-        for policy in [
-            dynamo_kv_router::ConditionalDisaggPolicyKind::IslBounding,
-            dynamo_kv_router::ConditionalDisaggPolicyKind::PrefillLoad,
-            dynamo_kv_router::ConditionalDisaggPolicyKind::IslOrLoad,
+        for role in [
+            None,
+            Some(WorkerType::Aggregated),
+            Some(WorkerType::Prefill),
+            Some(WorkerType::Decode),
+            Some(WorkerType::Encode),
         ] {
-            cases.push((
-                Some(WorkerType::Decode),
-                KvRouterConfig {
-                    conditional_disagg_enabled: true,
-                    conditional_disagg_policy: policy,
-                    ..default.clone()
-                },
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache,
-                true,
-            ));
-        }
-        for config in [
-            KvRouterConfig {
-                use_remote_indexer: true,
-                ..Default::default()
-            },
-            KvRouterConfig {
-                use_kv_events: false,
-                ..Default::default()
-            },
-            KvRouterConfig {
-                overlap_score_credit: 0.0,
-                ..Default::default()
-            },
-        ] {
-            cases.extend([
-                (
-                    None,
-                    config.clone(),
-                    KvEventSourceRequirement::Unknown,
-                    false,
-                ),
-                (
-                    Some(WorkerType::Aggregated),
-                    config.clone(),
-                    KvEventSourceRequirement::NotRequired,
-                    false,
-                ),
-                (
-                    Some(WorkerType::Decode),
-                    config,
-                    KvEventSourceRequirement::NotRequired,
-                    false,
-                ),
-            ]);
-        }
-
-        for (role, config, expected, should_subscribe) in cases {
-            let requirement = KvEventSourceRequirement::derive(role, &config);
-            assert_eq!(requirement, expected);
-            assert_eq!(requirement.should_subscribe(&config), should_subscribe);
+            for inputs in [WorkerInputs::LOAD, WorkerInputs::CACHE | WorkerInputs::LOAD] {
+                for overlap_score_credit in [0.0, 1.0, 2.0] {
+                    for use_kv_events in [false, true] {
+                        for use_remote_indexer in [false, true] {
+                            for conditional_disagg_enabled in [false, true] {
+                                let config = KvRouterConfig {
+                                    overlap_score_credit,
+                                    use_kv_events,
+                                    use_remote_indexer,
+                                    conditional_disagg_enabled,
+                                    ..Default::default()
+                                };
+                                let expected = if !inputs.contains(WorkerInputs::CACHE)
+                                    || !use_kv_events
+                                    || use_remote_indexer
+                                {
+                                    KvEventSourceRequirement::NotRequired
+                                } else if role.is_none() {
+                                    KvEventSourceRequirement::Unknown
+                                } else if role == Some(WorkerType::Decode)
+                                    && conditional_disagg_enabled
+                                {
+                                    KvEventSourceRequirement::ConditionalDisaggDecodeCache
+                                } else {
+                                    KvEventSourceRequirement::CacheAwareRouting
+                                };
+                                let actual =
+                                    KvEventSourceRequirement::derive(role, &config, inputs);
+                                assert_eq!(actual, expected);
+                                assert_eq!(
+                                    actual.should_subscribe(),
+                                    inputs.contains(WorkerInputs::CACHE)
+                                        && use_kv_events
+                                        && !use_remote_indexer,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -2212,9 +2174,10 @@ mod tests {
                 .iter()
                 .position(|candidate| candidate.worker() == self.worker)
                 .ok_or_else(|| WorkerSelectionPolicyError::failed("fixed worker not eligible"))?;
-            let shared = input
-                .cache()
-                .map(|cache| cache[row].shared_beyond_device_blocks())
+            let cache = input.cache().unwrap().get(row).unwrap();
+            let shared = cache
+                .shared_hits()
+                .map(|hits| hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32))
                 .filter(|blocks| *blocks > 0);
             assert_eq!(shared, self.expected_shared_blocks);
             Ok(row)
@@ -2227,7 +2190,7 @@ mod tests {
         fn keep(
             &mut self,
             _context: &WorkerSelectionContext<'_>,
-            _candidate: &WorkerCandidate,
+            _candidate: WorkerCandidate<'_>,
         ) -> Result<bool, WorkerSelectionPolicyError> {
             Ok(false)
         }
@@ -2290,7 +2253,7 @@ mod tests {
             "role-aware-subscription",
             HashMap::from([(7, ModelRuntimeConfig::default())]),
             16,
-            SelectionPolicySource::Registry,
+            picker_policy(|| Box::new(LoadOnlyPicker)),
             None,
             worker_role,
             "decode",
@@ -2353,21 +2316,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn constructor_skips_sources_for_decode_but_preserves_unknown_behavior() {
-        let router = make_router_without_membership(Some(WorkerType::Decode))
-            .await
-            .expect("ordinary decode must not require KV source membership");
-        assert!(!router.ingress.has_subscription());
+    async fn cache_inputs_control_indexer_and_subscription() {
+        for role in [None, Some(WorkerType::Aggregated), Some(WorkerType::Decode)] {
+            for use_kv_events in [false, true] {
+                for overlap_score_credit in [0.0, 1.0] {
+                    for wants_cache in [false, true] {
+                        let policy = if wants_cache {
+                            fixed_policy(None, WorkerWithDpRank::from_worker_id(7))
+                        } else {
+                            picker_policy(|| Box::new(LoadOnlyPicker))
+                        };
+                        let result = make_router(
+                            "cache-input-gate",
+                            HashMap::from([(7, ModelRuntimeConfig::default())]),
+                            16,
+                            policy,
+                            None,
+                            role,
+                            "decode",
+                            KvRouterConfig {
+                                use_kv_events,
+                                overlap_score_credit,
+                                conditional_disagg_enabled: true,
+                                skip_initial_worker_wait: true,
+                                router_event_threads: 1,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                        if wants_cache && use_kv_events {
+                            // No membership watch was provided: reaching subscription setup is
+                            // required even for zero scoring credit and decode/unknown roles.
+                            let error =
+                                result.err().expect("CACHE needs a source membership watch");
+                            assert!(
+                                error
+                                    .to_string()
+                                    .contains("KV source membership watch is required")
+                            );
+                        } else {
+                            let router = result.unwrap();
+                            assert_eq!(matches!(router.indexer, Indexer::None), !wants_cache);
+                            assert!(!router.ingress.has_subscription());
+                            router.cancellation_token.cancel();
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-        let error = make_router_without_membership(None)
+    #[tokio::test]
+    async fn builtin_load_only_modes_skip_indexing_and_subscriptions() {
+        for role in [WorkerType::Aggregated, WorkerType::Decode] {
+            let router = make_router(
+                "builtin-load-only",
+                HashMap::from([(7, ModelRuntimeConfig::default())]),
+                2,
+                SelectionPolicySource::Registry,
+                None,
+                Some(role),
+                role.default_selector_label(),
+                KvRouterConfig {
+                    overlap_score_credit: if role == WorkerType::Decode { 1.0 } else { 0.0 },
+                    use_kv_events: role == WorkerType::Decode,
+                    router_assume_kv_reuse: false,
+                    skip_initial_worker_wait: true,
+                    ..Default::default()
+                },
+            )
             .await
-            .err()
-            .expect("unknown role must preserve config-driven subscription");
-        assert!(
-            error
-                .to_string()
-                .contains("KV source membership watch is required")
-        );
+            .unwrap();
+            assert!(
+                !router
+                    .required_worker_inputs()
+                    .contains(WorkerInputs::CACHE)
+            );
+            assert!(matches!(router.indexer, Indexer::None));
+            assert!(!router.ingress.has_subscription());
+            let tokens = vec![11, 12, 13, 14];
+            for _ in 0..2 {
+                router
+                    .record_routing_decision(
+                        TokensWithHashes::new(tokens.clone(), 2),
+                        WorkerWithDpRank::from_worker_id(7),
+                    )
+                    .await
+                    .unwrap();
+                let FindBestMatchOutcome::Routed { cached_tokens, .. } =
+                    find_best_match(&router, &tokens, false).await.unwrap()
+                else {
+                    panic!("load-only request must route");
+                };
+                assert_eq!(cached_tokens, 0);
+                assert_eq!(
+                    router
+                        .prefill_load_hint_for(tokens.len(), cached_tokens, true)
+                        .unwrap()
+                        .initial_effective_prefill_tokens,
+                    tokens.len()
+                );
+            }
+            router.cancellation_token.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn indexer_features_require_declared_cache_inputs() {
+        for feature in ["serve_indexer", "enable_session_prefix_index"] {
+            let config = KvRouterConfig {
+                serve_indexer: feature == "serve_indexer",
+                enable_session_prefix_index: feature == "enable_session_prefix_index",
+                overlap_score_credit: 0.0,
+                ..Default::default()
+            };
+            config.validate().unwrap();
+            let source = picker_policy(|| Box::new(LoadOnlyPicker));
+            let error = source
+                .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+                .err()
+                .expect("host features must not enable undeclared cache input");
+            assert!(error.to_string().contains(feature));
+            assert!(error.to_string().contains("WorkerInputs::CACHE"));
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7))
+                .prepare(&config, WorkerType::Aggregated, "decode", Some("model"))
+                .expect("CACHE allows indexer features even with zero scoring credit");
+        }
     }
 
     #[tokio::test]
@@ -2551,24 +2625,42 @@ mod tests {
     async fn session_prefix_tracking_survives_shared_core_selection(#[case] threads: u32) {
         use dynamo_kv_router::protocols::{ExternalSequenceBlockHash, StorageTier};
 
-        let router = make_router(
-            "session-prefix-core",
-            HashMap::from([(7, ModelRuntimeConfig::default())]),
+        let component = make_test_component("session-prefix-core").await;
+        let endpoint = component.endpoint("backend");
+        let client = endpoint.client().await.unwrap();
+        let (_tx, workers) = watch::channel(HashMap::from([(7, ModelRuntimeConfig::default())]));
+        let membership = crate::discovery::KvSourceMembershipCoordinator::start(
+            endpoint.id(),
+            workers.clone(),
+            component.drt().discovery(),
+        )
+        .subscribe();
+        let router = KvRouter::new_with_worker_role(
+            endpoint,
+            client,
+            workers,
+            Some(membership),
             2,
-            SelectionPolicySource::Registry,
-            None,
-            Some(WorkerType::Decode),
-            "decode",
-            KvRouterConfig {
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(7)),
+            Some(KvRouterConfig {
                 enable_session_prefix_index: true,
                 router_event_threads: threads,
                 router_temperature: 0.0,
+                overlap_score_credit: 0.0,
                 skip_initial_worker_wait: true,
                 ..Default::default()
-            },
+            }),
+            None,
+            Some(WorkerType::Decode),
+            "decode",
+            None,
+            false,
+            None,
+            None,
         )
         .await
         .unwrap();
+        assert!(router.ingress.has_subscription());
         let session_index = router.session_prefix_index.as_ref().unwrap();
         let worker = WorkerWithDpRank::new(7, 0);
         let tokens = [11, 12, 13, 14];
@@ -3231,7 +3323,7 @@ mod tests {
             let constructions = Arc::clone(&constructions);
             Arc::new(move |config: &KvRouterConfig, _, _| {
                 constructions.fetch_add(1, Ordering::SeqCst);
-                WorkerSelectionPolicy::default(config.clone(), "decode")
+                dynamo_custom_policy_builtin::default_policy(config.clone(), "decode")
             })
         };
         let config = KvRouterConfig::default();
