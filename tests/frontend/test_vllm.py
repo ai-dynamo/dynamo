@@ -88,11 +88,13 @@ def _visible_gpu_total_memory_gib() -> Optional[float]:
     except ImportError:
         return None
 
-    # NVML indexes physical devices, so ask about the GPU this child was pinned
-    # to via CUDA_VISIBLE_DEVICES; serial runs leave it unset and land on GPU 0.
+    # The parallel scheduler sizes each test's VRAM budget against an NVML
+    # index and writes that same index into CUDA_VISIBLE_DEVICES, so read it
+    # back as an NVML index to stay on the card the budget describes; serial
+    # runs leave it unset and land on GPU 0.
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
     if not visible.isdigit():
-        # A GPU UUID rather than an index; not worth mapping back here.
+        # A GPU UUID or MIG token, which NVML cannot look up by index.
         return None
 
     try:
