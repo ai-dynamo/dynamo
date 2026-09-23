@@ -165,7 +165,14 @@ class GMSMemorySaverImpl:
                 backend_name="sglang",
                 device=device_index,
                 cohort=cohort,
-                rank=max(0, int(os.environ.get("LOCAL_RANK", device_index))),
+                rank=max(
+                    0,
+                    int(
+                        os.environ.get(
+                            "RANK", os.environ.get("LOCAL_RANK", device_index)
+                        )
+                    ),
+                ),
             )
         self._kv_engine_id = allocation_engine_id(device_index)
         self._kv_tag = allocator_tag(device_index)

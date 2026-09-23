@@ -54,6 +54,7 @@ class GPUClient:
     pid: int
     process_start_time: str
     rank: int
+    failure_notify_addr: str = ""
 
 
 def signal_client(client: GPUClient, sig: int) -> None:
@@ -105,6 +106,7 @@ class GPUQuiescenceManager:
         self._lock = asyncio.Lock()
         self._crashed: set[tuple[str, str, int]] = set()
         self._interlock_eof: set[tuple[str, str, int]] = set()
+        self._failure_notifiers: dict[str, object] = {}
 
     def register(
         self,
@@ -114,6 +116,7 @@ class GPUQuiescenceManager:
         pid: int,
         process_start_time_value: str,
         rank: int,
+        failure_notify_addr: str = "",
         crash_interlock: bool = False,
     ) -> int:
         backend = backend.strip().lower()
@@ -149,6 +152,7 @@ class GPUQuiescenceManager:
             pid=pid,
             process_start_time=process_start_time_value,
             rank=rank,
+            failure_notify_addr=failure_notify_addr.strip(),
         )
         previous = self._clients.get(key)
         if previous is not None and previous != client:
@@ -159,6 +163,8 @@ class GPUQuiescenceManager:
             raise ValueError(
                 "GPU crash interlock requires DYN_GMS_GPU_QUIESCENCE_PROVIDER=gms-mps"
             )
+        if crash_interlock:
+            self._ensure_failure_notifier(client.failure_notify_addr)
         if crash_interlock and not (
             hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
         ):
@@ -210,6 +216,66 @@ class GPUQuiescenceManager:
 
         task.add_done_callback(finish)
         return write_fd
+
+    def _ensure_failure_notifier(self, address: str) -> None:
+        """Connect a persistent crash-hint socket while the client is healthy."""
+
+        if not address or address in self._failure_notifiers:
+            return
+        socket = None
+        try:
+            import zmq
+
+            socket = zmq.Context.instance().socket(zmq.DEALER)
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.setsockopt(zmq.SNDHWM, 16)
+            identity = (
+                f"gms-crash-{os.uname().nodename}-{os.getpid()}-"
+                f"{len(self._failure_notifiers)}"
+            )
+            socket.setsockopt(zmq.IDENTITY, identity.encode())
+            socket.connect(address)
+        except Exception:
+            logger.exception(
+                "Failed to connect GPU crash notifier address=%s; "
+                "shared marker remains available",
+                address,
+            )
+            with suppress(Exception):
+                if socket is not None:
+                    socket.close(0)
+            return
+        self._failure_notifiers[address] = socket
+        logger.info("Connected GPU crash notifier address=%s", address)
+
+    def _notify_gpu_failure(self, client: GPUClient, source: str) -> None:
+        """Send a best-effort hint; this never constitutes fencing proof."""
+
+        socket = self._failure_notifiers.get(client.failure_notify_addr)
+        if socket is None:
+            return
+        try:
+            import zmq
+
+            socket.send_multipart(
+                [
+                    b"gpu-failed-v1",
+                    client.cohort.encode(),
+                    str(client.rank).encode(),
+                    str(client.pid).encode(),
+                    source.encode(),
+                ],
+                flags=zmq.NOBLOCK,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to send GPU crash notification backend=%s cohort=%s "
+                "rank=%d pid=%d; shared marker remains available",
+                client.backend,
+                client.cohort,
+                client.rank,
+                client.pid,
+            )
 
     async def _watch_crash_interlock(self, client: GPUClient, read_fd: int) -> None:
         """Quiesce a cohort when its native handler reports a catchable crash.
@@ -275,6 +341,7 @@ class GPUQuiescenceManager:
             client.pid,
             source,
         )
+        self._notify_gpu_failure(client, source)
         # Wake the leader immediately. This marker is deliberately only a
         # latency hint: takeover still waits for writer-cohort retirement and
         # authoritative ring/CUDA recovery before granting writable ownership.

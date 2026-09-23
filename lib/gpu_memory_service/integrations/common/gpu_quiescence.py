@@ -109,6 +109,9 @@ def register_gpu_client(
             "client_pid": pid,
             "process_start_time": _process_start_time(pid),
             "rank": rank,
+            "failure_notify_addr": os.environ.get(
+                "DYN_GMS_RANK_LIVENESS_CONNECT_ADDR", ""
+            ),
         }
         if gpu_crash_interlock_enabled(backend_name):
             return session.register_gpu_client_with_crash_interlock(**arguments)

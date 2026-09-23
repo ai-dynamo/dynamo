@@ -17,6 +17,7 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = [
     "msgspec>=0.18.0",
+    "pyzmq>=26.0.0",
     "uvloop>=0.21.0",
 ]
 classifiers = [

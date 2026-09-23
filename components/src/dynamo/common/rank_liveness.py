@@ -511,6 +511,24 @@ class RankLivenessMonitor:
                             frames = sock.recv_multipart(flags=zmq.NOBLOCK)
                         except zmq.Again:
                             break
+                        failure = self._gpu_failure_of(frames)
+                        if failure is not None:
+                            rank, pid, source = failure
+                            logger.warning(
+                                "[GMS liveness] direct GPU crash notification "
+                                "rank %d pid %d (%s); writer fencing remains "
+                                "authoritative",
+                                rank,
+                                pid,
+                                source,
+                            )
+                            if self._broadcast_fence_enabled:
+                                self._broadcast_fence(
+                                    sock, poller, last_seen, lost_rank=rank
+                                )
+                            self._fire(rank, "gpu-crash-interlock-zmq")
+                            return
+
                         if len(frames) < 2 or frames[-1] != b"hb":
                             continue
                         rank = self._rank_of(frames[0])
@@ -569,6 +587,31 @@ class RankLivenessMonitor:
                         return
         finally:
             sock.close(0)
+
+    def _gpu_failure_of(self, frames: list[bytes]) -> tuple[int, int, str] | None:
+        """Validate a direct GMS hint against this monitor's exact cohort."""
+
+        if len(frames) != 6 or frames[1] != b"gpu-failed-v1":
+            return None
+        try:
+            cohort = frames[2].decode()
+            rank = int(frames[3])
+            pid = int(frames[4])
+            source = frames[5].decode()
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if rank < 0 or pid <= 0 or not source:
+            return None
+        expected_marker = str(gpu_failure_marker_path(cohort))
+        if not self._failure_marker_path or os.path.normpath(
+            expected_marker
+        ) != os.path.normpath(self._failure_marker_path):
+            logger.warning(
+                "[GMS liveness] ignoring GPU crash notification for another cohort %s",
+                cohort,
+            )
+            return None
+        return rank, pid, source
 
     def _broadcast_fence(self, sock, poller, last_seen, *, lost_rank: int) -> None:
         """Prompt surviving ranks to fail-stop before the leader releases ownership.

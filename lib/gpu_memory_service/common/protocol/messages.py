@@ -243,6 +243,10 @@ class RegisterGPUClientRequest(msgspec.Struct, tag="register_gpu_client_request"
     client_pid: int
     process_start_time: str
     rank: int = 0
+    # Cohort-specific rank-0 ZMQ endpoint, connected before any crash.
+    # The message is a latency hint only; writer fencing remains authoritative.
+    # Empty preserves the shared-file-marker fallback.
+    failure_notify_addr: str = ""
     # Ask the daemon for a one-shot pipe whose write end is installed in a
     # native fatal-signal handler. Disabled by default: deployments must opt in
     # to both the GMS MPS provider and the crash-interlock contract.
