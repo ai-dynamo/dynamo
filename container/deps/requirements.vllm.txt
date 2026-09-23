@@ -29,9 +29,13 @@ mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0
 # NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
-# nvdec_decoder). Pin >=2.2.0 and force-reinstall (see the vllm_runtime.Dockerfile
-# install): the vllm-openai base ships PyNvVideoCodec 2.0.4, which bundles a full
-# FFmpeg (libavcodec + libavdevice/libavfilter/libsw*) that the codec gate
-# rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
-# Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
-PyNvVideoCodec>=2.2.0
+# nvdec_decoder). The vllm-openai base ships 2.0.4, which bundles a full FFmpeg
+# including a libavcodec the codec gate rejects, so vllm_runtime.Dockerfile
+# removes it before this installs. Requires NVIDIA_DRIVER_CAPABILITIES to include
+# "video". Pinned exactly: container/deps/README.md asks that every installed
+# version be explicitly tested, and here the wheel's bundled FFmpeg is what the
+# codec gate inspects, so a range would let an unaudited bundle land at build
+# time. Keep the specifier in step with requirements.{sglang,trtllm}.txt
+# and the runtime templates; tests/dependencies/test_pynvvideocodec_spec.py
+# enforces that.
+PyNvVideoCodec==2.2.3
