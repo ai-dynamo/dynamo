@@ -105,7 +105,10 @@ def _verify_pinned_sources() -> None:
         "vLLM build does not identify the pinned revision",
     )
     vllm = importlib.import_module("vllm")
-    root = Path(vllm.__file__).parent
+    vllm_file = vllm.__file__
+    if vllm_file is None:
+        raise UnsupportedContract("vLLM package has no source location")
+    root = Path(vllm_file).parent
     for relative, expected in _PINNED_FILES:
         _require(
             hashlib.sha256((root / relative).read_bytes()).hexdigest() == expected,
@@ -169,7 +172,7 @@ def _find_store_connector(connector: Any) -> Any:
     ).MultiConnector
     pending = [connector]
     stores = []
-    seen = set()
+    seen: set[int] = set()
     while pending:
         current = pending.pop()
         _require(id(current) not in seen and len(seen) < 64, "invalid connector graph")
@@ -254,8 +257,8 @@ def _export_descriptor(connector: Any, config: Any) -> dict[str, Any]:
         == len(coord.kv_cache_groups),
         "incomplete store-group projection",
     )
-    projection = [None] * len(original.kv_cache_groups)
-    groups = []
+    projection: list[int | None] = [None] * len(original.kv_cache_groups)
+    groups: list[dict[str, Any]] = []
     prefixes_seen: set[str] = set()
     managers = importlib.import_module(_MANAGER_MODULE)
     data = importlib.import_module(f"{_STORE_MODULE}.data")
@@ -344,7 +347,8 @@ def _export_descriptor(connector: Any, config: Any) -> dict[str, Any]:
             }
         )
     main = next((g for g in groups if g["kind"] == "full_attention"), None)
-    _require(main is not None, "main full-attention event group is required")
+    if main is None:
+        raise UnsupportedContract("main full-attention event group is required")
     event_span = main["block_size"]
     for group in groups:
         span = group["block_size"]
@@ -394,6 +398,9 @@ def _canonical(value: Any) -> str:
 
 class MooncakeStoreWorkerExtension:
     """Named, read-only RPC mixed into vLLM workers by explicit configuration."""
+
+    # Provided by the vLLM worker this class is mixed into.
+    vllm_config: Any
 
     def dynamo_mooncake_store_descriptor(self) -> dict[str, Any]:
         try:
@@ -470,7 +477,8 @@ def _agree_descriptors(
         if agreed is None:
             agreed, result = canonical, descriptor
         _require(canonical == agreed, "workers disagree on the resolved store contract")
-    _require(result is not None, "empty worker RPC result")
+    if result is None:
+        raise UnsupportedContract("empty worker RPC result")
     return result
 
 
