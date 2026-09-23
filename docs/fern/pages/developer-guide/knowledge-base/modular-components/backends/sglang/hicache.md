@@ -190,6 +190,9 @@ python -m dynamo.frontend \
 
 Set `shared_cache_multiplier` in the [default policy parameters](../../router/configuration-and-tuning.md#configure-the-default-policy). The default is `0.5` when shared cache is enabled. The legacy flag and environment variable are deprecated; per-request score overrides do not apply to the default policy.
 
+> [!WARNING]
+> During a mixed-version rollout, set `--shared-cache-multiplier 0.5` explicitly on workers that advertise HiCache routing configuration until all frontends support policy-owned defaults. Older frontends interpret an omitted multiplier as zero and give shared-cache hits no scoring credit. Use your existing value if you have tuned this multiplier.
+
 Set `DYN_MOONCAKE_KV_EVENTS_ENDPOINT` on the frontend to the Mooncake PUB endpoint, such as `tcp://mooncake-master.internal:5557`. The endpoint must be reachable from the frontend. Workers can advertise the same variable as a fallback, but a missing worker value does not disable shared-cache routing.
 
 Set `enable_group_semantics` to `true` in `--hicache-storage-backend-extra-config` to include SGLang logical group IDs in Mooncake metadata. Dynamo falls back to exact physical-key checks when group metadata is unavailable.

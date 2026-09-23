@@ -70,6 +70,8 @@ its configuration even if the endpoint is unchanged.
 
 ## Routing Behavior
 
+`--router-queue-threshold` and `--router-queue-policy` are deprecated starting in v1.6, with removal planned for v1.7. Their replacements configure each queue in the policy YAML.
+
 - `--router-host-cache-hit-weight`: Credit multiplier for host-pinned (CPU offload) prefix overlap, from 0.0 to 1.0. Symmetric to the policy’s `overlap_score_credit` but applied to the host-pinned tier when a backend exposes CPU offload via a KV connector. Defaults to 0.75.
 - `--router-disk-cache-hit-weight`: Credit multiplier for disk/lower-tier (e.g. NVMe-backed) prefix overlap, from 0.0 to 1.0. Defaults to 0.25.
 - `--router-conditional-disagg`: **Experimental.** Enables conditional disaggregation in frontend-embedded disaggregated serving. Requires `--router-mode kv`, `--router-kv-events`, separate prefill/decode worker pools, and decode-worker KV event publishing. Use `--router-conditional-disagg-config` for policy settings. See [Conditional Disaggregation](../../../advanced-customizations/conditional-disaggregation.md) for backend requirements and policy tuning.
@@ -163,7 +165,7 @@ Explicit parameters take precedence over router flags and environment variables.
 | `--shared-cache-multiplier` | `shared_cache_multiplier` |
 | `--router-temperature` | `router_temperature` |
 
-The host and disk cache-weight settings also affect cached-token estimates used for load accounting. Configure these in the shared `router` section or with their existing flags.
+The host and disk cache-weight settings also affect cached-token estimates used for prefill load tracking and queue ordering, even with a custom selector. Configure these in the shared `router` section or with their existing flags. Set the same names in a default policy's `parameters` to change only that policy's scoring weights.
 
 #### Shared Router Settings
 
@@ -181,7 +183,7 @@ Values and defaults match the corresponding [frontend options](../../../../refer
 
 ##### Replace the Load-Aware Preset
 
-`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated for removal in v1.7. In the default-policy example above, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0`. Add this section to the same file to preserve the old preset's tracking settings:
+`--load-aware` and `DYN_ROUTER_LOAD_AWARE` are also deprecated for removal in v1.7. In the default-policy example above, set `overlap_score_credit: 0` and `shared_cache_multiplier: 0` under `parameters`. Both control only that policy's scoring. Add this section to the same file to preserve the old preset's tracking settings:
 
 ```yaml
 router:
