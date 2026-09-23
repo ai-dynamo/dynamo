@@ -147,9 +147,8 @@ func TestProjectWithoutExternallyManagedComponentsDoesNotMutateSource(t *testing
 				require.Equal(t, "missing ordinary topology", condition.Message)
 			}
 
-			t.Log("Keep the projected copy independently mutable after all observations")
+			t.Log("Keep the source unchanged after observations and projected component-slice edits")
 			require.Equal(t, before, source)
-			ordinary.Annotations["projection-only"] = "independent-copy"
 			if len(ordinary.Spec.Components) > 0 {
 				ordinary.Spec.Components[0].ComponentName = "ordinary-copy"
 			}

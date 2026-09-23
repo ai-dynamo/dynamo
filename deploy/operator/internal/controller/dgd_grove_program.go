@@ -212,14 +212,14 @@ func (p *groveProgram) Reconcile(
 }
 
 // projectWithoutExternallyManagedComponents copies source without externally managed components.
-// The source must be non-nil and is not mutated.
+// The source must be non-nil; shared nested data must not be mutated by callers.
 func projectWithoutExternallyManagedComponents(source *nvidiacomv1beta1.DynamoGraphDeployment) *nvidiacomv1beta1.DynamoGraphDeployment {
-	projected := source.DeepCopy()
+	projected := *source
 	projected.Spec.Components = slices.DeleteFunc(
-		projected.Spec.Components,
+		slices.Clone(projected.Spec.Components),
 		func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
 			return component.ManagedByExternalController()
 		},
 	)
-	return projected
+	return &projected
 }
