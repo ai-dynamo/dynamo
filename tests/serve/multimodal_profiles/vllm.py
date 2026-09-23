@@ -24,6 +24,8 @@ from tests.utils.multimodal import (
     make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
     make_qwen35_custom_encoder_payload,
+    make_remote_custom_encoder_payload,
+    make_remote_custom_encoder_text_only_payload,
     make_video_payload,
 )
 from tests.utils.payload_builder import (
@@ -86,6 +88,9 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
     "agg_custom_qwen3_5": "agg_qwen3_5_native.sh",
+    # Remote CustomEncoder: the encoder runs in an application orchestrator
+    # worker and hands prepared embeddings to a stock aggregated generator.
+    "agg_custom_remote": "agg_custom_remote.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -753,6 +758,37 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     "PYTHONPATH": str(WORKSPACE_DIR),
                 },
                 tests=[MmCase(payload=make_custom_encoder_payload())],
+            ),
+            # Same encoder and phrase as `agg_custom`, but the encoder runs in
+            # an application orchestrator worker that hands prepared embeddings
+            # to a stock aggregated generator over the request plane. Matching
+            # "42" on both topologies is what shows the handoff preserves the
+            # in-process semantics.
+            "agg_custom_remote": TopologyConfig(
+                marks=[pytest.mark.post_merge],
+                timeout_s=300,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    # The harness addresses the deployment by the profile's model id,
+                    # including its text-only readiness probe, so publish under that
+                    # name instead of the example's default "remote-custom-encoder".
+                    "DYN_SERVED_MODEL_NAME": "Qwen/Qwen2.5-1.5B-Instruct",
+                    "DYN_GENERATOR_GPU": "0",
+                    "DYN_ENCODER_CLASS": (
+                        "examples.custom_encoder.hitchhikers_vision_encoder."
+                        "HitchhikersVisionEncoder"
+                    ),
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(payload=make_remote_custom_encoder_payload()),
+                    # A turn with no media must still be served: the orchestrator
+                    # forwards it to the generator instead of requiring an image.
+                    MmCase(
+                        suffix="text_only",
+                        payload=make_remote_custom_encoder_text_only_payload(),
+                    ),
+                ],
             ),
         },
     ),
