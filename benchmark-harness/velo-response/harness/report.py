@@ -52,7 +52,10 @@ for mode in MODES:
         run = ROOT / 'results' / f'{job}-main-{label}' / 'ablations' / f'main-{label}'
         result = json.loads((run / 'matching-window-results.json').read_text())
         assert result['quality']['accepted'], label
-        runs[mode].append({'label': label, 'metrics': measurements(result)})
+        runs[mode].append({'label': label, 'metrics': measurements(result),
+                           'quality': result['quality'],
+                           'client_counts': result['client']['counts'],
+                           'error_examples': result['client']['error_examples']})
 
 summary = {}
 for mode, records in runs.items():
@@ -96,6 +99,14 @@ lines += ['', 'Provisional limits against TCP:', '']
 for mode in MODES:
     failed = [name for name, passed in qualification[mode]['checks'].items() if not passed]
     lines.append(f'- {mode}: ' + ('pass' if not failed else 'fail: ' + ', '.join(failed)))
+lines += ['', 'Small error counts are retained in this directional comparison.', '',
+          '| Run | Exported profiling records | Errors | Error fraction |',
+          '|---|---:|---:|---:|']
+for mode in MODES:
+    for record in runs[mode]:
+        q = record['quality']
+        lines.append(f'| {record["label"]} | {record["client_counts"]["profiling_records"]} | '
+                     f'{q["error_count"]} | {100*q["error_fraction"]:.6f}% |')
 lines += ['', 'The Ethernet and RDMA fabrics differ. Hardware counters cover the full frontend node. '
           'Host packet aggregation and RDMA completions are not wire packets. '
           'Packet changes are reported separately from performance qualification. Defaults are unchanged.', '']
