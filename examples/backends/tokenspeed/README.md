@@ -167,11 +167,13 @@ process. Use `ENGINE_PORT`, `BOOTSTRAP_PORT`, and `HTTP_PORT` to change ports.
 
 ### GB300 Worker Options
 
-Use the shared environment above, then set these on every GB300 worker:
+Use these settings for LongCat-Flash on 12 GB300 GPUs: two prefill workers and one
+decode worker, each with TP=4 and EP=4. Use the shared environment above, then set
+these on every GB300 worker:
 
 ```bash
 export TENSOR_PARALLEL_SIZE=4
-export MAX_TOTAL_TOKENS=262144
+export MAX_TOTAL_TOKENS=917504
 export DYN_SYSTEM_PORT=8081
 ```
 
@@ -179,7 +181,8 @@ Start each prefill worker:
 
 ```bash
 bash examples/backends/tokenspeed/launch_disagg.sh prefill \
-  --max-model-len 131072 --max-num-seqs 4 \
+  --max-model-len 131072 --max-num-seqs 32 \
+  --attention-backend trtllm_mla \
   --moe-backend flashinfer_trtllm --force-deterministic-rsag
 ```
 
@@ -187,7 +190,8 @@ Start decode:
 
 ```bash
 bash examples/backends/tokenspeed/launch_disagg.sh decode \
-  --max-model-len 131072 --max-num-seqs 4 \
+  --max-model-len 131072 --max-num-seqs 32 \
+  --attention-backend trtllm_mla \
   --moe-backend flashinfer_trtllm --force-deterministic-rsag \
   --disable-prefill-graph
 ```
@@ -196,16 +200,17 @@ bash examples/backends/tokenspeed/launch_disagg.sh decode \
 decode worker's prefill graph avoids a failure during its optional prefill graph
 capture; decode CUDA graphs remain enabled. Start the frontend as above.
 
-Seven short requests completed on this GB300 configuration, including four
-unforced repeats that selected the prefill worker holding their prefix. Native
-prefill logs reported 832 or 896 reused tokens, and the cold control reported
-zero. These requests establish generation, transfer, and cache-routing
-feasibility. Three additional AgentX prompt checks completed with exactly
-129,133, 42,935, and 108,355 input tokens reported by the frontend, each generating
-one output token. Native logs confirm long prefill and transfer completion.
-TokenSpeed finishes one-token requests before a decode forward, so these checks
-do not exercise decode attention over long transferred KV. They are excluded
-from throughput measurements; the short multi-token requests verify decode.
+Apply the sequence and KV-cache limits to both roles. Prefill waits for decode-side
+KV allocation, so insufficient decode capacity can queue prefill work. The
+`trtllm_mla` attention backend addresses the measured long-context decode slowdown;
+`flashinfer_trtllm` selects the separate MoE backend.
+
+A recorded 20-minute AgentX run at concurrency 16 with these settings delivered
+208.38 output tokens/s, 0.735 s median time to first token, and 11.7 ms median
+inter-token latency. It completed 405 successful requests and recorded one
+empty-response error. These are single-run measurements for this model and
+topology. Separate functional checks verified KV transfer and cache-aware
+prefill selection.
 
 ## Verify Generation and KV Routing
 
