@@ -175,3 +175,47 @@ func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 		}
 	}
 }
+
+// TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins the numeric readers to vLLM's
+// FlexibleArgumentParser precedence: a repeated flag resolves to its final occurrence.
+// Reading the first one makes the operator size a topology the engine will not use --
+// "--tensor-parallel-size 1 -tp 4" launches 4 ranks but would be read as 1.
+func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
+	for name, args := range map[string][]string{
+		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
+		"long then short":  {tensorParallelSizeFlag, "1", "-tp", "4"},
+		"short then long":  {"-tp", "1", tensorParallelSizeFlag, "4"},
+		"short then short": {"-tp", "1", "-tp", "4"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			if got != 4 {
+				t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
+					"applies the last value when a flag is repeated", args, got)
+			}
+		})
+	}
+}
+
+// TestParseVLLMLaunchArgs_EnumFlagsUseLastOccurrence extends the same precedence to the
+// enum-valued flags. hasArg reports true when ANY occurrence matches the sought value, so
+// "--data-parallel-backend ray --data-parallel-backend mp" was read as ray even though vLLM
+// resolves it to mp -- which would front the engine with a Ray head it never asked for.
+func TestParseVLLMLaunchArgs_EnumFlagsUseLastOccurrence(t *testing.T) {
+	t.Run("data-parallel-backend resolves to the final occurrence", func(t *testing.T) {
+		container := vllmContainer("--enable-elastic-ep",
+			dataParallelBackendFlag, "ray", dataParallelBackendFlag, "mp")
+		if IsElasticEPRayLaunch(container) {
+			t.Fatal("effective --data-parallel-backend is mp (the last occurrence); " +
+				"must not qualify as an elastic-EP Ray launch")
+		}
+	})
+	t.Run("distributed-executor-backend resolves to the final occurrence", func(t *testing.T) {
+		args := parseVLLMLaunchArgs(getExpandedCommandLine(
+			vllmContainer(distributedExecutorFlag, "mp", distributedExecutorFlag, "ray")))
+		if args.DistributedExecutorBackendIsMp {
+			t.Fatal("effective --distributed-executor-backend is ray (the last occurrence); " +
+				"DistributedExecutorBackendIsMp must be false")
+		}
+	})
+}
