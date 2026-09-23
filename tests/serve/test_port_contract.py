@@ -27,6 +27,12 @@ _E_PD_LAUNCHER = (
 # starts all three; the launcher's own cleanup trap reaps this stub first.
 _STUB_ROLES = 3
 _STUB_ENGINE = f"""#!/bin/bash
+# Only a module launch is a worker; the launcher also runs the interpreter for
+# its own checks, and those have to reach the real one.
+case " $* " in
+    *" -m "*) ;;
+    *) exec python3 "$@" ;;
+esac
 printf '%s\\t%s\\t%s\\n' \
     "${{DYN_SYSTEM_PORT:-}}" "${{VLLM_NIXL_SIDE_CHANNEL_PORT:-}}" "$*" >> "$PORT_RECORD"
 for _ in $(seq 200); do
@@ -409,17 +415,57 @@ def test_e_pd_launcher_refuses_managed_kv_events_override(tmp_path: Path) -> Non
     assert "pd" not in workers
 
 
-# Both spellings argparse accepts, since the launcher matches the flag itself.
+# Two ways the reserved endpoint can appear ahead of the one that takes effect:
+# nested in another object, and as an earlier duplicate key, which json.loads
+# discards in favour of the last. Nothing here has to be a config vLLM accepts —
+# the launcher decides before vLLM runs.
+@pytest.mark.parametrize("decoy", ["nested", "duplicate"])
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_refuses_managed_kv_events_endpoint_decoy(
+    tmp_path: Path, decoy: str
+) -> None:
+    """Read the endpoint that takes effect, not the first one in the text."""
+    with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
+        reserved = f'"endpoint":"tcp://*:{allocated[3]}"'
+        first = f'"nested":{{{reserved}}}' if decoy == "nested" else reserved
+        config = (
+            '{"publisher":"zmq",' f"{first}," f'"endpoint":"tcp://*:{allocated[6]}"}}'
+        )
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(allocated[0]),
+                "DYN_SYSTEM_PORT1": str(allocated[0]),
+                "DYN_SYSTEM_PORT2": str(allocated[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(allocated[2]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(allocated[3]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(allocated[5]),
+            },
+            extra_args=["--kv-events-config", config],
+        )
+
+    assert result.returncode != 0
+    assert str(allocated[6]) in result.stderr
+    assert "pd" not in workers
+
+
+# Escaping a solidus is legal JSON and decodes to the same endpoint, so the
+# launcher has to decode rather than match text. Both flag spellings argparse
+# accepts are covered too, since the launcher matches the flag itself.
+@pytest.mark.parametrize("escape_slashes", [False, True])
 @pytest.mark.parametrize("separate_value", [True, False])
 @pytest.mark.timeout(180)
 def test_e_pd_launcher_keeps_managed_kv_events_on_the_reserved_port(
-    tmp_path: Path, separate_value: bool
+    tmp_path: Path, separate_value: bool, escape_slashes: bool
 ) -> None:
     """Keep a passthrough config that leaves the endpoint on the reserved port."""
     with reserved_ports(6, DynamoPortRange.SERVE.value) as allocated:
+        scheme = "tcp:\\/\\/" if escape_slashes else "tcp://"
         config = (
             '{"publisher":"zmq","topic":"kv-events",'
-            f'"endpoint":"tcp://*:{allocated[3]}",'
+            f'"endpoint":"{scheme}*:{allocated[3]}",'
             '"enable_kv_cache_events":true}'
         )
         result, workers = _run_e_pd_launcher(
@@ -442,7 +488,9 @@ def test_e_pd_launcher_keeps_managed_kv_events_on_the_reserved_port(
         )
 
     assert result.returncode == 0, result.stderr
-    assert workers["pd"]["kv"] == str(allocated[3])
+    # Read from the raw command line rather than the parsed "kv" field, which
+    # only recognises the unescaped spelling.
+    assert f"*:{allocated[3]}" in workers["pd"]["args"]
     # The generated config sets no enable_kv_cache_events, and vLLM would keep
     # only one of the two, so reading the flag back means the caller's copy is
     # the one that survived.

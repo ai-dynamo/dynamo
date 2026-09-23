@@ -146,7 +146,7 @@ KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
 KV_EVENTS_ARGS_PD=(--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}")
 KV_EVENTS_PD_OVERRIDE=""
 KV_EVENTS_PD_FOUND=false
-# Last occurrence wins, matching what vLLM itself keeps.
+# Last occurrence wins, matching what argparse hands vLLM.
 for i in "${!EXTRA_PD_ARGS[@]}"; do
     case "${EXTRA_PD_ARGS[$i]}" in
         --kv-events-config)
@@ -161,12 +161,17 @@ for i in "${!EXTRA_PD_ARGS[@]}"; do
 done
 if [[ "$KV_EVENTS_PD_FOUND" == true ]]; then
     if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
-        # The endpoint is matched, not parsed: a config that does not spell it as
-        # a plain "endpoint": "..." pair reads as unset here and is refused.
-        KV_EVENTS_PD_ENDPOINT=""
-        if [[ "$KV_EVENTS_PD_OVERRIDE" =~ \"endpoint\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
-            KV_EVENTS_PD_ENDPOINT="${BASH_REMATCH[1]}"
-        fi
+        # Decoded with the same json module vLLM parses this option with, so an
+        # escaped or duplicated endpoint reads here as it will there. Anything
+        # that is not an object with a string endpoint, including unparseable
+        # JSON or a missing interpreter, reads as unset and is refused.
+        KV_EVENTS_PD_ENDPOINT=$(python -c '
+import json, sys
+config = json.loads(sys.argv[1])
+endpoint = config.get("endpoint") if isinstance(config, dict) else None
+if isinstance(endpoint, str):
+    print(endpoint)
+' "$KV_EVENTS_PD_OVERRIDE" 2>/dev/null) || KV_EVENTS_PD_ENDPOINT=""
         if [[ "$KV_EVENTS_PD_ENDPOINT" != "tcp://*:${KV_PORT_PD}" ]]; then
             echo "Refusing a passthrough --kv-events-config under DYN_MANAGED_PORTS:" \
                  "its endpoint reads as ${KV_EVENTS_PD_ENDPOINT:-unset}, not the" \
