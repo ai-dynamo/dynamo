@@ -134,7 +134,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{name: "native sidecar rejects empty selector",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.DynamoSidecar = k8sptr.To("")
-			}), wantWebhookErrs: []string{`spec.components[1].dynamoSidecar: Invalid value: "": must not be empty`}},
+			}), wantWebhookErrs: []string{`spec.components[1].dynamoSidecar: Invalid value: "": must not be empty`, `spec.components[1].podTemplate.spec.initContainers: Required value: is required`}},
 		{name: "native sidecar beta custom runtime image create needs override",
 			deployment: nativeDGDForAdmission(t, false, func(c *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				c.PodTemplate.Spec.InitContainers[0].Image = customSidecarImage
