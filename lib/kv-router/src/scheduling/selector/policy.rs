@@ -42,7 +42,7 @@ pub(super) struct ComposedPolicyState {
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
-    unscored_candidates: Vec<CandidateData>,
+    pub(super) unscored_candidates: Vec<CandidateData>,
     score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
     pub(super) cache_inputs: Vec<WorkerCacheData>,

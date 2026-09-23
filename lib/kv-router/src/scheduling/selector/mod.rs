@@ -128,6 +128,252 @@ impl<'a, C: WorkerConfigLike> WorkerSelectionInput<'a, C> {
     }
 }
 
+/// Host-owned accounting for the DP-rank candidate universe. These fields are
+/// policy-neutral and stay meaningful when a custom policy is installed.
+#[derive(Debug, Clone, Copy, Default)]
+struct CandidateFilterSummary {
+    eligible: usize,
+    not_allowed: usize,
+    constraints: usize,
+    overloaded: usize,
+    unavailable: usize,
+}
+
+impl CandidateFilterSummary {
+    fn count_worker<C: WorkerConfigLike>(
+        &mut self,
+        worker_id: WorkerId,
+        config: &C,
+        eligibility: RoutingEligibility<'_>,
+    ) {
+        let replicas = config.data_parallel_size() as usize;
+        if !eligibility.caller_allows_worker_id(worker_id) {
+            self.not_allowed += replicas;
+        } else if !eligibility.is_worker_available(worker_id) {
+            self.unavailable += replicas;
+        } else if !eligibility.allows_worker_ignoring_overload(worker_id, config) {
+            self.constraints += replicas;
+        } else if eligibility.is_worker_overloaded(worker_id) {
+            self.overloaded += replicas;
+        } else {
+            self.eligible += replicas;
+        }
+    }
+
+    fn from_eligibility<C: WorkerConfigLike>(
+        workers: &HashMap<WorkerId, C>,
+        eligibility: RoutingEligibility<'_>,
+    ) -> Self {
+        let mut summary = Self::default();
+        if let Some(worker) = eligibility.pinned_worker() {
+            match workers.get(&worker.worker_id) {
+                Some(config) => {
+                    summary.count_worker(worker.worker_id, config, eligibility);
+                    summary.eligible = usize::from(summary.eligible > 0);
+                    summary.not_allowed = usize::from(summary.not_allowed > 0);
+                    summary.constraints = usize::from(summary.constraints > 0);
+                    summary.overloaded = usize::from(summary.overloaded > 0);
+                    summary.unavailable = usize::from(summary.unavailable > 0);
+                }
+                None => summary.unavailable = 1,
+            }
+            return summary;
+        }
+        for (&worker_id, config) in workers {
+            summary.count_worker(worker_id, config, eligibility);
+        }
+        summary
+    }
+
+    fn filtered_count(self) -> usize {
+        self.not_allowed + self.constraints + self.overloaded + self.unavailable
+    }
+}
+
+/// Bounded decision evidence written to a lifecycle `router.selection` span.
+/// Core mode records a stable summary. Investigation mode also records at most
+/// four scored candidates and their available raw cache/load inputs.
+struct RouterSelectionTelemetry {
+    span: tracing::Span,
+    include_candidate_details: bool,
+}
+
+impl RouterSelectionTelemetry {
+    fn record_candidate_envelope(&self, filters: CandidateFilterSummary, candidate_count: usize) {
+        // Composed policies can filter host-eligible workers before scoring.
+        let policy_filtered = filters.eligible.saturating_sub(candidate_count);
+        self.span.record(
+            "dynamo.router.candidate.eligible.count",
+            candidate_count as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.count",
+            (filters.filtered_count() + policy_filtered) as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.not_allowed",
+            filters.not_allowed as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.constraints",
+            filters.constraints as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.overloaded",
+            filters.overloaded as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.unavailable",
+            filters.unavailable as u64,
+        );
+        self.span.record(
+            "dynamo.router.candidate.filtered.policy",
+            policy_filtered as u64,
+        );
+    }
+
+    fn record_custom(
+        self,
+        candidates: &[ScoredWorkerCandidate],
+        inputs: &[CandidateData],
+        filters: CandidateFilterSummary,
+        selected: ScoredWorkerCandidate,
+        pool_role: &'static str,
+    ) {
+        self.span
+            .record("dynamo.router.candidate.count", candidates.len() as u64);
+        self.record_candidate_envelope(filters, candidates.len());
+        self.span.record("dynamo.router.algorithm.id", "composed");
+        self.span.record("dynamo.router.algorithm.version", "v1");
+        self.span
+            .record("dynamo.router.decision.schema", "selection.v1");
+        self.span
+            .record("dynamo.router.selection.policy", "composed");
+        self.span.record("dynamo.router.pool.role", pool_role);
+        self.span.record(
+            "dynamo.router.selected.worker.id",
+            selected.worker.worker_id,
+        );
+        self.span.record(
+            "dynamo.router.selected.dp.rank",
+            selected.worker.dp_rank as u64,
+        );
+        self.span
+            .record("dynamo.router.selected.score", selected.cost);
+        if let Some(best) = candidates.iter().min_by(|left, right| {
+            left.cost
+                .total_cmp(&right.cost)
+                .then_with(|| left.worker.cmp(&right.worker))
+        }) {
+            self.span
+                .record("dynamo.router.best.worker.id", best.worker.worker_id);
+            self.span
+                .record("dynamo.router.best.dp.rank", best.worker.dp_rank as u64);
+            self.span.record("dynamo.router.best.score", best.cost);
+            let runner_up = candidates
+                .iter()
+                .filter(|candidate| candidate.worker != best.worker)
+                .min_by(|left, right| left.cost.total_cmp(&right.cost));
+            self.span.record(
+                "dynamo.router.best.margin",
+                runner_up.map_or(0.0, |candidate| candidate.cost - best.cost),
+            );
+        }
+        if self.include_candidate_details {
+            const TOP_K: usize = 4;
+            let by_score = |&left: &usize, &right: &usize| {
+                candidates[left]
+                    .cost
+                    .total_cmp(&candidates[right].cost)
+                    .then_with(|| candidates[left].worker.cmp(&candidates[right].worker))
+            };
+            let mut detailed = (0..candidates.len()).collect::<Vec<_>>();
+            detailed.sort_unstable_by(by_score);
+            detailed.truncate(TOP_K);
+            if let Some(selected_row) = candidates
+                .iter()
+                .position(|candidate| candidate.worker == selected.worker)
+                && !detailed.contains(&selected_row)
+            {
+                detailed.pop();
+                detailed.push(selected_row);
+                detailed.sort_unstable_by(by_score);
+            }
+            let details = detailed
+                .into_iter()
+                .map(|row| {
+                    let candidate = candidates[row];
+                    let mut detail = serde_json::json!({
+                        "worker_id": candidate.worker.worker_id,
+                        "dp_rank": candidate.worker.dp_rank,
+                        "selected": candidate.worker == selected.worker,
+                        "score": candidate.cost,
+                    });
+                    if let Some(multiplier) = candidate.preferred_taint_multiplier {
+                        detail["preferred_taint_multiplier"] = serde_json::json!(multiplier);
+                    }
+                    if let Some(input) = inputs.get(row) {
+                        if input.inputs.contains(WorkerInputs::CACHE) {
+                            detail["cached_tokens"] =
+                                serde_json::json!(input.cache.estimated_cached_tokens);
+                            detail["device_overlap_blocks"] =
+                                serde_json::json!(input.cache.device_overlap_blocks);
+                            detail["host_overlap_blocks"] =
+                                serde_json::json!(input.cache.host_overlap_blocks);
+                            detail["disk_overlap_blocks"] =
+                                serde_json::json!(input.cache.disk_overlap_blocks);
+                        }
+                        if input.inputs.contains(WorkerInputs::LOAD) {
+                            detail["active_prefill_tokens"] =
+                                serde_json::json!(input.load.active_prefill_tokens);
+                            detail["decode_cost_blocks"] =
+                                serde_json::json!(input.load.decode_cost_blocks);
+                            detail["active_requests"] =
+                                serde_json::json!(input.load.active_requests);
+                        }
+                    }
+                    detail
+                })
+                .collect::<Vec<_>>();
+            self.span
+                .record("dynamo.router.candidates.detail_schema", "selection.v1");
+            self.span.record(
+                "dynamo.router.candidates.top_k",
+                serde_json::to_string(&details).expect("candidate details serialize"),
+            );
+        }
+    }
+}
+
+fn current_router_selection_telemetry() -> Option<RouterSelectionTelemetry> {
+    #[cfg(feature = "runtime-protocols")]
+    {
+        use dynamo_runtime::config::{
+            env_is_truthy,
+            environment_names::lifecycle_tracing::{
+                DYN_LIFECYCLE_TRACE_ENABLED, DYN_LIFECYCLE_TRACE_MODE,
+            },
+        };
+
+        let span = tracing::Span::current();
+        let is_router_selection = span.metadata().is_some_and(|metadata| {
+            metadata.target() == dynamo_runtime::telemetry::LIFECYCLE_TARGET
+                && metadata.name() == "router.selection"
+        });
+        (env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED) && is_router_selection).then(|| {
+            RouterSelectionTelemetry {
+                span,
+                include_candidate_details: std::env::var(DYN_LIFECYCLE_TRACE_MODE)
+                    .is_ok_and(|mode| mode.trim().eq_ignore_ascii_case("investigation")),
+            }
+        })
+    }
+    #[cfg(not(feature = "runtime-protocols"))]
+    {
+        None
+    }
+}
+
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
@@ -377,6 +623,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                 picker,
                 picker_inputs,
                 candidates,
+                unscored_candidates,
                 cache_inputs,
                 load_inputs,
                 ..
@@ -415,6 +662,15 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
+                if let Some(telemetry) = current_router_selection_telemetry() {
+                    telemetry.record_custom(
+                        candidates,
+                        unscored_candidates,
+                        CandidateFilterSummary::from_eligibility(workers, eligibility),
+                        *candidate,
+                        worker_type,
+                    );
+                }
                 Some((candidate.worker, candidate.cost))
             }
         }
