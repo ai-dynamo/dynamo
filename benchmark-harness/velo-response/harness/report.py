@@ -2,6 +2,7 @@
 import csv
 import json
 from pathlib import Path
+import re
 import statistics
 from analyze_campaign import ROOT
 
@@ -36,6 +37,10 @@ def measurements(result):
     eth_rx = sum(v for k, v in d.items() if k.endswith('/rx_packets_phy'))
     eth_rx_bytes = sum(v for k, v in d.items() if k.endswith('/rx_bytes_phy'))
     out['ethernet_mean_rx_wire_bytes'] = eth_rx_bytes / eth_rx
+    for key, packets in n['wire_rx_size_bucket_deltas'].items():
+        bucket = key.rsplit('/', 1)[-1]
+        if re.fullmatch(r'rx_\d+(?:_to_\d+)?_bytes_phy', bucket):
+            out['ethernet_' + bucket + '_percent'] = 100 * packets / eth_rx
     for counter in ('rx_discards_phy', 'tx_discards_phy', 'rx_out_of_buffer', 'RetransSegs'):
         out[counter + '_per_second'] = sum(v for k, v in d.items() if k.endswith('/' + counter)) / seconds
     fe = result['telemetry']['frontend-system-telemetry.jsonl']['processes']
