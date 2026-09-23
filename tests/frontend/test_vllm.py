@@ -88,9 +88,8 @@ def _visible_gpu_total_memory_gib() -> Optional[float]:
     except ImportError:
         return None
 
-    # The GPU-parallel scheduler pins each pytest child to one physical GPU via
-    # CUDA_VISIBLE_DEVICES, and NVML indexes physical devices, so that value is
-    # the index to ask about. Serial runs leave it unset and land on GPU 0.
+    # NVML indexes physical devices, so ask about the GPU this child was pinned
+    # to via CUDA_VISIBLE_DEVICES; serial runs leave it unset and land on GPU 0.
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0].strip() or "0"
     if not visible.isdigit():
         # A GPU UUID rather than an index; not worth mapping back here.
