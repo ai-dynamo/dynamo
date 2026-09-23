@@ -134,16 +134,17 @@ type DynamoComponentDeploymentSharedSpec struct {
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// podTemplate defines the complete Pod configuration shared by every role. It
-	// is mutually exclusive with roles[].podTemplate. New components must include
-	// a container named "main" with a non-empty image. Existing components created
-	// without a podTemplate may remain unchanged. The operator merges defaults into
-	// the main container.
+	// is mutually exclusive with roles[].podTemplate. Every component must
+	// include a container named "main" with a non-empty image. In standard mode
+	// the operator merges Dynamo defaults into main. In Dynamo sidecar mode
+	// (dynamoSidecar is set), main is the engine container and is fully
+	// user-managed — the operator injects no Dynamo defaults into it, and the
+	// named init container receives those defaults instead.
 	// For DGD components whose main image tag is not a Dynamo semantic version,
 	// set runtimeVersionOverride explicitly.
 	//
 	// All other containers are user-managed sidecars and must specify their
-	// required fields, including image. Exception: the init container named
-	// by dynamoSidecar receives Dynamo runtime defaults instead of main.
+	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
