@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import gc
 import logging
 import os
 import time
@@ -166,6 +167,13 @@ async def init_decode(
         health_check_payload = SglangHealthCheckPayload(
             engine, use_text_input=dynamo_args.use_sglang_tokenizer
         ).to_dict()
+
+    if dynamo_args.freeze_gc_after_init:
+        collected = gc.collect()
+        gc.freeze()
+        logging.info(
+            "Froze SGLang decode worker GC objects after collecting %d", collected
+        )
 
     logging.info(f"Registering model with endpoint types: {dynamo_args.endpoint_types}")
     if dynamo_args.custom_jinja_template and "chat" not in dynamo_args.endpoint_types:
