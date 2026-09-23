@@ -1485,6 +1485,8 @@ class WorkerFactory:
                 await run_gms_failover_post_lock_fence(
                     backend_name="vllm", role="active"
                 )
+                if promotion_warmup is not None:
+                    await promotion_warmup()
             except BaseException:
                 delattr(handler, "_gms_failover_lock")
                 try:
@@ -1505,6 +1507,25 @@ class WorkerFactory:
         lease_transition_serving = lease_transition_serving_enabled(
             "vllm", mapped_standby=mapped_standby
         )
+        prewarmed = False
+        if mapped_standby and promotion_warmup is not None:
+            from gpu_memory_service.integrations.common.kv_lease_client import (
+                kv_leases_enabled,
+            )
+
+            if not kv_leases_enabled("vllm"):
+                raise RuntimeError(
+                    "mapped standby prewarm requires vLLM KV leases so its "
+                    "canary can allocate only FREE blocks"
+                )
+            # The lease arbiter restricts this canary to FREE blocks, so it can
+            # compile and launch the shadow's real execution path while the
+            # primary remains active. This is allocation isolation, not granular
+            # takeover: the global lock still gates discovery and all recovery.
+            await promotion_warmup()
+            prewarmed = True
+            logger.info("[Shadow] Prewarmed mapped standby before lock wait")
+
         if mapped_standby:
             await handler._pause_controller.pause_generation_only(clear_cache=False)
             logger.info(
@@ -1537,7 +1558,7 @@ class WorkerFactory:
                 await self._wake_up_kv_fenced(handler, ["kv_cache"])
             resumed = True
             handler._pause_controller.mark_resumed()
-            if promotion_warmup is not None:
+            if promotion_warmup is not None and not prewarmed:
                 await promotion_warmup()
             self._maybe_start_rank_liveness_monitor(handler, config, failover_lock=lock)
             if lease_transition_serving:

@@ -580,6 +580,54 @@ async def test_gms_failover_promotion_warmup_backend_override_disables(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_gms_failover_promotion_warmup_honors_backend_concurrency(monkeypatch):
+    monkeypatch.setenv("DYN_TEST_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "4")
+    seen = []
+
+    async def generate(request, _context):
+        seen.append(request)
+        yield {"token_ids": [1], "finish_reason": "stop"}
+
+    await run_gms_failover_promotion_warmup(
+        generate, {"token_ids": [7]}, backend_name="test"
+    )
+
+    assert seen == [{"token_ids": [7]}] * 4
+
+
+@pytest.mark.asyncio
+async def test_gms_failover_promotion_warmup_covers_isolated_token_shapes(monkeypatch):
+    monkeypatch.setenv("DYN_VLLM_GMS_FAILOVER_PROMOTION_WARMUP_TOKEN_COUNTS", "1,8,16")
+    monkeypatch.setenv("DYN_VLLM_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "2")
+    seen = []
+
+    async def generate(request, _context):
+        seen.append(request)
+        yield {"token_ids": [1], "finish_reason": "stop"}
+
+    await run_gms_failover_promotion_warmup(
+        generate, {"token_ids": [7]}, backend_name="vllm"
+    )
+
+    assert [len(request["token_ids"]) for request in seen] == [1, 1, 8, 8, 16, 16]
+    salts = [request["nvext"]["cache_salt"] for request in seen]
+    assert len(set(salts)) == len(salts)
+
+
+@pytest.mark.asyncio
+async def test_gms_failover_promotion_warmup_rejects_token_shapes_for_text(monkeypatch):
+    monkeypatch.setenv("DYN_VLLM_GMS_FAILOVER_PROMOTION_WARMUP_TOKEN_COUNTS", "8")
+
+    async def generate(_request, _context):
+        yield {"token_ids": [1], "finish_reason": "stop"}
+
+    with pytest.raises(ValueError, match="non-empty token_ids"):
+        await run_gms_failover_promotion_warmup(
+            generate, {"prompt": "Test"}, backend_name="vllm"
+        )
+
+
+@pytest.mark.asyncio
 async def test_gms_failover_post_lock_fence_honors_backend_override(monkeypatch):
     monkeypatch.setenv("DYN_GMS_FAILOVER_POST_LOCK_FENCE_MS", "100")
     monkeypatch.setenv("DYN_TEST_GMS_FAILOVER_POST_LOCK_FENCE_MS", "25")
