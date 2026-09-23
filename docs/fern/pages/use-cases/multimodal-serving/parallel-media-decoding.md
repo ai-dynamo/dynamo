@@ -11,7 +11,7 @@ images and videos on a CPU worker pool and transfers the decoded pixel buffers
 to the backend through NIXL.
 
 The backend still runs its model-specific multimodal processor and vision
-encoder. This feature changes where image input is decoded; it does not skip
+encoder. This feature changes where media input is decoded; it does not skip
 vision encoding.
 
 ## Support Matrix
@@ -25,23 +25,27 @@ vision encoding.
 `Agg` refers to an aggregated worker. The entries in this matrix represent the
 supported topologies for frontend decoding.
 
+SGLang frontend video decoding is available only on CUDA. SGLang XPU images do
+not include the in-tree FFmpeg decoder. Image frontend decoding is not subject
+to that codec restriction.
+
 This matrix describes parallel media decoding, not the overall multimodal
 support of each backend. A backend can support video or audio by decoding it on
 the worker even when the frontend decoding path does not support that modality.
 
 ## When to Use
 
-Use parallel media decoding when image preprocessing consumes a significant
+Use parallel media decoding when media preprocessing consumes a significant
 part of request latency or backend CPU time. It is most useful for workloads
 with:
 
-- Concurrent requests containing HTTP, HTTPS, or base64-encoded images
-- Multiple images in one request
-- Backend workers whose request path is constrained by image fetching or
+- Concurrent requests containing HTTP, HTTPS, or base64-encoded media
+- Multiple images or supported videos in one request
+- Backend workers whose request path is constrained by media fetching or
   decompression
 
 Parallel media decoding can also be combined with the [embedding
-cache](embedding-cache.md). Frontend decoding reduces image input processing
+cache](embedding-cache.md). Frontend decoding reduces media input processing
 work, while the embedding cache can skip vision encoding for repeated images.
 
 ## How It Works

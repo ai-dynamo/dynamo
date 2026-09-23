@@ -45,9 +45,9 @@ URI string, while frontend decoding hashes the decoded bytes.
 
 Exact video routing requires frontend decoding. The frontend samples the video and computes an XXH3-64 identity over the sampled RGB frames, decoded shape and data type, and video metadata such as the source frame rate and sampled timestamps. Two URLs that decode to the same sampled content and metadata receive the same identity.
 
-Video prompt expansion is model-specific. The frontend uses a model adapter to reproduce the worker's resize, patch, temporal grouping, delimiter, timestamp, and pruning behavior in a routing-only token sequence. At worker startup, vLLM reports the installed processor behavior that affects this sequence. Dynamo disables exact video routing if the reported contract does not match the frontend adapter.
+Video prompt expansion is model-specific. The frontend uses a model adapter to reproduce the worker's resize, patch, temporal grouping, delimiter, timestamp, and pruning behavior in a routing-only token sequence. At worker startup, vLLM and eligible SGLang workers report the installed processor behavior that affects this sequence. Dynamo disables exact video routing if the reported contract does not match the frontend adapter.
 
-The selected worker receives the same per-video hash, and its KV events use that identity. This keeps the frontend's routing blocks aligned with the blocks published by vLLM without running the vision model in the frontend.
+The selected worker receives the same per-video hash, and its KV events use that identity. This keeps the frontend's routing blocks aligned with the blocks published by the backend without running the vision model in the frontend.
 
 <Tabs>
   <Tab title="vLLM" language="vllm">
@@ -65,7 +65,9 @@ The selected worker receives the same per-video hash, and its KV events use that
   <Tab title="SGLang" language="sglang">
     The frontend hashes each image and converts that hash into the same `pad_value` token that SGLang RadixAttention uses for its prefix-cache key. The matching token view lets the router measure image overlap before selecting a worker.
 
-    Dynamo's SGLang image includes the required hash-forwarding support. Exact video routing is not available on this path; video requests use text-prefix routing.
+    For aggregated Qwen3-VL and Qwen3.5 workers on CUDA, frontend decoding extends the same mechanism to video. The worker publishes its effective frame-sampling, resize, timestamp, and placeholder contract. The frontend reproduces that contract in its routing-only token view and forwards the sampled video's hash to SGLang.
+
+    Dynamo's SGLang image includes the required hash-forwarding support. Exact video routing fails closed to text-prefix routing when a worker lacks support, the discovery cohort contains legacy or mismatched contracts, or the installed processor behavior is incompatible.
   </Tab>
   <Tab title="TensorRT-LLM" language="trtllm">
     The frontend hashes each image, represents that identity in its routing token view, and forwards the hash as `multi_modal_uuids`. TensorRT-LLM workers publish matching KV events so the router can identify cached image blocks.
@@ -115,7 +117,7 @@ The selected worker receives the same per-video hash, and its KV events use that
     bash examples/backends/sglang/launch/agg_multimodal_router.sh
     ```
 
-    The launcher configures KV events and matching frontend and worker block sizes.
+    The launcher enables `--frontend-decoding`, configures KV events, and sets matching frontend and worker block sizes. Set `DYN_MM_VIDEO_NUM_FRAMES` before launching to change the maximum sampled frame count from its default of `32`; keep the same value for the frontend and every worker.
 
     See [SGLang Multimodal](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) for prerequisites, configuration, fallback behavior, and verification.
   </Tab>
@@ -155,11 +157,11 @@ curl http://localhost:8000/v1/chat/completions \
 JSON
 ```
 
-Send the request twice to populate and then reuse the worker's KV cache. Exact routing through the default Rust frontend supports VP8 or VP9 video in MP4, WebM, or MKV containers. The in-tree frontend decoder does not support H.264 or H.265. Re-encode those inputs to VP9, or disable frontend decoding and let the backend decode them through NVDEC or an installed software decoder; with backend-only decoding, video identity does not contribute to exact routing. See [Additional Media Decoders](additional-media-decoders.md) and [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
+Send the request twice to populate and then reuse the worker's KV cache. Exact routing through the default Rust frontend supports VP8 or VP9 video in MP4, WebM, or MKV containers. SGLang provides this decoder on CUDA only. The in-tree frontend decoder does not support H.264 or H.265. Re-encode those inputs to VP9, or use a backend-supported NVDEC or software-decoder path; with backend-only decoding, video identity does not contribute to exact routing. See [Additional Media Decoders](additional-media-decoders.md) and [Video Decode GPU Requirements](video-decode-gpu-requirements.md).
 
 ## Verify Video Routing
 
-The vLLM multimodal router launcher enables routing debug logs by default. For a custom launch, set `DYN_LOG=info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug`, then check for:
+The vLLM and SGLang multimodal router launchers enable routing debug logs by default. For a custom launch, set `DYN_LOG=info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug`, then check for:
 
 - `exact video-aware KV routing enabled` during worker registration.
 - `video routing metadata resolved` after the frontend decodes an eligible request.
@@ -173,10 +175,11 @@ If startup or request validation cannot prove that the frontend and worker produ
 
 The default Rust frontend supports exact video routing for:
 
-- Qwen3-VL and Qwen3.5 dense and mixture-of-experts models. Video pruning is not supported on this path.
-- Nemotron 3 Nano Omni. The adapter reproduces temporal grouping, frame separators, dynamic resolution, and optional EVS pruning.
+- vLLM Qwen3-VL and Qwen3.5 dense and mixture-of-experts models. Video pruning is not supported on this path.
+- vLLM Nemotron 3 Nano Omni. The adapter reproduces temporal grouping, frame separators, dynamic resolution, and optional EVS pruning.
+- Aggregated SGLang Qwen3-VL and Qwen3.5 dense and mixture-of-experts models on CUDA with `--frontend-decoding`.
 
-Exact video routing falls back to text-prefix routing for unsupported models, opaque client-provided UUIDs, non-empty `mm_processor_kwargs`, audio in the same request, or adjacent video objects. Nemotron uses the same `<image>` placeholder for image and video features, so its exact path currently supports one video-only media object per request; mixed image-and-video or multiple-video Nemotron requests fall back.
+Exact video routing falls back to text-prefix routing for unsupported models, opaque client-provided UUIDs, non-empty `mm_processor_kwargs`, audio in the same request, or adjacent video objects. SGLang also falls back when workers publish missing, incompatible, or different processor contracts. Nemotron uses the same `<image>` placeholder for image and video features, so its exact path currently supports one video-only media object per request; mixed image-and-video or multiple-video Nemotron requests fall back.
 
 ## Support Matrix
 
@@ -184,7 +187,7 @@ Exact video routing falls back to text-prefix routing for unsupported models, op
 |---------|--------------|--------|-------|
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing supports Qwen2-VL, Qwen2.5-VL, Qwen3-VL, LLaVA 1.5, LLaVA-NeXT, Llama 4, Kimi K2.5/K2.6, Qwen3.5, Qwen3.6, and Nemotron 3 Nano Omni. Exact video routing requires frontend decoding and supports Qwen3-VL, Qwen3.5, and Nemotron 3 Nano Omni. Other media layouts use text-prefix routing. |
 | [vLLM](../../developer-guide/knowledge-base/modular-components/backends/vllm/multimodal.md#multimodal-kv-routing) | Python chat processor | <Badge intent="success" minimal>Yes</Badge> | Uses vLLM's multimodal processor to derive image and video feature hashes and positions for models supported by vLLM. |
-| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Images</Badge> | Hash forwarding is upstream in SGLang 0.5.13+; Dynamo pins 0.5.19. Video requests use text-prefix routing. |
+| [SGLang](../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Yes</Badge> | Exact image routing uses SGLang's hash-forwarding support. Exact video routing supports aggregated Qwen3-VL and Qwen3.5 workers on CUDA with frontend decoding; other video requests use text-prefix routing. |
 | [TensorRT-LLM](../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md#multimodal-kv-routing) | Rust frontend (default) | <Badge intent="success" minimal>Images</Badge> | Exact image routing supports the Qwen2-VL family and Kimi K2.5/K2.6. Video requests and other models use text-prefix routing. |
 
 Nemotron 3 Nano Omni exact image and video routing currently requires the vLLM backend. Other backends fall back to text-prefix routing for this model.

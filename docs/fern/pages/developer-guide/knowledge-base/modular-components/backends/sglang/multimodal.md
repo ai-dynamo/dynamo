@@ -12,26 +12,24 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 |----------|--------------|------------|---------------|-------|
 | **Image** | HTTP/HTTPS URL | Yes | Yes | Vision encoder generates embeddings |
 | **Image** | Data URL (Base64) | No | No |  |
-| **Video** | HTTP/HTTPS, `file://`, `data:` | No | Yes, H.264/H.265, Qwen2-family only | Needs the encode worker; decoded on NVDEC, then the vision encoder produces embeddings |
+| **Video** | HTTP/HTTPS, `file://`, `data:` | Yes, VP8/VP9 on CUDA for Qwen3-VL and Qwen3.5 | Yes, H.264/H.265 for Qwen2-family only | Aggregated video requires `--frontend-decoding`; disaggregated video requires the encode worker |
 | **Audio** | HTTP/HTTPS URL | No | No | Not supported in SGLang backend |
 
 > [!IMPORTANT]
-> **Video input is limited to H.264 and H.265, and requires a separate encode
-> worker.** The runtime image ships no software video decoder, so H.264 and H.265
-> video is decoded on the GPU by NVDEC. Video in any other format (VP8, VP9, AV1)
-> cannot be decoded at all.
+> SGLang has two video-input paths with different codec and model support.
 >
-> "Encode worker" here means Dynamo's `--disaggregation-mode encode` component,
-> which runs the model's vision encoder to turn frames into embeddings. It does
-> not encode video — nothing in this path produces a video stream. Hardware
-> decode is wired into that worker (as used by `multimodal_epd.sh`). In an
-> aggregated deployment SGLang resolves and decodes the media URL itself, so
-> Dynamo never sees the bytes and cannot route them to NVDEC — video input is
-> therefore unavailable in aggregated deployments of this image.
+> - Aggregated Qwen3-VL and Qwen3.5 workers on CUDA support VP8 and VP9 with
+>   `--frontend-decoding`. Dynamo's Rust frontend decodes and transfers the
+>   sampled frames; SGLang still runs model-specific preprocessing and vision
+>   encoding. The multimodal router launcher uses this path for exact
+>   video-aware KV routing.
+> - Disaggregated Qwen2-family deployments support H.264 and H.265 through the
+>   frontend-facing `--disaggregation-mode encode` worker. NVDEC performs the
+>   decode before the vision encoder produces embeddings.
 >
-> Video is also skipped for model types whose preprocessing cannot accept
-> pre-decoded frames (the Qwen3-VL family); those requests fall back to the URL
-> path, which has no decoder in this image. Use a Qwen2-family vision model.
+> The shipped SGLang image does not provide an AV1 input decoder. SGLang XPU
+> images also omit the frontend FFmpeg decoder, so the aggregated VP8/VP9 path
+> is CUDA-only.
 >
 > NVDEC requires a GPU with a video decode engine and a container granted the
 > `video` driver capability — see
@@ -79,26 +77,33 @@ SGLang supports EPD, EP/D, E/PD, and E/P/D patterns. See [Multimodal Model Servi
 
 ### SGLang-Specific Characteristics
 
-- **Vision Encoder in Python**: Encode worker uses SGLang's MMEncoder for model-agnostic vision encoding
+- **Vision Encoder in Python**: SGLang runs model-specific vision encoding after the frontend or worker decodes the media
 - **Token Expansion**: Single `<|image_pad|>` token replaced with N tokens based on embedding shape
 - **NIXL Transfer**: Embeddings transferred from Encoder → PD Worker using NIXL
-- **No Rust Processing**: All tokenization and image handling happens in Python
+- **Optional Rust Frontend Decode**: `--frontend-decoding` moves media fetch and decode to the Rust frontend while retaining SGLang preprocessing and vision encoding
 
 ## Multimodal KV Routing
 
 Multimodal KV routing works with SGLang's aggregated worker topology. It is independent of the E/PD and E/P/D encoder-disaggregation patterns described later in this guide.
 
-SGLang RadixAttention includes a per-image `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
+SGLang RadixAttention includes a per-media `pad_value` token in its prefix-cache key. Dynamo must use that same token in the routing view:
 
-1. The Rust frontend hashes each image and calculates its expanded token count.
+1. The Rust frontend hashes each image or sampled video and calculates its expanded token count.
 2. It derives `pad_value = MM_PAD_SHIFT_VALUE + (mm_hash % 2^30)`.
-3. It substitutes that value for the image placeholder in the routing-only token view.
+3. It substitutes that value for the media placeholder in the routing-only token view.
 4. It forwards the original hash list through `GenerateReqInput.mm_hashes`.
 5. SGLang uses the supplied hash when constructing its own `pad_value`, keeping the router and RadixAttention cache keys aligned.
 
 The frontend selects this behavior automatically when the worker's `ModelDeploymentCard` reports `backend_framework="sglang"`.
 
-Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so image identity no longer contributes to cache overlap.
+For Qwen3-VL and Qwen3.5 video, `--frontend-decoding` also makes an aggregated
+worker publish its effective frame-sampling, resize, timestamp, and placeholder
+contract. The frontend enables exact video routing only when every worker in the
+discovery cohort publishes the same compatible contract. Unsupported models,
+legacy workers, mixed contracts, or a processor override fall back to
+text-prefix routing without failing the request.
+
+Step 4 needs an SGLang build that accepts `mm_hashes`. Dynamo's SGLang image carries the upstream patch that adds it; a custom build without it is still supported, but Dynamo detects the missing argument when the worker starts and routes on the text prefix alone, so media identity no longer contributes to cache overlap.
 
 Launch an aggregated deployment with multimodal KV routing:
 
@@ -107,7 +112,8 @@ cd $DYNAMO_HOME
 bash examples/backends/sglang/launch/agg_multimodal_router.sh
 ```
 
-The launcher configures KV events on each worker and sets `--router-mode kv` with a matching frontend and worker block size.
+The launcher enables `--frontend-decoding`, configures KV events on each worker,
+and sets `--router-mode kv` with a matching frontend and worker block size.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -115,6 +121,7 @@ The launcher configures KV events on each worker and sets `--router-mode kv` wit
 | `NUM_WORKERS` | `2` | Number of SGLang workers |
 | `BLOCK_SIZE` | `16` | Worker page size and frontend KV block size |
 | `KV_EVENTS_PORT_BASE` | `29090` | Starting port for per-worker KV event publishers |
+| `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Maximum sampled video frames; keep this value consistent across the frontend and workers |
 | `SGLANG_EXTRA_ARGS` | unset | Additional arguments for `python -m dynamo.sglang` |
 
 ### Version Requirements
@@ -123,13 +130,14 @@ The Dynamo SGLang image includes both routing prerequisites:
 
 - Dynamo is built with the `mm-routing` Rust feature.
 - SGLang 0.5.13 or later includes `GenerateReqInput.mm_hashes` support. Dynamo currently pins 0.5.19.
+- The CUDA image includes the codec-limited VP8/VP9 frontend decoder.
 
 Custom installations on SGLang 0.5.12 or earlier need the `mm_hashes` change
 from [sgl-project/sglang#25300](https://github.com/sgl-project/sglang/pull/25300).
 Without it, requests still complete but fall back to text-prefix-only routing.
 Prefer upgrading to 0.5.13 or later instead of patching an installed package.
 
-Enable `DYN_LOG=info,mm_routing=debug` to inspect image-token counts, multimodal hashes, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
+Enable `DYN_LOG=info,mm_routing=debug` to inspect media-token counts, multimodal hashes, the video processor contract, and the selected worker's overlap. A repeated request should select the same worker with high block overlap.
 
 For the user-facing workflow, see [Multimodal KV Routing](../../../../../use-cases/multimodal-serving/multimodal-kv-routing.md).
 

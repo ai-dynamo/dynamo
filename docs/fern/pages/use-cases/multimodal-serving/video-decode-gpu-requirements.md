@@ -4,13 +4,14 @@
 title: Video Decode GPU Requirements
 ---
 
-Dynamo provides two video-input decode paths in its CUDA runtime images:
+Dynamo provides two video-input decode paths. CUDA runtime images can use both;
+vLLM CPU and XPU runtimes can use the frontend software path:
 
 - H.264 and H.265 (HEVC) decode on the GPU using NVDEC, NVIDIA's dedicated
   hardware video decoder, through
   [PyNvVideoCodec](https://pypi.org/project/PyNvVideoCodec/).
 - VP8 and VP9 decode on the CPU through Dynamo's codec-limited, in-tree FFmpeg
-  when frontend decoding is enabled on vLLM or SGLang.
+  when frontend decoding is enabled on vLLM, or SGLang on CUDA.
 
 The in-tree FFmpeg does not include H.264, H.265, or AV1 decoders. Without
 frontend decoding, video input remains owned by the backend and requires its
@@ -131,8 +132,8 @@ between the two.
 ## Behavior when NVDEC is unavailable
 
 Hardware decode is additive and never blocks a request on its own: routing falls through
-to a software decode path where one exists. VP8 and VP9 frontend decoding on CUDA vLLM
-and SGLang does not depend on NVDEC.
+to a software decode path where one exists. VP8 and VP9 frontend decoding on vLLM, or
+SGLang on CUDA, does not depend on NVDEC.
 
 > [!IMPORTANT]
 > The shipped images do not include a software H.264, H.265, or AV1 decoder.
@@ -142,7 +143,7 @@ and SGLang does not depend on NVDEC.
 > route it through NVDEC and the in-tree FFmpeg excludes it.
 >
 > Grant the container the `video` driver capability so NVDEC can serve H.264 and H.265.
-> For VP8 and VP9, use frontend decoding on a CUDA vLLM or SGLang runtime. For
+> For VP8 and VP9, use frontend decoding on vLLM, or SGLang on CUDA. For
 > other software-decoded cases, install a decode carrier alongside or transcode
 > the input before sending it.
 
@@ -205,7 +206,7 @@ NVDEC as above needs no additional change. Encode performance does not depend on
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DYN_DISABLE_NVDEC` | unset | Set to `1` to skip hardware decode. In a shipped image that leaves video input with no decoder at all, so it is a debugging switch rather than a fallback. Read as a boolean: `1`/`true`/`yes` disable, anything else does not. |
+| `DYN_DISABLE_NVDEC` | unset | Set to `1` to skip hardware decode. In a shipped image that leaves H.264 and H.265 input with no decoder, so it is a debugging switch rather than a fallback for those codecs. VP8 and VP9 frontend decoding is unaffected. Read as a boolean: `1`/`true`/`yes` disable, anything else does not. |
 | `DYN_NVDEC_GPU_ID` | `0` | GPU ordinal used for decode. |
 | `DYN_MM_VIDEO_NUM_FRAMES` | `32` | Frames sampled uniformly from each clip. |
 | `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum size in MiB for each remote image, audio, or video download. TensorRT-LLM uses its backend-specific `--max-file-size-mb` option (`DYN_TRTLLM_MAX_FILE_SIZE_MB`) instead. |
