@@ -77,7 +77,17 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.29.0-ubuntu2404
+    # DeepSeek V4.1 Flash benchmark baseline: vLLM commit 3df4ae153eb385e,
+    # published 2026-09-21 as 0.29.1rc1.dev452+g3df4ae153. Pin its
+    # multi-architecture manifest rather than following the mutable nightly tag.
+    # BuildKit selects the matching child for each CUDA stage:
+    # arm64  sha256:a17c15e30254f83adadcf1d9b85db18c59ea1e76a1aca1db8db20c3a12b48ba2
+    # amd64  sha256:45f77c2928b7ad11b8ce8ae1cfe445810b0bdb2a268efaf4a231dda1e333e8c9
+    runtime_image_tag: nightly-3df4ae153eb385e27b52f26c81f8edb9e20b9984@sha256:1e1f56a164a3dfdf87a57168983602421a295b0b3570d27c5b49c54b97b341b4
+    # DeepSeek V4.1 Flash is text-only.  Its day-0 image must retain the
+    # dependency solution supplied by vLLM nightly, rather than installing the
+    # separately released Omni stack with its incompatible Transformers pin.
+    enable_vllm_omni: "false"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -99,6 +109,7 @@ vllm:
     runtime_image_tag: v0.29.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
   vllm_omni_ref: "v0.29.0rc1"
+  enable_vllm_omni: "true"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
