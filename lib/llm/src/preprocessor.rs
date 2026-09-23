@@ -11,7 +11,6 @@
 //!
 //! The Preprocessor will accept any IngressRequest and transform it to a BackendRequest.
 
-mod deepseek_v41;
 pub mod media;
 #[cfg(feature = "mm-routing")]
 pub mod mm_routing;
@@ -1649,7 +1648,6 @@ pub struct OpenAIPreprocessor {
     /// variants are initialized independently on demand.
     embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
-    order_deepseek_v41_media: bool,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
     runtime_config: crate::local_model::runtime_config::ModelRuntimeConfig,
@@ -2379,8 +2377,6 @@ impl OpenAIPreprocessor {
             );
         };
         let model_info = model_info.get_model_info()?;
-        let order_deepseek_v41_media =
-            deepseek_v41::matches_model(&model_info.model_type(), &mdc.display_name);
         let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
         let normalize_tool_call_args = mdc.runtime_config.tool_call_arguments_format
             == crate::local_model::runtime_config::ToolCallArgumentsFormat::JsonObject
@@ -2704,7 +2700,6 @@ impl OpenAIPreprocessor {
             tokenizer,
             embedding_tokenizers,
             model_info,
-            order_deepseek_v41_media,
             mdcsum,
             lora_name,
             runtime_config,
@@ -3402,13 +3397,7 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        // V4.1 sorts tool results in its prompt. Collect their media in the same
-        // order, including UUID-only slots, so image identities cannot swap.
-        let message_order = (self.order_deepseek_v41_media
-            && messages
-                .iter()
-                .any(|m| matches!(m, ChatCompletionRequestMessage::Tool(_))))
-        .then(|| deepseek_v41::media_message_order(messages));
+        let message_order = self.formatter.media_message_order(request);
         for index in 0..messages.len() {
             let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {

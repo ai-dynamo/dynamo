@@ -63,8 +63,8 @@ aisimulate-core = { version = "=0.12.0" }
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0" }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=1.8.2" }
-dynamo-renderer = { version = "=5.3.2" }
+dynamo-tokenizers = { version = "=1.9.1" }
+dynamo-renderer = { version = "=5.4.0" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
