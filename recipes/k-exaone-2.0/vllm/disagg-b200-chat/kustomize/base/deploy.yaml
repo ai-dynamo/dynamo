@@ -113,11 +113,10 @@ spec:
                 - --kv-events-config
                 - '{"enable_kv_cache_events":true,"publisher":"zmq"}'
                 - --spec-method
-                - exaone_moe_mtp
+                - mtp
                 - --spec-tokens
                 - "2"
-                # For perf benchmarking only, replace the two entries above with (the engine
-                # resolves the deprecated exaone_moe_mtp alias to mtp):
+                # For perf benchmarking only, replace the two entries above with:
                 # - --speculative-config
                 # - '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":1.94}'
               securityContext:
@@ -202,11 +201,10 @@ spec:
                 - --kernel-config
                 - '{"moe_backend":"FLASHINFER_CUTLASS"}'
                 - --spec-method
-                - exaone_moe_mtp
+                - mtp
                 - --spec-tokens
                 - "2"
-                # For perf benchmarking only, replace the two entries above with (the engine
-                # resolves the deprecated exaone_moe_mtp alias to mtp):
+                # For perf benchmarking only, replace the two entries above with:
                 # - --speculative-config
                 # - '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":1.94}'
               securityContext:

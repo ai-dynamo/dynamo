@@ -80,7 +80,7 @@ spec:
           - --kv-events-config
           - '{"enable_kv_cache_events":true,"publisher":"zmq"}'
           - --spec-method
-          - exaone_moe_mtp
+          - mtp
           - --spec-tokens
           - "2"
           command:
