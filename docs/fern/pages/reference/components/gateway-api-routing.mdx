@@ -21,7 +21,7 @@ pinned to 1.4, does not read `DYN_EPP_MODE` and has no standalone mode.
 | Dynamo runtime | Required. It uses whichever discovery and event planes the platform is configured for; etcd and NATS are needed only when selected | Not used |
 | Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
 | EPP ServiceAccount and RBAC | Cluster-wide mode: the operator creates the ServiceAccount and binds it to the `dynamo-platform` chart's EPP ClusterRole. Namespace-restricted mode: the chart creates the ServiceAccount, Role, and RoleBinding | Supplied with the deployment manifests |
-| EPP replication | Available. Replicas exchange active-sequence state through the Dynamo event plane, which the runtime addresses and discovers. It is ZMQ-backed by default and NATS when the runtime is configured for it | Available. Replicas exchange active-sequence state over ZMQ sockets the EPP binds itself, discovering peers from the Service named by `DYN_EPP_PEER_SERVICE` |
+| EPP replication | Available. When `DYN_ROUTER_REPLICA_SYNC` is set, replicas exchange active-sequence state through the Dynamo event plane, which the runtime addresses and discovers. It is ZMQ-backed by default and NATS when the runtime is configured for it | Available. Replicas exchange active-sequence state over ZMQ sockets the EPP binds itself, discovering peers from the Service named by `DYN_EPP_PEER_SERVICE` |
 
 A standalone EPP is not managed by the Dynamo operator, so the operator generates no resources for
 it. It uses neither the EPP ServiceAccount nor the `dynamo-platform` chart's EPP RBAC. Standalone
@@ -58,9 +58,8 @@ and is configured through `DYN_*` environment variables. It implements the GAIE
   active-load state unless `DYN_ROUTER_REPLICA_SYNC` is set. Read
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy) before scaling it.
 
-  The deprecated Go EPP, selected by the presence of `eppConfig`, hosts no Dynamo KV router and has
-  no way to share state between replicas. It must have exactly `1` replica, and admission rejects any
-  other value.
+  The deprecated Go EPP, selected by the presence of `eppConfig`, does not support replication. It
+  must have exactly `1` replica, and admission rejects any other value.
 </ParamField>
 
 <ParamField path="spec.components[].frontendSidecar" type="string" required={true}>
@@ -120,8 +119,7 @@ Gateway topology.
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
   plane. It is off by default, matching the Frontend-hosted router, and is set through `podTemplate`
   env. It has no peer to synchronize with at one replica, and the deprecated Go EPP cannot be
-  replicated at all. It reduces cross-replica divergence rather than removing it, and it carries a
-  throughput cost. See
+  replicated at all. Set this field to `true` when enabling multiple EPP replicas. See
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
 </ParamField>
 
@@ -142,121 +140,14 @@ For the full shared configuration surface and tuning guidance, see
 
 ## EPP Replication and Routing Accuracy
 
-Running more than one EPP replica trades exact load accounting for endpoint-picker throughput and
-fault tolerance. The trade is the same one the Frontend-hosted KV router already makes when it is
-replicated, described in
-[Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md).
-This section states what a replicated EPP gets wrong, and by how much.
+The EPP embeds the same KV router as the Frontend and reads the same `DYN_ROUTER_*` settings, so
+replicated EPPs keep prefix-cache and active-load state the same way replicated Frontends do. See
+[Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md)
+for how that state behaves across replicas and what `DYN_ROUTER_REPLICA_SYNC` synchronizes.
 
-The router keeps two kinds of state, and only one of them is affected.
-
-**Prefix-cache state converges on its own.** Workers publish KV `Stored` and `Removed` events to the
-Dynamo event plane, and every subscriber receives every event, so each replica builds an equivalent
-radix tree without any router-to-router traffic. Cache-overlap scoring, which dominates worker choice
-on prefix-heavy traffic, is therefore as accurate with ten replicas as with one. A replica that starts
-late rebuilds prefix state by querying each worker's local indexer.
-
-**Active-block state does not.** A booking is recorded by the replica that routed the request, so each
-replica sees only the load it placed itself. `DYN_ROUTER_REPLICA_SYNC` shares the request lifecycle —
-add, prefill-complete, and free — across replicas. It is off by default. That channel is
-fire-and-forget: its outbound queue drops the newest event when full, there is
-no acknowledgement, replay, or resynchronization, and replicas can disagree for a bounded period.
-Output-block growth is never shared, because it changes at a frequency that would consume
-disproportionate bandwidth, so decode-side load estimates drift between replicas whenever
-`DYN_ROUTER_TRACK_OUTPUT_BLOCKS` is on.
-
-Enabling it does not make active-load accounting correct. It changes the error from permanent to
-transient. Left off, each replica scores workers from its own slice of the traffic and understates load
-by roughly the replica count, and every replica is wrong in the same direction, so the errors compound
-rather than averaging out. Turned on, replicas converge on a fleet-wide view between the gaps above.
-Those gaps are not symmetric when the outbound queue drops an event: a dropped `add` hides a request
-from a peer for that request's lifetime, while a dropped `free` leaves a phantom booking on the peer
-until the reaper clears it.
-
-### Choosing Whether to Enable Replica Synchronization
-
-It is off by default, which matches the Frontend-hosted router. Leaving it off is a real choice rather
-than an oversight, because sharing is not free.
-
-Every replica applies every other replica's lifecycle events, so the work of maintaining the shared
-view does not divide as replicas are added. A replica publishes the events for the requests it routed
-and receives the events for all the rest, which converges on the whole fleet's request rate no matter
-how many replicas there are. An `add` also carries one block hash per KV block of its prompt, so the
-per-event cost rises with prompt length. Adding replicas scales out request handling; it does not scale
-out this bookkeeping.
-
-Enable it when the cost is bounded and the benefit is real:
-
-- Traffic is unevenly distributed across replicas, so a local view is a poor sample of the fleet.
-- Active-load precision drives worker choice, as with long generations or tight latency targets.
-- Request rates and prompt lengths are modest enough that the added event volume is comfortable.
-
-Leave it off when traffic is already spread evenly across replicas, when cache-overlap scoring rather
-than active load drives most decisions, or when the deployment is scaled out for throughput at prompt
-lengths and request rates that would make fleet-wide event volume expensive.
-
-Measure rather than assume. The publisher and the ingress both expose Prometheus metrics, so the added
-volume and any dropped events are visible once it is on.
-
-### Booking Ownership on Disconnect and Retry
-
-The Frontend owns a request end to end and frees its booking when the work ends. The EPP only selects,
-so it has no direct view of the worker: it watches the response through `ext_proc` and frees when that
-stream ends.
-
-In practice the free lands where the Frontend's does. A stream that runs to completion ends when the
-response does. A stream that ends early takes the worker with it, because agentgateway drops fail-open
-once request headers are sent and has no response-side fail-open: an `ext_proc` failure mid-response
-ends the exchange, closing the stream to the worker, and the worker's Frontend sidecar cancels
-generation on the disconnect. Either way nothing keeps running that the EPP has stopped accounting
-for.
-
-Two effects remain:
-
-- **A retry can land on a different EPP.** The gateway load-balances `ext_proc` streams across EPP pods
-  with no request affinity, so a retried request re-enters admission on whichever replica it reaches.
-  Until the original `free` propagates, a replica that has not received it holds both bookings and
-  counts the request twice.
-- **Cancellation is not instant.** A disconnected decode request may hold router state for up to
-  `CLEANUP_DISPATCH_TIMEOUT` (120 seconds) while it finishes reaching its worker, so the free and the
-  release of worker capacity are close but not simultaneous.
-
-This reasoning depends on the gateway resetting the upstream. A gateway that instead lets the upstream
-run would leave the EPP accounting for nothing while the worker is still busy, which understates that
-worker across every replica that received the `free`.
-
-### Selection-to-Booking Race
-
-Replica synchronization is eventually consistent, so it cannot serialize selection. Two replicas can
-evaluate the same worker as least-loaded before either one's booking has propagated, and both send work
-to it. The size of the error grows with request arrival rate and with propagation delay, and no setting
-removes it. `DYN_ROUTER_TEMPERATURE` above `0` decorrelates replicas by sampling among near-equal
-workers, which reduces how often they converge on the same choice.
-
-### Queue and Admission State
-
-Replica synchronization covers active-sequence state. It does not cover the router queue, and that
-is a different kind of loss from the accuracy drift above.
-
-When router queueing is enabled, a request waits in the queue of the replica that received it. That
-queue is local to the replica and does not outlive it. No peer adopts the queued requests of a
-replica that goes away, and none of them is replayed. A replica also cannot see what its peers have
-queued, so admission decisions, fairness, and priority ordering hold within a replica rather than
-across the fleet. Making them fleet-wide would need strong consistency between replicas, which
-best-effort synchronization does not provide.
-
-Plan for this at the layer above. A client or gateway retry re-enters admission on whichever replica
-serves the retry, which is the recovery path available today. Weigh that against the workload's
-tolerance before enabling queueing and replication together: a queue that absorbs a long backlog
-concentrates more work in each replica, so more is lost when one is replaced during a rolling update
-or a node failure.
-
-### Choosing a Replica Count
-
-Use one replica when active-load precision matters more than endpoint-picker throughput, or when the
-workload is long-generation and sensitive to decode-side balance. Use several when the EPP itself is
-the bottleneck or its availability is, and the traffic is prefix-heavy enough that cache-overlap
-scoring — the part that stays accurate — drives most of the routing decision.
+One difference is specific to the EPP. The gateway, not the EPP, sends the request to the worker, so
+the EPP frees a booking when the gateway's `ext_proc` stream for that request ends. If the gateway
+keeps the request running after that stream ends, the EPP no longer counts that request's load.
 
 ## Generated Resource Contract
 
