@@ -119,6 +119,26 @@ spec:
             - name: metrics
               containerPort: {{ .Values.agent.prometheusPort }}
               protocol: TCP
+            - name: readyz
+              containerPort: 8081
+              protocol: TCP
+          # Readiness means the agent is ENFORCING power caps: its last
+          # reconcile cycle completed every enforcement action it was required
+          # to take, with no reported failure, and completed recently. Values
+          # are hard-coded rather than templated through values.yaml — the port
+          # is fixed in the agent with no flag, so a chart value that could
+          # disagree with it is a footgun, and a configurable failureThreshold
+          # would let an operator dial the debounce until readiness means
+          # nothing. No livenessProbe: a non-enforcing agent must keep
+          # reconciling (it can recover), and a restart would drop in-memory
+          # GPU ownership.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: readyz
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

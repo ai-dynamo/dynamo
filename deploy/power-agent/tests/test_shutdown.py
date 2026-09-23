@@ -90,12 +90,17 @@ class TestRunLoopRunsCleanupOnce(_ShutdownTestBase):
         agent._actuator = MagicMock()
         agent.node_name = "node-1"
         agent.safe_default_watts = 500
+        agent._last_good_cycle = 0.0
         agent.reconcile_once = reconcile
+        # `run()` binds the readiness port; these tests are about cleanup, and
+        # a real bind would leak a listener across the suite.
+        agent._start_readyz_server = MagicMock()
         return agent
 
     def test_cleanup_runs_once_on_normal_shutdown(self):
         def reconcile():
             power_agent._shutdown.set()  # SIGTERM equivalent
+            return True
 
         agent = self._bare_agent(reconcile)
         with patch.object(power_agent.signal, "signal"), patch.object(
@@ -120,6 +125,71 @@ class TestRunLoopRunsCleanupOnce(_ShutdownTestBase):
             agent.run()
 
         cleanup.assert_called_once_with(agent._actuator)
+
+
+class TestShutdownDoesNotLaunderTheCycleBoolean(_ShutdownTestBase):
+    """Both `_shutdown` short-circuits in `reconcile_once` return the fold
+    accumulated so far, never a literal True (DEP #14767).
+
+    The GPUs a short-circuit skipped were not actions the cycle was required to
+    take, so a shutdown that interrupts an otherwise clean cycle must not flip
+    the pod NotReady during its own termination grace period. But a shutdown
+    landing AFTER an earlier GPU already failed must not discard that failure:
+    an unconditional True would publish a fresh successful timestamp at the
+    exact moment `_shutdown_cleanup` starts restoring default caps, so
+    `/readyz` would claim enforcement while enforcement was being torn down.
+    """
+
+    def _agent(self, device_count):
+        agent = power_agent.PowerAgent.__new__(power_agent.PowerAgent)
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent._core_v1 = core_v1
+        agent.node_name = "node-1"
+        agent.k8s_namespace = None
+        agent.device_count = device_count
+        agent.metrics = MagicMock()
+        actuator = MagicMock()
+        actuator.device_count.return_value = device_count
+        agent._actuator = actuator
+        return agent
+
+    def test_fast_path_returns_true(self):
+        """`_shutdown` already set on entry: no GPU has been touched, so the
+        fold is still at its initial value. True is the ONLY reachable result
+        here — an assertion expecting False would be unsatisfiable."""
+        agent = self._agent(device_count=3)
+        agent._reconcile_gpu = MagicMock()
+        power_agent._shutdown.set()
+
+        self.assertIs(agent.reconcile_once(), True)
+        agent._reconcile_gpu.assert_not_called()
+
+    def test_midloop_break_returns_true_when_nothing_had_failed(self):
+        agent = self._agent(device_count=4)
+
+        def fake(gpu_idx, _uid_to_annotation):
+            power_agent._shutdown.set()  # SIGTERM lands while handling GPU 0
+            return True
+
+        agent._reconcile_gpu = fake
+
+        self.assertIs(agent.reconcile_once(), True)
+
+    def test_midloop_break_preserves_an_earlier_failure(self):
+        """The actual regression test for "shutdown does not launder a
+        failure" — and the only place the False half is reachable."""
+        agent = self._agent(device_count=4)
+
+        def fake(gpu_idx, _uid_to_annotation):
+            if gpu_idx == 0:
+                return False  # GPU 0 failed to enforce
+            power_agent._shutdown.set()  # SIGTERM lands on GPU 1
+            return True
+
+        agent._reconcile_gpu = fake
+
+        self.assertIs(agent.reconcile_once(), False)
 
 
 class TestCleanupViaActuator(_ShutdownTestBase):

@@ -40,7 +40,9 @@ import os
 import re
 import signal
 import threading
+import time
 from typing import Callable, Optional
+from wsgiref.simple_server import WSGIRequestHandler, make_server
 
 import managed_state
 from actuator import Actuator, DcgmActuator, NvmlActuator, _GpuIdentityMismatch
@@ -79,6 +81,27 @@ logger = logging.getLogger("power_agent")
 
 POWER_ANNOTATION_KEY = "dynamo.nvidia.com/gpu-power-limit"
 RECONCILE_INTERVAL_S = 15
+
+# Readiness: how long the last successful cycle may age before `/readyz` reports
+# NotReady. The bound is what catches a HUNG cycle, which nothing else can —
+# `run()` has no watchdog, NVML and DCGM calls are unbounded, and a blocked cycle
+# keeps serving whatever the last one published, so the probe's failureThreshold
+# cannot see it (nothing is failing; it is simply not advancing). The bound
+# restarts nothing; it only stops publishing a stale claim.
+#
+# The multiplier of 3 is what makes that safe. `run()` sleeps AFTER each cycle,
+# so the timestamp refreshes every RECONCILE_INTERVAL_S plus the cycle's own
+# duration; 3x therefore tolerates a healthy cycle lasting up to
+# 2 * RECONCILE_INTERVAL_S (~30 s at the default) before a slow-but-working agent
+# is called NotReady.
+STALE_AFTER_S = 3 * RECONCILE_INTERVAL_S
+
+# Readiness server port. Fixed, with no CLI flag and no chart value: readiness
+# must not be optional, and a chart value that could disagree with the agent
+# would be a footgun. Deliberately NOT served from the Prometheus server, which
+# `--prometheus-port=0` disables. The pod does not use hostNetwork, so this is
+# pod-local and cannot collide with anything on the node.
+READYZ_PORT = 8081
 
 # Pod-LIST timeouts. These exist so a SIGTERM that lands while the reconcile
 # loop is blocked in the apiserver LIST cannot eat the whole pod termination
@@ -500,14 +523,21 @@ _pending_retirement: set[str] = set()
 
 def _apply_cap(
     handle, gpu_idx: int, requested_w: int, metrics: PowerAgentMetrics
-) -> None:
-    """Apply NVML power cap. All writes go through here."""
+) -> bool:
+    """Apply NVML power cap. All writes go through here.
+
+    Returns True when the Set and its ownership/metric bookkeeping completed,
+    False when NVML rejected the write. The failure is still logged and counted
+    and is deliberately NOT re-raised — the caller uses the boolean to decide
+    whether the cycle enforced, not whether to abort.
+    """
     effective_w = _clamp_to_constraints(handle, requested_w, gpu_idx, metrics)
     try:
         pynvml.nvmlDeviceSetPowerManagementLimit(handle, effective_w * 1000)
         _managed_gpu_indices.add(gpu_idx)
         _record_managed_gpu_uuid(handle)
         metrics.applied_limit_watts.labels(gpu=str(gpu_idx)).set(effective_w)
+        return True
     except pynvml.NVMLError as e:
         logger.error(
             "nvmlDeviceSetPowerManagementLimit GPU %d → %d W failed: %s",
@@ -516,6 +546,7 @@ def _apply_cap(
             e,
         )
         metrics.apply_failures_total.inc()
+        return False
 
 
 def _retire_actuator_ownership(actuator: Actuator, uuid: str) -> None:
@@ -609,8 +640,14 @@ def _flush_pending_retirements() -> None:
 
 def _release_managed_gpu(
     actuator: Actuator, gpu_idx: int, expected_uuid: Optional[str] = None
-) -> None:
+) -> bool:
     """Restore default TGP on a GPU we previously capped, and unmanage it.
+
+    Returns True when nothing this call was required to do was left undone —
+    either the release completed, or no release was required because the GPU is
+    not ours. Every deferral of a REQUIRED release returns False, so the cycle
+    fold behind pod readiness (`reconcile_once`) cannot report enforcement for a
+    cycle that left a cap possibly stranded.
 
     Runtime counterpart to ``_shutdown_cleanup`` / ``_restore_orphaned_gpus_on_startup``.
     Invoked from steady-state reconcile when a GPU we previously capped is now
@@ -663,7 +700,7 @@ def _release_managed_gpu(
         logger.warning(
             "Failed to read UUID for GPU %d during release check: %s", gpu_idx, e
         )
-        return
+        return False
 
     # Reverify against the pre-snapshot identity that routed us here. The "no
     # annotated pod owns this GPU" evidence was gathered on whatever GPU
@@ -681,10 +718,12 @@ def _release_managed_gpu(
             expected_uuid,
             uuid,
         )
-        return
+        return False
 
     if gpu_idx not in _managed_gpu_indices and uuid not in _previously_managed:
-        return  # not a GPU this agent capped — leave it alone (UUID-gating)
+        # Not a GPU this agent capped — leave it alone (UUID-gating). No
+        # release was REQUIRED, so this is a successful no-op for the cycle.
+        return True
 
     # Identity we historically capped at this index. On the ``dcgm`` path this
     # can differ from the current occupant after a hostengine re-enumeration
@@ -711,7 +750,7 @@ def _release_managed_gpu(
                 gpu_idx,
                 e,
             )
-            return
+            return False
 
     # A dcgm re-enumeration can make the index's recorded identity
     # (managed_uuid) differ from the current occupant (uuid). The "unannotated
@@ -741,7 +780,7 @@ def _release_managed_gpu(
                     uuid,
                     actuator.name,
                 )
-                return
+                return False
             logger.info(
                 "Released cap on the current occupant of GPU %d (UUID %s) by "
                 "UUID: previously managed, now running only unannotated/non-K8s "
@@ -751,7 +790,7 @@ def _release_managed_gpu(
                 managed_uuid,
             )
             _commit_release(actuator, gpu_idx, uuid)
-            return
+            return True
 
         # The current occupant is NOT a GPU we manage (a re-enumeration dropped
         # an unrelated GPU onto this index, or the actuator has no UUID-addressed
@@ -762,6 +801,13 @@ def _release_managed_gpu(
         # orphan recovery, so it is never stranded. NVML has no
         # managed_uuid_for_idx (managed_uuid == uuid there), so this whole
         # branch is a no-op on that path.
+        #
+        # This returns False for the cycle fold: the GPU loop only moves
+        # forward, so a re-enumeration that lands the displaced managed GPU on
+        # an ALREADY-PASSED index leaves it unassessed this cycle, and True
+        # would publish a fresh successful timestamp for a cycle that skipped a
+        # managed GPU. When the displaced GPU lands on a not-yet-reached index
+        # this is a false negative, which the next cycle clears.
         logger.info(
             "Skipping cap release for GPU %d: index now hosts %s (not managed by "
             "us) but we capped %s here (dcgm re-enumeration). Deferring the "
@@ -770,7 +816,7 @@ def _release_managed_gpu(
             uuid,
             managed_uuid,
         )
-        return
+        return False
 
     # managed_uuid == uuid: the current occupant IS the GPU we capped here.
     # Delegate the below-default / at-default / restore decision to the
@@ -794,7 +840,7 @@ def _release_managed_gpu(
             managed_uuid,
             e,
         )
-        return
+        return False
     if result is False:
         # Not conclusively located/restored (a probe raised, or a proven
         # mid-write re-enumeration): the cap may still be LIVE, so keep our
@@ -807,7 +853,7 @@ def _release_managed_gpu(
             managed_uuid,
             actuator.name,
         )
-        return
+        return False
     # True (restored a live below-default cap) or None (reconfirmed at/above
     # default, or a clean scan proved the GPU gone): either way it is CONCLUSIVE
     # that no cap of ours remains, so retire ownership durably.
@@ -819,6 +865,7 @@ def _release_managed_gpu(
         actuator.name,
     )
     _commit_release(actuator, gpu_idx, managed_uuid)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1262,6 +1309,18 @@ def _resolve_cap_for_gpu(
 # ---------------------------------------------------------------------------
 
 
+class _QuietWSGIHandler(WSGIRequestHandler):
+    """WSGI handler that does not log a line per request.
+
+    `WSGIRequestHandler` inherits `BaseHTTPRequestHandler.log_message`, which
+    writes one line to stderr per request. At the probe's `periodSeconds: 10`
+    that is ~8,600 lines per node per day of pure noise in the agent's logs.
+    """
+
+    def log_message(self, format, *args):  # noqa: A002 - base-class signature
+        pass
+
+
 class PowerAgent:
     def __init__(
         self,
@@ -1276,6 +1335,17 @@ class PowerAgent:
         self.node_name = node_name or os.environ.get("NODE_NAME", "")
         self.k8s_namespace = k8s_namespace
         self.metrics = PowerAgentMetrics(prometheus_port)
+
+        # Readiness state: the monotonic timestamp of the last cycle that
+        # enforced everything it was required to, or 0.0 for "no cycle has ever
+        # succeeded / the last one failed". ONE float, assigned exactly once per
+        # cycle in `run()`, so a reader on the server thread can never see a torn
+        # mix and an exception can never leave a stale SUCCESSFUL timestamp in
+        # place. No lock is needed. An instance attribute rather than a module
+        # global because `power_agent` is `__main__` under the entrypoint while
+        # `actuator.py` reaches it via `import power_agent` — two distinct module
+        # objects, and a global would exist twice.
+        self._last_good_cycle: float = 0.0
 
         if pynvml is None:
             raise RuntimeError("pynvml is required — install pynvml or nvidia-ml-py")
@@ -1421,8 +1491,27 @@ class PowerAgent:
                 result[pod.metadata.uid] = annotations[POWER_ANNOTATION_KEY]
         return result
 
-    def reconcile_once(self) -> None:
+    def reconcile_once(self) -> bool:
         """Run one reconcile cycle: list pods, map PIDs→UIDs, apply caps.
+
+        Returns the whole-cycle enforcement boolean: True iff every enforcement
+        action this cycle was REQUIRED to take completed, and the inputs it
+        depended on were obtained. Every path that swallows a failure to keep
+        the loop running (a failed cap write, a cap skipped on unconfirmed GPU
+        identity, a failed PID snapshot, a failed release, a failed pod list, a
+        failed device-count refresh) sets it False. This is what `/readyz`
+        publishes, so no enforcement failure may be silently absorbed. A GPU
+        that is merely idle is never written and contributes nothing either way.
+
+        Two things are deliberately OUTSIDE the fold. The persistence-only
+        retries below each retry a durable record whose hardware write and
+        in-memory ownership already succeeded, so live enforcement is correct
+        and only a RESTARTED agent would notice. And a cgroup read that yields
+        no pod UID is indistinguishable from a non-Kubernetes process, so it is
+        not a failure the cycle can observe at all.
+
+        A False cycle does NOT exit the process: a NotReady agent that keeps
+        reconciling can recover, while a restart drops in-memory GPU ownership.
 
         On Kubernetes API failure during the pod list we skip the cycle
         rather than treating the apiserver outage as "no pods on this
@@ -1438,14 +1527,26 @@ class PowerAgent:
         # `run()`'s `finally` cleanup and risk kubelet SIGKILL before caps are
         # restored. `run()` still executes `_shutdown_cleanup` from its
         # `finally`, so returning early loses no restoration work.
+        #
+        # Returns the fold accumulated so far — here, still its initial value.
+        # The GPUs this short-circuit skipped were not actions the cycle was
+        # required to take, so a shutdown that interrupts an otherwise clean
+        # cycle does not flip the pod NotReady during its own termination grace
+        # period. It is NOT special-cased to a literal True; see the mid-loop
+        # break below, where the distinction is load-bearing.
+        ok = True
         if _shutdown.is_set():
             logger.info("Shutdown requested — skipping reconcile cycle.")
-            return
+            return ok
 
         # Flush any release OR acquisition whose durable write failed on a
         # previous cycle BEFORE listing pods, so it retries even during a
         # Kubernetes API outage (the retry touches only the state volume, not
         # the apiserver).
+        #
+        # Persistence-only: deliberately NOT folded into `ok` (see the
+        # docstring). Their failures already log and are visible in the
+        # `_pending_*` set sizes.
         _flush_pending_retirements()
         _flush_pending_acquisitions()
 
@@ -1466,7 +1567,7 @@ class PowerAgent:
                 "remain in effect; alert on k8s_list_failures_total > 0 "
                 "over 5m."
             )
-            return
+            return False
         uid_to_annotation = self._build_uid_to_annotation(pods)
 
         # Re-snapshot the device count every cycle rather than trusting the
@@ -1475,7 +1576,9 @@ class PowerAgent:
         # a startup-frozen count would never reconcile the new GPUs; if it
         # SHRANK, iterating the stale (larger) range raises per-index errors.
         # Best-effort — on a transient read failure keep the last-known count
-        # for this cycle rather than skipping enforcement entirely.
+        # for this cycle rather than skipping enforcement entirely — but the
+        # cycle ran against a possibly-stale topology, so it does not count as
+        # enforcing.
         try:
             self.device_count = self._actuator.device_count()
         except Exception as e:
@@ -1484,6 +1587,7 @@ class PowerAgent:
                 self.device_count,
                 e,
             )
+            ok = False
 
         for gpu_idx in range(self.device_count):
             # Stop enforcing the moment shutdown is requested: cleanup runs from
@@ -1498,18 +1602,38 @@ class PowerAgent:
                     "within the grace period.",
                     gpu_idx,
                 )
+                # Falls through to `return ok` — the fold SO FAR, never a
+                # literal True. An unconditional True would publish a fresh
+                # successful timestamp at the exact moment `_shutdown_cleanup`
+                # starts restoring default caps, so `/readyz` would claim
+                # enforcement while enforcement was being torn down.
                 break
             try:
-                self._reconcile_gpu(gpu_idx, uid_to_annotation)
+                # `_reconcile_gpu(...) and ok`, NOT `ok and _reconcile_gpu(...)`:
+                # the second form short-circuits, so once one GPU fails no later
+                # GPU is reconciled at all. The fold must never short-circuit.
+                ok = self._reconcile_gpu(gpu_idx, uid_to_annotation) and ok
             except Exception as e:
                 logger.error("Reconcile failed for GPU %d: %s", gpu_idx, e)
+                ok = False
+
+        return ok
 
     def _reconcile_gpu(
         self,
         gpu_idx: int,
         uid_to_annotation: dict[str, Optional[str]],
-    ) -> None:
+    ) -> bool:
         """Apply the policy-resolved cap for one GPU via the active actuator.
+
+        Returns True when this GPU needed no enforcement action or the action it
+        needed completed; False when a required write or release was skipped or
+        failed. Feeds `reconcile_once`'s whole-cycle enforcement boolean.
+
+        `_resolve_cap_for_gpu`'s fallback to `safe_default_watts` on a missing,
+        unparseable, or contested annotation is NOT a failure: readiness tracks
+        the cap the agent RESOLVED, not the one the user asked for, so once that
+        resolved cap is written the GPU counts as enforced.
 
         Routes through `self._actuator.list_running_pids` and
         `self._actuator.apply_cap` instead of inline `pynvml`. On
@@ -1569,7 +1693,7 @@ class PowerAgent:
                 gpu_idx,
                 e,
             )
-            return
+            return False
 
         # Bind the PID snapshot to the anchored identity: on the DCGM path a
         # re-enumeration could otherwise attribute a different GPU's workload to
@@ -1592,9 +1716,11 @@ class PowerAgent:
                 expected_uuid,
                 e,
             )
-            return
+            return False
         if not pids:
-            return  # no K8s workload on this GPU
+            # Idle GPU: no K8s workload, never written, so it is not an action
+            # this cycle was required to take.
+            return True
 
         # Deduplicate by pod UID before building `pod_annotations`. A
         # single pod commonly runs multiple GPU processes (one per rank
@@ -1635,8 +1761,9 @@ class PowerAgent:
             # GPU whose (absent) annotated workload we actually observed — a
             # re-enumeration that swapped this index's occupant is detected and
             # the stale projection skipped.
-            _release_managed_gpu(self._actuator, gpu_idx, expected_uuid=expected_uuid)
-            return
+            return _release_managed_gpu(
+                self._actuator, gpu_idx, expected_uuid=expected_uuid
+            )
 
         cap_w = _resolve_cap_for_gpu(
             gpu_idx, pod_annotations, self.safe_default_watts, self.metrics
@@ -1645,7 +1772,68 @@ class PowerAgent:
         # still the GPU on this index before writing; a re-enumeration
         # anywhere across attribution → resolve → write is detected and the
         # write skipped.
-        self._actuator.apply_cap(gpu_idx, cap_w, expected_uuid=expected_uuid)
+        #
+        # `.ok` is the whole point: `apply_cap` returning normally is NOT
+        # success — both actuators absorb their write errors and still return a
+        # plausible post-clamp wattage. A raise from here (the NVML/DCGM
+        # RuntimeError paths that return no result at all) propagates to
+        # `reconcile_once`'s per-GPU `except`, which folds it to False.
+        result = self._actuator.apply_cap(gpu_idx, cap_w, expected_uuid=expected_uuid)
+        return result.ok
+
+    def _readiness(self) -> tuple[bool, Optional[float]]:
+        """Return (ready, age_seconds). A `None` age means no cycle has ever
+        succeeded.
+
+        `0.0` is unambiguous as that sentinel: `time.monotonic()` is
+        CLOCK_MONOTONIC (seconds since boot) and cannot realistically be exactly
+        `0.0` at the moment a cycle completes.
+        """
+        last = self._last_good_cycle
+        if last == 0.0:
+            return False, None
+        age = time.monotonic() - last
+        return age < STALE_AFTER_S, age
+
+    def _readyz_app(self, environ, start_response):
+        """WSGI app serving the single fixed `GET /readyz` endpoint.
+
+        The claim published is narrow and self-reported: the agent's last
+        reconcile cycle completed every enforcement action it was required to
+        take with no reported failure, and completed recently. A GPU with no
+        running workload is intentionally skipped, so the claim covers the
+        actions the cycle was required to take, not the live state of every GPU.
+
+        The age in the body is what makes a 503 diagnosable with
+        `kubectl exec ... curl` and no log access.
+        """
+        if environ["PATH_INFO"] != "/readyz":
+            start_response("404 Not Found", [("Content-Type", "text/plain")])
+            return [b""]
+        ready, age = self._readiness()
+        age_s = "none" if age is None else f"{age:.1f}"
+        body = f"{'ok' if ready else 'not-ready'} last_good_cycle_age_s={age_s}\n"
+        status = "200 OK" if ready else "503 Service Unavailable"
+        start_response(status, [("Content-Type", "text/plain; charset=utf-8")])
+        return [body.encode("utf-8")]
+
+    def _start_readyz_server(self) -> None:
+        """Bind and serve `/readyz` on a daemon thread.
+
+        A bind failure propagates: the caller runs this BEFORE `run()`'s `try`,
+        so the process exits and the pod enters CrashLoopBackOff rather than
+        running an agent whose readiness can never be observed. Daemon thread so
+        it does not hold the process open at shutdown — readiness keeps serving
+        through the termination grace period, which is what `reconcile_once`'s
+        shutdown-fold rule is for.
+        """
+        server = make_server(
+            "", READYZ_PORT, self._readyz_app, handler_class=_QuietWSGIHandler
+        )
+        threading.Thread(
+            target=server.serve_forever, name="readyz", daemon=True
+        ).start()
+        logger.info("Readiness endpoint serving on :%d/readyz", READYZ_PORT)
 
     def run(self) -> None:
         """Main reconcile loop. Blocks until SIGTERM, then cleans up once.
@@ -1664,12 +1852,22 @@ class PowerAgent:
             RECONCILE_INTERVAL_S,
         )
 
+        # Outside the `try` on purpose: a bind failure must escape uncaught so
+        # the process exits. Starting it inside would send a never-enforcing
+        # agent through the full `_shutdown_cleanup` restore sweep on the way
+        # out.
+        self._start_readyz_server()
+
         try:
             while not _shutdown.is_set():
                 try:
-                    self.reconcile_once()
+                    cycle_ok = self.reconcile_once()
                 except Exception as e:
                     logger.exception("Unexpected error in reconcile loop: %s", e)
+                    cycle_ok = False
+                # Exactly one assignment per cycle, computed after the `try`, so
+                # an exception cannot leave a stale SUCCESSFUL timestamp behind.
+                self._last_good_cycle = time.monotonic() if cycle_ok else 0.0
                 _shutdown.wait(timeout=RECONCILE_INTERVAL_S)
         finally:
             _shutdown_cleanup(self._actuator)
