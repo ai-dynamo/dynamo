@@ -20,8 +20,41 @@ mod test_event_processing {
     use dynamo_kv_router::protocols::{BlockHashOptions, compute_block_hash_for_seq};
     use dynamo_kv_router::zmq_wire::StoredBlockOptions;
 
-    #[test]
-    fn test_publish_batch_ignores_empty_and_preserves_order() {
+    #[tokio::test]
+    async fn publisher_readiness_and_fatal_termination_are_observable_when_idle() {
+        for startup_succeeds in [false, true] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (startup_tx, startup) = oneshot::channel();
+            let (finish_tx, finish_rx) = oneshot::channel::<()>();
+            let processor_task = tokio::spawn(async move {
+                if startup_succeeds {
+                    let _ = startup_tx.send(());
+                    let _ = finish_rx.await;
+                }
+            });
+            let mut publisher = KvEventPublisher {
+                kv_block_size: 1,
+                source: None,
+                cancellation_token: CancellationToken::new(),
+                worker_id: 7,
+                tx,
+                next_event_id: Arc::new(AtomicU64::new(0)),
+                startup: Some(startup),
+                processor_task,
+            };
+            let result = tokio::time::timeout(Duration::from_secs(1), publisher.ready())
+                .await
+                .expect("readiness must complete without data events");
+            assert_eq!(result.is_ok(), startup_succeeds);
+            drop(finish_tx);
+            tokio::time::timeout(Duration::from_secs(1), publisher.terminated())
+                .await
+                .expect("fatal termination must be observable");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_batch_ignores_empty_and_preserves_order() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
@@ -30,6 +63,8 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_task: tokio::spawn(async {}),
         };
 
         publisher.publish_batch(Vec::new()).unwrap();
@@ -60,8 +95,8 @@ mod test_event_processing {
         assert_eq!(batch[1].event.dp_rank, 2);
     }
 
-    #[test]
-    fn test_publish_batch_closed_channel_returns_original_events_in_order() {
+    #[tokio::test]
+    async fn test_publish_batch_closed_channel_returns_original_events_in_order() {
         let (tx, rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
@@ -70,6 +105,8 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_task: tokio::spawn(async {}),
         };
         drop(rx);
 
@@ -95,8 +132,8 @@ mod test_event_processing {
         assert_eq!(error.0[1].dp_rank, 2);
     }
 
-    #[test]
-    fn test_publish_wraps_events_in_batches() {
+    #[tokio::test]
+    async fn test_publish_wraps_events_in_batches() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Vec<PlacementEvent>>();
         let publisher = KvEventPublisher {
             kv_block_size: 1,
@@ -105,6 +142,8 @@ mod test_event_processing {
             worker_id: 7,
             tx,
             next_event_id: Arc::new(AtomicU64::new(0)),
+            startup: None,
+            processor_task: tokio::spawn(async {}),
         };
 
         publisher
