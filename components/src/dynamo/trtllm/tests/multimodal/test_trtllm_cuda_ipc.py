@@ -133,9 +133,10 @@ class TestExtractEmbeddingsFromHandles:
             handle_queue.close()
             result_queue.close()
 
-        # Verify against expected tensor
+        # Verify against expected tensor. Build it on the GPU like the producer:
+        # a float16 arange past 2048 rounds differently on CUDA and on the CPU.
         result = torch.from_numpy(result_array)
-        expected = torch.arange(100 * 2048, dtype=torch.float16).reshape(100, 2048)
+        expected = _create_tensor_on_gpu().cpu()
         assert result.shape == expected.shape
         assert device_type == "cpu"
         assert torch.equal(result, expected)
