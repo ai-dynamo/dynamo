@@ -138,15 +138,19 @@ the Gateway API setup, supported features, and configuration.
 
 ### Option A: Container (fastest)
 
+Choose either vLLM or SGLang:
+
+#### vLLM
+
 ```bash
-# Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
-python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --discovery-backend file &
 
-# Send a request
+# Once the worker is ready, send a request
 curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-0.6B",
   "messages": [{"role": "user", "content": "Hello!"}],
@@ -154,19 +158,45 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+#### SGLang
+
+```bash
+# Pull a prebuilt container
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0
+
+# Inside the container — start frontend and worker
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+
+# Once the worker is ready, send a request
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "max_tokens": 100
+}' | jq
+```
+
+Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
-Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then:
+Install [uv](https://github.com/astral-sh/uv) (`curl -LsSf https://astral.sh/uv/install.sh | sh`), then choose your backend:
+
+#### vLLM
 
 ```bash
-uv pip install --prerelease=allow "ai-dynamo[sglang]"   # or [vllm]
+uv pip install --prerelease=allow "ai-dynamo[vllm]"
+```
+
+#### SGLang
+
+```bash
+uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
 > **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for TRT-LLM-specific instructions.
 
-Then start the frontend and a worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
+Then start the frontend and the matching worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
 
 ### Option C: Kubernetes (recommended)
 
