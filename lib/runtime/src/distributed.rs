@@ -287,6 +287,11 @@ impl DistributedRuntime {
                 distributed_runtime.get_metrics_registry(),
             );
         }
+        if response_plane == ResponsePlaneMode::Velo {
+            crate::pipeline::network::velo_response::register_metrics(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime

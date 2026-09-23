@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Weak},
+    sync::{Arc, LazyLock, Weak},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -41,6 +41,17 @@ const VERSION: u32 = 2;
 const TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 static PROCESS_SERVICE: tokio::sync::Mutex<Weak<VeloResponseService>> =
     tokio::sync::Mutex::const_new(Weak::new());
+static PROCESS_METRICS: LazyLock<(crate::MetricsRegistry, Arc<velo::VeloMetrics>)> =
+    LazyLock::new(|| {
+        let registry = crate::MetricsRegistry::new();
+        let metrics = velo::VeloMetrics::register(&registry.prometheus_registry.read().unwrap())
+            .expect("register Velo response metrics");
+        (registry, Arc::new(metrics))
+    });
+
+pub(crate) fn register_metrics(registry: &crate::MetricsRegistry) {
+    registry.add_child_registry(&PROCESS_METRICS.0);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,6 +130,7 @@ impl VeloResponseService {
 
     async fn new(transport: ResponseTransport, address: SocketAddr) -> Result<Arc<Self>> {
         let mut builder = Velo::builder()
+            .metrics(PROCESS_METRICS.1.clone())
             .stream_bind_addr(address.ip())
             .messenger_mux(MuxConfig {
                 enabled: true,
