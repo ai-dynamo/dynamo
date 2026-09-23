@@ -387,6 +387,10 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
             "aic_model_path": "example/model",
             "aic_attention_dp_size": 2,
             "aic_pp_size": 1,
+            "prefill_schedule_interval": 1,
+            "prefill_decode_interval": 0,
+            "aic_database_mode": "SILICON",
+            "aic_strict_provenance": False,
             "timing_model": {
                 "type": "fixed",
                 "prefill_ms": 1.0,
@@ -403,6 +407,57 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     assert "aic_attention_dp_size" not in lowered
     assert lowered["dp_size"] == 2
     assert "aic_pp_size" not in lowered
+    assert "prefill_schedule_interval" not in lowered
+    assert "prefill_decode_interval" not in lowered
+    assert "aic_database_mode" not in lowered
+    assert "aic_strict_provenance" not in lowered
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("prefill_schedule_interval", 2),
+        ("prefill_schedule_interval", True),
+        ("prefill_decode_interval", 1),
+        ("prefill_decode_interval", False),
+        ("aic_database_mode", "HYBRID"),
+        ("aic_strict_provenance", True),
+    ],
+)
+def test_legacy_replay_rejects_unrepresentable_settings(field, value):
+    with pytest.raises(ValueError, match=f"legacy Dynamo replay requires {field}"):
+        simulation.DynamoReplayRunner._engine_args({field: value})
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"pp": 2},
+        {"database_mode": "HYBRID"},
+        {"decoder_replay": True},
+        {"unsupported_future_control": 7},
+    ],
+)
+def test_legacy_replay_rejects_unrepresentable_canonical_aic_settings(extra):
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    config = ForwardPassPerfModelConfig(
+        model="example/model",
+        system="h200_sxm",
+        backend="vllm",
+        worker_type="aggregated",
+    ).to_dict()
+    config.update(extra)
+    with pytest.raises(ValueError, match="cannot represent AIC setting"):
+        simulation.DynamoReplayRunner._engine_args(
+            {
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": config,
+                },
+            }
+        )
 
 
 def test_factory_preserves_trtllm_disagg_gate() -> None:

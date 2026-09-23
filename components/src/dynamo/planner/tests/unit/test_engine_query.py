@@ -93,12 +93,10 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
 
     class _FakeAicFacade:
         last_config = None
-        last_options = None
 
         @classmethod
-        def best_available(cls, config, options):
+        def best_available(cls, config):
             cls.last_config = config
-            cls.last_options = options
             return sentinel
 
     monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
@@ -111,18 +109,41 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         "max_batch_size": 16,
         "max_kv_tokens": 10_000,
     }
-    config = {"schema_version": 1, "model_name": "Qwen/Qwen3-0.6B"}
+    config = {
+        "schema_version": 1,
+        "model_name": "Qwen/Qwen3-0.6B",
+        "system_name": "h200_sxm",
+        "backend": "vllm",
+        "tp_size": 2,
+        "pp_size": 1,
+        "attention_dp_size": 4,
+        "kv_block_size": 16,
+        "nextn": 3,
+    }
 
     model = AicCoreEnginePerfModel.best_available(
         aic_config=config,
         worker_type="prefill",
         limits=limits,
         options=options,
-        attention_dp_size=1,
+        attention_dp_size=4,
     )
 
-    assert _FakeAicFacade.last_config is config
-    assert _FakeAicFacade.last_options is options
+    migrated = _FakeAicFacade.last_config
+    assert migrated.model == config["model_name"]
+    assert migrated.system == config["system_name"]
+    assert migrated.backend == config["backend"]
+    assert migrated.worker_type == "prefill"
+    assert (migrated.tp, migrated.attention_dp) == (2, 4)
+    assert (migrated.kv_block_size, migrated.nextn) == (16, 3)
+    assert migrated.estimation_mode == "op_level"
+    assert migrated.fallback_policy == "regression"
+    assert migrated.estimator_config["correction"]["max_num_tokens"] == 128
+    assert migrated.estimator_config["fpm_regression"]["min_observations"] == 2
+    assert migrated.estimator_config["fpm_regression"]["sampling"] == {
+        "bins_per_axis": [2, 2],
+        "max_observations": 8,
+    }
     assert model.diagnostics()["readiness"] == "ready"
 
 

@@ -33,8 +33,8 @@ def _offline_aic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
 
 
-def _config() -> PlannerConfig:
-    pick = PickedParallelConfig()
+def _config(tp: int = 1) -> PlannerConfig:
+    pick = PickedParallelConfig(tp=tp)
     return PlannerConfig.model_construct(
         aic_perf_model=AICPerfModelSpec.model_construct(
             hf_id="Qwen/Qwen3-32B",
@@ -62,13 +62,14 @@ def _capabilities() -> EngineCapabilities:
     )
 
 
-def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
+@pytest.mark.parametrize("tp", [1, 2])
+def test_planner_uses_native_aic_for_estimates_and_capacity(tp: int) -> None:
     assert compile_engine
     prefill_model = PlannerEnginePerfModel(
-        worker_type="prefill", config=_config(), capabilities=_capabilities()
+        worker_type="prefill", config=_config(tp), capabilities=_capabilities()
     )
     decode_model = PlannerEnginePerfModel(
-        worker_type="decode", config=_config(), capabilities=_capabilities()
+        worker_type="decode", config=_config(tp), capabilities=_capabilities()
     )
 
     for model in (prefill_model, decode_model):
@@ -112,9 +113,12 @@ def test_planner_uses_native_aic_for_estimates_and_capacity() -> None:
     assert decode_capacity is not None and decode_capacity.rps > 0.0
 
 
-def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
+@pytest.mark.parametrize("backend", ["vllm", "sglang", "trtllm"])
+def test_planner_uses_real_aic_regression_fallback_after_tuning(backend: str) -> None:
     config = PlannerConfig.model_construct(
         aic_perf_model=None,
+        backend=backend,
+        model_name="observation-only/model",
         max_num_fpm_samples=16,
         load_min_observations=2,
         fpm_sample_bucket_size=16,
@@ -129,6 +133,12 @@ def test_planner_uses_real_aic_regression_fallback_after_tuning() -> None:
     diagnostics = model._engine_diagnostics()
     assert diagnostics["source"] == "fallback_regression"
     assert diagnostics["readiness"] == "insufficient_data"
+    identity = diagnostics["provenance"]["config"]
+    assert identity["backend"] == backend
+    assert identity["model"] == config.model_name
+    assert identity["worker_type"] == "decode"
+    assert identity["estimation_mode"] == "fpm_regression"
+    assert diagnostics["provenance"]["selected_systems_root"] is None
 
     for counter_id, (requests, kv_tokens, wall_time) in enumerate(
         ((1, 100, 0.01), (2, 200, 0.02)),

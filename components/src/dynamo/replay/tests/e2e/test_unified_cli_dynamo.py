@@ -110,6 +110,72 @@ def test_dynamo_predict_cli_cases(config_path: Path, tmp_path: Path) -> None:
         assert "falling back to load-based scaling only" not in result.stderr
 
 
+@pytest.mark.parametrize("throughput_planner", [False, True])
+def test_legacy_default_aic_timing_cli(tmp_path, throughput_planner):
+    name = (
+        "08-synthetic-throughput-planner.yaml"
+        if throughput_planner
+        else "01-synthetic-no-adapters.yaml"
+    )
+    config = yaml.safe_load(
+        (_REPO_ROOT / _CONFIG_ROOT / "predict/dynamo" / name).read_text()
+    )
+    config["engine"]["model"] = "Qwen/Qwen3-32B"
+    config["engine"]["workers"]["aggregated"]["timing"] = {"type": "default"}
+    path = tmp_path / "aic-timing.yaml"
+    path.write_text(yaml.safe_dump(config))
+    output = tmp_path / "aic-output"
+    result = _run_cli(
+        "predict",
+        "--stack",
+        "dynamo",
+        "--config",
+        str(path),
+        "--output-dir",
+        str(output),
+        "--format",
+        "json",
+    )
+    summary = json.loads(result.stdout)
+    assert summary["completed_requests"] == 6
+    # Real AIC decode timing for this BF16 model differs from the template's
+    # fixed one-millisecond engine; the test executes the compiled estimator.
+    assert summary["mean_tpot_ms"] > 1
+    if throughput_planner:
+        report = json.loads((output / "prediction.json").read_text())
+        assert report["planner"]["metadata"]["bootstrap"]["status"] == "installed"
+        assert "falling back to load-based scaling only" not in result.stderr
+    else:
+        # Sweeper passes the SDK's resolved op_level identity, with expanded
+        # estimator defaults and system roots, rather than authored auto values.
+        recommend = yaml.safe_load(
+            (
+                _REPO_ROOT
+                / _CONFIG_ROOT
+                / "recommend/dynamo/01-no-adapters-throughput.yaml"
+            ).read_text()
+        )
+        recommend["engine"]["model"] = config["engine"]["model"]
+        recommend["engine"]["workers"]["aggregated"]["timing"] = {
+            "type": "default",
+            "estimation_mode": "op_level",
+        }
+        recommend_path = tmp_path / "aic-recommend.yaml"
+        recommend_path.write_text(yaml.safe_dump(recommend))
+        recommended = _run_cli(
+            "recommend",
+            "--stack",
+            "dynamo",
+            "--config",
+            str(recommend_path),
+            "--output-dir",
+            str(tmp_path / "recommend"),
+            "--format",
+            "json",
+        )
+        assert json.loads(recommended.stdout)
+
+
 @pytest.mark.parametrize("config_path", _RECOMMEND_CASES, ids=lambda path: path.stem)
 def test_dynamo_recommend_cli_cases_round_trip(
     config_path: Path, tmp_path: Path
@@ -265,6 +331,8 @@ def _predict_conversations(tmp_path: Path, config: dict, name: str, *, stack=Non
         args.extend(["--stack", stack])
     _run_cli(*args)
     report = json.loads((output / "prediction.json").read_text())
+    assert report["summary"]["completed_requests"] == report["completed_requests"]
+    assert report["coverage"]["per_request_records"] == len(report["per_request"])
     assert report["per_request"] == [
         json.loads(line)
         for line in (output / "requests.jsonl").read_text().splitlines()

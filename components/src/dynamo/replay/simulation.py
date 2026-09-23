@@ -144,9 +144,28 @@ class DynamoReplayRunner:
                 ),
             )
             try:
-                return runner.run(spec, output_requirements=output_requirements)
+                report = runner.run(spec, output_requirements=output_requirements)
             finally:
                 runner.close()
+            native = report.metadata.get("native_report")
+            if isinstance(native, dict):
+                # Retain the existing Dynamo report envelope while preserving
+                # canonical diagnostics and routing evidence at the top level.
+                native = {
+                    **native,
+                    "summary": dict(report.metrics),
+                    "coverage": {
+                        "capture_per_request": output_requirements.capture_per_request,
+                        "capture_planner_details": output_requirements.include_raw_report,
+                        "per_request_records": len(native.get("per_request") or []),
+                    },
+                    "planner": None,
+                }
+                return ReplayReport(
+                    metrics=report.metrics,
+                    metadata={**report.metadata, "native_report": native},
+                )
+            return report
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
@@ -324,7 +343,131 @@ class DynamoReplayRunner:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
         lowered = dict(payload)
+        # AISim 0.13 spells out defaults absent from legacy MockEngineArgs.
+        # Only identical defaults may be omitted at this compatibility boundary.
+        for field, default in (
+            ("prefill_schedule_interval", 1),
+            ("prefill_decode_interval", 0),
+            ("aic_database_mode", "SILICON"),
+            ("aic_strict_provenance", False),
+        ):
+            if field in lowered:
+                value = lowered.pop(field)
+                if type(value) is not type(default) or value != default:
+                    raise ValueError(
+                        f"legacy Dynamo replay requires {field}={default}; "
+                        "this non-default setting needs canonical replay"
+                    )
         timing = lowered.get("timing_model")
+        if isinstance(timing, dict) and timing.get("type") == "external":
+            if timing.get("provider") != "aic" or not isinstance(
+                timing.get("config"), dict
+            ):
+                raise ValueError(
+                    "legacy Dynamo replay requires the AIC timing provider"
+                )
+            from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+            config = dict(timing["config"])
+            names = {
+                "model": "aic_model_path",
+                "system": "aic_system",
+                "backend": "aic_backend",
+                "backend_version": "aic_backend_version",
+                "tp": "aic_tp_size",
+                "attention_dp": "aic_attention_dp_size",
+                "moe_tp_size": "aic_moe_tp_size",
+                "moe_ep_size": "aic_moe_ep_size",
+                "gemm_quant_mode": "aic_gemm_dtype",
+                "moe_quant_mode": "aic_moe_dtype",
+                "fmha_quant_mode": "aic_fmha_dtype",
+                "kvcache_quant_mode": "aic_kv_cache_dtype",
+                "comm_quant_mode": "aic_comm_dtype",
+            }
+            identity = {
+                key: config[key]
+                for key in ("model", "system", "backend", "worker_type")
+            }
+            defaults = ForwardPassPerfModelConfig(**identity).to_dict()
+            expected = {
+                **defaults,
+                "worker_type": lowered.get("worker_type", "aggregated"),
+                "kv_block_size": lowered.get("block_size"),
+                "nextn": lowered.get("aic_nextn", 0),
+            }
+            capacity = {
+                "gpu_memory_utilization",
+                "mem_fraction_static",
+                "free_gpu_memory_fraction",
+                "cuda_graph_reserved_bytes",
+            }
+            # Validate what the legacy callback can represent before resolving
+            # capacity. Auto selection must run on the original canonical spec.
+            for key, value in config.items():
+                if (
+                    key in names
+                    or key in capacity
+                    or key
+                    in {
+                        "estimator_config",
+                        "systems_paths",
+                        "transfer_policy",
+                    }
+                ):
+                    continue
+                if key == "estimation_mode" and value in {"auto", "op_level"}:
+                    continue
+                if key not in expected or value != expected[key]:
+                    raise ValueError(
+                        f"legacy Dynamo replay cannot represent AIC setting {key}={value!r}"
+                    )
+            resolve_aic_num_gpu_blocks(lowered)
+            config = dict(lowered["timing_model"]["config"])
+            if config.get("estimation_mode") != "op_level":
+                raise ValueError(
+                    "legacy Dynamo replay requires the selected op_level estimator; "
+                    f"AIC selected {config.get('estimation_mode')!r}"
+                )
+            # Let the same public SDK expand defaults, including estimator
+            # controls and system roots, instead of maintaining a second schema.
+            reference = ForwardPassPerfModelConfig(
+                **{key: config[key] for key in names},
+                worker_type=config["worker_type"],
+                kv_block_size=config["kv_block_size"],
+                nextn=config["nextn"],
+                estimation_mode="op_level",
+            )
+            reference_args = {
+                "num_gpu_blocks": lowered["num_gpu_blocks"],
+                "timing_model": {
+                    "type": "external",
+                    "provider": "aic",
+                    "config": reference.to_dict(),
+                },
+            }
+            resolve_aic_num_gpu_blocks(reference_args)
+            expected = reference_args["timing_model"]["config"]
+            for key, value in config.items():
+                if key in names:
+                    target = names[key]
+                    if target in lowered and lowered[target] != value:
+                        raise ValueError(f"conflicting legacy AIC setting {target}")
+                    if value is not None:
+                        lowered[target] = value
+                elif key in capacity:
+                    if key in lowered and lowered[key] != value:
+                        raise ValueError(f"conflicting AIC capacity setting {key}")
+                    lowered[key] = value
+                elif key not in expected or value != expected[key]:
+                    raise ValueError(
+                        f"legacy Dynamo replay cannot represent AIC setting {key}={value!r}"
+                    )
+            tensor_parallel_size = lowered.pop(
+                "tensor_parallel_size", config.get("tp", 1)
+            )
+            if tensor_parallel_size != lowered.get("aic_tp_size", 1):
+                raise ValueError("conflicting AIC tensor parallel sizes")
+            lowered.pop("timing_model")
         if isinstance(timing, dict) and timing.get("type") in {
             "fixed",
             "polynomial",
@@ -340,6 +483,9 @@ class DynamoReplayRunner:
             ):
                 lowered.pop(name, None)
         resolve_aic_num_gpu_blocks(lowered)
+        # The AISim capacity helper has already applied this reservation to the
+        # inferred block count; MockEngineArgs only accepts the materialized pool.
+        lowered.pop("cuda_graph_reserved_bytes", None)
         # Pipeline parallelism is already represented in the public parallel
         # mapping and used for AIC capacity. MockEngineArgs has no PP field.
         lowered.pop("aic_pp_size", None)

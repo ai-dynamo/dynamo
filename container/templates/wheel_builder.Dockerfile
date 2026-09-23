@@ -632,13 +632,13 @@ COPY examples/router/custom-policy-example/ /opt/dynamo/examples/router/custom-p
 COPY deploy/inference-gateway/ext-proc/ /opt/dynamo/deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/sidecar/
 
-{% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
 # Build the existing AISimulate wheel from the same immutable source as the Rust
 # core. The matching duration/conversation release is not published yet; neither
 # an older published wheel nor a same-series nightly provides this contract.
-# Runtime images install dependencies through their existing local wheelhouse.
+# Every image that ships ai-dynamo needs this wheel in its local wheelhouse,
+# including frontend and standalone wheel-builder targets.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
     --mount=type=cache,target=/root/.cargo/git,sharing=shared \
@@ -651,7 +651,6 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
         --wheel-dir /opt/dynamo/dist \
         --constraint /opt/dynamo/container/deps/requirements.aisimulate.txt \
         "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@${AISIMULATE_REV}#subdirectory=python/aisimulate"
-{% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry
 # source cache so the rust NOTICES generator can inline upstream license text
