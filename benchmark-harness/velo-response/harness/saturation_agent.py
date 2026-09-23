@@ -2113,7 +2113,11 @@ class AiperfAgent:
         if not terminal:
             raise CampaignError("missing terminal client count for export completeness")
         completed_count, cancelled_count, _ = [int(v.replace(",", "")) for v in terminal[-1]]
-        profile = validate_profile_artifact(profile_path, self.config["workload"], sending_ended=sending_ended, expected_records=completed_count + cancelled_count)
+        # The pinned client's record export covers completed credits. Credits
+        # cancelled at the drain deadline have a separate phase count and do
+        # not produce records. Keep that count visible for tail interpretation.
+        profile = validate_profile_artifact(profile_path, self.config["workload"], sending_ended=sending_ended, expected_records=completed_count)
+        profile["phase_cancelled_requests"] = cancelled_count
         if not finalizer_terminated and not native_aiperf:
             summary = re.search(
                 r"Processed [0-9,]+ valid requests and ([0-9,]+) errors|"

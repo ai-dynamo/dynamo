@@ -121,6 +121,7 @@ def analyze(label):
     result['client']=client_summary(run,start,end)
     campaign=json.loads((run/'campaign-result.json').read_text())
     counts=result['client']['counts']
+    counts['phase_cancelled_requests']=campaign['aiperf'].get('phase_cancelled_requests',0)
     bad_counts={k:v for k,v in counts.items() if v and any(word in k for word in ('cancellations','mismatches','missing_or_duplicate','skips'))}
     error_count=counts.get('measured_errors',0)+counts.get('outside_window_errors',0)
     error_fraction=error_count/counts['profiling_records']
@@ -132,6 +133,7 @@ def analyze(label):
         'invalid_client_records':bad_counts,
         'error_count':error_count,
         'error_fraction':error_fraction,
+        'phase_cancelled_requests':counts['phase_cancelled_requests'],
         'small_error_count_accepted':error_fraction<=config['workload']['allowed_error_fraction'],
         'kv_sources_complete':all(result['telemetry'][n]['kv_sources']['min']==expected for n in names),
         'rdma_lanes_verified':result['rdma_lanes'] is None or all(x['verified'] for x in result['rdma_lanes'].values()),

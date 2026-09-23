@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923
 JOB=$(cat "$ROOT/control/job-id")
-mapfile -t labels < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' "$ROOT/configs/order.json")
+mapfile -t labels < <(python3 -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))))' "${1:-$ROOT/configs/order.json}")
 for label in "${labels[@]}"; do
     printf '%s\n' "$label" > "$ROOT/control/current-condition"
     bash "$ROOT/harness/run_condition.sh" "$label" > "$ROOT/logs/$JOB-$label-controller.log" 2>&1

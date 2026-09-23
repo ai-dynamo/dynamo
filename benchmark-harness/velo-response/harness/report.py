@@ -105,15 +105,17 @@ for mode in MODES:
     failed = [name for name, passed in qualification[mode]['checks'].items() if not passed]
     lines.append(f'- {mode}: ' + ('pass' if not failed else 'fail: ' + ', '.join(failed)))
 lines += ['', 'Small error counts are retained in this directional comparison.', '',
-          '| Run | Exported profiling records | Errors | Error fraction |',
-          '|---|---:|---:|---:|']
+          '| Run | Exported completed records | Errors | Error fraction | Cancelled at drain deadline |',
+          '|---|---:|---:|---:|---:|']
 for mode in MODES:
     for record in runs[mode]:
         q = record['quality']
         lines.append(f'| {record["label"]} | {record["client_counts"]["profiling_records"]} | '
-                     f'{q["error_count"]} | {100*q["error_fraction"]:.6f}% |')
+                     f'{q["error_count"]} | {100*q["error_fraction"]:.6f}% | '
+                     f'{q.get("phase_cancelled_requests",0)} |')
 lines += ['', 'The Ethernet and RDMA fabrics differ. Hardware counters cover the full frontend node. '
           'Host packet aggregation and RDMA completions are not wire packets. '
+          'Latency percentiles describe successful exported requests; requests cancelled at the drain deadline are counted separately and limit tail comparisons. '
           'Packet changes are reported separately from performance qualification. Defaults are unchanged.', '']
 (out / 'metrics.md').write_text('\n'.join(lines))
 print(out)
