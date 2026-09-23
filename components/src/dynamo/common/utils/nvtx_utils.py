@@ -33,13 +33,23 @@ or domain cache lookups on the hot path.
 """
 import functools
 import inspect
+import logging
 import os
 
 ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
 
 if ENABLED:
-    import nvtx as _nvtx_lib
+    try:
+        import nvtx as _nvtx_lib
+    except ImportError:
+        # Profiling presets set DYN_NVTX for every launch; an image without the
+        # package must still serve, so degrade to the no-op path.
+        logging.getLogger(__name__).warning(
+            "DYN_NVTX=1 but the nvtx package is not installed; NVTX markers are disabled"
+        )
+        ENABLED = False
 
+if ENABLED:
     # Named domain + pre-allocated EventAttributes: no per-call object
     # allocation or domain cache lookups on the hot path.
     _domain = _nvtx_lib.get_domain("dynamo")

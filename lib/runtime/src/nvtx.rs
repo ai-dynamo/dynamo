@@ -3,7 +3,9 @@
 
 //! NVTX timeline-annotation helpers for Nsight Systems profiling.
 //!
-//! Delegates to `cudarc::nvtx` for the actual NVTX calls
+//! Delegates to the `nvtx` crate, which compiles the header-only NVTX3 shim into
+//! the binary. Nsight Systems attaches through its injection library at launch,
+//! so no libnvToolsExt.so is needed at build or run time.
 //!
 //! # Gating (two-level)
 //!
@@ -11,7 +13,7 @@
 //! |----------------------|----------------------------|-------------------------------------------|
 //! | off (default)        | any                        | macros compile to nothing; zero overhead  |
 //! | on                   | unset                      | one `Relaxed` load per site (~1 ns)       |
-//! | on                   | `1` / `true` / `yes`       | cudarc NVTX calls (~50 ns/annotation)     |
+//! | on                   | `1` / `true` / `yes`       | NVTX calls (~50 ns/annotation)            |
 //!
 //! # Usage
 //!
@@ -27,7 +29,6 @@
 //! ```bash
 //! cargo build --profile profiling --features nvtx
 //! ```
-//! Requires `libnvToolsExt.so` at runtime (CUDA Toolkit or NVHPC).
 
 #[cfg(feature = "nvtx")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,7 +70,7 @@ pub fn push_impl(name: &str) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            cudarc::nvtx::result::range_push(name);
+            nvtx::range_push!("{name}");
         }
     }
     let _ = name;
@@ -82,7 +83,7 @@ pub fn pop_impl() {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            cudarc::nvtx::result::range_pop();
+            nvtx::range_pop!();
         }
     }
 }
@@ -94,11 +95,7 @@ pub fn name_current_thread_impl(name: &str) {
     #[cfg(feature = "nvtx")]
     {
         if NVTX_ENABLED.load(Ordering::Relaxed) {
-            #[cfg(target_os = "linux")]
-            let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
-            #[cfg(not(target_os = "linux"))]
-            let tid = 0u32;
-            cudarc::nvtx::result::name_os_thread(tid, name);
+            nvtx::name_thread!("{name}");
         }
     }
     let _ = name;
@@ -124,9 +121,9 @@ impl NvtxRangeGuard {
         {
             let active = NVTX_ENABLED.load(Ordering::Relaxed);
             if active {
-                cudarc::nvtx::result::range_push(name);
+                nvtx::range_push!("{name}");
             }
-            return NvtxRangeGuard { active };
+            NvtxRangeGuard { active }
         }
         #[cfg(not(feature = "nvtx"))]
         {
@@ -140,7 +137,7 @@ impl NvtxRangeGuard {
 impl Drop for NvtxRangeGuard {
     fn drop(&mut self) {
         if self.active {
-            cudarc::nvtx::result::range_pop();
+            nvtx::range_pop!();
         }
     }
 }

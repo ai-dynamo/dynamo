@@ -1167,6 +1167,20 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
 
         return bootstrap_host, bootstrap_port
 
+    def _log_engine_id_map(
+        self, context: Context, sglang_request_id: str, bootstrap_room: int | None
+    ) -> None:
+        # Same shape as the TRT-LLM handler's line, so offline joins between Dynamo
+        # traces and engine-side per-request records can key on it. Logged at the
+        # first engine response: when the request carried no rid, that is the
+        # earliest point the SGLang id exists.
+        logging.info(
+            "Engine ID map: request_id=%s sglang_rid=%s bootstrap_room=%s",
+            context.id(),
+            sglang_request_id,
+            bootstrap_room,
+        )
+
     def _abort_requests(self, request_ids: set[str], context: Context) -> None:
         if not request_ids:
             return

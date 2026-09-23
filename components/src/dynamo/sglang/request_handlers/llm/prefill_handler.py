@@ -220,14 +220,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "disaggregated_params": bootstrap_info,
         }
 
-        task = asyncio.create_task(self._consume_results(results, context))
+        task = asyncio.create_task(
+            self._consume_results(results, context, bootstrap_room=bootstrap_room)
+        )
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
 
         await task
 
     async def _consume_results(
-        self, results: AsyncIterator[Any], context: Context
+        self,
+        results: AsyncIterator[Any],
+        context: Context,
+        bootstrap_room: int | None = None,
     ) -> None:
         """Consume async generator results without processing.
 
@@ -246,6 +251,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New Prefill Request ID: {sglang_request_id}")
+                        self._log_engine_id_map(
+                            context, sglang_request_id, bootstrap_room
+                        )
 
                 # Note: No explicit cancellation checks needed here.
                 # When abort_request is called by the cancellation monitor,
