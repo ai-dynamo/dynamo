@@ -490,6 +490,32 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	}
 }
 
+// TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand pins the multinode
+// decision to the same argv vLLM is launched with. Kubernetes concatenates Command and
+// Args into one argv and does not care which field a flag sits in, and the detection
+// paths (IsElasticEPRayLaunch, shouldInjectVLLMMpWaitLeaderInit) already parse both.
+// Parsing Args alone here meant a Command-borne "--tensor-parallel-size 16" was read as
+// the default of 1, so the operator skipped the multinode launch the engine needs.
+//
+// Args stays non-empty independently of the injection, so the assertion cannot be
+// satisfied by the unrelated "container Args cannot be empty for LWS pod" precondition.
+func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing.T) {
+	backend := &VLLMBackend{}
+	container := &corev1.Container{
+		Command: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"},
+		Args:    []string{"--model", "test/model"},
+	}
+	require.NoError(t, backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(8)))
+
+	// TP 16 across 8 GPUs per node requires a distributed launch, which rewrites Args.
+	// Read as the default of 1 it would fit on one node and nothing would be injected.
+	joined := strings.Join(container.Args, " ")
+	if !strings.Contains(joined, distributedExecutorFlag) {
+		t.Errorf("Args = %q, want the multinode launch flags injected -- "+
+			"%s in Command was not read", joined, tensorParallelSizeFlag)
+	}
+}
+
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 
