@@ -353,7 +353,10 @@ fn consume_redundant_nvext(
             ));
         }
         // Worker attribution and timing are produced by the frontend.
-        if let Some(serde_json::Value::Array(fields)) = nvext.get_mut("extra_fields") {
+        if let Some(fields) = nvext.get_mut("extra_fields") {
+            let fields = fields.as_array_mut().ok_or_else(|| {
+                client::invalid_argument("extra_args.nvext.extra_fields must be an array")
+            })?;
             fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
             if fields.is_empty() {
                 nvext.remove("extra_fields");

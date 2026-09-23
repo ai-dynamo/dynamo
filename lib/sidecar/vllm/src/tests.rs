@@ -1065,6 +1065,22 @@ fn frontend_router_metadata_does_not_require_engine_support() {
 }
 
 #[test]
+fn frontend_router_metadata_rejects_non_array_fields() {
+    let mut request = request();
+    request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = json!("worker_id");
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "InvalidRequest: extra_args.nvext.extra_fields must be an array"
+    );
+}
+
+#[test]
 fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
     let mut request = request();
     request.output_options.skip_special_tokens = Some(false);
