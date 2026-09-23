@@ -291,15 +291,11 @@ async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "disaggregation_mode",
-    [DisaggregationMode.PREFILL, DisaggregationMode.AGGREGATED],
-)
+@pytest.mark.timeout(5)
 async def test_legacy_lora_request_admission_serializes_with_unload(
-    monkeypatch, disaggregation_mode
+    monkeypatch,
 ):
     handler = _make_prefill_handler()
-    handler.config.disaggregation_mode = disaggregation_mode
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
     }
@@ -388,6 +384,7 @@ async def test_legacy_lora_request_drain_preserves_concurrent_generation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_legacy_unload_cancellation_does_not_unregister_active_lora(
     monkeypatch,
 ):

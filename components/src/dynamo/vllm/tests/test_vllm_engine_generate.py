@@ -179,6 +179,27 @@ def test_tito_adapter_rejects_routing_hash_count_mismatch():
         )
 
 
+def test_tito_adapter_rejects_non_object_kwargs_data():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    request = _request(
+        features={
+            "mm_hashes": {"image": ["one"]},
+            "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+            "kwargs_data": [],
+        }
+    )
+
+    with pytest.raises(TypeError, match="kwargs_data must be an object or null"):
+        adapt_engine_generate_request(
+            request,
+            enable_multimodal=True,
+            aggregated=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+
 @pytest.mark.parametrize(
     ("is_embed", "error", "match"),
     [

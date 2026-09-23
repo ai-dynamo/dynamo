@@ -7,14 +7,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import msgspec
 import torch
-
-if TYPE_CHECKING:
-    from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
-
 from vllm.inputs import TokensPrompt, mm_input
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
@@ -22,6 +18,8 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+
+from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
@@ -36,8 +34,6 @@ def publish_engine_generate_capability(
     tower_connector_lora_enabled: bool,
 ) -> bool:
     """Publish native Generate support and its MM-routing-relevant config."""
-    from dynamo.llm import ModelInput, ModelType, WorkerType
-
     if model_input != ModelInput.Tokens:
         return False
     if worker_type == WorkerType.Prefill:
@@ -99,9 +95,11 @@ def _image_features(
     kwargs_data = features.get("kwargs_data")
     if not isinstance(mm_hashes, dict) or not isinstance(mm_placeholders, dict):
         raise TypeError("TITO features require mm_hashes and mm_placeholders objects")
+    if kwargs_data is not None and not isinstance(kwargs_data, dict):
+        raise TypeError("TITO features kwargs_data must be an object or null")
 
     modalities = set(mm_hashes) | set(mm_placeholders)
-    if isinstance(kwargs_data, dict):
+    if kwargs_data is not None:
         modalities.update(kwargs_data)
     if modalities != {"image"}:
         raise ValueError("TITO preprocessed features currently support image only")
@@ -206,6 +204,11 @@ def adapt_engine_generate_request(
     raw_sampling_params = envelope.get("sampling_params")
     if not isinstance(raw_sampling_params, dict):
         raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
+    features = envelope.get("features")
+    if isinstance(features, dict):
+        kwargs_data = features.get("kwargs_data")
+        if kwargs_data is not None and not isinstance(kwargs_data, dict):
+            raise TypeError("TITO features kwargs_data must be an object or null")
     token_ids = list(request.get("token_ids") or [])
     reconstructed = {**envelope, "token_ids": token_ids}
     _, generate_request_type = _native_generate_api()
@@ -223,6 +226,8 @@ def adapt_engine_generate_request(
             f"({max_num_seqs}), got {sampling_params.n}."
         )
     if not native_request.is_sampling_param_provided("max_tokens"):
+        # Older supported vLLM builds do not expose this helper. Keep the import
+        # lazy so workers that do not adapt native Generate requests still start.
         from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 
         model_config = vllm_config.model_config
@@ -244,7 +249,6 @@ def adapt_engine_generate_request(
         )
     sampling_params.output_kind = RequestOutputKind.DELTA
 
-    features = envelope.get("features")
     cache_salt = envelope.get("cache_salt")
     engine_cache_salt = (
         f"{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}" if cache_salt else None

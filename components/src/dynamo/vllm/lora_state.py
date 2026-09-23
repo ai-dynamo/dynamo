@@ -79,12 +79,14 @@ class LoRAState:
             return lock
 
     def begin_request(self, lora_name: str) -> None:
+        """Track a request; every call must be paired with ``end_request``."""
         count = self.active_requests.get(lora_name, 0)
         if count == 0:
             self.request_drained[lora_name] = asyncio.Event()
         self.active_requests[lora_name] = count + 1
 
     def end_request(self, lora_name: str) -> None:
+        """Release one request previously tracked by ``begin_request``."""
         count = self.active_requests[lora_name]
         if count > 1:
             self.active_requests[lora_name] = count - 1
@@ -93,6 +95,7 @@ class LoRAState:
         self.request_drained.pop(lora_name).set()
 
     async def wait_until_idle(self, lora_name: str) -> None:
+        """Wait until all tracked requests for an adapter have ended."""
         drained = self.request_drained.get(lora_name)
         if drained is not None:
             await drained.wait()
