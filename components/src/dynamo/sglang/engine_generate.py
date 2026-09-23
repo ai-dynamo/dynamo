@@ -40,7 +40,7 @@ def build_native_generate_request(
     native_payload: Mapping[str, Any],
     *,
     input_ids: list[int],
-    fallback_rid: str,
+    request_id: str,
     priority: int | None,
     sampling_overrides: Mapping[str, Any] | None = None,
     bootstrap_host: str | None = None,
@@ -49,6 +49,7 @@ def build_native_generate_request(
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
     lora_path: str | None = None,
+    cache_salt: str | None = None,
 ) -> GenerateReqInput:
     """Reconstruct the installed SGLang version native request.
 
@@ -57,15 +58,26 @@ def build_native_generate_request(
     routing state, and fields supplied by the selected worker. SGLang owns
     all remaining validation.
 
-    ``fallback_rid`` is router-owned and always replaces a caller-supplied
+    ``request_id`` is router-owned and always replaces a caller-supplied
     ``rid`` so cancellation cannot target another request.
     Native session requests pass their caller-visible node ID as the fallback
     because SGLang keys session continuations by the submitted top-level
     request ID.
     """
     payload = dict(native_payload)
+    salt = cache_salt if cache_salt is not None else payload.get("cache_salt")
+    if salt is None or salt == "":
+        payload.pop("cache_salt", None)
+    else:
+        # The separately pinned XPU release (0.5.11) silently ignores unknown
+        # dataclass fields. Remove this check when that pin supports cache_salt.
+        if "cache_salt" not in GenerateReqInput.__dataclass_fields__:
+            raise ValueError(
+                "cache_salt is not supported by the installed SGLang engine"
+            )
+        payload["cache_salt"] = salt
     payload["input_ids"] = input_ids
-    payload["rid"] = fallback_rid
+    payload["rid"] = request_id
     payload["stream"] = True
     if priority is None:
         payload.pop("priority", None)

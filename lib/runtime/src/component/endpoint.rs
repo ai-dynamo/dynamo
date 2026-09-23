@@ -18,7 +18,7 @@ use crate::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::nats,
+    transports::{nats, tcp},
 };
 
 fn endpoint_device_type() -> Option<DeviceType> {
@@ -253,7 +253,7 @@ impl EndpointConfigBuilder {
                     "Unable to register service for discovery"
                 );
                 let _ = server
-                    .unregister_endpoint(&endpoint_name_for_task, connection_id)
+                    .unregister_endpoint_instance(&endpoint_id, connection_id)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
@@ -287,7 +287,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_name_for_cleanup, connection_id)
+                .unregister_endpoint_instance(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -317,7 +317,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
+/// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -344,7 +344,11 @@ fn tcp_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> TransportType {
-    TransportType::Tcp(format!("{address}/{connection_id:x}/{}", endpoint_id.name))
+    // Clients forward the discovered path unchanged; ingress uses the same key.
+    TransportType::Tcp(format!(
+        "{address}/{}",
+        tcp::instance_path(endpoint_id, connection_id)
+    ))
 }
 
 /// Build transport type, ensuring TCP server is initialized when needed.
@@ -468,8 +472,11 @@ mod tests {
         };
 
         for (address, expected) in [
-            ("192.0.2.10:1234", "192.0.2.10:1234/2a/generate"),
-            ("[2001:db8::10]:1234", "[2001:db8::10]:1234/2a/generate"),
+            ("192.0.2.10:1234", "192.0.2.10:1234/2a/ns/worker/generate"),
+            (
+                "[2001:db8::10]:1234",
+                "[2001:db8::10]:1234/2a/ns/worker/generate",
+            ),
         ] {
             let transport = tcp_transport_type(address.parse().unwrap(), &endpoint_id, 0x2a);
             assert_eq!(transport.address(), expected);
