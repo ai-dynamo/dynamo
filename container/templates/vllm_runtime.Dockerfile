@@ -283,17 +283,17 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # is unavailable. The stock completion path turns that observability exception
 # into a failed KV transfer. Apply the two upstream runtime hunks against the
 # benchmark-pinned nightly and assert their behavioral postcondition.
-RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.29.1rc1.dev452+g3df4ae153/dsv41-flash-15112,target=/tmp/vllm-nixl-telemetry-patches,readonly \
-    --mount=type=bind,source=./container/deps/vllm/validate_nixl_telemetry_runtime.py,target=/tmp/validate_nixl_telemetry_runtime.py,readonly \
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
+    --mount=type=bind,source=./container/deps/vllm/validate_patches_runtime.py,target=/tmp/validate_patches_runtime.py,readonly \
     set -eux; \
     python3 -c 'import vllm; assert vllm.__commit_id__ == "g3df4ae153", vllm.__commit_id__'; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
     site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
-    for patch_file in /tmp/vllm-nixl-telemetry-patches/*.patch; do \
+    for patch_file in /tmp/vllm-patches/*.patch; do \
         patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
     done; \
-    python3 /tmp/validate_nixl_telemetry_runtime.py; \
+    python3 /tmp/validate_patches_runtime.py; \
     apt-get purge -y patch; \
     rm -rf /var/lib/apt/lists/*
 {% endif %}
