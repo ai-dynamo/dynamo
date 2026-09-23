@@ -94,6 +94,9 @@ async def test_readiness_timeout_retains_transport_error(validator):
         ("forced-prefill", "Forced prefill"),
         ("cold-overlap", "Cold prefix"),
         ("wrong-reuse", "Cached-prefix owner"),
+        ("round-robin-0", "Cached-prefix owner"),
+        ("round-robin-1", "Cached-prefix owner"),
+        ("cache-timeout", "Expected 2 cached blocks"),
         ("http-error", "HTTP 503"),
         ("empty-http-error", "HTTP 503"),
         ("invalid-utf8-error", "HTTP 503"),
@@ -143,14 +146,18 @@ async def test_full_validation_cannot_pass_bad_deployment(
                     {
                         "worker_id": worker,
                         "device_blocks": 2
-                        if worker == owner or (owner == 3 and fault == "cold-overlap")
+                        if fault != "cache-timeout"
+                        and (worker == owner or (owner == 3 and fault == "cold-overlap"))
                         else 0,
                     }
                     for worker in [1, 2]
                 ]
             }
 
+    unforced_requests = 0
+
     async def respond(request):
+        nonlocal unforced_requests
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "longcat-flash"}]})
         if fault in ("http-error", "empty-http-error", "invalid-utf8-error"):
@@ -160,6 +167,10 @@ async def test_full_validation_cannot_pass_bad_deployment(
         index = payload["prompt"][0]
         forced = headers.get("x-dynamo-prefill-instance-id")
         owner = int(forced) if forced else min(index + 1, 2)
+        if not forced and fault in ("round-robin-0", "round-robin-1"):
+            offset = int(fault[-1])
+            owner = (unforced_requests + offset) % 2 + 1
+            unforced_requests += 1
         if fault == "unknown-prefill":
             owner = 99
         elif fault == "forced-prefill" and forced:

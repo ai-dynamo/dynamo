@@ -95,7 +95,7 @@ async def run(args):
                 if hits.get(owner, 0) >= expected:
                     return result
                 if time.monotonic() >= deadline:
-                    raise AssertionError(
+                    raise RuntimeError(
                         f"Expected {expected} cached blocks on {owner}: {result}"
                     )
                 await asyncio.sleep(0.25)
@@ -192,8 +192,10 @@ async def run(args):
                 raise RuntimeError(
                     f"Cold prefix was already cached: {report['cold_overlap']}"
                 )
-            for repeat in range(2):
-                for i, owner in enumerate(prefill_ids):
+            # Consecutive requests for the same owner distinguish cache-aware
+            # selection from round-robin, which can pass alternating probes.
+            for i, owner in enumerate(prefill_ids):
+                for repeat in range(2):
                     record = await request(
                         f"reuse-{i}-{repeat}", prompts[i], ("ORANGE", "PURPLE")[i]
                     )
