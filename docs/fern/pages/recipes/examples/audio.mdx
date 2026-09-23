@@ -2,19 +2,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Audio and Realtime Serving"
-subtitle: "Audio generation, transcription, and realtime vLLM serving."
+subtitle: "Speech-to-speech, transcription, and realtime vLLM serving."
 hide-toc: true
 ---
 
 import { ExampleSelector } from "@/components/ExampleSelector";
+
+For text-to-speech deployments and launch scripts, see [Audio Generation](audio-generation.mdx).
 
 Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
 
 <ExampleSelector
   variants={[
     {"id": "local-vllm-agg-omni-realtime-sh", "target": "local:vllm", "label": "agg_omni_realtime.sh", "description": "Realtime Speech-to-Speech"},
-    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Realtime Audio Transcription"},
-    {"id": "local-vllm-agg-omni-audio-sh", "target": "local:vllm", "label": "agg_omni_audio.sh", "description": "Audio Generation"}
+    {"id": "local-vllm-agg-realtime-transcription-sh", "target": "local:vllm", "label": "agg_realtime_transcription.sh", "description": "Realtime Audio Transcription"}
   ]}
 >
 
@@ -39,18 +40,6 @@ Run commands from the repository root. Review each script’s model, GPU, and en
 [Source: `agg_realtime_transcription.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
 
 <Code src="../../../../../examples/backends/vllm/launch/agg_realtime_transcription.sh" title="agg_realtime_transcription.sh" language="bash" maxLines={0} />
-
-</div>
-
-<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-audio-sh">
-
-```bash
-(cd examples/backends/vllm && bash launch/agg_omni_audio.sh)
-```
-
-[Source: `agg_omni_audio.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
-
-<Code src="../../../../../examples/backends/vllm/launch/agg_omni_audio.sh" title="agg_omni_audio.sh" language="bash" maxLines={0} />
 
 </div>
 

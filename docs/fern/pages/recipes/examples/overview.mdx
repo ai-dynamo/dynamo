@@ -12,6 +12,9 @@ import { ExamplesCatalog } from "@/components/ExamplesCatalog";
 Choose a DGD/DGDR manifest or launch script, then select an available platform and backend. These pages expose files from
 [`examples/`](https://github.com/ai-dynamo/dynamo/tree/main/examples); they are not performance-tuned model recipes.
 
+For a model-by-model catalog with workload, backend, and weight-size chips, see the
+[Diffusion Overview](diffusion-overview.mdx).
+
 <ExamplesCatalog>
 
 <div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg-with-config.yaml agg.sh agg.yaml agg_xpu.sh agg_xpu_dra.yaml">
@@ -334,51 +337,12 @@ vLLM sequence classification and pooling.
 
 </div>
 
-<div className="dynamo-example-card" data-example="image-generation" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_image_diffusion.sh agg_omni_image.sh disagg_omni_glm_image.sh disagg_omni_glm_image_nixl.sh image_diffusion.sh">
-
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Image Generation](image-generation.mdx)
-
-Aggregated and disaggregated image-generation launch scripts.
-
-<div className="dynamo-example-badges">
-<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
-</div>
-
-</div>
-
-<div className="dynamo-example-card" data-example="video-generation" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_omni_i2v.sh agg_omni_video.sh agg_video_diffusion.sh text-to-video-diffusion.sh">
-
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Video Generation](video-generation.mdx)
-
-Text-to-video and image-to-video launch scripts.
-
-<div className="dynamo-example-badges">
-<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
-</div>
-
-</div>
-
-<div className="dynamo-example-card" data-example="text-diffusion" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang" data-keywords="diffusion_llada.sh">
-
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
-### [Diffusion Language Models](text-diffusion.mdx)
-
-SGLang text generation through iterative refinement.
-
-<div className="dynamo-example-badges">
-<span>Local / CLI: SGLang</span>
-</div>
-
-</div>
-
-<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_audio.sh agg_omni_realtime.sh agg_realtime_transcription.sh">
+<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_realtime.sh agg_realtime_transcription.sh">
 
 <span className="dynamo-example-eyebrow">Workloads · Example</span>
 ### [Audio and Realtime Serving](audio.mdx)
 
-Audio generation, transcription, and realtime vLLM serving.
+Transcription and realtime speech-to-speech serving.
 
 <div className="dynamo-example-badges">
 <span>Local / CLI: vLLM</span>
@@ -386,9 +350,65 @@ Audio generation, transcription, and realtime vLLM serving.
 
 </div>
 
-<div className="dynamo-example-card" data-example="fastvideo" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:fastvideo local:fastvideo" data-keywords="agg.yaml agg_user_workload.yaml run_local.sh">
+<div className="dynamo-example-card" data-example="image-generation" data-topic="diffusion" data-topic-label="Diffusion" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg_image_diffusion.sh agg_image_diffusion.yaml agg_omni_image.sh agg_omni_image.yaml disagg_omni_glm_image.sh disagg_omni_glm_image_nixl.sh image_diffusion.sh">
 
-<span className="dynamo-example-eyebrow">Workloads · Example</span>
+<span className="dynamo-example-eyebrow">Diffusion · Example</span>
+### [Image Generation](image-generation.mdx)
+
+Validated image-generation Kubernetes templates and local launch scripts.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="video-generation" data-topic="diffusion" data-topic-label="Diffusion" data-targets="kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg_omni_i2v.sh agg_omni_i2v.yaml agg_omni_video.sh agg_omni_video.yaml agg_video_diffusion.sh text-to-video-diffusion.sh">
+
+<span className="dynamo-example-eyebrow">Diffusion · Example</span>
+### [Video Generation](video-generation.mdx)
+
+Experimental patched-build T2V/I2V deployments and local launch scripts.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM (experimental)</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="audio-generation" data-topic="diffusion" data-topic-label="Diffusion" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_omni_audio.sh agg_omni_audio.yaml">
+
+<span className="dynamo-example-eyebrow">Diffusion · Example</span>
+### [Audio Generation](audio-generation.mdx)
+
+Qwen3-TTS with validated nightly-image templates and a local launch script.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM (experimental)</span>
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="text-diffusion" data-topic="diffusion" data-topic-label="Diffusion" data-targets="kubernetes:sglang local:sglang" data-keywords="agg_llm_diffusion.yaml diffusion_llada.sh">
+
+<span className="dynamo-example-eyebrow">Diffusion · Example</span>
+### [Diffusion Language Models](text-diffusion.mdx)
+
+SGLang text generation through iterative refinement.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang</span>
+<span>Local / CLI: SGLang</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="fastvideo" data-topic="diffusion" data-topic-label="Diffusion" data-targets="kubernetes:fastvideo local:fastvideo" data-keywords="agg.yaml agg_user_workload.yaml run_local.sh">
+
+<span className="dynamo-example-eyebrow">Diffusion · Example</span>
 ### [FastVideo](fastvideo.mdx)
 
 The custom FastVideo worker on local hosts or Kubernetes.
