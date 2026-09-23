@@ -1034,7 +1034,8 @@ mod tests {
     fn test_cache_history_prefix_metric_name() {
         assert_eq!(
             build_component_metric_name(&format!(
-                "router_{}",
+                "{}{}",
+                router_request::METRIC_PREFIX,
                 frontend_service::CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL
             )),
             "dynamo_component_router_cache_loss_history_prefix_tokens_total"
