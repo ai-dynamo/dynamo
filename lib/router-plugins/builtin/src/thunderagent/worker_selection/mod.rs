@@ -6,7 +6,7 @@ use std::sync::Arc;
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::plugins::worker_selection::{
-    WorkerCandidate, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
+    WorkerCandidates, WorkerInputView, WorkerInputs, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy, WorkerSelectionPolicyError,
     WorkerSelectionPolicyFactory, WorkerSelectionPolicyParameters,
     WorkerSelectionPolicyProviderError, WorkerSelectionPolicyRegistryError,
@@ -24,13 +24,17 @@ impl WorkerScorer for ThunderAgentScorer {
     fn score(
         &mut self,
         context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        let load = candidate
-            .load()
-            .ok_or_else(|| WorkerSelectionPolicyError::failed("worker load unavailable"))?;
-        Ok(load.active_prefill_tokens() as f64
-            + load.decode_cost_blocks() * f64::from(context.block_size()))
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        let block_size = f64::from(context.block_size());
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            let load = candidate
+                .load()
+                .ok_or_else(|| WorkerSelectionPolicyError::failed("worker load unavailable"))?;
+            *cost = load.active_prefill_tokens() as f64 + load.decode_cost_blocks() * block_size;
+        }
+        Ok(())
     }
 }
 
@@ -103,7 +107,8 @@ mod tests {
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike, WorkerWithDpRank};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode, SchedulingRequest};
     use dynamo_kv_router::{
-        KvRouterConfig, WorkerSelectionInput, WorkerSelectionPolicy, WorkerSelector,
+        KvRouterConfig, WorkerLoadProjection, WorkerSelectionInput, WorkerSelectionPolicy,
+        WorkerSelector,
     };
 
     use super::*;
@@ -188,9 +193,20 @@ mod tests {
     #[test]
     fn falls_back_when_the_classifier_target_is_unavailable() {
         let unavailable = WorkerWithDpRank::new(2, 0);
-        let worker = WorkerWithDpRank::new(1, 0);
-        let workers = HashMap::from([(1, TestWorker)]);
-        let request = request(unavailable);
+        let worker = WorkerWithDpRank::new(4, 0);
+        let workers = HashMap::from([(1, TestWorker), (3, TestWorker), (4, TestWorker)]);
+        let mut request = request(unavailable);
+        // Scores at block size 16 are 161, 100, and 84; both load terms affect selection.
+        for (id, prefill_tokens, decode_blocks) in [(1, 1, 10), (3, 100, 0), (4, 20, 4)] {
+            request.worker_loads.insert(
+                WorkerWithDpRank::new(id, 0),
+                WorkerLoadProjection {
+                    active_prefill_tokens: prefill_tokens,
+                    active_decode_blocks: decode_blocks,
+                    ..Default::default()
+                },
+            );
+        }
 
         let selected = policy()
             .select_worker(WorkerSelectionInput::configured(

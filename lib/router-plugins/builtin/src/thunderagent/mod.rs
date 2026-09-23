@@ -27,12 +27,10 @@ pub(super) fn register(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn registers_classifier_and_worker_selector() {
-        let mut registry = RouterPluginRegistry::default();
-        register(&mut registry).unwrap();
+        let mut registry = crate::default_registry();
+        crate::register(&mut registry).unwrap();
         let policy = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             policy.path(),

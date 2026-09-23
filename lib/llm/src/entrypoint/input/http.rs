@@ -102,7 +102,9 @@ impl HttpFrontend {
         {
             anyhow::bail!("request classifiers require --router-mode kv");
         }
-        if !self.plugins.is_empty() && !matches!(&engine_config, EngineConfig::Dynamic { .. }) {
+        if self.plugins.has_custom_plugins()
+            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        {
             anyhow::bail!("custom router plugins require a dynamic engine");
         }
 
