@@ -19,7 +19,6 @@ from dynamo.trtllm.workers import llm_worker
 from dynamo.trtllm.workers.llm_worker import (
     _MM_ROUTING_MODEL_TYPES,
     _resolve_image_token_id,
-    _resolve_mm_token_id_offset,
 )
 
 pytestmark = [
@@ -70,22 +69,3 @@ def test_unvalidated_family_does_not_use_registry(
     monkeypatch.setattr(llm_worker, "resolve_routing_image_token_id", fail)
 
     assert _resolve_image_token_id(model_type, _config()) is None
-
-
-def test_mm_token_id_offset_uses_model_vocab_size() -> None:
-    model_config = SimpleNamespace(vocab_size=151936)
-
-    assert _resolve_mm_token_id_offset(model_config) == 151936
-
-
-def test_mm_token_id_offset_falls_back_to_nested_text_config() -> None:
-    model_config = SimpleNamespace(text_config=SimpleNamespace(vocab_size=152064))
-
-    assert _resolve_mm_token_id_offset(model_config) == 152064
-
-
-@pytest.mark.parametrize("vocab_size", [None, -1, True, "151936"])
-def test_mm_token_id_offset_rejects_invalid_vocab_size(vocab_size: object) -> None:
-    model_config = SimpleNamespace(vocab_size=vocab_size)
-
-    assert _resolve_mm_token_id_offset(model_config) is None

@@ -17,6 +17,7 @@ from typing import Any, Optional
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY
+from tensorrt_llm._torch.pyexecutor.config_utils import resolve_vocab_size
 from tensorrt_llm.llmapi import (
     CapacitySchedulerPolicy,
     DynamicBatchConfig,
@@ -175,14 +176,6 @@ def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
     ):
         return None
     return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
-
-
-def _resolve_mm_token_id_offset(model_config: Any) -> Optional[int]:
-    for config in (model_config, getattr(model_config, "text_config", None)):
-        vocab_size = getattr(config, "vocab_size", None)
-        if type(vocab_size) is int and vocab_size >= 0:
-            return vocab_size
-    return None
 
 
 def build_kv_connector_config(config: Config):
@@ -655,7 +648,7 @@ async def init_llm_worker(
             config.model,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
-        mm_token_id_offset = _resolve_mm_token_id_offset(model_config)
+        mm_token_id_offset = resolve_vocab_size(model_config)
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
         # only in aggregated mode; disaggregated MM requests are not routed on it.
         if config.disaggregation_mode == DisaggregationMode.AGGREGATED:

@@ -649,7 +649,7 @@ def test_v2_mm_malformed_digest_is_dropped_without_logging_digest(bad_digest, ca
 
 @pytest.mark.parametrize(
     "malformation",
-    ["missing", "missing-uuid", "inconsistent", "inconsistent-uuid", "out-of-order"],
+    ["missing", "missing-uuid", "inconsistent", "out-of-order"],
 )
 @pytest.mark.multimodal
 def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog):
@@ -662,8 +662,6 @@ def test_v2_mm_incomplete_or_inconsistent_keys_fail_closed(malformation, caplog)
         del blocks[0]["mm_keys"][0]["uuid"]
     elif malformation == "inconsistent":
         blocks[0]["mm_keys"][0]["hash"] = blocks[2]["mm_keys"][1]["hash"]
-    elif malformation == "inconsistent-uuid":
-        blocks[1]["mm_keys"][0]["uuid"] = blocks[2]["mm_keys"][1]["uuid"]
     else:
         blocks[1]["mm_keys"][0]["start_offset"] = 2
     pub = _publisher_for_kv_event_test()

@@ -8,8 +8,9 @@ item as its 32-byte content digest and later item tokens as
 ``vocab_size + item_offset``.  Its ``mm_keys`` list associates each maximal
 multimodal run with both that digest and the frontend-provided routing UUID.
 
-This module validates that producer contract and converts it to Dynamo's
-canonical integer-only routing tokens at the backend ingress boundary.
+This module decodes the fixed NVIDIA/TensorRT-LLM#19529 event shape and
+converts it to Dynamo's canonical integer-only routing tokens at the backend
+ingress boundary.
 """
 
 from __future__ import annotations
@@ -69,6 +70,9 @@ def _extract_runs(token_ids: list[Any], token_id_offset: int) -> list[_MmRun]:
             start = token_index
             token_index += 1
             item_offset = 1
+            # In KVCM V2's synthetic cache-key stream, item offset zero is the
+            # digest token. Continuations are vocab_size + item_offset, so the
+            # first integer continuation is token_id_offset + 1.
             while (
                 token_index < len(token_ids)
                 and type(token_ids[token_index]) is int
@@ -122,10 +126,10 @@ def normalize_kv_event_blocks(
 ) -> tuple[list[list[int]], bool]:
     """Return integer token blocks and whether V2 MM normalization was applied.
 
-    Validation covers every block before a caller publishes any part of the stored
-    event.  An exception means the event must be dropped atomically.  ``mm_keys``
-    supplies item identity; the V2 token stream is used only to locate and size its
-    runs.  Text tokens retain their integer representation in the same ingress pass.
+    Validation covers every block before a caller publishes any part of the
+    stored event. An exception means the event must be dropped atomically.
+    ``mm_keys`` supplies item identity; the V2 token stream locates and sizes
+    each run. Text tokens retain their integer representation.
     """
 
     raw_blocks: list[list[int | str]] = []
@@ -158,10 +162,6 @@ def normalize_kv_event_blocks(
         )
 
     normalized_blocks: list[list[int]] = []
-    current_item_digest: str | None = None
-    current_item_uuid: str | None = None
-    expected_item_offset: int | None = None
-
     for block, raw_token_ids in zip(blocks, raw_blocks, strict=True):
         runs = _extract_runs(raw_token_ids, token_id_offset)
         mm_keys = block.get("mm_keys")
@@ -177,42 +177,14 @@ def normalize_kv_event_blocks(
                 raise UnsupportedMultimodalKvEvent(
                     "multimodal key offset does not match token run"
                 )
-
-            if run.digest is not None:
-                if start_offset != 0 or digest != run.digest:
-                    raise UnsupportedMultimodalKvEvent(
-                        "digest token does not match multimodal key"
-                    )
-                current_item_digest = digest
-                current_item_uuid = routing_uuid
-                expected_item_offset = 0
-            elif current_item_digest is None:
-                # A stored event may begin at a block boundary in the middle of
-                # an item.  Its first mm_key establishes the carried identity.
-                current_item_digest = digest
-                current_item_uuid = routing_uuid
-                expected_item_offset = start_offset
-            elif digest != current_item_digest:
+            if run.digest is not None and digest != run.digest:
                 raise UnsupportedMultimodalKvEvent(
-                    "continuation run changed multimodal item"
-                )
-            elif routing_uuid != current_item_uuid:
-                raise UnsupportedMultimodalKvEvent(
-                    "continuation run changed multimodal routing UUID"
-                )
-
-            if (
-                expected_item_offset is not None
-                and start_offset != expected_item_offset
-            ):
-                raise UnsupportedMultimodalKvEvent(
-                    "multimodal key offsets are incomplete or out of order"
+                    "digest token does not match multimodal key"
                 )
 
             mm_hash = int(routing_uuid, 16)
             pad_value = pad_value_for_mm_hash(mm_hash)
             normalized[run.start : run.end] = [pad_value] * (run.end - run.start)
-            expected_item_offset = start_offset + (run.end - run.start)
 
         normalized_blocks.append(normalized)
 
