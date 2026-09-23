@@ -4,10 +4,9 @@
 """Compatibility entry points spanning shared offline and Dynamo online replay."""
 
 import json
-import math
 import os
-import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
@@ -37,6 +36,16 @@ def _planner_replay_adapter():
     return planner_replay_adapter
 
 
+@dataclass(frozen=True)
+class TelemetryOptions:
+    """Optional policy-neutral telemetry for an offline replay."""
+
+    sample_interval_ms: float = 1_000.0
+    capture_in_memory: bool = True
+    callback: Callable[[dict[str, Any]], None] | None = None
+    jsonl_path: str | os.PathLike[str] | None = None
+
+
 class _CommonReplayOptions(TypedDict, total=False):
     extra_engine_args: Any
     prefill_engine_args: Any
@@ -58,10 +67,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
-    capture_telemetry: bool
-    telemetry_sample_interval_ms: float
-    telemetry_callback: Callable[[dict[str, Any]], None] | None
-    telemetry_jsonl_path: str | os.PathLike[str] | None
+    telemetry_options: TelemetryOptions | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
@@ -103,7 +109,7 @@ def _materialize_offline_report(
     *,
     planner: PlannerReplayDetails | None,
 ) -> ReplayReport:
-    native_telemetry = getattr(native, "telemetry", None)
+    native_telemetry = native.telemetry
     telemetry = (
         None
         if native_telemetry is None
@@ -121,74 +127,15 @@ def _materialize_offline_report(
     )
 
 
-def _validate_telemetry_options(
-    *,
-    replay_mode: str,
-    capture_telemetry: bool,
-    telemetry_sample_interval_ms: float,
-    telemetry_callback: Callable[[dict[str, Any]], None] | None,
-    telemetry_jsonl_path: str | os.PathLike[str] | None,
-) -> None:
-    enabled = (
-        capture_telemetry
-        or telemetry_callback is not None
-        or telemetry_jsonl_path is not None
-    )
-    if not enabled:
-        return
-    if replay_mode != "offline":
-        raise ValueError("replay telemetry only supports replay_mode='offline'")
-    if (
-        not isinstance(telemetry_sample_interval_ms, (int, float))
-        or isinstance(telemetry_sample_interval_ms, bool)
-        or not math.isfinite(float(telemetry_sample_interval_ms))
-        or telemetry_sample_interval_ms <= 0.0
-    ):
-        raise ValueError(
-            "telemetry_sample_interval_ms must be a positive finite number"
-        )
-    if telemetry_callback is not None and not callable(telemetry_callback):
-        raise TypeError("telemetry_callback must be callable or None")
-
-
-def _paths_alias(left: str | os.PathLike[str], right: str | os.PathLike[str]) -> bool:
-    try:
-        if os.path.samefile(left, right):
-            return True
-    except OSError:
-        pass
-    left_resolved = os.path.realpath(os.path.abspath(os.fspath(left)))
-    right_resolved = os.path.realpath(os.path.abspath(os.fspath(right)))
-    if sys.platform == "darwin" or os.name == "nt":
-        # Most macOS volumes are case-insensitive, but prospective targets do
-        # not yet have identities for samefile() to compare. Conservatively
-        # reject case-folded matches; this can only over-reject on the rarer
-        # case-sensitive macOS volume and avoids silently clobbering one sink.
-        return left_resolved.lower() == right_resolved.lower()
-    return left_resolved == right_resolved
-
-
-def _validate_telemetry_output_path(
-    *,
-    telemetry_jsonl_path: str | os.PathLike[str] | None,
-    report_jsonl_path: str | os.PathLike[str] | None = None,
-    trace_files: Sequence[str | os.PathLike[str]] = (),
-) -> None:
-    """Reject telemetry aliases before native replay can open either sink."""
-    if telemetry_jsonl_path is None:
-        return
-    if report_jsonl_path is not None and _paths_alias(
-        telemetry_jsonl_path, report_jsonl_path
-    ):
-        raise ValueError(
-            "report_jsonl_path and telemetry_jsonl_path must refer to different files"
-        )
-    for trace_file in trace_files:
-        if _paths_alias(telemetry_jsonl_path, trace_file):
-            raise ValueError(
-                "telemetry_jsonl_path must not refer to replay input trace "
-                f"{trace_file}"
-            )
+def _telemetry_kwargs(options: TelemetryOptions | None) -> dict[str, Any]:
+    if options is None:
+        return {}
+    return {
+        "capture_telemetry": options.capture_in_memory,
+        "telemetry_sample_interval_ms": options.sample_interval_ms,
+        "telemetry_callback": options.callback,
+        "telemetry_jsonl_path": options.jsonl_path,
+    }
 
 
 @overload
@@ -252,24 +199,21 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
-    capture_telemetry=False,
-    telemetry_sample_interval_ms=1_000.0,
-    telemetry_callback=None,
-    telemetry_jsonl_path=None,
+    telemetry_options=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
 
-    Telemetry sampling is disabled by default and independent of Planner
-    decisions. Enabled callbacks and JSONL writes run synchronously on the
-    replay loop, so their latency contributes to replay wall time. The final
-    buffered-file flush happens after the simulator finalizes ``wall_time_ms``;
-    time the outer API call when measuring end-to-end persistence overhead.
-    JSONL output is opened lazily on the first sample. If a later write fails,
-    replay fails; completed prior lines remain, and the failing final line may
-    be partial.
+    Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
+    leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
+    the replay loop, so their latency contributes to replay wall time. The
+    final buffered-file flush happens after the simulator finalizes
+    ``wall_time_ms``; time the outer API call when measuring end-to-end
+    persistence overhead. JSONL output is opened lazily on the first sample.
+    If a later write fails, replay fails; completed prior lines remain, and the
+    failing final line may be partial.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
@@ -302,28 +246,13 @@ def run_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
-        "capture_telemetry": capture_telemetry,
-        "telemetry_sample_interval_ms": telemetry_sample_interval_ms,
-        "telemetry_callback": telemetry_callback,
-        "telemetry_jsonl_path": telemetry_jsonl_path,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError(
             "capture_per_request only supports replay_mode='offline'; "
             "use report_jsonl_path for online request records"
         )
-    _validate_telemetry_options(
-        replay_mode=replay_mode,
-        capture_telemetry=capture_telemetry,
-        telemetry_sample_interval_ms=telemetry_sample_interval_ms,
-        telemetry_callback=telemetry_callback,
-        telemetry_jsonl_path=telemetry_jsonl_path,
-    )
-    _validate_telemetry_output_path(
-        telemetry_jsonl_path=telemetry_jsonl_path,
-        report_jsonl_path=report_jsonl_path,
-        trace_files=trace_files,
-    )
     if planner_config is not None:
         # Planner replay is offline-only; reject controls the
         # planner path ignores so callers fail fast instead of silently getting an
@@ -449,12 +378,9 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
-    capture_telemetry=False,
-    telemetry_sample_interval_ms=1_000.0,
-    telemetry_callback=None,
-    telemetry_jsonl_path=None,
+    telemetry_options=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same timing and telemetry contract as trace replay."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -481,20 +407,10 @@ def run_synthetic_trace_replay(
         "sla_e2e_ms": sla_e2e_ms,
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
-        "capture_telemetry": capture_telemetry,
-        "telemetry_sample_interval_ms": telemetry_sample_interval_ms,
-        "telemetry_callback": telemetry_callback,
-        "telemetry_jsonl_path": telemetry_jsonl_path,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
-    _validate_telemetry_options(
-        replay_mode=replay_mode,
-        capture_telemetry=capture_telemetry,
-        telemetry_sample_interval_ms=telemetry_sample_interval_ms,
-        telemetry_callback=telemetry_callback,
-        telemetry_jsonl_path=telemetry_jsonl_path,
-    )
     if planner_config is not None:
         if replay_mode != "offline":
             raise ValueError(

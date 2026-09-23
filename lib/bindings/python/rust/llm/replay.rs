@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -950,21 +950,17 @@ pub fn run_mocker_trace_replay(
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
-    let report_jsonl_path = report_jsonl_path
-        .as_deref()
-        .map(absolute_output_path)
-        .transpose()
-        .map_err(to_pyerr)?;
-    let telemetry_jsonl_path = telemetry_jsonl_path
-        .as_deref()
-        .map(absolute_output_path)
-        .transpose()
-        .map_err(to_pyerr)?;
-    validate_replay_output_paths(
-        telemetry_jsonl_path.as_deref(),
-        report_jsonl_path.as_deref(),
-        &trace_files,
-    )?;
+    if telemetry_jsonl_path
+        .as_ref()
+        .is_some_and(|path| report_jsonl_path.as_ref() == Some(path) || trace_files.contains(path))
+        || report_jsonl_path
+            .as_ref()
+            .is_some_and(|path| trace_files.contains(path))
+    {
+        return Err(PyValueError::new_err(
+            "replay output paths must differ from each other and trace files",
+        ));
+    }
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -982,17 +978,6 @@ pub fn run_mocker_trace_replay(
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
-    let has_file_output = telemetry_jsonl_path.is_some() || report_jsonl_path.is_some();
-    let retained_replay_inputs = if has_file_output {
-        Some(retain_replay_input_identities(&trace_files)?)
-    } else {
-        None
-    };
-    let trace_files_for_revalidation = has_file_output.then(|| trace_files.clone());
-    let report_target_for_emit = report_jsonl_path
-        .as_deref()
-        .map(ExpectedReportTarget::capture)
-        .transpose()?;
     let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
         py,
         router_mode,
@@ -1053,8 +1038,6 @@ pub fn run_mocker_trace_replay(
         telemetry_sample_interval_ms,
         telemetry_callback,
         telemetry_jsonl_path.as_deref(),
-        report_jsonl_path.as_deref(),
-        retained_replay_inputs.clone(),
         telemetry_callback_error.clone(),
     )?;
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
@@ -1240,7 +1223,7 @@ pub fn run_mocker_trace_replay(
     // replay failed. Preserve the replay/callback error as the primary error.
     let telemetry_finish_result = finish_replay_telemetry(
         telemetry_capture,
-        telemetry_writer.as_ref(),
+        telemetry_writer,
         telemetry_sample_interval_ms,
     );
     let report = report_result.map_err(|error| {
@@ -1251,31 +1234,13 @@ pub fn run_mocker_trace_replay(
         )
     })?;
     let telemetry = telemetry_finish_result.map_err(to_pyerr)?;
-    // Preserve the public ValueError contract for ordinary path aliases. The
-    // retained descriptor checks below still cover rename/decoy evasions that
-    // cannot be detected by comparing current pathnames alone.
-    validate_replay_output_paths(
-        telemetry_jsonl_path.as_deref(),
-        jsonl_path_for_emit.as_deref(),
-        trace_files_for_revalidation.as_deref().unwrap_or_default(),
-    )?;
     let runtime_evidence = report.runtime_evidence.clone();
     // Write per-request JSONL from Rust directly if requested, avoiding a
     // potentially-large round trip through pyo3 / pythonize. Each line is one
     // JSON object (matching AIPerf's profile_export.jsonl convention).
-    if jsonl_path_for_emit.is_some() {
-        let target = report_target_for_emit
-            .as_ref()
-            .expect("report target exists with requested report path");
-        py.allow_threads(|| {
-            write_per_request_jsonl(
-                target,
-                &report.per_request,
-                retained_replay_inputs.as_deref(),
-                telemetry_writer.as_ref(),
-            )
-        })
-        .map_err(to_pyerr)?;
+    if let Some(path) = jsonl_path_for_emit.as_deref() {
+        py.allow_threads(|| write_per_request_jsonl(path, &report.per_request))
+            .map_err(to_pyerr)?;
     }
     if is_offline {
         return Py::new(
@@ -1471,101 +1436,15 @@ fn run_loaded_dynamo_request_trace(
 /// and is friendlier to streaming consumers (pandas read_json with lines=True,
 /// jq -c, etc.).
 fn write_per_request_jsonl(
-    target: &ExpectedReportTarget,
+    path: &Path,
     records: &[dynamo_mocker::replay::PerRequestRecord],
-    replay_inputs: Option<&[RetainedReplayInput]>,
-    telemetry_writer: Option<&ReplayTelemetryWriter>,
 ) -> anyhow::Result<()> {
-    // Freeze the report target's initial state before callbacks. An existing
-    // target must retain its identity; an absent target must remain absent and
-    // resolve to the same prospective location until an atomic create_new.
-    let mut file = if let Some(expected_identity) = target.existing_identity.as_ref() {
-        let current_identity = same_file::Handle::from_path(&target.path).map_err(|error| {
-            anyhow::anyhow!(
-                "report_jsonl_path changed during replay: {}: {error}",
-                target.path.display()
-            )
-        })?;
-        if &current_identity != expected_identity {
-            anyhow::bail!(
-                "report_jsonl_path changed during replay and no longer refers to its original target: {}",
-                target.path.display()
-            );
-        }
-        output_open_options().open(&target.open_path)?
-    } else {
-        match same_file::Handle::from_path(&target.path) {
-            Ok(current_identity) => {
-                ensure_output_identity_is_not_replay_input(
-                    "report_jsonl_path",
-                    &target.path,
-                    &current_identity,
-                    replay_inputs,
-                )?;
-                if telemetry_writer
-                    .is_some_and(|writer| writer.lock().is_same_file(&current_identity))
-                {
-                    anyhow::bail!(
-                        "report_jsonl_path and telemetry_jsonl_path must refer to different files"
-                    );
-                }
-                anyhow::bail!(
-                    "report_jsonl_path was created or redirected during replay: {}",
-                    target.path.display()
-                );
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        let current_target = resolve_output_target(&target.path)?;
-        if !resolved_output_targets_equal(&current_target, &target.open_path) {
-            anyhow::bail!(
-                "report_jsonl_path changed during replay and resolves to a different target: {}",
-                target.path.display()
-            );
-        }
-        if let Some(parent) = target.open_path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent)?;
-        }
-        output_open_options()
-            .create_new(true)
-            .open(&target.open_path)?
-    };
-    let identity = same_file::Handle::from_file(file.try_clone()?)?;
-    if let Some(expected_identity) = target.existing_identity.as_ref()
-        && &identity != expected_identity
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
     {
-        anyhow::bail!(
-            "report_jsonl_path target changed while it was being opened: {}",
-            target.path.display()
-        );
+        std::fs::create_dir_all(parent)?;
     }
-    ensure_output_identity_is_not_replay_input(
-        "report_jsonl_path",
-        &target.path,
-        &identity,
-        replay_inputs,
-    )?;
-    if telemetry_writer.is_some_and(|writer| writer.lock().is_same_file(&identity)) {
-        anyhow::bail!("report_jsonl_path and telemetry_jsonl_path must refer to different files");
-    }
-    let requested_identity = same_file::Handle::from_path(&target.path).map_err(|error| {
-        anyhow::anyhow!(
-            "report_jsonl_path no longer refers to the reserved report sink {}: {error}",
-            target.path.display()
-        )
-    })?;
-    if requested_identity != identity {
-        anyhow::bail!(
-            "report_jsonl_path changed during replay and no longer refers to the reserved report sink: {}",
-            target.path.display()
-        );
-    }
-
-    file.set_len(0)?;
-    file.seek(SeekFrom::Start(0))?;
+    let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
     for record in records {
         let line = serde_json::to_string(record)?;
@@ -1615,11 +1494,6 @@ pub fn run_mocker_synthetic_trace_replay(
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
-    let telemetry_jsonl_path = telemetry_jsonl_path
-        .as_deref()
-        .map(absolute_output_path)
-        .transpose()
-        .map_err(to_pyerr)?;
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
             "capture_per_request only supports replay_mode='offline'",
@@ -1686,8 +1560,6 @@ pub fn run_mocker_synthetic_trace_replay(
         telemetry_sample_interval_ms,
         telemetry_callback,
         telemetry_jsonl_path.as_deref(),
-        None,
-        None,
         telemetry_callback_error.clone(),
     )?;
     let run = move |mut scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
@@ -1943,7 +1815,7 @@ pub fn run_mocker_synthetic_trace_replay(
     // replay failed. Preserve the replay/callback error as the primary error.
     let telemetry_finish_result = finish_replay_telemetry(
         telemetry_capture,
-        telemetry_writer.as_ref(),
+        telemetry_writer,
         telemetry_sample_interval_ms,
     );
     let report = report_result.map_err(|error| {
@@ -2671,271 +2543,6 @@ fn validate_sla_threshold(name: &str, value: Option<f64>) -> PyResult<()> {
     Ok(())
 }
 
-const MAX_OUTPUT_PATH_SYMLINKS: usize = 64;
-
-#[derive(Debug)]
-enum OwnedPathComponent {
-    Prefix(std::ffi::OsString),
-    RootDir,
-    CurDir,
-    ParentDir,
-    Normal(std::ffi::OsString),
-}
-
-fn owned_path_components(path: &Path) -> std::collections::VecDeque<OwnedPathComponent> {
-    path.components()
-        .map(|component| match component {
-            std::path::Component::Prefix(prefix) => {
-                OwnedPathComponent::Prefix(prefix.as_os_str().to_os_string())
-            }
-            std::path::Component::RootDir => OwnedPathComponent::RootDir,
-            std::path::Component::CurDir => OwnedPathComponent::CurDir,
-            std::path::Component::ParentDir => OwnedPathComponent::ParentDir,
-            std::path::Component::Normal(name) => OwnedPathComponent::Normal(name.to_os_string()),
-        })
-        .collect()
-}
-
-fn absolute_output_path(path: &Path) -> std::io::Result<PathBuf> {
-    if path.is_absolute() {
-        Ok(path.to_path_buf())
-    } else {
-        Ok(std::env::current_dir()?.join(path))
-    }
-}
-
-/// Resolve a prospective output target without requiring it to exist.
-///
-/// Unlike `canonicalize`, this follows every existing symlink component even
-/// when a later component is missing. That preserves filesystem ordering for
-/// constructs such as `link/../file` and resolves dangling final or
-/// intermediate symlinks to the target they would create.
-fn resolve_output_target(path: &Path) -> std::io::Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut pending = owned_path_components(&absolute);
-    let mut resolved = PathBuf::new();
-    let mut followed_symlinks = 0;
-
-    while let Some(component) = pending.pop_front() {
-        match component {
-            OwnedPathComponent::Prefix(prefix) => resolved = PathBuf::from(prefix),
-            OwnedPathComponent::RootDir => {
-                resolved.push(Path::new(std::path::MAIN_SEPARATOR_STR));
-            }
-            OwnedPathComponent::CurDir => {}
-            OwnedPathComponent::ParentDir => {
-                resolved.pop();
-            }
-            OwnedPathComponent::Normal(name) => {
-                let candidate = resolved.join(&name);
-                match candidate.symlink_metadata() {
-                    Ok(metadata) => match candidate.read_link() {
-                        Ok(target) => {
-                            followed_symlinks += 1;
-                            if followed_symlinks > MAX_OUTPUT_PATH_SYMLINKS {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    format!(
-                                        "too many symbolic links while resolving replay output path {}",
-                                        path.display()
-                                    ),
-                                ));
-                            }
-                            let mut target_components = owned_path_components(&target);
-                            while let Some(target_component) = target_components.pop_back() {
-                                pending.push_front(target_component);
-                            }
-                        }
-                        Err(error) if metadata.file_type().is_symlink() => return Err(error),
-                        Err(_) => {
-                            if !pending.is_empty() && !metadata.is_dir() {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::NotADirectory,
-                                    format!(
-                                        "replay output path component is not a directory: {}",
-                                        candidate.display()
-                                    ),
-                                ));
-                            }
-                            resolved = candidate.canonicalize()?;
-                        }
-                    },
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        resolved.push(name)
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-    }
-    Ok(resolved)
-}
-
-fn resolved_output_targets_equal(left: &Path, right: &Path) -> bool {
-    #[cfg(any(windows, target_os = "macos"))]
-    {
-        // Most macOS volumes are case-insensitive. Prospective paths have no
-        // file identity for same-file checks, so conservatively reject a
-        // case-folded match. This may over-reject only on the rarer
-        // case-sensitive macOS volume and prevents one sink clobbering another.
-        left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        left == right
-    }
-}
-
-fn replay_paths_alias(left: &Path, right: &Path) -> PyResult<bool> {
-    let same_existing_file = match same_file::is_same_file(left, right) {
-        Ok(same) => same,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => return Err(to_pyerr(error)),
-    };
-    if same_existing_file {
-        return Ok(true);
-    }
-    let left = resolve_output_target(left).map_err(to_pyerr)?;
-    let right = resolve_output_target(right).map_err(to_pyerr)?;
-    Ok(resolved_output_targets_equal(&left, &right))
-}
-
-fn validate_replay_output_paths(
-    telemetry_jsonl_path: Option<&Path>,
-    report_jsonl_path: Option<&Path>,
-    trace_files: &[PathBuf],
-) -> PyResult<()> {
-    if telemetry_jsonl_path.is_none() && report_jsonl_path.is_none() {
-        return Ok(());
-    }
-    if let (Some(telemetry_path), Some(report_path)) = (telemetry_jsonl_path, report_jsonl_path)
-        && replay_paths_alias(telemetry_path, report_path)?
-    {
-        return Err(PyValueError::new_err(
-            "report_jsonl_path and telemetry_jsonl_path must refer to different files",
-        ));
-    }
-    for trace_path in trace_files {
-        if let Some(telemetry_path) = telemetry_jsonl_path
-            && replay_paths_alias(telemetry_path, trace_path)?
-        {
-            return Err(PyValueError::new_err(format!(
-                "telemetry_jsonl_path must not refer to replay input trace {}",
-                trace_path.display()
-            )));
-        }
-        if let Some(report_path) = report_jsonl_path
-            && replay_paths_alias(report_path, trace_path)?
-        {
-            return Err(PyValueError::new_err(format!(
-                "report_jsonl_path must not refer to replay input trace {}",
-                trace_path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// An open handle pins the identity of a replay input even if a callback later
-/// renames the input path. Output sinks compare their own open handles against
-/// these retained handles before truncating anything.
-struct RetainedReplayInput {
-    path: PathBuf,
-    identity: same_file::Handle,
-}
-
-type RetainedReplayInputs = Arc<[RetainedReplayInput]>;
-
-struct ExpectedReportTarget {
-    path: PathBuf,
-    open_path: PathBuf,
-    existing_identity: Option<same_file::Handle>,
-}
-
-impl ExpectedReportTarget {
-    fn capture(path: &Path) -> PyResult<Self> {
-        let open_path = resolve_output_target(path).map_err(to_pyerr)?;
-        let existing_identity = match same_file::Handle::from_path(path) {
-            Ok(identity) => Some(identity),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(to_pyerr(error)),
-        };
-        Ok(Self {
-            path: path.to_path_buf(),
-            open_path,
-            existing_identity,
-        })
-    }
-}
-
-fn retain_replay_input_identities(trace_files: &[PathBuf]) -> PyResult<RetainedReplayInputs> {
-    trace_files
-        .iter()
-        .map(|path| {
-            Ok(RetainedReplayInput {
-                path: path.clone(),
-                identity: same_file::Handle::from_path(path).map_err(to_pyerr)?,
-            })
-        })
-        .collect::<PyResult<Vec<_>>>()
-        .map(Arc::from)
-}
-
-fn ensure_output_identity_is_not_replay_input(
-    output_label: &str,
-    output_path: &Path,
-    output_identity: &same_file::Handle,
-    replay_inputs: Option<&[RetainedReplayInput]>,
-) -> anyhow::Result<()> {
-    let Some(replay_inputs) = replay_inputs else {
-        return Ok(());
-    };
-    for input in replay_inputs {
-        if output_identity == &input.identity {
-            anyhow::bail!(
-                "{output_label} must not refer to replay input trace {} (output: {})",
-                input.path.display(),
-                output_path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn output_open_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
-    options.write(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    options
-}
-
-/// Reserve an output target without truncating it. On Unix, the caller passes
-/// a fully resolved target and `O_NOFOLLOW` prevents a last-moment
-/// final-component symlink swap. The returned descriptor must still be
-/// identity-checked before `set_len(0)` because hard links intentionally pass
-/// `O_NOFOLLOW`.
-fn reserve_output_without_truncation(
-    path: &Path,
-) -> std::io::Result<(File, same_file::Handle, bool)> {
-    let file = match output_open_options().create_new(true).open(path) {
-        Ok(file) => (file, true),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            (output_open_options().open(path)?, false)
-        }
-        Err(error) => return Err(error),
-    };
-    let identity = same_file::Handle::from_file(file.0.try_clone()?)?;
-    Ok((file.0, identity, file.1))
-}
-
 #[derive(Clone, Default)]
 struct ReplayTelemetryCapture(Arc<Mutex<Vec<ReplayTelemetrySnapshot>>>);
 
@@ -2956,151 +2563,46 @@ impl ReplayTelemetryCapture {
 /// leave a partial line for callers to detect and discard.
 struct ReplayTelemetryJsonl {
     path: PathBuf,
-    open_path: PathBuf,
-    report_path: Option<PathBuf>,
-    replay_inputs: Option<RetainedReplayInputs>,
-    identity: Option<same_file::Handle>,
     writer: Option<BufWriter<File>>,
-    needs_truncate: bool,
-    created_new: bool,
 }
 
 impl ReplayTelemetryJsonl {
-    fn new(
-        path: PathBuf,
-        open_path: PathBuf,
-        report_path: Option<PathBuf>,
-        replay_inputs: Option<RetainedReplayInputs>,
-    ) -> Self {
-        Self {
-            path,
-            open_path,
-            report_path,
-            replay_inputs,
-            identity: None,
-            writer: None,
-            needs_truncate: true,
-            created_new: false,
-        }
+    fn new(path: PathBuf) -> Self {
+        Self { path, writer: None }
     }
 
-    fn ensure_open(&mut self) -> anyhow::Result<()> {
+    fn writer(&mut self) -> anyhow::Result<&mut BufWriter<File>> {
         if self.writer.is_none() {
-            if let Some(parent) = self.open_path.parent()
+            if let Some(parent) = self.path.parent()
                 && !parent.as_os_str().is_empty()
             {
                 std::fs::create_dir_all(parent)?;
             }
-
-            // Do not request truncate at open time: first pin the actual file
-            // descriptor and prove it is not any retained replay input. This
-            // closes the path-validation/open TOCTOU window for hard links and
-            // symlinks without rejecting legitimate symlinked output paths.
-            let (file, identity, created_new) = reserve_output_without_truncation(&self.open_path)?;
-            ensure_output_identity_is_not_replay_input(
-                "telemetry_jsonl_path",
-                &self.path,
-                &identity,
-                self.replay_inputs.as_deref(),
-            )?;
-            if let Some(report_path) = self.report_path.as_deref() {
-                match same_file::Handle::from_path(report_path) {
-                    Ok(report_identity) if report_identity == identity => {
-                        anyhow::bail!(
-                            "report_jsonl_path and telemetry_jsonl_path must refer to different files"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-
-            self.created_new = created_new;
-            self.identity = Some(identity);
-            self.writer = Some(BufWriter::new(file));
+            self.writer = Some(BufWriter::new(File::create(&self.path)?));
         }
-        Ok(())
-    }
-
-    fn writer(&mut self) -> anyhow::Result<&mut BufWriter<File>> {
-        self.ensure_open()?;
         Ok(self
             .writer
             .as_mut()
             .expect("telemetry writer initialized above"))
     }
 
-    fn is_same_file(&self, other: &same_file::Handle) -> bool {
-        self.identity
-            .as_ref()
-            .is_some_and(|identity| identity == other)
-    }
-
     fn write(&mut self, snapshot: &ReplayTelemetrySnapshot) -> anyhow::Result<()> {
-        if self.needs_truncate {
-            let writer = self.writer()?;
-            writer.get_mut().set_len(0)?;
-            writer.get_mut().seek(SeekFrom::Start(0))?;
-            self.needs_truncate = false;
-        }
         let writer = self.writer()?;
         serde_json::to_writer(&mut *writer, snapshot)?;
         writer.write_all(b"\n")?;
         Ok(())
     }
 
-    fn finish(&mut self) -> anyhow::Result<()> {
+    fn flush(&mut self) -> anyhow::Result<()> {
         if let Some(writer) = self.writer.as_mut() {
             writer.flush()?;
-        }
-        if let Some(identity) = self.identity.as_ref() {
-            let requested_identity = same_file::Handle::from_path(&self.path).map_err(|error| {
-                anyhow::anyhow!(
-                    "telemetry_jsonl_path no longer refers to the opened telemetry sink {}: {error}",
-                    self.path.display()
-                )
-            })?;
-            ensure_output_identity_is_not_replay_input(
-                "telemetry_jsonl_path",
-                &self.path,
-                &requested_identity,
-                self.replay_inputs.as_deref(),
-            )?;
-            if &requested_identity != identity {
-                anyhow::bail!(
-                    "telemetry_jsonl_path changed during replay and no longer refers to the opened telemetry sink: {}",
-                    self.path.display()
-                );
-            }
         }
         Ok(())
     }
 }
 
-impl Drop for ReplayTelemetryJsonl {
-    fn drop(&mut self) {
-        if !self.created_new || !self.needs_truncate {
-            return;
-        }
-        let still_owned = match (
-            self.identity.as_ref(),
-            same_file::Handle::from_path(&self.open_path),
-        ) {
-            (Some(expected), Ok(current)) => expected == &current,
-            _ => false,
-        };
-        if !still_owned {
-            return;
-        }
-        // Close both descriptors before removal so cleanup also works on
-        // Windows. Ignore cleanup errors: the replay's original failure wins.
-        self.writer.take();
-        self.identity.take();
-        let _ = std::fs::remove_file(&self.open_path);
-    }
-}
-
+// Samples are emitted serially. Shared ownership only lets the binding flush
+// after AISimulate has consumed the observer; this is not a concurrent writer.
 type ReplayTelemetryWriter = Arc<Mutex<ReplayTelemetryJsonl>>;
 
 struct PyReplayTelemetryObserver {
@@ -3112,13 +2614,6 @@ struct PyReplayTelemetryObserver {
 
 impl ReplayTelemetryObserver for PyReplayTelemetryObserver {
     fn on_sample(&mut self, snapshot: ReplayTelemetrySnapshot) -> anyhow::Result<()> {
-        // Pin and validate the sink before invoking user code. The callback may
-        // mutate pathnames, but all JSONL writes remain bound to this verified
-        // descriptor and cannot be redirected into a replay input.
-        if let Some(writer) = self.writer.as_ref() {
-            writer.lock().ensure_open()?;
-        }
-
         if let Some(callback) = self.callback.as_ref() {
             let result = Python::with_gil(|py| -> PyResult<()> {
                 let sample = pythonize(py, &snapshot).map_err(to_pyerr)?;
@@ -3157,8 +2652,6 @@ fn prepare_replay_telemetry(
     sample_interval_ms: f64,
     callback: Option<Py<PyAny>>,
     jsonl_path: Option<&Path>,
-    report_jsonl_path: Option<&Path>,
-    replay_inputs: Option<RetainedReplayInputs>,
     callback_error: Option<PyReplayTelemetryErrorSlot>,
 ) -> PyResult<PreparedReplayTelemetry> {
     let enabled = capture_telemetry || callback.is_some() || jsonl_path.is_some();
@@ -3190,17 +2683,8 @@ fn prepare_replay_telemetry(
     }
 
     let capture = capture_telemetry.then(ReplayTelemetryCapture::default);
-    let writer = if let Some(path) = jsonl_path {
-        let open_path = resolve_output_target(path).map_err(to_pyerr)?;
-        Some(Arc::new(Mutex::new(ReplayTelemetryJsonl::new(
-            path.to_path_buf(),
-            open_path,
-            report_jsonl_path.map(Path::to_path_buf),
-            replay_inputs,
-        ))))
-    } else {
-        None
-    };
+    let writer = jsonl_path
+        .map(|path| Arc::new(Mutex::new(ReplayTelemetryJsonl::new(path.to_path_buf()))));
     let options = Some(ReplayTelemetryOptions {
         sample_interval_ms,
         observer: Box::new(PyReplayTelemetryObserver {
@@ -3220,11 +2704,11 @@ fn prepare_replay_telemetry(
 
 fn finish_replay_telemetry(
     capture: Option<ReplayTelemetryCapture>,
-    writer: Option<&ReplayTelemetryWriter>,
+    writer: Option<ReplayTelemetryWriter>,
     sample_interval_ms: f64,
 ) -> anyhow::Result<Option<OfflineReplayTelemetry>> {
     if let Some(writer) = writer {
-        writer.lock().finish()?;
+        writer.lock().flush()?;
     }
     Ok(capture.map(|capture| OfflineReplayTelemetry {
         sample_interval_ms,

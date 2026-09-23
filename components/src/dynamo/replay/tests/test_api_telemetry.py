@@ -52,10 +52,12 @@ def test_synthetic_replay_forwards_and_materializes_telemetry(monkeypatch) -> No
         16,
         4,
         1,
-        capture_telemetry=True,
-        telemetry_sample_interval_ms=2_500.0,
-        telemetry_callback=callback,
-        telemetry_jsonl_path="samples.jsonl",
+        telemetry_options=api.TelemetryOptions(
+            sample_interval_ms=2_500.0,
+            capture_in_memory=True,
+            callback=callback,
+            jsonl_path="samples.jsonl",
+        ),
     )
 
     assert seen["capture_telemetry"] is True
@@ -67,152 +69,40 @@ def test_synthetic_replay_forwards_and_materializes_telemetry(monkeypatch) -> No
     assert report.telemetry.samples == [sample]
 
 
-def test_default_replay_report_shape_omits_disabled_telemetry(monkeypatch) -> None:
-    monkeypatch.setattr(
-        api,
-        "_run_mocker_synthetic_trace_replay",
-        lambda *args, **kwargs: _native_result(),
-    )
+def test_default_replay_omits_native_telemetry_options(monkeypatch) -> None:
+    seen = {}
+
+    def run_native(*args, **kwargs):
+        seen.update(kwargs)
+        return _native_result()
+
+    monkeypatch.setattr(api, "_run_mocker_synthetic_trace_replay", run_native)
 
     report = api.run_synthetic_trace_replay(16, 4, 1)
 
+    assert "capture_telemetry" not in seen
+    assert "telemetry_sample_interval_ms" not in seen
+    assert "telemetry_callback" not in seen
+    assert "telemetry_jsonl_path" not in seen
     assert report.telemetry is None
     assert "telemetry" not in report.to_dict()
 
 
-@pytest.mark.parametrize("interval", [0.0, -1.0, float("inf"), float("nan"), True])
-def test_enabled_telemetry_rejects_invalid_interval(interval) -> None:
-    with pytest.raises(ValueError, match="positive finite"):
-        api.run_synthetic_trace_replay(
-            16,
-            4,
-            1,
-            capture_telemetry=True,
-            telemetry_sample_interval_ms=interval,
-        )
-
-
-def test_telemetry_rejects_online_mode_and_non_callable_callback() -> None:
-    with pytest.raises(ValueError, match="offline"):
-        api.run_synthetic_trace_replay(
-            16,
-            4,
-            1,
-            replay_mode="online",
-            capture_telemetry=True,
-        )
-
-    with pytest.raises(TypeError, match="callable"):
-        api.run_synthetic_trace_replay(
-            16,
-            4,
-            1,
-            telemetry_callback=object(),
-        )
-
-
-def test_trace_replay_rejects_colliding_output_paths_before_native_call(
-    monkeypatch, tmp_path
-) -> None:
-    called = False
+def test_telemetry_options_capture_in_memory_by_default(monkeypatch) -> None:
+    seen = {}
 
     def run_native(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("native replay must not run for colliding outputs")
+        seen.update(kwargs)
+        return _native_result(telemetry={"sample_interval_ms": 1_000.0, "samples": []})
 
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
-    output = tmp_path / "samples.jsonl"
-    output.write_text("sentinel")
-    alias = tmp_path / "missing" / ".." / "samples.jsonl"
+    monkeypatch.setattr(api, "_run_mocker_synthetic_trace_replay", run_native)
 
-    with pytest.raises(ValueError, match="must refer to different files"):
-        api.run_trace_replay(
-            tmp_path / "trace.jsonl",
-            report_jsonl_path=output,
-            telemetry_jsonl_path=alias,
-        )
+    api.run_synthetic_trace_replay(
+        16,
+        4,
+        1,
+        telemetry_options=api.TelemetryOptions(),
+    )
 
-    assert called is False
-    assert output.read_text() == "sentinel"
-    assert not (tmp_path / "missing").exists()
-
-
-def test_trace_replay_rejects_prospective_case_insensitive_output_aliases(
-    monkeypatch, tmp_path
-) -> None:
-    probe = tmp_path / "CaseSensitivityProbe"
-    probe.write_text("probe")
-    if not (tmp_path / "casesensitivityprobe").exists():
-        pytest.skip("filesystem is case-sensitive")
-
-    called = False
-
-    def run_native(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("native replay must not run for colliding outputs")
-
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
-    report = tmp_path / "Samples.jsonl"
-    telemetry = tmp_path / "samples.jsonl"
-
-    with pytest.raises(ValueError, match="must refer to different files"):
-        api.run_trace_replay(
-            tmp_path / "trace.jsonl",
-            report_jsonl_path=report,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert called is False
-    assert not report.exists()
-    assert not telemetry.exists()
-
-
-def test_trace_replay_rejects_telemetry_alias_of_input_before_native_call(
-    monkeypatch, tmp_path
-) -> None:
-    trace = tmp_path / "trace.jsonl"
-    trace.write_text("sentinel")
-    called = False
-
-    def run_native(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("native replay must not run for colliding input")
-
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
-
-    with pytest.raises(ValueError, match="must not refer to replay input trace"):
-        api.run_trace_replay(trace, telemetry_jsonl_path=trace)
-
-    assert called is False
-    assert trace.read_text() == "sentinel"
-
-
-def test_trace_replay_rejects_hard_linked_output_paths_before_native_call(
-    monkeypatch, tmp_path
-) -> None:
-    called = False
-
-    def run_native(*args, **kwargs):
-        nonlocal called
-        called = True
-        raise AssertionError("native replay must not run for colliding outputs")
-
-    monkeypatch.setattr(api, "_run_mocker_trace_replay", run_native)
-    output = tmp_path / "requests.jsonl"
-    output.write_text("sentinel")
-    telemetry = tmp_path / "telemetry.jsonl"
-    telemetry.hardlink_to(output)
-
-    with pytest.raises(ValueError, match="must refer to different files"):
-        api.run_trace_replay(
-            tmp_path / "trace.jsonl",
-            report_jsonl_path=output,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert called is False
-    assert output.read_text() == "sentinel"
-    assert telemetry.read_text() == "sentinel"
+    assert seen["capture_telemetry"] is True
+    assert seen["telemetry_sample_interval_ms"] == 1_000.0

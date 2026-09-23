@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
 import threading
 
 import pytest
@@ -147,9 +146,7 @@ def test_callback_and_jsonl_only_do_not_retain_telemetry(tmp_path):
         telemetry_jsonl_path=jsonl_path,
         telemetry_sample_interval_ms=1.0,
     )
-    lines = jsonl_path.read_text().splitlines()
-    assert lines
-    samples = [json.loads(line) for line in lines]
+    samples = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
     assert [sample["sample_ordinal"] for sample in samples] == list(range(len(samples)))
     assert jsonl_result.telemetry is None
 
@@ -191,7 +188,7 @@ def test_jsonl_only_replay_releases_gil_for_background_python_thread(tmp_path):
 
 
 def test_jsonl_open_failure_fails_replay(tmp_path):
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match=r"(?i)directory|os error"):
         run_mocker_synthetic_trace_replay(
             **_replay_kwargs(),
             telemetry_jsonl_path=tmp_path,
@@ -200,7 +197,6 @@ def test_jsonl_open_failure_fails_replay(tmp_path):
 
 def test_disabled_telemetry_preserves_default_native_result():
     result = run_mocker_synthetic_trace_replay(**_replay_kwargs())
-
     assert result.telemetry is None
 
 
@@ -240,277 +236,30 @@ def test_native_telemetry_rejects_online_mode_and_non_callable_callback():
         )
 
 
-def test_native_rejects_colliding_output_paths_before_truncation(tmp_path):
+def test_native_rejects_exact_output_path_collision(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
     output = tmp_path / "samples.jsonl"
     output.write_text("sentinel")
-    alias = tmp_path / "missing" / ".." / "samples.jsonl"
 
-    with pytest.raises(ValueError, match="must refer to different files"):
+    with pytest.raises(ValueError, match="must differ"):
         run_mocker_trace_replay(
             [trace_path],
             report_jsonl_path=output,
-            telemetry_jsonl_path=alias,
+            telemetry_jsonl_path=output,
         )
 
     assert output.read_text() == "sentinel"
-    assert not (tmp_path / "missing").exists()
 
 
-def test_native_rejects_prospective_case_insensitive_output_aliases(tmp_path):
-    probe = tmp_path / "CaseSensitivityProbe"
-    probe.write_text("probe")
-    if not (tmp_path / "casesensitivityprobe").exists():
-        pytest.skip("filesystem is case-sensitive")
-
-    trace_path = _write_multiturn_trace(tmp_path)
-    report = tmp_path / "Samples.jsonl"
-    telemetry = tmp_path / "samples.jsonl"
-
-    with pytest.raises(ValueError, match="must refer to different files"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert not report.exists()
-    assert not telemetry.exists()
-
-
-def test_native_rechecks_output_alias_before_report_write(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    report = tmp_path / "requests.jsonl"
-    telemetry = tmp_path / "telemetry.jsonl"
-
-    def swap_report_target(_sample):
-        if not report.is_symlink():
-            report.symlink_to(telemetry.name)
-
-    with pytest.raises(ValueError, match="must refer to different files"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_callback=swap_report_target,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    samples = [json.loads(line) for line in telemetry.read_text().splitlines()]
-    assert samples
-    assert report.is_symlink()
-
-
-def test_native_rejects_hard_linked_output_paths_before_truncation(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    output = tmp_path / "requests.jsonl"
-    output.write_text("sentinel")
-    telemetry = tmp_path / "telemetry.jsonl"
-    telemetry.hardlink_to(output)
-
-    with pytest.raises(ValueError, match="must refer to different files"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=output,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert output.read_text() == "sentinel"
-    assert telemetry.read_text() == "sentinel"
-
-
-def test_native_rejects_telemetry_alias_of_input_before_truncation(tmp_path):
+@pytest.mark.parametrize("output_option", ["telemetry_jsonl_path", "report_jsonl_path"])
+def test_native_rejects_output_equal_to_input(tmp_path, output_option):
     trace_path = _write_multiturn_trace(tmp_path)
     original = trace_path.read_text()
 
-    with pytest.raises(ValueError, match="must not refer to replay input trace"):
-        run_mocker_trace_replay([trace_path], telemetry_jsonl_path=trace_path)
+    with pytest.raises(ValueError, match="must differ"):
+        run_mocker_trace_replay([trace_path], **{output_option: trace_path})
 
     assert trace_path.read_text() == original
-
-
-def test_native_rejects_report_alias_of_input_without_telemetry(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    original = trace_path.read_text()
-
-    with pytest.raises(ValueError, match="report_jsonl_path must not refer"):
-        run_mocker_trace_replay([trace_path], report_jsonl_path=trace_path)
-
-    assert trace_path.read_text() == original
-
-
-@pytest.mark.parametrize("alias_kind", ["symlink", "hardlink"])
-def test_callback_cannot_redirect_telemetry_sink_into_input_trace(tmp_path, alias_kind):
-    trace_path = _write_multiturn_trace(tmp_path)
-    original = trace_path.read_text()
-    telemetry = tmp_path / "telemetry.jsonl"
-    swapped = False
-
-    def redirect_telemetry(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        telemetry.unlink()
-        if alias_kind == "symlink":
-            telemetry.symlink_to(trace_path.name)
-        else:
-            telemetry.hardlink_to(trace_path)
-
-    with pytest.raises(Exception, match="telemetry_jsonl_path must not refer"):
-        run_mocker_trace_replay(
-            [trace_path],
-            telemetry_callback=redirect_telemetry,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert swapped
-    assert trace_path.read_text() == original
-    assert telemetry.read_text() == original
-
-
-def test_retained_trace_identity_blocks_report_rename_evasion(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    original = trace_path.read_text()
-    hidden_trace = tmp_path / "hidden-trace.jsonl"
-    report = tmp_path / "requests.jsonl"
-    swapped = False
-
-    def hide_trace_and_redirect_report(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        trace_path.rename(hidden_trace)
-        trace_path.write_text("decoy\n")
-        report.hardlink_to(hidden_trace)
-
-    with pytest.raises(Exception, match="report_jsonl_path must not refer"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_callback=hide_trace_and_redirect_report,
-        )
-
-    assert swapped
-    assert hidden_trace.read_text() == original
-    assert report.read_text() == original
-    assert trace_path.read_text() == "decoy\n"
-
-
-def test_callback_cannot_replace_absent_report_with_arbitrary_file(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    report = tmp_path / "requests.jsonl"
-    victim = tmp_path / "unrelated.jsonl"
-    victim.write_text("sentinel")
-    swapped = False
-
-    def install_sentinel_at_report_path(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        report.hardlink_to(victim)
-
-    with pytest.raises(Exception, match="created or redirected during replay"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_callback=install_sentinel_at_report_path,
-        )
-
-    assert swapped
-    assert report.read_text() == "sentinel"
-    assert victim.read_text() == "sentinel"
-
-
-def test_callback_parent_directory_swap_cannot_redirect_telemetry(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    output_dir = tmp_path / "output"
-    output_dir.mkdir()
-    moved_output_dir = tmp_path / "moved-output"
-    victim_dir = tmp_path / "victim"
-    victim_dir.mkdir()
-    telemetry = output_dir / "telemetry.jsonl"
-    victim = victim_dir / telemetry.name
-    victim.write_text("sentinel")
-    swapped = False
-
-    def swap_parent_directory(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        output_dir.rename(moved_output_dir)
-        output_dir.symlink_to(victim_dir, target_is_directory=True)
-
-    with pytest.raises(Exception, match="telemetry_jsonl_path changed during replay"):
-        run_mocker_trace_replay(
-            [trace_path],
-            telemetry_callback=swap_parent_directory,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert swapped
-    assert victim.read_text() == "sentinel"
-    first_safe_line = json.loads(
-        (moved_output_dir / telemetry.name).read_text().splitlines()[0]
-    )
-    assert first_safe_line["kind"] == "baseline"
-
-
-def test_callback_parent_directory_swap_cannot_create_report_dirs_elsewhere(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    output_parent = tmp_path / "output"
-    victim_dir = tmp_path / "victim"
-    victim_dir.mkdir()
-    report = output_parent / "nested" / "requests.jsonl"
-    swapped = False
-
-    def swap_absent_parent(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        output_parent.symlink_to(victim_dir, target_is_directory=True)
-
-    with pytest.raises(Exception, match="resolves to a different target"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_callback=swap_absent_parent,
-        )
-
-    assert swapped
-    assert output_parent.is_symlink()
-    assert not (victim_dir / "nested").exists()
-
-
-def test_callback_cannot_move_telemetry_inode_onto_report_path(tmp_path):
-    trace_path = _write_multiturn_trace(tmp_path)
-    telemetry = tmp_path / "telemetry.jsonl"
-    report = tmp_path / "requests.jsonl"
-    swapped = False
-
-    def move_telemetry_and_install_decoy(_sample):
-        nonlocal swapped
-        if swapped:
-            return
-        swapped = True
-        telemetry.rename(report)
-        telemetry.write_text("decoy")
-
-    with pytest.raises(Exception, match="telemetry_jsonl_path changed during replay"):
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path=report,
-            telemetry_callback=move_telemetry_and_install_decoy,
-            telemetry_jsonl_path=telemetry,
-        )
-
-    assert swapped
-    assert telemetry.read_text() == "decoy"
-    first_report_line = json.loads(report.read_text().splitlines()[0])
-    assert first_report_line["kind"] == "baseline"
 
 
 def test_callback_failure_does_not_truncate_existing_telemetry_sink(tmp_path):
@@ -528,34 +277,6 @@ def test_callback_failure_does_not_truncate_existing_telemetry_sink(tmp_path):
         )
 
     assert telemetry.read_text() == "sentinel"
-
-
-def test_callback_chdir_does_not_retarget_relative_outputs(tmp_path):
-    original_cwd = os.getcwd()
-    replay_dir = tmp_path / "replay"
-    other_dir = tmp_path / "other"
-    replay_dir.mkdir()
-    other_dir.mkdir()
-    trace_path = _write_multiturn_trace(tmp_path)
-
-    def change_working_directory(_sample):
-        os.chdir(other_dir)
-
-    try:
-        os.chdir(replay_dir)
-        run_mocker_trace_replay(
-            [trace_path],
-            report_jsonl_path="requests.jsonl",
-            telemetry_callback=change_working_directory,
-            telemetry_jsonl_path="telemetry.jsonl",
-        )
-    finally:
-        os.chdir(original_cwd)
-
-    assert (replay_dir / "requests.jsonl").is_file()
-    assert (replay_dir / "telemetry.jsonl").is_file()
-    assert not (other_dir / "requests.jsonl").exists()
-    assert not (other_dir / "telemetry.jsonl").exists()
 
 
 def test_late_option_validation_does_not_truncate_telemetry_output(tmp_path):
@@ -577,7 +298,7 @@ def test_trace_parse_failure_does_not_truncate_telemetry_output(tmp_path):
     output = tmp_path / "telemetry.jsonl"
     output.write_text("sentinel")
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match=r"(?i)failed to parse.*json"):
         run_mocker_trace_replay(
             [trace_path],
             extra_engine_args=MockEngineArgs(

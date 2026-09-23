@@ -27,6 +27,7 @@ from dynamo.replay import (
     PlannerReplayDetails,
     ReplayReport,
     ReplayTelemetryDetails,
+    TelemetryOptions,
     run_trace_replay,
     simulation,
 )
@@ -229,8 +230,7 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
         )
     )
 
-    assert seen["capture_telemetry"] is True
-    assert seen["telemetry_sample_interval_ms"] == 2_500.0
+    assert seen["telemetry_options"] == TelemetryOptions(sample_interval_ms=2_500.0)
     assert report.metadata["native_report"]["telemetry"] == {
         "sample_interval_ms": 2_500.0,
         "samples": [sample],
