@@ -23,8 +23,13 @@ from dynamo.profiler.sweeper.renderers import (
     render_dgd,
 )
 from dynamo.profiler.sweeper.runner import SweepResult, load_sweep_config, run_sweep
+from dynamo.profiler.v2.dynamo_event_plane_transport import DynamoEventPlaneEmitter
+from dynamo.profiler.v2.sweeper_event_plane import SweeperEventPublisher, new_run_uid
 
 _DEFAULT_DGD_NAME = "sweeper-dgd"
+_EVENT_COMPONENT = "sweeper"
+_EVENT_DISCOVERY_BACKEND = "etcd"
+_EVENT_REQUEST_PLANE = "nats"
 
 
 def _dgd_name(value: str) -> str:
@@ -181,6 +186,81 @@ class _BestDGDPublisher:
         )
 
 
+def _start_event_publisher(namespace: str) -> SweeperEventPublisher | None:
+    """Best-effort event-plane bootstrap; never aborts the sweep on failure.
+
+    Constructs the ``DistributedRuntime`` directly (matching the pattern
+    ``test_sweeper_events_integration.py`` exercises) rather than through
+    ``dynamo.common.utils.runtime.create_runtime``, which requires an
+    already-running event loop -- a poor fit for this synchronous CLI.
+    """
+    try:
+        import asyncio
+
+        from dynamo.runtime import DistributedRuntime
+
+        loop = asyncio.new_event_loop()
+        drt = DistributedRuntime(loop, _EVENT_DISCOVERY_BACKEND, _EVENT_REQUEST_PLANE)
+        endpoint = drt.endpoint(f"{namespace}.{_EVENT_COMPONENT}.events")
+        emitter = DynamoEventPlaneEmitter(endpoint)
+        publisher = SweeperEventPublisher(new_run_uid(), emitter)
+        publisher.start()
+        return publisher
+    except Exception as exc:  # noqa: BLE001 -- fail open: progress events are best-effort
+        print(
+            "dynamo-profiler-sweeper: event plane unavailable, continuing without "
+            f"progress events: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+
+def _candidate_event_payload(record: Any) -> dict[str, Any]:
+    if record.status.value == "feasible":
+        return {
+            "outcome": "materialized",
+            "candidate": record.as_candidate().model_dump(mode="json"),
+        }
+    return {"outcome": "materialization_failed", "error": record.reason}
+
+
+def _make_on_candidate(event_publisher: SweeperEventPublisher | None):
+    if event_publisher is None:
+        return None
+
+    def _on_candidate(record: Any) -> None:
+        event_publisher.emit("search.resolved", _candidate_event_payload(record))
+
+    return _on_candidate
+
+
+def _make_on_round_event(event_publisher: SweeperEventPublisher | None):
+    if event_publisher is None:
+        return None
+
+    def _on_round(round_number: int, candidates: list[Any]) -> None:
+        event_publisher.emit(
+            "round.completed",
+            {"round_no": round_number, "cumulative_candidates": len(candidates)},
+        )
+
+    return _on_round
+
+
+def _combine_round_callbacks(*callbacks):
+    active = [callback for callback in callbacks if callback is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def _combined(round_number: int, candidates: list[Any]) -> None:
+        for callback in active:
+            callback(round_number, candidates)
+
+    return _combined
+
+
 def _validate_config(parser: argparse.ArgumentParser, args: Any, config: Any) -> bool:
     backends = list(config.search_space.backend)
     if len(backends) != 1:
@@ -239,6 +319,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     publisher: _BestDGDPublisher | None = None
+    event_publisher: SweeperEventPublisher | None = None
+    run_outcome: dict[str, Any] = {"outcome": "succeeded"}
+    if args.dgd_namespace:
+        event_publisher = _start_event_publisher(args.dgd_namespace)
     try:
         config = load_sweep_config(args.config)
         is_pareto = _validate_config(parser, args, config)
@@ -251,7 +335,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir = Path(args.output_dir)
 
         if is_pareto:
-            result = run_sweep(config, show_progress=not args.no_progress)
+            result = run_sweep(
+                config,
+                show_progress=not args.no_progress,
+                on_round=_make_on_round_event(event_publisher),
+                on_candidate=_make_on_candidate(event_publisher),
+            )
             if not result.candidates:
                 raise CandidateMaterializationError(
                     "no feasible candidate found (check backend, workload, SLA, GPU budget, and replay errors)"
@@ -281,7 +370,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = run_sweep(
             config,
             show_progress=not args.no_progress,
-            on_round=publisher.on_round,
+            on_round=_combine_round_callbacks(
+                publisher.on_round, _make_on_round_event(event_publisher)
+            ),
+            on_candidate=_make_on_candidate(event_publisher),
         )
         if not result.candidates:
             raise CandidateMaterializationError(
@@ -300,6 +392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     except KeyboardInterrupt:
+        run_outcome = {"outcome": "failed", "error": "interrupted"}
         retained = (
             "; best known DGD remains at "
             f"{publisher.output_dir / publisher.artifacts[0]['path']}"
@@ -316,8 +409,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         yaml.YAMLError,
         ValueError,
     ) as exc:
+        run_outcome = {"outcome": "failed", "error": str(exc)}
         print(f"dynamo-profiler-sweeper: error: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if event_publisher is not None:
+            event_publisher.emit("run.completed", run_outcome)
+            event_publisher.close()
 
 
 if __name__ == "__main__":

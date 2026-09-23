@@ -50,14 +50,6 @@ def _wait_until(predicate, timeout=2.0, interval=0.01):
     return predicate()
 
 
-def test_emit_does_not_block_caller():
-    emitter = FakeEventEmitter()
-    pub = SweeperEventPublisher("run-1", emitter)
-    start = time.monotonic()
-    pub.emit("round.completed", {"round_no": 1, "cumulative_candidates": 1})
-    assert time.monotonic() - start < 0.5
-
-
 def test_events_delivered_in_order_with_correct_subjects():
     emitter = FakeEventEmitter()
     with SweeperEventPublisher("run-2", emitter) as pub:

@@ -16,13 +16,8 @@ if TYPE_CHECKING:
 
 
 class DynamoEventPlaneEmitter:
-    """Publishes onto Dynamo's event plane via the (new) SweeperEventPublisher
-    PyO3 class. One instance manages all three subjects for a single Sweeper
-    run -- the Rust side is expected to lazily create one underlying
-    EventPublisher per distinct subject it's asked to publish to, matching
-    the DEP's "one subject per event type" design without the Python side
-    needing to know that detail.
-    """
+    """Publishes onto Dynamo's event plane via the SweeperEventPublisher
+    PyO3 class."""
 
     def __init__(self, endpoint: "Endpoint") -> None:
         from dynamo._core import SweeperEventPublisher as _RustPublisher

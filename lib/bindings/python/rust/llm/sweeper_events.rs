@@ -54,31 +54,49 @@ impl SweeperEventPublisher {
     /// Intended to be called from a background thread (the drain loop in
     /// sweeper_event_plane.py), never from a latency-sensitive caller.
     /// Releases the GIL while the underlying publish awaits. The map lock
-    /// is held only to look up or create the publisher, never across the
-    /// publish itself -- otherwise a stalled transport would block close()
-    /// behind this call indefinitely, defeating close()'s bounded-shutdown
-    /// contract.
+    /// is held only to look up or insert an already-created publisher,
+    /// never across an await -- not the transport publish, and not
+    /// first-time publisher creation either, since EventPublisher::
+    /// for_endpoint also awaits (broker resolution / discovery
+    /// registration). Otherwise a stalled discovery backend could block
+    /// close() on this same mutex indefinitely, defeating close()'s
+    /// bounded-shutdown contract.
     fn publish_subject(&self, py: Python, subject: String, payload: Vec<u8>) -> PyResult<()> {
         py.allow_threads(|| {
-            let publisher = {
-                let mut publishers = self
+            let existing = {
+                let publishers = self
                     .publishers
                     .lock()
                     .map_err(|e| to_pyerr(format!("SweeperEventPublisher lock poisoned: {e}")))?;
+                publishers.get(&subject).cloned()
+            };
 
-                if !publishers.contains_key(&subject) {
-                    let created = self
-                        .runtime_handle
-                        .block_on(EventPublisher::for_endpoint(
-                            &self.endpoint,
-                            subject.clone(),
-                        ))
-                        .map_err(to_pyerr)?;
-                    publishers.insert(subject.clone(), Arc::new(created));
+            let publisher = match existing {
+                Some(publisher) => publisher,
+                None => {
+                    // Created without holding the map lock: this awaits
+                    // discovery registration, which must not be able to
+                    // stall close()'s lock-then-clear.
+                    let created = Arc::new(
+                        self.runtime_handle
+                            .block_on(EventPublisher::for_endpoint(
+                                &self.endpoint,
+                                subject.clone(),
+                            ))
+                            .map_err(to_pyerr)?,
+                    );
+
+                    let mut publishers = self.publishers.lock().map_err(|e| {
+                        to_pyerr(format!("SweeperEventPublisher lock poisoned: {e}"))
+                    })?;
+                    // Another thread may have raced us and already inserted
+                    // one for this subject while we were awaiting creation
+                    // -- keep that one rather than overwrite it, so two
+                    // concurrent first publishes settle on a single
+                    // publisher per subject instead of leaking one.
+                    publishers.entry(subject.clone()).or_insert(created).clone()
                 }
-
-                publishers.get(&subject).expect("just inserted").clone()
-            }; // map lock released here, before the awaited publish below
+            };
 
             self.runtime_handle
                 .block_on(publisher.publish_bytes_ref(&payload))

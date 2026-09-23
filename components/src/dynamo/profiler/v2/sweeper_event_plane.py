@@ -149,8 +149,6 @@ class SweeperEventPublisher:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    # -- internals --------------------------------------------------
-
     def _drain_loop(self) -> None:
         while not self._stop.is_set() or not self._queue.empty():
             try:

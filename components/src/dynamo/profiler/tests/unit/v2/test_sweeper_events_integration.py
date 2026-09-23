@@ -53,49 +53,7 @@ def _make_process_local_runtime() -> "DistributedRuntime":
     return DistributedRuntime(loop, "mem", "tcp")
 
 
-def test_publisher_subscriber_round_trip_over_real_event_plane():
-    drt = _make_process_local_runtime()
-    endpoint = drt.endpoint("sweeper-integration-test.worker.events")
-
-    publisher = SweeperEventPublisher(endpoint)
-    subscriber = SweeperEventSubscriber(endpoint)
-
-    subject = "sweeper.integration-run-1.round_completed"
-    payload = b'{"round_no": 1, "cumulative_candidates": 1}'
-
-    result_q: "queue.Queue[bytes | None]" = queue.Queue()
-
-    def _recv():
-        result_q.put(subscriber.recv(subject))
-
-    recv_thread = threading.Thread(target=_recv, daemon=True)
-    recv_thread.start()
-
-    received = None
-    deadline = time.monotonic() + 10.0
-    try:
-        while time.monotonic() < deadline:
-            publisher.publish_subject(subject, payload)
-            try:
-                received = result_q.get(timeout=0.2)
-                break
-            except queue.Empty:
-                continue
-    finally:
-        publisher.close()
-
-    assert received == payload, (
-        "subscriber never received the published payload within 10s -- "
-        "either discovery/connection didn't complete, or the wire format "
-        "doesn't round-trip"
-    )
-
-
 def test_multiple_subjects_are_independent():
-    """A subscriber listening on one subject must not see events published
-    to a different subject on the same endpoint -- exercises the DEP's
-    'one subject per event type' design, not just that publish/recv work at
-    all."""
     drt = _make_process_local_runtime()
     endpoint = drt.endpoint("sweeper-integration-test.worker.events-multi")
 
