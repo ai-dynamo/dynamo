@@ -3,6 +3,7 @@
 
 """Unit tests for load_multimodal_embeddings in prefill_worker_utils."""
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -88,6 +89,56 @@ def test_attach_coalesced_embedding_rejects_token_count_mismatch():
         )
 
 
+@pytest.mark.asyncio
+async def test_encode_worker_request_carries_image_cache_scope():
+    """The prefill-to-encode hop must preserve frontend cache isolation."""
+    captured_payloads = []
+
+    class _Response:
+        def __init__(self, payload: str):
+            self._payload = payload
+
+        def data(self) -> str:
+            return self._payload
+
+    async def _response_stream(payload: str):
+        yield _Response(payload)
+
+    async def _round_robin(payload: str, *, context=None):
+        captured_payloads.append(payload)
+        response = json.loads(payload)
+        response["multimodal_inputs"][0]["serialized_request"] = {
+            "embeddings_shape": [1, 2, 3],
+            "embedding_dtype_str": "float16",
+            "serialized_request": "opaque",
+        }
+        return _response_stream(json.dumps(response))
+
+    client = Mock()
+    client.instance_ids.return_value = ["encode-0"]
+    client.round_robin = AsyncMock(side_effect=_round_robin)
+
+    receiver = SimpleNamespace(
+        receive_embeddings=AsyncMock(
+            return_value=(7, torch.randn(1, 2, 3, dtype=DTYPE))
+        ),
+        release_tensor=Mock(),
+    )
+    groups, pending = await mod._fetch_from_encode_workers(
+        client,
+        ["https://example.com/image.png"],
+        "req-1",
+        receiver,
+        cache_scope="session-42",
+    )
+
+    assert len(groups) == 1
+    assert pending is not None
+    assert json.loads(captured_payloads[0])["image_cache_scope"] == "session-42"
+    pending.release_all()
+    receiver.release_tensor.assert_called_once_with(7)
+
+
 class TestMultimodalEmbeddingLoader:
     @pytest.mark.asyncio
     async def test_all_cached(self):
@@ -137,15 +188,86 @@ class TestMultimodalEmbeddingLoader:
                 [url],
                 "req-1",
                 model=MODEL,
+                cache_scope="session-42",
             )
 
         mock_fetch.assert_awaited_once()
+        assert mock_fetch.call_args.kwargs["cache_scope"] == "session-42"
         assert torch.equal(mm_data["image"], tensor)
 
         key = mod.get_embedding_hash(url)
         cached = cache.get(key)
         assert cached is not None
         assert torch.equal(cached.tensor, tensor)
+
+    @pytest.mark.asyncio
+    async def test_session_scope_partitions_embedding_cache(self):
+        """The same URL in separate sessions must not share an embedding."""
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
+        url = "http://img1.png"
+        first_tensor = torch.full((1, 10), 1.0, dtype=DTYPE)
+        second_tensor = torch.full((1, 10), 2.0, dtype=DTYPE)
+        groups = [
+            MultiModalGroup(loaded_embedding=first_tensor),
+            MultiModalGroup(loaded_embedding=second_tensor),
+        ]
+
+        with patch.object(
+            mod,
+            "_fetch_from_encode_workers",
+            new_callable=AsyncMock,
+            side_effect=[([groups[0]], None), ([groups[1]], None)],
+        ) as mock_fetch:
+            embedding_loader = mod.MultiModalEmbeddingLoader(
+                AsyncMock(), None, cache, session_scoped_cache=True
+            )
+            first = await embedding_loader.load_multimodal_embeddings(
+                [url], "req-1", model=MODEL, cache_scope="session-a"
+            )
+            second = await embedding_loader.load_multimodal_embeddings(
+                [url], "req-2", model=MODEL, cache_scope="session-b"
+            )
+            first_again = await embedding_loader.load_multimodal_embeddings(
+                [url], "req-3", model=MODEL, cache_scope="session-a"
+            )
+
+        assert mock_fetch.await_count == 2
+        assert torch.equal(first["image"], first_tensor)
+        assert torch.equal(second["image"], second_tensor)
+        assert torch.equal(first_again["image"], first_tensor)
+        assert cache.stats["entries"] == 2
+
+    @pytest.mark.asyncio
+    async def test_session_scoped_embedding_cache_bypasses_without_scope(self):
+        """Missing scope must neither read nor populate the embedding cache."""
+        cache = MultimodalEmbeddingCacheManager(capacity_bytes=1024 * 1024)
+        url = "http://img1.png"
+        tensors = [
+            torch.full((1, 10), 1.0, dtype=DTYPE),
+            torch.full((1, 10), 2.0, dtype=DTYPE),
+        ]
+        groups = [MultiModalGroup(loaded_embedding=tensor) for tensor in tensors]
+
+        with patch.object(
+            mod,
+            "_fetch_from_encode_workers",
+            new_callable=AsyncMock,
+            side_effect=[([groups[0]], None), ([groups[1]], None)],
+        ) as mock_fetch:
+            embedding_loader = mod.MultiModalEmbeddingLoader(
+                AsyncMock(), None, cache, session_scoped_cache=True
+            )
+            first = await embedding_loader.load_multimodal_embeddings(
+                [url], "req-1", model=MODEL
+            )
+            second = await embedding_loader.load_multimodal_embeddings(
+                [url], "req-2", model=MODEL, cache_scope=" "
+            )
+
+        assert mock_fetch.await_count == 2
+        assert torch.equal(first["image"], tensors[0])
+        assert torch.equal(second["image"], tensors[1])
+        assert cache.stats["entries"] == 0
 
     @pytest.mark.asyncio
     async def test_no_cache(self):

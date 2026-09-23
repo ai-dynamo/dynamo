@@ -3,7 +3,7 @@
 
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -99,11 +99,49 @@ async def test_extracts_mixed_url_data_url_and_decoded_media():
 
     assert result == {"image": image, "video": video, "audio": [audio_a, audio_b]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.video_loader.load_video_batch.assert_awaited_once_with(video_items, {})
     processor.audio_loader.load_audio_batch.assert_awaited_once_with(audio_items)
     processor.audio_loader.load_audio.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_image_cache_uses_frontend_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": " session-42 ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope="session-42", preserve_uuid_slots=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_image_cache_has_no_scope_for_malformed_scope():
+    processor = _processor()
+    image_items = [{"Url": "https://example.com/image.png"}]
+
+    await processor.extract_multimodal_data(
+        {
+            "image_cache_scope": "   ",
+            "multi_modal_data": {"image_url": image_items},
+        },
+        "request-1",
+        None,
+    )
+
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        image_items, cache_scope=None, preserve_uuid_slots=True
+    )
 
 
 @pytest.mark.asyncio
@@ -243,10 +281,11 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     result = await processor.extract_multimodal_data(
         {
+            "image_cache_scope": "session-42",
             "multi_modal_data": {
                 "image_url": [{"Url": "https://example.com/image.png"}],
                 "video_url": [{"Url": "https://example.com/video.mp4"}],
-            }
+            },
         },
         "request-encoder",
         None,
@@ -265,6 +304,12 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 
     assert result == {"image": decoded_image}
     processor.embedding_loader.load_multimodal_embeddings.assert_awaited_once()
+    assert (
+        processor.embedding_loader.load_multimodal_embeddings.call_args.kwargs[
+            "cache_scope"
+        ]
+        == "session-42"
+    )
 
 
 @pytest.mark.asyncio
@@ -288,7 +333,7 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
 
     assert result == {"image": [image, None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
     processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
@@ -307,7 +352,7 @@ async def test_extracts_uuid_only_unified_vision_chunk_as_bare_none_slot():
 
     assert result == {"vision_chunk": [None]}
     processor.image_loader.load_image_batch.assert_awaited_once_with(
-        image_items, preserve_uuid_slots=True
+        image_items, cache_scope=None, preserve_uuid_slots=True
     )
 
 
@@ -1345,6 +1390,7 @@ def test_qwen_handoff_applies_per_request_pixel_overrides(monkeypatch):
         min_pixels=65536,
         max_pixels=16777216,
         vision_hidden_dim=2048,
+        decode_embedding_dim=2048,
     )
     captured = {}
 
@@ -1390,12 +1436,13 @@ def test_qwen_handoff_computes_grid_for_pil_images():
             min_pixels=65536,
             max_pixels=16777216,
             vision_hidden_dim=2048,
+            decode_embedding_dim=8192,
         ),
     )
 
     assert result == {
         "image_grid_thw": [[1, 30, 40]],
-        "embeddings_shape": [300, 2048],
+        "embeddings_shape": [300, 8192],
     }
 
 
@@ -1616,3 +1663,44 @@ def test_k3_long_prompt_splices_only_rare_pads():
     assert result[10 : 10 + len(_K3_NATIVE_IDS)] == _K3_NATIVE_IDS
     assert result[-(len(_K3_NATIVE_IDS) + 9) : -9] == _K3_NATIVE_IDS
     assert len(result) == len(tokens) + 2 * (len(_K3_NATIVE_IDS) - 1)
+
+
+class TestLoadQwenGridParams:
+    """Tests for embedding dimensions loaded from Qwen vision configs."""
+
+    @pytest.mark.parametrize(
+        ("deepstack_config", "expected_decode_embedding_dim"),
+        [
+            pytest.param(
+                {"deepstack_visual_indexes": [8, 16, 24]}, 8192, id="deepstack"
+            ),
+            pytest.param({"deepstack_visual_indexes": []}, 2048, id="empty"),
+            pytest.param({"deepstack_visual_indexes": None}, 2048, id="none"),
+            pytest.param({}, 2048, id="missing"),
+        ],
+    )
+    def test_decode_embedding_dim(
+        self, deepstack_config, expected_decode_embedding_dim
+    ):
+        processor = SimpleNamespace(
+            patch_size=16, merge_size=2, min_pixels=65536, max_pixels=16777216
+        )
+        vision_config = SimpleNamespace(
+            hidden_size=1024, out_hidden_size=2048, **deepstack_config
+        )
+        with (
+            patch.object(
+                qwen_mod.AutoImageProcessor, "from_pretrained", return_value=processor
+            ),
+            patch.object(
+                qwen_mod.AutoConfig,
+                "from_pretrained",
+                return_value=SimpleNamespace(vision_config=vision_config),
+            ),
+        ):
+            params = qwen_mod.load_qwen_grid_params("Qwen/Qwen3-VL-2B-Instruct")
+
+        assert params is not None
+        assert params.vision_hidden_dim == 2048
+        # DeepStack concatenates intermediate outputs with the final vision output.
+        assert params.decode_embedding_dim == expected_decode_embedding_dim

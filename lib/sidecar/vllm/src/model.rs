@@ -1,9 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::ops::Range;
+
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
+use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 use crate::client;
 use crate::proto as pb;
@@ -17,6 +20,8 @@ struct ModelIdentity {
     aliases: Vec<String>,
     reasoning_parser: Option<String>,
     tool_call_parser: Option<String>,
+    supports_lora: bool,
+    max_loras: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +31,7 @@ pub(crate) struct DiscoveredModel {
     pub supports_multimodal: bool,
     identity: ModelIdentity,
     server: pb::ServerInfo,
+    data_parallel_range: Range<u32>,
 }
 
 impl DiscoveredModel {
@@ -39,19 +45,15 @@ impl DiscoveredModel {
                 server.api_version
             )));
         }
-        if let Some(parallelism) = server.parallelism.as_ref() {
-            if parallelism.data_parallel_size == 0 {
-                return Err(client::protocol_error(
-                    "vLLM reports a data-parallel size of zero",
-                ));
-            }
-            if parallelism.data_parallel_rank != 0 {
-                return Err(client::protocol_error(format!(
-                    "vLLM reports data_parallel_rank {}; the sidecar currently requires one frontend hosting the complete data-parallel group starting at rank 0",
-                    parallelism.data_parallel_rank
-                )));
-            }
-        }
+        let data_parallel_range = if let Some(parallelism) = server.parallelism.as_ref() {
+            local_data_parallel_range(
+                parallelism.data_parallel_size,
+                parallelism.data_parallel_rank,
+                parallelism.data_parallel_size_local,
+            )?
+        } else {
+            0..1
+        };
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -61,12 +63,16 @@ impl DiscoveredModel {
         }
         let reasoning_parser = nonempty(model.reasoning_parser);
         let tool_call_parser = nonempty(model.tool_call_parser);
+        let supports_lora = model.supports_lora;
+        let max_loras = server.max_loras;
         let identity = ModelIdentity {
             source: source.clone(),
             served_name: served_name.clone(),
             aliases: model.served_model_aliases,
             reasoning_parser: reasoning_parser.clone(),
             tool_call_parser: tool_call_parser.clone(),
+            supports_lora,
+            max_loras,
         };
         Ok(Self {
             source,
@@ -74,6 +80,7 @@ impl DiscoveredModel {
             supports_multimodal: model.supports_multimodal,
             identity,
             server,
+            data_parallel_range,
         })
     }
 
@@ -163,43 +170,89 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = if enable_kv_routing {
+            self.kv_cache_block_size()?
+        } else {
+            None
+        };
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            // The released protocol lacks native sampling JSON and its capability
-            // flag. Advertise native Generate only once upstream supports both.
-            runtime_data: Default::default(),
+            runtime_data: [
+                (
+                    dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+            ]
+            .into_iter()
+            .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
-                total_kv_blocks: self.total_kv_blocks_per_rank(),
+                kv_cache_block_size,
+                total_kv_blocks: enable_kv_routing
+                    .then(|| self.total_kv_blocks_per_rank())
+                    .flatten(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
-                data_parallel_size: parallelism
-                    .and_then(|parallelism| nonzero(parallelism.data_parallel_size)),
-                data_parallel_start_rank: parallelism.map(|_| 0),
+                max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
+                data_parallel_size: parallelism.map(|_| self.data_parallel_size_local()),
+                data_parallel_start_rank: parallelism.map(|_| self.data_parallel_range.start),
                 ..Default::default()
             }),
-        }
+        })
     }
 
-    pub(crate) fn data_parallel_size(&self) -> u32 {
-        self.server
-            .parallelism
-            .as_ref()
-            .map_or(1, |parallelism| parallelism.data_parallel_size)
+    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let Some(block_size) = self.server.effective_attention_block_size else {
+            return Ok(nonzero(self.server.kv_block_size));
+        };
+        let block_size = u32::try_from(block_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
+                ))
+            })?;
+        Ok(Some(block_size))
+    }
+
+    pub(crate) fn data_parallel_range(&self) -> &Range<u32> {
+        &self.data_parallel_range
+    }
+
+    fn data_parallel_size_local(&self) -> u32 {
+        self.data_parallel_range.end - self.data_parallel_range.start
+    }
+
+    pub(crate) fn supports_lora(&self) -> bool {
+        self.identity.supports_lora && self.identity.max_loras > 0
+    }
+
+    pub(crate) fn max_loras(&self) -> u32 {
+        self.identity.max_loras
+    }
+
+    pub(crate) fn is_base_model_name(&self, name: &str) -> bool {
+        name == self.identity.source
+            || name == self.identity.served_name
+            || self.identity.aliases.iter().any(|alias| alias == name)
     }
 
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
-        let data_parallel_size = u64::from(self.data_parallel_size());
-        // Control exposes only the aggregate across DP engines. This arithmetic-mean
-        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
-        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
-        // publish it atomically; never relabel this quotient as exact for hard admission.
+        let data_parallel_size = u64::from(self.data_parallel_size_local());
+        // Control reports total KV blocks across the frontend's local DP engines.
         let per_rank = total_kv_blocks / data_parallel_size;
 
         if per_rank == 0 {
@@ -224,6 +277,45 @@ impl DiscoveredModel {
     }
 }
 
+// A zero local size means unknown, including metadata from older Control servers.
+fn local_data_parallel_range(
+    global_size: u32,
+    start: u32,
+    local_size: u32,
+) -> Result<Range<u32>, DynamoError> {
+    if global_size == 0 {
+        return Err(client::protocol_error(
+            "vLLM reports a data-parallel size of zero",
+        ));
+    }
+    let local_size = match local_size {
+        0 if start == 0 => {
+            if global_size > 1 {
+                tracing::warn!(
+                    global_size,
+                    "vLLM omits data_parallel_size_local; assuming this frontend hosts the entire DP group. Hybrid deployments require a vLLM build that reports local DP size to avoid registering unhosted ranks and underestimating per-rank KV capacity"
+                );
+            }
+            global_size
+        }
+        0 => {
+            return Err(client::protocol_error(format!(
+                "vLLM reports data_parallel_rank {start} without data_parallel_size_local; hybrid rank ownership requires the local-size Control field"
+            )));
+        }
+        size => size,
+    };
+    let end = start
+        .checked_add(local_size)
+        .filter(|&end| end <= global_size)
+        .ok_or_else(|| {
+            client::protocol_error(format!(
+                "vLLM reports an invalid local data-parallel range: start {start}, local size {local_size}, global size {global_size}"
+            ))
+        })?;
+    Ok(start..end)
+}
+
 fn required(field: &str, value: String) -> Result<String, DynamoError> {
     if value.trim().is_empty() {
         return Err(client::protocol_error(format!(
@@ -242,4 +334,34 @@ where
     T: Default + PartialEq,
 {
     (value != T::default()).then_some(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::local_data_parallel_range;
+
+    // Regression: ambiguous, out-of-bounds, or overflowing ownership can advertise
+    // unreachable DP ranks; validate the metadata before worker registration.
+    #[test]
+    fn local_dp_ownership_requires_a_valid_unambiguous_range() {
+        for (global, start, local, expected) in [(2, 0, 0, 0..2), (8, 0, 4, 0..4), (8, 4, 4, 4..8)]
+        {
+            assert_eq!(
+                local_data_parallel_range(global, start, local).unwrap(),
+                expected
+            );
+        }
+        for (global, start, local) in [
+            (0, 0, 0),
+            (8, 4, 0),
+            (8, 0, 9),
+            (8, 4, 5),
+            (u32::MAX, u32::MAX - 1, 4),
+        ] {
+            assert!(
+                local_data_parallel_range(global, start, local).is_err(),
+                "invalid range: {start} + {local} of {global}"
+            );
+        }
+    }
 }
