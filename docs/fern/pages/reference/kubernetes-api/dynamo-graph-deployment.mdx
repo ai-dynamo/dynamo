@@ -87,6 +87,7 @@ spec:
 
 <ParamField path="restart" type="Restart">
   Restart policy for the graph. Must be unset on creation; set or change `restart.id` on an existing DGD to trigger a restart.
+  Graphs containing LPX components require explicit `restart.strategy.type: Parallel`; Sequential and omitted strategies are rejected.
 </ParamField>
 
 <Indent>

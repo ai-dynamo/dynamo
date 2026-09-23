@@ -427,6 +427,9 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	const restartToken = "2026-09-08T00:00:00Z"
 	t.Log("Author scheduler metadata and stale identity annotations before freezing the child")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
+	second := dgd.Spec.Components[0].DeepCopy()
+	second.ComponentName = "independent"
+	dgd.Spec.Components = append(dgd.Spec.Components, *second)
 	dgd.Labels = map[string]string{"project": "inference", "unrelated": "ignored"}
 	dgd.Annotations["kai.scheduler/topology"] = "source-topology"
 	dgd.Spec.Annotations = map[string]string{
@@ -439,8 +442,10 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	r.config.Discovery.Backend = configv1alpha1.DiscoveryBackendKubernetes
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
+	require.Len(t, workloads, 2)
 	pcs, resources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
+	require.Len(t, pcs.Spec.Template.PodCliqueScalingGroupConfigs, 2)
 
 	t.Log("Inherit scheduler metadata while explicit PCS metadata takes precedence")
 	require.Equal(t, "inference", pcs.Labels["project"])

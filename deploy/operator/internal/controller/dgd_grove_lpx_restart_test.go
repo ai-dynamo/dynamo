@@ -15,7 +15,7 @@ import (
 )
 
 func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
-	for _, strategy := range []v1beta1.RestartStrategyType{v1beta1.RestartStrategyTypeSequential, v1beta1.RestartStrategyTypeParallel} {
+	for _, strategy := range []v1beta1.RestartStrategyType{v1beta1.RestartStrategyTypeParallel} {
 		t.Run(string(strategy), func(t *testing.T) {
 			t.Log("Observe a Ready child after delivering the selected LPX restart")
 			ctx := t.Context()

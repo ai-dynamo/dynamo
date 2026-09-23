@@ -328,7 +328,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 }
 
 func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
-	for _, strategy := range []v1beta1.RestartStrategyType{v1beta1.RestartStrategyTypeSequential, v1beta1.RestartStrategyTypeParallel} {
+	for _, strategy := range []v1beta1.RestartStrategyType{v1beta1.RestartStrategyTypeParallel} {
 		t.Run(string(strategy), func(t *testing.T) {
 			t.Log("Request an LPX-only restart without requiring an ordinary PCS")
 			_, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
@@ -390,6 +390,92 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			require.NotEqual(t, updated.Spec.InputRevision, next.Spec.InputRevision)
 		})
 	}
+}
+
+func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testing.T) {
+	t.Log("Request one parallel restart of two independent LPX workloads and a frontend")
+	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
+	require.NoError(t, rbacv1.AddToScheme(kube.Scheme()))
+	second := source.Spec.Components[0].DeepCopy()
+	second.ComponentName = "second"
+	source.Spec.Components = append(source.Spec.Components, *second, v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
+	})
+	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
+	source.Spec.Restart = &v1beta1.Restart{ID: "parallel-restart", Strategy: &v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}}
+	require.NoError(t, kube.Update(t.Context(), source))
+	config := &configv1alpha1.OperatorConfiguration{}
+	config.Namespace.Restricted = source.Namespace
+	program := (&DynamoGraphDeploymentReconciler{
+		Client: kube, Config: config, Recorder: events.NewFakeRecorder(100),
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
+	}).newGroveProgram()
+
+	t.Log("Persist selection of all three components before publishing their restart")
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.Equal(t, []string{"frontend", "lpx", "second"}, result.Status.Restart.InProgress)
+	source.Status = result.Status
+	require.NoError(t, kube.Status().Update(t.Context(), source))
+
+	t.Log("Deliver the same token to LPX and the ordinary Pod template while every workload is pending")
+	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
+	require.Equal(t, []string{"frontend", "lpx", "second"}, result.Status.Restart.InProgress)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), child))
+	require.Equal(t, source.Spec.Restart.ID, child.Annotations[dynamo.LPXRestartAnnotation])
+	require.Empty(t, child.Status.Components)
+	ordinary := projectWithoutExternallyManagedComponents(source)
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{
+		Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
+	}, pcs))
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	require.Equal(t, source.Spec.Restart.ID, pcs.Spec.Template.Cliques[0].Annotations[consts.RestartAnnotation])
+	require.Nil(t, pcs.Status.ObservedGeneration)
+	source.Status = result.Status
+	require.NoError(t, kube.Status().Update(t.Context(), source))
+
+	t.Log("One ready LPX workload cannot finish the restart while the second is pending")
+	child.Status.ObservedGeneration = child.Generation
+	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
+		ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+		Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+	}}
+	require.NoError(t, kube.Status().Update(t.Context(), child))
+	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.Equal(t, v1beta1.RestartPhaseRestarting, result.Status.Restart.Phase)
+	require.Contains(t, result.Status.Restart.InProgress, "second")
+
+	t.Log("Both ready LPX workloads still wait for the ordinary component")
+	child.Status.Components["second"] = child.Status.Components["lpx"]
+	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+		Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready",
+	})
+	require.NoError(t, kube.Status().Update(t.Context(), child))
+	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.Equal(t, v1beta1.RestartPhaseRestarting, result.Status.Restart.Phase)
+	require.Equal(t, []string{"frontend"}, result.Status.Restart.InProgress)
+	source.Status = result.Status
+	require.NoError(t, kube.Status().Update(t.Context(), source))
+
+	t.Log("Complete only after Grove observes the frontend's ready replacement")
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+	require.NoError(t, kube.Update(t.Context(), pcs))
+	require.NoError(t, kube.Create(t.Context(), &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(ordinary, "frontend"), Namespace: source.Namespace, Generation: 1},
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+	}))
+	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	require.Equal(t, v1beta1.RestartPhaseCompleted, result.Status.Restart.Phase)
+	require.Empty(t, result.Status.Restart.InProgress)
 }
 
 func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
@@ -462,8 +548,6 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 		name     string
 		strategy v1beta1.RestartStrategy
 	}{
-		{"draft first", v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeSequential, Order: []string{"draft", "lpx"}}},
-		{"target first", v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeSequential, Order: []string{"lpx", "draft"}}},
 		{"parallel", v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -499,7 +583,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			source.Status.Restart = restarter.Resolve(t.Context(), source, &source.Status, progress).Status
 			require.NotEmpty(t, source.Status.Restart.InProgress)
 
-			t.Log("Either selected member delivers one token to the same child")
+			t.Log("Both selected members deliver one token to the same child")
 			handoff := &dgdLPXHandoff{client: kube}
 			child, err := handoff.Reconcile(t.Context(), source)
 			require.NoError(t, err)
@@ -543,9 +627,6 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.NoError(t, kube.Status().Update(t.Context(), child))
 			require.Equal(t, []string{"draft"}, progress(t.Context(), source, []string{"draft", "lpx"}))
 			require.Zero(t, pcsReads)
-			if scenario.strategy.Type != v1beta1.RestartStrategyTypeParallel {
-				return
-			}
 
 			t.Log("A missing ordinary PCS keeps only live ordinary restart members pending")
 			source.Spec.Components = append(source.Spec.Components,

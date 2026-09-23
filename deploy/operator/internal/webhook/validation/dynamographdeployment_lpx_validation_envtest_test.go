@@ -8,6 +8,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	k8sptr "k8s.io/utils/ptr"
 )
 
@@ -20,7 +21,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const alphaConductorTemplateErr = "spec.services[lpx].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
-	return []dgdAdmissionTestCase{
+	tests := []dgdAdmissionTestCase{
 		{
 			name: "singleton LPX with explicit conductor preserves omitted replicas",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -796,6 +797,71 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{`spec.components[0].type: Invalid value: "lpx": cannot change node topology between LPX and non-LPX after creation`},
 		},
 	}
+
+	// Exercise restart admission and defaulting through both served API versions.
+	const parallelRestartErr = "spec: Invalid value: spec.restart.strategy.type must be Parallel when the graph contains LPX components"
+	for _, restart := range []struct {
+		name       string
+		strategy   *nvidiacomv1beta1.RestartStrategy
+		ordinary   bool
+		addLPX     bool
+		create     bool
+		wantCELErr string
+	}{
+		{name: "LPX admits Parallel restart", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeParallel}},
+		{name: "LPX rejects Sequential restart", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential}, wantCELErr: parallelRestartErr},
+		{name: "LPX rejects omitted restart strategy", wantCELErr: parallelRestartErr},
+		{name: "LPX rejects omitted restart strategy type", strategy: &nvidiacomv1beta1.RestartStrategy{}, wantCELErr: parallelRestartErr},
+		{name: "LPX rejects Parallel restart on CREATE", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeParallel}, create: true,
+			wantCELErr: "spec: Invalid value: spec.restart must be unset on create; set spec.restart.id after creation to request a restart"},
+		{name: "ordinary graph admits Sequential restart", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential}, ordinary: true},
+		{name: "ordinary graph admits omitted restart strategy", ordinary: true},
+		{name: "ordinary graph admits omitted restart strategy type", strategy: &nvidiacomv1beta1.RestartStrategy{}, ordinary: true},
+		{name: "adding LPX rejects an unchanged Sequential restart", strategy: &nvidiacomv1beta1.RestartStrategy{Type: nvidiacomv1beta1.RestartStrategyTypeSequential}, addLPX: true, wantCELErr: parallelRestartErr},
+	} {
+		// Keep ordinary components beside LPX so the restriction covers mixed graphs.
+		alphaOld := alphaDGDForAdmission(nil)
+		betaOld := betaDGDForAdmission(nil)
+		if !restart.ordinary && !restart.addLPX {
+			alphaOld.Spec.Services["lpx"] = alphaLPXDGDForAdmission(nil).Spec.Services["lpx"]
+			betaOld.Spec.Components = append(betaOld.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
+		}
+
+		// Author equivalent restart requests without converting away source-version defaults.
+		alpha := alphaOld.DeepCopy()
+		beta := betaOld.DeepCopy()
+		alpha.Spec.Restart = &nvidiacomv1alpha1.Restart{ID: "restart-1"}
+		beta.Spec.Restart = &nvidiacomv1beta1.Restart{ID: "restart-1", Strategy: restart.strategy}
+		if restart.strategy != nil {
+			alpha.Spec.Restart.Strategy = &nvidiacomv1alpha1.RestartStrategy{Type: nvidiacomv1alpha1.RestartStrategyType(restart.strategy.Type)}
+		}
+		if restart.addLPX {
+			alphaOld.Spec.Restart = alpha.Spec.Restart.DeepCopy()
+			betaOld.Spec.Restart = beta.Spec.Restart.DeepCopy()
+			alpha.Spec.Services["lpx"] = alphaLPXDGDForAdmission(nil).Spec.Services["lpx"]
+			beta.Spec.Components = append(beta.Spec.Components, betaLPXDGDForAdmission(nil).Spec.Components[0])
+		}
+
+		// The shared harness submits each native object to its matching API endpoint.
+		for _, version := range []struct {
+			name       string
+			deployment runtime.Object
+			old        runtime.Object
+		}{
+			{name: "v1alpha1", deployment: alpha, old: alphaOld},
+			{name: "v1beta1", deployment: beta, old: betaOld},
+		} {
+			test := dgdAdmissionTestCase{
+				name: version.name + " " + restart.name, deployment: version.deployment,
+				oldDeployment: version.old, wantCELErr: restart.wantCELErr,
+			}
+			if restart.create {
+				test.oldDeployment = nil
+			}
+			tests = append(tests, test)
+		}
+	}
+	return tests
 }
 
 func betaLPXDGDForAdmission(
