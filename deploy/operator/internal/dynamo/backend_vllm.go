@@ -687,14 +687,21 @@ func (a vllmLaunchArgs) WorldSize() int64 {
 // parseVLLMLaunchArgs parses an already-expanded, normalized argument list
 // (see getExpandedArgs / getExpandedCommandLine) into a vllmLaunchArgs value.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
+	// Enum-style flags read the last occurrence's value rather than hasArg's
+	// any-occurrence semantics: with "--data-parallel-backend ray
+	// --data-parallel-backend mp", vLLM resolves to "mp", and an
+	// any-occurrence check would still report "ray".
+	dataParallelBackend := getFlagStringValue(expandedArgs, dataParallelBackendFlag)
+	distributedExecutorBackend := getFlagStringValue(expandedArgs, distributedExecutorFlag)
+
 	return vllmLaunchArgs{
 		TensorParallelSize:             getFlagValue(expandedArgs, tensorParallelSizeFlag),
 		PipelineParallelSize:           getFlagValue(expandedArgs, pipelineParallelSizeFlag),
 		DataParallelSize:               getFlagValue(expandedArgs, dataParallelSizeFlag),
 		HasDataParallelSize:            hasFlag(expandedArgs, dataParallelSizeFlag),
-		DataParallelBackendIsRay:       hasArg(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay),
+		DataParallelBackendIsRay:       dataParallelBackend == dataParallelBackendRay,
 		EnableElasticEP:                hasFlag(expandedArgs, enableElasticEPFlag),
-		DistributedExecutorBackendIsMp: hasArg(expandedArgs, distributedExecutorFlag, "mp"),
+		DistributedExecutorBackendIsMp: distributedExecutorBackend == "mp",
 	}
 }
 
@@ -769,16 +776,36 @@ func needsDataParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) 
 	return args.WorldSize()*args.DataParallelSize > containerGPUs
 }
 
+// getFlagValue returns the value of the last occurrence of flag in expandedArgs,
+// matching vLLM's FlexibleArgumentParser precedence: when a flag (or one of its
+// canonicalized aliases) is repeated, the final occurrence wins.
 func getFlagValue(expandedArgs []string, flag string) int64 {
 	var flagValue int64 = 1
 	for i, arg := range expandedArgs {
 		if arg == flag && (i+1 < len(expandedArgs)) {
-			flagValue, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
+			parsed, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
 			if err != nil {
 				continue
 			}
-			return flagValue
+			flagValue = parsed
 		}
 	}
 	return flagValue
+}
+
+// getFlagStringValue returns the value of the last occurrence of flag in
+// expandedArgs, matching vLLM's FlexibleArgumentParser last-value-wins
+// precedence (the same rule getFlagValue applies to integers), or "" when
+// flag never appears. Using hasArg's any-occurrence semantics for an
+// enum-style flag like --data-parallel-backend would be wrong: with
+// "--data-parallel-backend ray --data-parallel-backend mp", vLLM resolves to
+// "mp", but an any-occurrence check would still report "ray".
+func getFlagStringValue(expandedArgs []string, flag string) string {
+	value := ""
+	for i, arg := range expandedArgs {
+		if arg == flag && i+1 < len(expandedArgs) {
+			value = expandedArgs[i+1]
+		}
+	}
+	return value
 }
