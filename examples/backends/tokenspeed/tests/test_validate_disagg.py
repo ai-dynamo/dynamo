@@ -147,7 +147,9 @@ async def test_full_validation_cannot_pass_bad_deployment(
                         "worker_id": worker,
                         "device_blocks": 2
                         if fault != "cache-timeout"
-                        and (worker == owner or (owner == 3 and fault == "cold-overlap"))
+                        and (
+                            worker == owner or (owner == 3 and fault == "cold-overlap")
+                        )
                         else 0,
                     }
                     for worker in [1, 2]
