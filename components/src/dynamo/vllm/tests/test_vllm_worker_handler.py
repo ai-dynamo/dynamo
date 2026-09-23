@@ -179,11 +179,11 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     ("disaggregation_mode", "expected_worker_type"),
     [
         (None, mod.WorkerType.Aggregated),
-        ("PREFILL", None),
-        ("DECODE", None),
+        ("PREFILL", mod.WorkerType.Prefill),
+        ("DECODE", mod.WorkerType.Decode),
     ],
 )
-def test_lora_discovery_publishes_engine_generate_capability_only_for_aggregated(
+def test_lora_discovery_publishes_engine_generate_capability(
     disaggregation_mode, expected_worker_type
 ):
     config = _make_config(disaggregation_mode=disaggregation_mode)
@@ -218,7 +218,7 @@ def test_lora_discovery_publishes_engine_generate_capability_only_for_aggregated
     ):
         asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
 
-    if expected_worker_type is None:
+    if expected_worker_type == mod.WorkerType.Prefill:
         publish_generate.assert_not_called()
     else:
         publish_generate.assert_called_once()

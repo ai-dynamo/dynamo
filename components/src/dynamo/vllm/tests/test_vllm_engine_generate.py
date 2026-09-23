@@ -66,7 +66,7 @@ def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=False,
-        aggregated=True,
+        decode_capable=True,
         vllm_config=_vllm_config(),
         default_sampling_params={},
     )
@@ -92,7 +92,7 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=False,
-        aggregated=True,
+        decode_capable=True,
         vllm_config=_vllm_config(),
         default_sampling_params={},
     )
@@ -120,7 +120,7 @@ def test_tito_adapter_rejects_invalid_routed_experts_prompt_start(prompt_start):
                 }
             ),
             enable_multimodal=False,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -142,7 +142,7 @@ def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():
                 }
             ),
             enable_multimodal=False,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -155,7 +155,7 @@ def test_tito_adapter_rejects_stop_strings_but_preserves_stop_token_ids():
         adapt_engine_generate_request(
             _request(sampling_params={"max_tokens": 1, "stop": ["END"]}),
             enable_multimodal=False,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -163,7 +163,7 @@ def test_tito_adapter_rejects_stop_strings_but_preserves_stop_token_ids():
     adapted = adapt_engine_generate_request(
         _request(sampling_params={"max_tokens": 1, "stop_token_ids": [42]}),
         enable_multimodal=False,
-        aggregated=True,
+        decode_capable=True,
         vllm_config=_vllm_config(),
         default_sampling_params={},
     )
@@ -193,7 +193,7 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     adapted = adapt_engine_generate_request(
         request,
         enable_multimodal=True,
-        aggregated=True,
+        decode_capable=True,
         vllm_config=_vllm_config(),
         default_sampling_params={},
     )
@@ -209,7 +209,7 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
 
 
 @pytest.mark.parametrize(
-    ("enable_multimodal", "aggregated", "features", "match"),
+    ("enable_multimodal", "decode_capable", "features", "match"),
     [
         (
             False,
@@ -220,7 +220,7 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
             },
             "multimodal",
         ),
-        (True, False, None, "aggregated"),
+        (True, False, None, "aggregated or decode"),
         (
             True,
             True,
@@ -233,7 +233,7 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     ],
 )
 def test_tito_adapter_rejects_unsupported_execution_paths(
-    enable_multimodal, aggregated, features, match
+    enable_multimodal, decode_capable, features, match
 ):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
@@ -241,7 +241,7 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
         adapt_engine_generate_request(
             _request(features=features),
             enable_multimodal=enable_multimodal,
-            aggregated=aggregated,
+            decode_capable=decode_capable,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -261,7 +261,7 @@ def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
         adapt_engine_generate_request(
             _request(features=features, sampling_params={"max_tokens": 1}),
             enable_multimodal=True,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -283,7 +283,7 @@ def test_tito_adapter_rejects_routing_hash_count_mismatch():
         adapt_engine_generate_request(
             request,
             enable_multimodal=True,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -304,7 +304,7 @@ def test_tito_adapter_rejects_non_object_kwargs_data():
         adapt_engine_generate_request(
             request,
             enable_multimodal=True,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -338,7 +338,7 @@ def test_tito_adapter_rejects_invalid_placeholder_mask_before_tensor_conversion(
         adapt_engine_generate_request(
             request,
             enable_multimodal=True,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
@@ -351,7 +351,7 @@ def test_tito_adapter_rejects_sampling_choices_above_scheduler_capacity():
         adapt_engine_generate_request(
             _request(sampling_params={"n": 5, "max_tokens": 4}),
             enable_multimodal=False,
-            aggregated=True,
+            decode_capable=True,
             vllm_config=_vllm_config(max_num_seqs=4),
             default_sampling_params={},
         )
@@ -363,7 +363,7 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
     adapted = adapt_engine_generate_request(
         _request(token_ids=[1, 2, 3], sampling_params={}),
         enable_multimodal=False,
-        aggregated=True,
+        decode_capable=True,
         vllm_config=_vllm_config(max_model_len=20),
         default_sampling_params={},
     )

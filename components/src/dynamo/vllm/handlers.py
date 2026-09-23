@@ -2546,7 +2546,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
-        if lora_worker_type == WorkerType.Aggregated:
+        if lora_worker_type in (WorkerType.Aggregated, WorkerType.Decode):
             lora_config = self.engine_client.vllm_config.lora_config
             publish_engine_generate_capability(
                 runtime_config,
@@ -3753,7 +3753,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine_generate_input = adapt_engine_generate_request(
                 request,
                 enable_multimodal=self._multimodal_request_processor.enable_multimodal,
-                aggregated=mode == DisaggregationMode.AGGREGATED,
+                decode_capable=mode != DisaggregationMode.PREFILL,
                 vllm_config=self.engine_client.vllm_config,
                 default_sampling_params=self.default_sampling_params,
             )

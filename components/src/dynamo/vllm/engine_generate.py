@@ -31,7 +31,10 @@ def publish_engine_generate_capability(
     tower_connector_lora_enabled: bool,
 ) -> bool:
     """Publish native Generate support and its MM-routing-relevant config."""
-    if model_input != ModelInput.Tokens or worker_type != WorkerType.Aggregated:
+    if model_input != ModelInput.Tokens or worker_type not in (
+        WorkerType.Aggregated,
+        WorkerType.Decode,
+    ):
         return False
     if not (model_type.supports_chat() or model_type == ModelType.Completions):
         return False
@@ -183,7 +186,7 @@ def adapt_engine_generate_request(
     request: dict[str, Any],
     *,
     enable_multimodal: bool,
-    aggregated: bool,
+    decode_capable: bool,
     vllm_config: Any,
     default_sampling_params: dict[str, Any],
 ) -> EngineGenerateInput | None:
@@ -198,8 +201,8 @@ def adapt_engine_generate_request(
     envelope = extra_args["vllm_tito"]
     if not isinstance(envelope, dict):
         raise TypeError("extra_args.vllm_tito must be an object")
-    if not aggregated:
-        raise ValueError("TITO requests currently require an aggregated vLLM worker")
+    if not decode_capable:
+        raise ValueError("TITO requests require an aggregated or decode vLLM worker")
     if envelope.get("content_parts"):
         raise ValueError("TITO raw multimodal content_parts are not supported")
 
