@@ -105,16 +105,16 @@ vllm:
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
-    base_image_tag: v0.29.0
-    runtime_image_tag: v0.29.0
-    baseline_sbom: vllm-openai-xpu@96db42e2
+    base_image_tag: v0.30.0
+    runtime_image_tag: v0.30.0
+    baseline_sbom: vllm-openai-xpu@fc0e112a
   cpu:
     base_image: ubuntu
     runtime_image: vllm/vllm-openai-cpu
     base_image_tag: 22.04
-    runtime_image_tag: v0.29.0
+    runtime_image_tag: v0.30.0
     # No baseline_sbom: cpu images are unshipped and skip the compliance stages.
-  vllm_omni_ref: "v0.29.0rc1"
+  vllm_omni_ref: "v0.30.0rc1"
   # Omni requires Transformers <5.15, which requires tokenizers <=0.23.0.
   transformers_version: "5.14.1"
   tokenizers_version: "0.22.2"
