@@ -130,23 +130,23 @@
       "platform": "linux/arm64"
     },
     {
-      "baseline_digest": "sha256:2366e4b4bdb385fcb38642a4555cbd091c4f8b1a27ff567a47acbe815dd49e86",
+      "baseline_digest": "sha256:a1f43376f0fd5719baaa258774249b1f8e0015783b76332c4927608545f90a80",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@2366e4b4-amd64.cdx.json",
-      "baseline_tag": "1.3.0rc25",
-      "from_digest": "sha256:2366e4b4bdb385fcb38642a4555cbd091c4f8b1a27ff567a47acbe815dd49e86",
+      "baseline_sbom": "release@a1f43376-amd64.cdx.json",
+      "baseline_tag": "1.3.0rc28",
+      "from_digest": "sha256:a1f43376f0fd5719baaa258774249b1f8e0015783b76332c4927608545f90a80",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc25",
+      "from_tag": "1.3.0rc28",
       "platform": "linux/amd64"
     },
     {
-      "baseline_digest": "sha256:2366e4b4bdb385fcb38642a4555cbd091c4f8b1a27ff567a47acbe815dd49e86",
+      "baseline_digest": "sha256:a1f43376f0fd5719baaa258774249b1f8e0015783b76332c4927608545f90a80",
       "baseline_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "baseline_sbom": "release@2366e4b4-arm64.cdx.json",
-      "baseline_tag": "1.3.0rc25",
-      "from_digest": "sha256:2366e4b4bdb385fcb38642a4555cbd091c4f8b1a27ff567a47acbe815dd49e86",
+      "baseline_sbom": "release@a1f43376-arm64.cdx.json",
+      "baseline_tag": "1.3.0rc28",
+      "from_digest": "sha256:a1f43376f0fd5719baaa258774249b1f8e0015783b76332c4927608545f90a80",
       "from_image": "nvcr.io/nvidia/tensorrt-llm/release",
-      "from_tag": "1.3.0rc25",
+      "from_tag": "1.3.0rc28",
       "platform": "linux/arm64"
     }
   ],
@@ -162,6 +162,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-09-18T02:12:55+00:00",
+  "generated_at": "2026-09-23T10:43:07+00:00",
   "schema_version": 2
 }
