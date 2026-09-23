@@ -2055,6 +2055,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "dynamo-custom-policy-builtin"
+version = "1.6.0"
+dependencies = [
+ "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.6.0"
 dependencies = [
@@ -2150,6 +2160,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2248,6 +2259,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "dynamo-custom-policy-builtin",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
