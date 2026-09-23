@@ -787,6 +787,13 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - section: Motif Technologies
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Motif-3 NVFP4
+                path: pages/recipes/model-recipes/motif-3.mdx
+                slug: motif-3
           # Grouped by model provider. Each group uses skip-slug so page URLs
           # stay /recipes/<slug>; within a group, newest models come first.
           - section: Z.ai
