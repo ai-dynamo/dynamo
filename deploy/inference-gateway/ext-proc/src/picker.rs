@@ -13,6 +13,8 @@ use dynamo_llm::http::service::metadata::MetadataHeaderError;
 
 use dynamo_llm::protocols::common::extensions::{HEADER_TENANT_ID, last_non_empty_trimmed_value};
 
+use crate::worker_role::WorkerRole;
+
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -180,6 +182,12 @@ pub struct ResponseUsage {
 pub enum PickError {
     #[error("no endpoints available")]
     NoEndpoints,
+    /// The serving role's catalog is empty while the pool itself is fine — the
+    /// disaggregated shape of `NoEndpoints`, kept distinct so a mislabelled or
+    /// drained role is attributable in the client's 503 rather than looking like
+    /// an empty pool.
+    #[error("no {0} workers available")]
+    RoleCatalogEmpty(WorkerRole),
     #[error("routing failed: {0}")]
     RoutingFailed(String),
     /// Malformed client input (unparseable body, or a 4xx from the renderer) → 400.
