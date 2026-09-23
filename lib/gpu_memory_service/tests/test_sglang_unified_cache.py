@@ -320,6 +320,52 @@ def test_finished_publication_uses_cpu_pages_without_device_collection(monkeypat
     assert cache._gms_directory.published[0]["slot_ids"] == [3]
 
 
+def test_finished_publication_falls_back_when_captured_node_has_no_indices(
+    monkeypatch,
+):
+    cache, allocator = _cache(monkeypatch)
+    lease = KVLease(3, 12)
+    allocator._gms_kv_leases_by_page = {3: lease}
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(adapter, "retain_hbm_pages", lambda *_args: [lease])
+    monkeypatch.setattr(cache, "_hashes_for_key", lambda *_args: [b"x" * 32])
+    inserted = cache.insert(InsertParams(key=_key(1, 2), value=torch.tensor([6, 7])))
+    collect = cache.tree_core.collect_full_device_indices
+    calls = []
+
+    def collect_once_missing(*args, **kwargs):
+        # The captured node yields nothing; SGLang's authoritative lookup
+        # then reads the same prefix off a freshly matched node path.
+        calls.append(args)
+        return None if len(calls) == 1 else collect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        cache.tree_core, "collect_full_device_indices", collect_once_missing
+    )
+
+    cache._publish_finished_prefix(_key(1, 2), inserted.last_device_node)
+
+    assert len(calls) == 2
+    assert len(cache._gms_directory.published) == 1
+    assert cache._gms_directory.published[0]["slot_ids"] == [3]
+
+
+def test_transitional_publication_validates_cpu_pages_against_native_layout(
+    monkeypatch,
+):
+    cache, allocator = _cache(monkeypatch)
+    allocator._gms_kv_leases_by_page = {3: KVLease(3, 12)}
+    monkeypatch.setattr(cache, "_hashes_for_key", lambda *_args: [b"x" * 32])
+    inserted = cache.insert(InsertParams(key=_key(1, 2), value=torch.tensor([6, 7])))
+
+    _hashes, pages, _items = cache._prepare_finished_prefix(
+        _key(1, 2), inserted.last_device_node, request_pages=[3]
+    )
+
+    assert pages == [3]
+
+
 def test_empty_second_match_preserves_allocator_page_record(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     req = SimpleNamespace(_gms_kv_page_ids=[3, 4])
@@ -456,7 +502,7 @@ def test_native_eviction_without_python_nodes_releases_unhinted(monkeypatch):
     assert native == [7]
 
 
-def test_promoted_standby_waits_for_all_rank_gpu_recovery(monkeypatch):
+def test_promoted_standby_waits_for_all_rank_gms_recovery(monkeypatch):
     cache, _allocator = _cache(monkeypatch)
     directory = _Directory()
     directory._standby = True
@@ -477,15 +523,15 @@ def test_promoted_standby_waits_for_all_rank_gpu_recovery(monkeypatch):
 
     from gpu_memory_service.integrations.sglang import writer_lifecycle
 
-    monkeypatch.setattr(writer_lifecycle, "gpu_quiescence_ready", lambda: ready[0])
+    monkeypatch.setattr(writer_lifecycle, "gms_recovery_ready", lambda: ready[0])
     cache._gms_tp = Cohort()
 
     assert cache._maybe_enter_steady_state() is False
-    assert calls == [("steady:gpu-recovery-ready", False)]
+    assert calls == [("steady:gms-recovery-ready", False)]
     ready[0] = True
     calls.clear()
     assert cache._maybe_enter_steady_state() is True
-    assert calls[0] == ("steady:gpu-recovery-ready", True)
+    assert calls[0] == ("steady:gms-recovery-ready", True)
     assert cache._gms_steady_state is True
 
 

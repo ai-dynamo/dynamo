@@ -802,26 +802,37 @@ def enter_exclusive_steady_state(self) -> int:
             if page in lease_map and page not in retained
         ],
     )
-    if len(local) != len(common) or set(local) != set(common):
-        raise RuntimeError("SGLang TP writable-page ownership diverged")
+    local_only = sorted(set(local).difference(common))
+    if local_only:
+        # A crashed TP rank can quarantine a different physical-page subset.
+        # Page IDs exposed to SGLang must nevertheless be identical on every
+        # rank. Withdraw local-only ownership before publishing the common
+        # native free list; the pages remain hidden for this writer epoch.
+        withdrawn = [lease_map.pop(page) for page in local_only]
+        st["client"].release(withdrawn)
+        logger.info(
+            "[GMS-KVLease] SGLang withheld %d asymmetric writable pages",
+            len(local_only),
+        )
+    writable = list(common)
     st["standby_headroom_pages"] = standby_headroom
     st["exclusive_hidden_pages"] = (
-        set(common_free).difference(local).difference(standby_headroom)
+        set(common_free).difference(writable).difference(standby_headroom)
     )
     self.free_pages = torch.tensor(
-        local, dtype=self.free_pages.dtype, device=self.free_pages.device
+        writable, dtype=self.free_pages.dtype, device=self.free_pages.device
     )
     # Never activate the entire free pool by default: at least three quarters
     # of current allocator headroom remains explicitly IDLE and immediately
     # recoverable. The configured ceiling still bounds refill batch size.
     active_count = min(
-        len(local),
+        len(writable),
         _steady_active_window_pages(),
-        max(1, len(local) // 4),
+        max(1, len(writable) // 4),
     )
     st["active_window_pages"] = active_count
-    active_pages = set(local[:active_count])
-    idle_leases = [lease_map[page] for page in local[active_count:]]
+    active_pages = set(writable[:active_count])
+    idle_leases = [lease_map[page] for page in writable[active_count:]]
 
     def park_initial_idle():
         st["client"].park_idle(idle_leases)
@@ -830,14 +841,14 @@ def enter_exclusive_steady_state(self) -> int:
 
     if idle_leases:
         parked = cohort.run_agreed("steady:park-idle", park_initial_idle)
-        if parked != local[active_count:]:
+        if parked != writable[active_count:]:
             raise RuntimeError("SGLang TP idle-page publication diverged")
     st["active_free_pages"] = active_pages
     st["active_prefix_valid"] = True
     # Every page left in native free_pages is already leased by this writer.
     # SGLang's GPU list remains authoritative. Mirror only page IDs on the CPU
     # so completion can publish exact identities without synchronizing CUDA.
-    st["cpu_free_pages"] = deque(local)
+    st["cpu_free_pages"] = deque(writable)
     cpu_staged = st.get("cpu_staged_pages")
     if isinstance(cpu_staged, list):
         cpu_staged.clear()
@@ -847,7 +858,7 @@ def enter_exclusive_steady_state(self) -> int:
     st["tp_reservation_aligned"] = True
     st["exclusive_steady_state"] = True
     st["steady_state"] = True
-    return len(local)
+    return len(writable)
 
 
 def _demote_exact_retained_pages(self, pages: list[int]) -> None:

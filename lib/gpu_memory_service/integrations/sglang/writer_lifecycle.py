@@ -31,21 +31,40 @@ _COHORT_ENV = "GMS_SGLANG_WRITER_COHORT_PATH"
 _writer_fds: list[int] = []
 
 
-def gpu_quiescence_ready() -> bool:
-    """Return whether this boot finished local predecessor GPU recovery."""
+def _boot_marker(suffix: str) -> Path | None:
     cohort = os.environ.get(_COHORT_ENV)
-    return bool(cohort) and Path(cohort + ".gpu-quiesced").is_file()
+    return None if not cohort else Path(cohort + suffix)
 
 
-def mark_gpu_quiescence_ready() -> None:
-    """Publish local phase-two completion for the scheduler subprocess."""
-    cohort = os.environ.get(_COHORT_ENV)
-    if not cohort:
+def _mark_boot_marker(suffix: str) -> None:
+    marker = _boot_marker(suffix)
+    if marker is None:
         raise RuntimeError("SGLang writer cohort is unavailable")
-    marker = Path(cohort + ".gpu-quiesced")
     pending = marker.with_name(f"{marker.name}.{os.getpid()}.pending")
     pending.write_text("ready\n")
     os.replace(pending, marker)
+
+
+def gms_recovery_ready() -> bool:
+    """Return whether phase one classified every predecessor lease."""
+    marker = _boot_marker(".gms-recovery-ready")
+    return marker is not None and marker.is_file()
+
+
+def mark_gms_recovery_ready() -> None:
+    """Publish local phase-one completion for the scheduler subprocess."""
+    _mark_boot_marker(".gms-recovery-ready")
+
+
+def gpu_quiescence_ready() -> bool:
+    """Return whether this boot finished local predecessor GPU recovery."""
+    marker = _boot_marker(".gpu-quiesced")
+    return marker is not None and marker.is_file()
+
+
+def mark_gpu_quiescence_ready() -> None:
+    """Publish local phase-two completion for diagnostics and reclamation."""
+    _mark_boot_marker(".gpu-quiesced")
 
 
 def _hold_writer_guard(path: Path) -> None:

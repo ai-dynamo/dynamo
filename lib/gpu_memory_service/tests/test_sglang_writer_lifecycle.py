@@ -38,9 +38,13 @@ def isolated_cohort(tmp_path, monkeypatch):
 def test_gpu_quiescence_marker_is_scoped_to_current_boot():
     guard = lifecycle.prepare_writer_cohort()
 
+    assert lifecycle.gms_recovery_ready() is False
     assert lifecycle.gpu_quiescence_ready() is False
+    lifecycle.mark_gms_recovery_ready()
     lifecycle.mark_gpu_quiescence_ready()
+    assert lifecycle.gms_recovery_ready() is True
     assert lifecycle.gpu_quiescence_ready() is True
+    assert Path(str(guard) + ".gms-recovery-ready").read_text() == "ready\n"
     assert Path(str(guard) + ".gpu-quiesced").read_text() == "ready\n"
 
 
