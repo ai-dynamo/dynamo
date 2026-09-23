@@ -410,6 +410,15 @@ class TestVllmRendererApi:
         valid_request_fields = valid_request_fields + tuple(
             (*fields, "model_intermediate_buffer") for fields in valid_request_fields
         )
+        valid_request_fields += (
+            (
+                *abort_request_fields,
+                "session_id",
+                "additional_information",
+                "model_intermediate_buffer",
+                "payload_sender_info",
+            ),
+        )
         actual_request_fields = EngineCoreRequest.__struct_fields__
         assert actual_request_fields in valid_request_fields, (
             "EngineCoreRequest fields changed!\n"
@@ -428,6 +437,8 @@ class TestVllmRendererApi:
                 )
             )
             assert request_defaults["session_id"] is None
+            if "payload_sender_info" in actual_request_fields:
+                assert request_defaults["payload_sender_info"] is None
 
         base_output_fields = (
             "request_id",
@@ -481,6 +492,17 @@ class TestVllmRendererApi:
         valid_output_fields = core_output_fields + tuple(
             fields + omni_output_extra_fields for fields in core_output_fields
         )
+        valid_output_fields += tuple(
+            fields
+            + (
+                "multimodal_output",
+                "pooling_output_payload",
+                "is_segment_finished",
+                "new_prompt_len_snapshot",
+                "num_generation_tokens",
+            )
+            for fields in core_output_fields
+        )
         actual_output_fields = EngineCoreOutput.__struct_fields__
         assert actual_output_fields in valid_output_fields, (
             "EngineCoreOutput fields changed!\n"
@@ -518,6 +540,10 @@ class TestVllmRendererApi:
             assert output.new_sampling_mask is None
         if "spec_decode_metrics" in EngineCoreOutput.__struct_fields__:
             assert output.spec_decode_metrics is None
+        if "pooling_output_payload" in EngineCoreOutput.__struct_fields__:
+            assert output.pooling_output_payload is None
+        if "num_generation_tokens" in EngineCoreOutput.__struct_fields__:
+            assert output.num_generation_tokens is None
         assert output.finish_reason is FinishReason.STOP
         assert output.stop_reason == "eos"
 

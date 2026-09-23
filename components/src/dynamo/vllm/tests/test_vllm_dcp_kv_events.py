@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from importlib.metadata import version
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,7 @@ import pytest_asyncio
 import torch
 import zmq
 import zmq.asyncio
+from packaging.version import Version
 
 from dynamo.llm import (
     KvEventPublisher,
@@ -50,6 +52,9 @@ async def runtime(monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_dcp_events_match_configured_block_size(monkeypatch, runtime):
+    if Version(version("vllm")).public != "0.30.0":
+        pytest.skip("The cache-metadata compatibility patch targets vLLM 0.30.0")
+
     from vllm.distributed.kv_events import KVEventBatch
     from vllm.sampling_params import SamplingParams
     from vllm.utils.hashing import sha256

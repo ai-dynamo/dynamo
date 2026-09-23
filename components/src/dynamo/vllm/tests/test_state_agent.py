@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from dynamo.vllm import state_agent
-from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY
+pytest.importorskip("vllm.config")
+
+from dynamo.vllm import state_agent  # noqa: E402
+from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 
 pytestmark = [
     pytest.mark.unit,
