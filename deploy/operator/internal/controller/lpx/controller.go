@@ -81,6 +81,8 @@ func (r *graphReconciler) GetRecorder() events.EventRecorder {
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=lpxgraphdeployments/finalizers,verbs=update
+// SetControllerReference sets blockOwnerDeletion=true on PCS-owned LPUPipelineRequests,
+// requiring update permission on the owner's finalizers subresource.
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquesets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale;podcliquescalinggroups/scale,verbs=update
 // +kubebuilder:rbac:groups=scheduling.lpu.nvidia.com,resources=lpupipelinerequests,verbs=get;list;watch;create;delete
