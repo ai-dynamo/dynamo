@@ -58,13 +58,6 @@ Set `OPERATOR_CHART_DIR` when the chart is not available at its
 repository-relative path; the operator tester image uses this override for its
 copied chart.
 
-`AdditionalAdmission` installs dependency registrations next to the operator's
-own, for tests whose expected manifests depend on a dependency's defaulting.
-LeaderWorkerSet, for example, defaults `spec.networkConfig` and
-`spec.rolloutStrategy` in its mutating webhook rather than in its CRD, so a
-LeaderWorkerSet contract only reproduces when `internal/testing/mocks/lws`
-supplies both its configurations and its handler.
-
 The webhook manager is separate from controller managers. It runs for the
 lifetime of the environment and is the only always-on manager.
 
