@@ -1166,7 +1166,6 @@ def test_structured_response_requires_effective_reasoning():
 def test_auto_tool_structural_tag_requires_effective_reasoning(
     request_fields, force_reasoning, expected
 ):
-    """An auto tool-call grammar waits for thinking to end."""
     request = {"tool_choice": "auto", **request_fields}
     guided_decoding = {"structural_tag": {}}
     assert (
