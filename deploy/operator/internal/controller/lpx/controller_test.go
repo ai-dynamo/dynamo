@@ -78,7 +78,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Log("Accept scheduler requests and observe initial Cyborg capacity independently of the seed")
+	t.Log("Accept scheduler requests and observe each workload's initial Cyborg capacity")
 	requests, err := r.getPipelineRequests(t.Context(), pcs)
 	require.NoError(t, err)
 	require.Len(t, requests, 4)
@@ -130,6 +130,10 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 		_, err = r.Reconcile(t.Context(), key)
 		require.NoError(t, err)
 
+		t.Log("Observe the PCS template before scaling existing workers")
+		_, err = r.Reconcile(t.Context(), key)
+		require.NoError(t, err)
+
 		t.Log("Observe the capacity write before calculating each workload's readiness")
 		_, err = r.Reconcile(t.Context(), key)
 		require.NoError(t, err)
@@ -137,8 +141,25 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 		require.True(t, meta.IsStatusConditionFalse(child.Status.Components["lpx"].Conditions, v1alpha1.LPXReadyCondition))
 		require.True(t, meta.IsStatusConditionTrue(child.Status.Components[second.ComponentName].Conditions, v1alpha1.LPXReadyCondition))
 
-		t.Log("Preserve PCS identity and spec, both groups, all Agents, and the other workload's workers")
+		t.Log("Persist the Cyborg template count without changing PCS identity or the other templates")
+		expectedPCS := pcs.DeepCopy()
+		for _, template := range expectedPCS.Spec.Template.Cliques {
+			if template.Name == plans["lpx"].CyborgTemplate {
+				template.Spec.Replicas = ptr.Deref(replicas, 1)
+			}
+		}
+		actualPCS := &grovev1alpha1.PodCliqueSet{}
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), actualPCS))
+		require.Equal(t, pcs.UID, actualPCS.UID)
+		require.True(t, actualPCS.DeletionTimestamp.IsZero())
+		require.Equal(t, pcs.Annotations[lpx.WorkloadDigestAnnotation], actualPCS.Annotations[lpx.WorkloadDigestAnnotation])
+		require.Equal(t, expectedPCS.Spec, actualPCS.Spec)
+
+		t.Log("Preserve both groups, all Agents, the other workload's workers and scheduler requests")
 		for _, original := range objects {
+			if _, ok := original.(*grovev1alpha1.PodCliqueSet); ok {
+				continue
+			}
 			if clique, ok := original.(*grovev1alpha1.PodClique); ok && clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleCyborgWorker && clique.Labels[lpx.StageLabel] == "lpx" {
 				continue
 			}
@@ -153,7 +174,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 			require.Equal(t, requestUIDs[request.Name], request.UID)
 		}
 
-		t.Log("Observe the requested live capacity and prove Ready without changing the template seed")
+		t.Log("Observe the requested live capacity and prove Ready without repeating scale writes")
 		var workers []*grovev1alpha1.PodClique
 		for ordinal := range plans["lpx"].Replicas {
 			clique := &grovev1alpha1.PodClique{}
@@ -1822,7 +1843,6 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 			ctx := t.Context()
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
 			dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
-			dgd.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(3))
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 			pcsg := getResource[*grovev1alpha1.PodCliqueScalingGroup](t, objects, selected.plan.LPXScalingGroup)
@@ -1844,6 +1864,16 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 				request.Status = newTestPipelineRequest(child, pcs, request.Name, time.Now(), lpxv1alpha1.RequestPhaseBound).Status
 				require.NoError(t, r.Update(ctx, request))
 			}
+
+			t.Log("Request three Cyborg replicas while the PCS template and live cliques still have one")
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
+			dgd.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(3))
+			require.NoError(t, r.Update(ctx, dgd))
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			child.Spec.InputRevision, err = dynamo.LPXInputRevision(dgd, "")
+			require.NoError(t, err)
+			child.Generation++
+			require.NoError(t, r.Update(ctx, child))
 			pcsg.Spec.Replicas = tc.groupReplicas
 			pcsg.Status.Replicas, pcsg.Status.UpdatedReplicas = tc.groupReplicas, tc.groupReplicas
 			pcsg.Status.AvailableReplicas, pcsg.Status.ScheduledReplicas = tc.groupReplicas, tc.groupReplicas
@@ -1893,20 +1923,44 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 				},
 			})
 
-			t.Log("A capacity write stops reconciliation before the cached ready 1/1 state can be reported")
-			result, err := r.Reconcile(ctx, key)
-			require.NoError(t, err)
-			require.Zero(t, result, "capacity observations resume reconciliation through watches")
-			require.Equal(t, tc.wantGroupUpdates, groupUpdates)
-			require.Equal(t, 1, cliqueLists)
-			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
-			require.Equal(t, v1alpha1.LPXReadyReasonPending, meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition).Reason)
-			if tc.wantGroupUpdates > 0 {
-				t.Log("Observe the group scale before updating its workers")
-				require.Zero(t, cliqueUpdates)
+			if tc.groupReplicas > 2 {
+				t.Log("Scale down the group before updating its worker template")
 				_, err = r.Reconcile(ctx, key)
 				require.NoError(t, err)
+				require.Equal(t, 1, groupUpdates)
+				require.Zero(t, cliqueUpdates)
 			}
+
+			t.Log("Persist the PCS worker template before scaling existing cliques")
+			cliqueLists = 0
+			result, err := r.Reconcile(ctx, key)
+			require.NoError(t, err)
+			require.Zero(t, result, "PCS observations resume reconciliation through watches")
+			require.Zero(t, cliqueUpdates)
+			require.Equal(t, 1, cliqueLists)
+			require.NoError(t, base.Get(ctx, client.ObjectKeyFromObject(pcs), pcs))
+			cyborgIndex := slices.IndexFunc(pcs.Spec.Template.Cliques, func(clique *grovev1alpha1.PodCliqueTemplateSpec) bool {
+				return clique.Name == selected.plan.CyborgTemplate
+			})
+			require.NotEqual(t, -1, cyborgIndex)
+			require.EqualValues(t, 3, pcs.Spec.Template.Cliques[cyborgIndex].Spec.Replicas)
+			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
+			require.Equal(t, v1alpha1.LPXReadyReasonPending, meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition).Reason)
+			if tc.groupReplicas < 2 {
+				t.Log("Scale up the group and wait to observe it before updating its workers")
+				_, err = r.Reconcile(ctx, key)
+				require.NoError(t, err)
+				require.Equal(t, 1, groupUpdates)
+				require.Zero(t, cliqueUpdates)
+			}
+
+			t.Log("Scaling the workers stops reconciliation before the cached ready 1/1 state can be reported")
+			cliqueLists = 0
+			result, err = r.Reconcile(ctx, key)
+			require.NoError(t, err)
+			require.Zero(t, result, "capacity observations resume reconciliation through watches")
+			require.Equal(t, 1, cliqueLists)
+			require.Equal(t, tc.wantGroupUpdates, groupUpdates)
 			require.Equal(t, 2, cliqueUpdates)
 			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
 			require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))

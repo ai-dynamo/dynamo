@@ -472,7 +472,7 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	}
 }
 
-func TestLPXReplicaChangesPreserveRenderedTemplates(t *testing.T) {
+func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	t.Log("Render omitted hybrid capacity for two I/O endpoints with two clients each")
 	root := t.TempDir()
 	const buildID = "split-io"
@@ -501,13 +501,15 @@ func TestLPXReplicaChangesPreserveRenderedTemplates(t *testing.T) {
 	require.EqualValues(t, 4, cyborg.Spec.Replicas)
 	require.Equal(t, ptr.To(int32(1)), cyborg.Spec.MinAvailable)
 
-	t.Log("Changing backbone and Cyborg capacity preserves templates, configuration and the graph digest")
+	t.Log("Persist explicit Cyborg capacity while preserving the group seed, configuration and graph digest")
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(12))
 	dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor).Replicas = ptr.To(int32(8))
 	workloads, plans, err = r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 	after, afterResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
 	require.NoError(t, err)
+	require.EqualValues(t, 8, after.Spec.Template.Cliques[cyborgIndex].Spec.Replicas)
+	before.Spec.Template.Cliques[cyborgIndex].Spec.Replicas = 8
 	require.Equal(t, before, after)
 	require.Equal(t, beforeResources, afterResources)
 }

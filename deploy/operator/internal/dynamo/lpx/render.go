@@ -226,11 +226,6 @@ func RenderNodeLocal(
 			return nil, err
 		}
 
-		minimumReplicas, err := workload.MinimumCyborgReplicas()
-		if err != nil {
-			return nil, err
-		}
-		cyborg.Spec.Replicas = minimumReplicas
 		cyborg.Spec.MinAvailable = ptr.To(int32(1))
 	}
 
