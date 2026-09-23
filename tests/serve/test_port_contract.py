@@ -378,7 +378,7 @@ def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> Non
 @pytest.mark.timeout(180)
 def test_e_pd_launcher_refuses_managed_kv_events_override(tmp_path: Path) -> None:
     """Refuse a passthrough --kv-events-config that would drop the reserved port."""
-    with reserved_ports(6, DynamoPortRange.SERVE.value) as allocated:
+    with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
         result, workers = _run_e_pd_launcher(
             tmp_path,
             {
@@ -393,7 +393,7 @@ def test_e_pd_launcher_refuses_managed_kv_events_override(tmp_path: Path) -> Non
             },
             extra_args=[
                 "--kv-events-config",
-                '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}',
+                f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{allocated[6]}"}}',
             ],
         )
 
@@ -405,20 +405,22 @@ def test_e_pd_launcher_refuses_managed_kv_events_override(tmp_path: Path) -> Non
 @pytest.mark.timeout(180)
 def test_e_pd_launcher_keeps_standalone_kv_events_passthrough(tmp_path: Path) -> None:
     """Let a standalone caller's --kv-events-config reach the PD worker."""
-    # _run_e_pd_launcher reports the first endpoint in the argument list, so an
-    # unreserved value here can only be read back if the generated option, which
-    # would precede it, was dropped.
-    result, workers = _run_e_pd_launcher(
-        tmp_path,
-        {},
-        extra_args=[
-            "--kv-events-config",
-            '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20099"}',
-        ],
-    )
+    # _run_e_pd_launcher reports the first endpoint in the argument list. The
+    # allocator's range is disjoint from the launcher's standalone KV-event
+    # default, so reading this port back can only mean the generated option,
+    # which would precede it, was dropped.
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {},
+            extra_args=[
+                "--kv-events-config",
+                f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{allocated[0]}"}}',
+            ],
+        )
 
     assert result.returncode == 0, result.stderr
-    assert workers["pd"]["kv"] == "20099"
+    assert workers["pd"]["kv"] == str(allocated[0])
 
 
 def test_dyn_port_accepts_high_non_system_port() -> None:
