@@ -29277,6 +29277,7 @@ spec:
                           leader and one worker role. Admission defaults omitted replicas to 1 for
                           leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                           preserves the implicit multinode role layout.
+
                           LPX components each require an agent role. A DGD may contain independent
                           LPX components, each with its own conductor role, or a shared draft and
                           target pair with a conductor role only on the target. Every LPX role
