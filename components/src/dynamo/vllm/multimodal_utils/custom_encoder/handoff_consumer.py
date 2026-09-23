@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Mapping
 from typing import Any
 
@@ -18,8 +17,8 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
 from dynamo.vllm.multimodal_utils.custom_encoder.handoff import ExternalEncoderResult
 
 
-class ExternalEncoderPromptLoader:
-    """Decode a handoff and prepare the same prompt as the inline adapter."""
+class ExternalEncoderHandoffConsumer:
+    """Decode an encoder handoff into the aggregated worker's prompt."""
 
     def __init__(self, model_config: Any, engine_args: Any) -> None:
         try:
@@ -30,21 +29,12 @@ class ExternalEncoderPromptLoader:
         except (TypeError, ValueError) as error:
             raise RuntimeError(str(error)) from error
 
-    async def load(
+    def prepare_prompt(
         self,
         encoder_result: Mapping[str, Any],
         token_ids: list[int],
     ) -> EmbedsPrompt:
         """Decode packed feature rows and adapt them to vLLM mixed mode."""
-
-        return await asyncio.to_thread(self._load_sync, encoder_result, token_ids)
-
-    def _load_sync(
-        self,
-        encoder_result: Mapping[str, Any],
-        token_ids: list[int],
-    ) -> EmbedsPrompt:
-        """Reconstruct one prompt outside the request event loop."""
 
         try:
             parsed = ExternalEncoderResult.from_dict(encoder_result)

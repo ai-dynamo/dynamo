@@ -21,12 +21,12 @@ from dynamo.vllm.multimodal_utils.custom_encoder.adapter.linear import (
     LinearEmbedsAdapter,
 )
 from dynamo.vllm.multimodal_utils.custom_encoder.backend import VisionEncoderBackend
-from dynamo.vllm.multimodal_utils.custom_encoder.external import (
-    ExternalEncoderPromptLoader,
-)
 from dynamo.vllm.multimodal_utils.custom_encoder.handoff import (
     ExternalEncoderResult,
     encode_request_plane_tensor,
+)
+from dynamo.vllm.multimodal_utils.custom_encoder.handoff_consumer import (
+    ExternalEncoderHandoffConsumer,
 )
 
 pytestmark = [
@@ -80,16 +80,16 @@ def _handler(
         engine_args=_engine_args(),
     )
     handler.model_config = _model_config()
-    handler._external_encoder_prompt_loader = None
+    handler._external_encoder_handoff_consumer = None
     handler._custom_encoder = None
     return handler
 
 
-async def test_loader_builds_mixed_prompt_from_request_plane_features() -> None:
+def test_consumer_builds_mixed_prompt_from_request_plane_features() -> None:
     packed = torch.arange(12, dtype=torch.bfloat16).reshape(3, _HIDDEN)
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+    consumer = ExternalEncoderHandoffConsumer(_model_config(), _engine_args())
 
-    prompt = await loader.load(
+    prompt = consumer.prepare_prompt(
         _encoder_result(packed),
         [1, _IMAGE_TOKEN_ID, 2, _IMAGE_TOKEN_ID, 3],
     )
@@ -110,7 +110,7 @@ class _AdapterBackend(VisionEncoderBackend):
         raise NotImplementedError
 
 
-async def test_external_loader_matches_inline_linear_adapter() -> None:
+def test_handoff_consumer_matches_inline_linear_adapter() -> None:
     artifacts = [
         torch.arange(8, dtype=torch.bfloat16).reshape(2, _HIDDEN),
         torch.full((1, _HIDDEN), 12, dtype=torch.bfloat16),
@@ -121,10 +121,10 @@ async def test_external_loader_matches_inline_linear_adapter() -> None:
         _model_config(),
         _engine_args(),
     )
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+    consumer = ExternalEncoderHandoffConsumer(_model_config(), _engine_args())
 
     inline_prompt = adapter.prepare_prompt(token_ids, artifacts)
-    remote_prompt = await loader.load(
+    remote_prompt = consumer.prepare_prompt(
         ExternalEncoderResult.from_artifacts(
             artifacts,
             image_token_id=_IMAGE_TOKEN_ID,
@@ -139,7 +139,7 @@ async def test_external_loader_matches_inline_linear_adapter() -> None:
     )
 
 
-async def test_loader_reconstructs_prompt_off_event_loop(
+async def test_handler_reconstructs_prompt_off_event_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     event_loop_thread = get_ident()
@@ -156,11 +156,18 @@ async def test_loader_reconstructs_prompt_off_event_loop(
         "decode_request_plane_tensor",
         tracked_decode,
     )
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+    handler = _handler()
+    handler._external_encoder_handoff_consumer = ExternalEncoderHandoffConsumer(
+        _model_config(),
+        _engine_args(),
+    )
 
-    await loader.load(
-        _encoder_result(row_splits=(0, 3)),
-        [_IMAGE_TOKEN_ID],
+    await handler._assemble_external_encoder_prompt(
+        {
+            "encoder_result": _encoder_result(row_splits=(0, 3)),
+            "token_ids": [_IMAGE_TOKEN_ID],
+        },
+        "req-1",
     )
 
     assert decode_thread is not None
@@ -174,13 +181,13 @@ async def test_loader_reconstructs_prompt_off_event_loop(
         (_model_config(), _engine_args(enable_prompt_embeds=False), "prompt-embeds"),
     ],
 )
-def test_loader_rejects_incompatible_decoder_configuration(
+def test_consumer_rejects_incompatible_decoder_configuration(
     model_config: SimpleNamespace,
     engine_args: SimpleNamespace,
     match: str,
 ) -> None:
     with pytest.raises(RuntimeError, match=match):
-        ExternalEncoderPromptLoader(model_config, engine_args)
+        ExternalEncoderHandoffConsumer(model_config, engine_args)
 
 
 @pytest.mark.parametrize(
@@ -198,53 +205,53 @@ def test_loader_rejects_incompatible_decoder_configuration(
         ),
     ],
 )
-async def test_loader_rejects_invalid_tensor(
+def test_consumer_rejects_invalid_tensor(
     packed: torch.Tensor,
     row_splits: tuple[int, ...],
     match: str,
 ) -> None:
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+    consumer = ExternalEncoderHandoffConsumer(_model_config(), _engine_args())
     token_ids = [_IMAGE_TOKEN_ID] * (len(row_splits) - 1)
 
     with pytest.raises(InvalidArgument, match=match):
-        await loader.load(
+        consumer.prepare_prompt(
             _encoder_result(packed, row_splits=row_splits),
             token_ids,
         )
 
 
-async def test_loader_rejects_empty_image_row_split() -> None:
+def test_consumer_rejects_empty_image_row_split() -> None:
     packed = torch.ones((2, _HIDDEN), dtype=torch.bfloat16)
     encoder_result = _encoder_result(packed, row_splits=(0, 2))
     encoder_result["row_splits"] = [0, 0, 2]
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+    consumer = ExternalEncoderHandoffConsumer(_model_config(), _engine_args())
 
     with pytest.raises(InvalidArgument, match="strictly increasing"):
-        await loader.load(
+        consumer.prepare_prompt(
             encoder_result,
             [_IMAGE_TOKEN_ID, _IMAGE_TOKEN_ID],
         )
 
 
-async def test_loader_rejects_placeholder_count_mismatch() -> None:
-    loader = ExternalEncoderPromptLoader(_model_config(), _engine_args())
+def test_consumer_rejects_placeholder_count_mismatch() -> None:
+    consumer = ExternalEncoderHandoffConsumer(_model_config(), _engine_args())
 
     with pytest.raises(InvalidArgument, match="placeholder tokens.*image tensors"):
-        await loader.load(
+        consumer.prepare_prompt(
             _encoder_result(),
             [_IMAGE_TOKEN_ID],
         )
 
 
-async def test_handler_assembles_external_prompt_through_shared_loader() -> None:
+async def test_handler_assembles_external_prompt_through_handoff_consumer() -> None:
     handler = _handler()
     expected = EmbedsPrompt(
         prompt_embeds=torch.ones((1, _HIDDEN), dtype=torch.bfloat16),
         prompt_token_ids=[_IMAGE_TOKEN_ID],
         prompt_is_token_ids=[False],
     )
-    loader = SimpleNamespace(load=AsyncMock(return_value=expected))
-    handler._external_encoder_prompt_loader = loader
+    consumer = SimpleNamespace(prepare_prompt=MagicMock(return_value=expected))
+    handler._external_encoder_handoff_consumer = consumer
     request = {
         "token_ids": [_IMAGE_TOKEN_ID],
         "encoder_result": _encoder_result(row_splits=(0, 3)),
@@ -254,7 +261,7 @@ async def test_handler_assembles_external_prompt_through_shared_loader() -> None
     prompt = await handler._assemble_external_encoder_prompt(request, "req-1")
 
     assert prompt is expected
-    loader.load.assert_awaited_once_with(
+    consumer.prepare_prompt.assert_called_once_with(
         request["encoder_result"],
         request["token_ids"],
     )
@@ -350,8 +357,8 @@ async def test_handler_rejects_competing_multimodal_extra_args(field: str) -> No
 
 async def test_handler_propagates_external_encoder_runtime_failure() -> None:
     handler = _handler()
-    handler._external_encoder_prompt_loader = SimpleNamespace(
-        load=AsyncMock(side_effect=RuntimeError("allocation failed"))
+    handler._external_encoder_handoff_consumer = SimpleNamespace(
+        prepare_prompt=MagicMock(side_effect=RuntimeError("allocation failed"))
     )
     request = {
         "token_ids": [_IMAGE_TOKEN_ID],

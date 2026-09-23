@@ -102,8 +102,10 @@ from .multimodal_utils.custom_encoder import (
     VisionEncoderBackend,
     create_custom_encoder_adapter,
 )
-from .multimodal_utils.custom_encoder.external import ExternalEncoderPromptLoader
 from .multimodal_utils.custom_encoder.handoff import external_encoder_request_conflicts
+from .multimodal_utils.custom_encoder.handoff_consumer import (
+    ExternalEncoderHandoffConsumer,
+)
 from .multimodal_utils.prefill_worker_utils import MultiModalEmbeddingLoader
 from .multimodal_utils.request_processor import (
     IMAGE_URL_KEY,
@@ -3426,8 +3428,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             encode_worker_client=encode_worker_client,
         )
         self._first_token_source = first_token_source
-        self._external_encoder_prompt_loader: Optional[
-            ExternalEncoderPromptLoader
+        self._external_encoder_handoff_consumer: Optional[
+            ExternalEncoderHandoffConsumer
         ] = None
 
     async def generate(self, request, context):
@@ -3593,12 +3595,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         token_ids = request.get("token_ids")
         if not isinstance(token_ids, list):
             raise InvalidArgument("external encoder results require token_ids")
-        if self._external_encoder_prompt_loader is None:
-            self._external_encoder_prompt_loader = ExternalEncoderPromptLoader(
+        if self._external_encoder_handoff_consumer is None:
+            self._external_encoder_handoff_consumer = ExternalEncoderHandoffConsumer(
                 self.model_config,
                 self.config.engine_args,
             )
-        prompt = await self._external_encoder_prompt_loader.load(
+        prompt = await asyncio.to_thread(
+            self._external_encoder_handoff_consumer.prepare_prompt,
             encoder_result,
             token_ids,
         )
