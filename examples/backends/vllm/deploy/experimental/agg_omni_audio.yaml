@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Experimental Qwen3-TTS audio serving. Adapted from the configuration validated
+# on September 18, 2026; namespace/node-pool bindings and cache names are portable.
+# The pinned, matched nightly images contain Dynamo 1.6.0.dev20260918,
+# vLLM 0.29.0 and vLLM-Omni 0.29.0rc1. The tested operator was 1.4.2.
+# Keep runtimeVersionOverride at 1.6.0: it describes the images, not the operator.
+# Stock Dynamo 1.4.2 serving images returned only the initial silent audio chunk.
+# Other builds and mixed-version features need separate validation.
+#
+# Before applying, create the hf-token-secret Secret containing HF_TOKEN, replace
+# model-cache-pvc and subPath: model-cache with your writable cache, and set GPU
+# node selectors for your cluster. The validation used one H100 GPU.
+# Review the model's remote code before using --trust-remote-code.
+# For response_format=wav and data_source=b64_json, save raw WAV response bytes,
+# not JSON/base64. Validation checked non-silent output, not speech quality.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-omni-audio-experimental
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    runtimeVersionOverride: 1.6.0
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:20260918-a9792db
+        nodeSelector:
+          kubernetes.io/arch: amd64
+  - name: OmniAudioWorker
+    type: worker
+    replicas: 1
+    runtimeVersionOverride: 1.6.0
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260918-a9792db
+          command:
+          - python3
+          - -m
+          - dynamo.vllm.omni
+          args:
+          - --model
+          - Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+          - --output-modalities
+          - audio
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          - --trust-remote-code
+          - --enforce-eager
+          env:
+          - name: VLLM_ALLOW_LONG_MAX_MODEL_LEN
+            value: '1'
+          - name: HF_HOME
+            value: /model-cache
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              nvidia.com/gpu: '1'
+          volumeMounts:
+          - name: media-output
+            mountPath: /tmp/dynamo_media
+          - name: model-cache
+            mountPath: /model-cache
+            subPath: model-cache
+        volumes:
+        - name: media-output
+          emptyDir:
+            sizeLimit: 20Gi
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache-pvc
+        nodeSelector:
+          kubernetes.io/arch: amd64
