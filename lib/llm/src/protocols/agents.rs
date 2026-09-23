@@ -83,6 +83,7 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             compaction,
         });
     }
+
     for mapping in AGENT_HEADER_MAPPINGS {
         let Some(root_session_id) = borrowed_header_value(headers, mapping.root_session_header)
         else {
