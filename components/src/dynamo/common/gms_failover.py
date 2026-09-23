@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_FAILOVER_LOCK_PATH = "/shared/failover.lock"
 DEFAULT_FAILOVER_TAGS = ("kv_cache", "weights")
 KEEP_SHADOW_READY_ENV = "DYN_GMS_FAILOVER_KEEP_SHADOW_READY"
+LEASE_TRANSITION_SERVING_ENV = "DYN_GMS_FAILOVER_LEASE_TRANSITION_SERVING"
 _gpu_quiescence_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -237,6 +238,59 @@ def _normalize_lease_engine_name(backend_name: str) -> str:
     if normalized in {"trt", "trt_llm", "tensorrt_llm"}:
         return "trtllm"
     return normalized
+
+
+def lease_transition_serving_enabled(
+    backend_name: str, *, mapped_standby: bool
+) -> bool:
+    """Validate the opt-in mode that serves before predecessor retirement.
+
+    In this mode the new owner may allocate only atomically FREE lease slots and
+    may reuse predecessor KV only through exact-generation SEALED adoption or
+    read pins. CPU writers are fenced and leases classified before admission;
+    optional GPU-quiescence reclamation remains asynchronous.
+    """
+
+    if not _truthy_env(LEASE_TRANSITION_SERVING_ENV):
+        return False
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    primary_engine_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    is_shadow = engine_id != primary_engine_id
+    if is_shadow and not mapped_standby:
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires a mapped sleeping standby"
+        )
+    from gpu_memory_service.integrations.common.kv_lease_client import kv_leases_enabled
+
+    engine = _normalize_lease_engine_name(backend_name)
+    if not kv_leases_enabled(engine):
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires {engine} KV leases"
+        )
+    directory_mode = os.environ.get("GMS_KV_DIRECTORY_MODE", "off").strip().lower()
+    if directory_mode == "off":
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires the GMS KV directory"
+        )
+
+    if not os.environ.get("GMS_KV_DIRECTORY_MANIFEST", "").strip():
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires GMS_KV_DIRECTORY_MANIFEST"
+        )
+    if not _directory_socket(backend_name):
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires a GMS KV directory socket"
+        )
+    directory_is_standby = directory_mode == "shadow" or _truthy_env(
+        "GMS_KV_DIRECTORY_STANDBY"
+    )
+    if is_shadow and not directory_is_standby:
+        raise RuntimeError(
+            f"{LEASE_TRANSITION_SERVING_ENV}=1 requires the mapped standby "
+            "directory to remain read-only before takeover"
+        )
+
+    return True
 
 
 def _directory_socket(backend_name: str) -> str:
@@ -811,6 +865,7 @@ async def prepare_gms_failover(
     promotion_warmup: Callable[[], Awaitable[None]] | None = None,
     warm_standby_before_quiesce: bool = False,
     activation_barrier: Callable[[], Awaitable[None]] | None = None,
+    lease_transition_serving: bool = False,
 ) -> GmsFailoverActivation:
     """Gate model registration until this engine owns the shared GMS namespace.
 
@@ -897,6 +952,11 @@ async def prepare_gms_failover(
     )
     resume_started = False
     try:
+        # Classify predecessor-held pages before admitting any successor read.
+        # The shared ring has one reader count, so a background classifier could
+        # not distinguish a stale primary pin from a newly admitted shadow pin.
+        # This CPU-only phase is the safety boundary; GPU-quiescence reclamation
+        # remains asynchronous inside run_gms_failover_post_lock_fence().
         await run_gms_failover_post_lock_fence(backend_name=backend_name, role=role)
         if activation_barrier is not None:
             await activation_barrier()
@@ -912,6 +972,14 @@ async def prepare_gms_failover(
 
         if not keep_shadow_ready and set_health_status is not None:
             set_health_status(True)
+
+        if lease_transition_serving:
+            logger.info(
+                "[GMS failover] %s %s serving from FREE and exact-generation "
+                "SEALED leases while GPU-quiescence recovery completes",
+                backend_name,
+                role,
+            )
     except BaseException:
         safe_to_release = not resume_started
         cleanup_cancelled = None

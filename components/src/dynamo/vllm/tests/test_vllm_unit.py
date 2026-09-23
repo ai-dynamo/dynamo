@@ -2839,6 +2839,80 @@ async def test_gms_shadow_sleeps_until_lock_then_wakes(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gms_mapped_shadow_classifies_leases_before_resume(monkeypatch):
+    from dynamo.vllm.worker_factory import WorkerFactory
+
+    events = []
+    lock = object()
+    factory = WorkerFactory(*(lambda *args, **kwargs: None for _ in range(5)))
+
+    async def acquire_lock():
+        events.append("lock")
+        return lock
+
+    class PauseController:
+        async def pause_generation_only(self, *, clear_cache):
+            events.append(("pause_generation_only", clear_cache))
+
+        async def resume(self, *args, **kwargs):
+            events.append(("resume", args, kwargs))
+
+        def mark_resumed(self):
+            events.append("mark_resumed")
+
+    class Runtime:
+        def set_health_status(self, status):
+            events.append(("health", status))
+
+    def transition_enabled(backend_name, *, mapped_standby):
+        events.append(("transition", backend_name, mapped_standby))
+        return True
+
+    async def fence(**kwargs):
+        events.append(("fence", kwargs["backend_name"], kwargs["role"]))
+
+    handler = SimpleNamespace(
+        _pause_controller=PauseController(),
+        engine_client=SimpleNamespace(),
+    )
+    config = SimpleNamespace(gms_shadow_mode=True)
+
+    monkeypatch.setenv("ENGINE_ID", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    monkeypatch.setenv("DYN_VLLM_GMS_MAPPED_STANDBY", "1")
+    monkeypatch.setattr(factory, "_acquire_failover_lock", acquire_lock)
+    monkeypatch.setattr(
+        factory,
+        "_maybe_start_rank_liveness_monitor",
+        lambda *_args, **_kwargs: events.append("monitor"),
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.lease_transition_serving_enabled",
+        transition_enabled,
+    )
+    monkeypatch.setattr(
+        "dynamo.vllm.worker_factory.run_gms_failover_post_lock_fence",
+        fence,
+    )
+
+    assert (
+        await factory._maybe_wait_for_failover_lock(handler, Runtime(), config) is False
+    )
+
+    assert handler._gms_failover_lock is lock
+    assert events == [
+        ("transition", "vllm", True),
+        ("pause_generation_only", False),
+        ("health", True),
+        "lock",
+        ("fence", "vllm", "shadow"),
+        ("resume", ([],), {}),
+        "mark_resumed",
+        "monitor",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
 
