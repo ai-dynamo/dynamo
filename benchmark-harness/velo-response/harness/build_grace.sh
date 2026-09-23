@@ -20,7 +20,8 @@ printf '%s\n' "$RUSTFLAGS" > "$REPO/.dynamo-native-rustflags"
 cd "$REPO/lib/bindings/python"
 cargo metadata --format-version 1 --features velo-ucx > "$ROOT/manifests/prebuild-bindings-metadata.json"
 cargo build --release --locked --features tracing/release_max_level_warn,velo-ucx > "$ROOT/logs/frontend-build.log" 2>&1
-cp "$CARGO_TARGET_DIR/release/lib_core.so" src/dynamo/_core.so
+cp "$CARGO_TARGET_DIR/release/lib_core.so" src/dynamo/_core.so.next
+mv src/dynamo/_core.so.next src/dynamo/_core.so
 sha256sum src/dynamo/_core.so > "$ROOT/manifests/core.sha256"
 cargo metadata --locked --format-version 1 --features tracing/release_max_level_warn,velo-ucx > "$ROOT/manifests/grace-bindings-metadata.json"
 "$REPO/.venv/bin/python" -c 'import dynamo._core, dynamo.frontend, dynamo.mocker; print(dynamo._core.__file__); print(dynamo.frontend.__file__)' > "$ROOT/manifests/python-imports.txt"
