@@ -780,7 +780,8 @@ jobs:
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.planner == 'true' ||
-      needs.changed-files.outputs.operator == 'true'
+      needs.changed-files.outputs.operator == 'true' ||
+      needs.changed-files.outputs.dgdr == 'true'
     uses: $/.github/workflows/shared-build-image.yml
     with:
       framework: dynamo
@@ -1565,7 +1566,9 @@ jobs:
     if: |
       !cancelled() && !failure() &&
       (needs.changed-files.outputs.operator == 'true' ||
-       needs.changed-files.outputs.dgdr == 'true')
+       needs.changed-files.outputs.dgdr == 'true') &&
+      needs.planner-copy-to-acr.result == 'success' &&
+      needs.planner-copy-to-acr.outputs.image_tag != ''
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
     with:
       namespace: ${{ needs.deploy-operator.outputs.namespace }}
