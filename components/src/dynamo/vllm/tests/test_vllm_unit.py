@@ -2986,6 +2986,29 @@ async def test_gms_shadow_wake_timeout_requiesces_and_releases_lock(monkeypatch)
     ]
 
 
+def test_failover_engines_get_isolated_vllm_compile_caches(monkeypatch):
+    from dynamo.vllm.__main__ import _isolate_failover_compile_cache
+
+    monkeypatch.delenv("VLLM_CACHE_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", "/cache")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("ENGINE_ID", "shadow/1")
+
+    assert _isolate_failover_compile_cache() == "/cache/vllm-gms-failover/shadow_1"
+    assert os.environ["VLLM_CACHE_ROOT"] == "/cache/vllm-gms-failover/shadow_1"
+
+
+def test_explicit_vllm_compile_cache_is_preserved(monkeypatch):
+    from dynamo.vllm.__main__ import _isolate_failover_compile_cache
+
+    monkeypatch.setenv("VLLM_CACHE_ROOT", "/prebuilt")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "true")
+    monkeypatch.setenv("ENGINE_ID", "1")
+
+    assert _isolate_failover_compile_cache() is None
+    assert os.environ["VLLM_CACHE_ROOT"] == "/prebuilt"
+
+
 @pytest.mark.asyncio
 async def test_gms_shadow_wake_hard_timeout_retains_lock(monkeypatch):
     from dynamo.vllm.worker_factory import WorkerFactory
