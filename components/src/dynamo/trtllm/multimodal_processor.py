@@ -590,16 +590,9 @@ class MultimodalRequestProcessor:
                     scheme = urlparse(normalized_url).scheme
                     if scheme in ("http", "https", "data"):
                         if scheme == "data":
-                            # The payload is inline, so decode it here and let the
-                            # codec probe below treat it like fetched bytes.
-                            content = decode_data_uri(normalized_url)
-                            if len(content) > self.max_file_size_bytes:
-                                raise HttpStatusError(
-                                    400,
-                                    "Video exceeds the maximum allowed size "
-                                    f"({self.max_file_size_mb}MB)",
-                                    source,
-                                )
+                            content = decode_data_uri(
+                                normalized_url, max_bytes=self.max_file_size_bytes
+                            )
                         else:
                             content = await fetch_bytes(
                                 normalized_url,

@@ -18,6 +18,7 @@ import pytest
 
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.media_source import (
+    decode_data_uri,
     describe_media_source,
     is_local_media_url,
     read_local_media_bytes,
@@ -106,6 +107,14 @@ async def test_reads_base64_data_uri():
 async def test_malformed_data_uri_rejected(url, match):
     with pytest.raises(UrlValidationError, match=match):
         await read_local_media_bytes(url, UrlValidationPolicy())
+
+
+@pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
+def test_decode_data_uri_size_bound_is_exact(size):
+    url = "data:video/mp4;base64," + base64.b64encode(b"x" * size).decode()
+    assert decode_data_uri(url, max_bytes=size) == b"x" * size
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=size - 1)
 
 
 async def test_unsupported_scheme_rejected():

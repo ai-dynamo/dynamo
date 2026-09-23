@@ -236,24 +236,15 @@ async def test_h264_data_uri_video_routes_through_nvdec(monkeypatch) -> None:
         ep_disaggregated_params=None,
     )
 
-    nvdec.assert_called_once()  # the inline bytes reached the NVDEC transform ...
+    nvdec.assert_called_once()
     assert nvdec.call_args.args[0] == b"h264 bytes"
-    load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
-    fetch.assert_not_awaited()  # ... without any network fetch
+    load_video.assert_not_awaited()
+    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "uri",
-    [
-        "data:video/mp4;base64",
-        "data:video/mp4,%00%01%02",
-        "data:video/mp4;base64,AAAA!!!!",
-    ],
-    ids=["no-comma", "not-base64", "invalid-base64-characters"],
-)
-async def test_malformed_video_data_uri_is_rejected(uri) -> None:
-    """Malformed payloads must 400 rather than decode to garbage or empty bytes."""
+async def test_malformed_video_data_uri_is_rejected() -> None:
+    uri = "data:video/mp4;base64,AAAA!!!!"
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
