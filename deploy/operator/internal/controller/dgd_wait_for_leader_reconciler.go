@@ -23,7 +23,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features/compatibility"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -45,9 +44,7 @@ func (r *dgdWaitForLeaderReconciler) Reconcile(
 		return nil
 	}
 
-	// Keep the legacy ConfigMap stable for DGDs created by older operators.
-	rayWorkerGCSReadinessEnabled := compatibility.VLLMRayWorkerGCSReadiness.Enabled(dgd.Annotations)
-	configMap := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace, rayWorkerGCSReadinessEnabled)
+	configMap := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
 	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.ConfigMap, bool, error) {
 		return configMap, false, nil
 	})

@@ -1265,7 +1265,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 func TestGenerateWaitLeaderConfigMap(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns", true)
+	cm := GenerateWaitLeaderConfigMap("my-dgd", "my-ns")
 
 	g.Expect(cm.Name).To(gomega.Equal("my-dgd-wait-leader-script"))
 	g.Expect(cm.Namespace).To(gomega.Equal("my-ns"))
@@ -1289,12 +1289,6 @@ func TestGenerateWaitLeaderConfigMap(t *testing.T) {
 	g.Expect(rayScript).To(gomega.ContainSubstring(`ray health-check --address "${address}"`))
 	g.Expect(rayScript).To(gomega.ContainSubstring("max_attempts=60"))
 	g.Expect(rayScript).To(gomega.ContainSubstring("did not become healthy within 300s"))
-
-	t.Log("Verify the legacy ConfigMap remains byte-for-byte limited to the MP script")
-	legacyCM := GenerateWaitLeaderConfigMap("my-dgd", "my-ns", false)
-	g.Expect(legacyCM.Data).To(gomega.Equal(map[string]string{
-		"wait-for-leader.py": WaitLeaderScript,
-	}))
 }
 
 func TestGetWaitLeaderConfigMapName(t *testing.T) {
