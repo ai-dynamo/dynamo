@@ -77,10 +77,12 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    # DeepSeek V4.1 Flash support is available upstream. Follow vLLM's
-    # multi-architecture nightly image so the Dynamo runtime tracks the
-    # latest official model support until it lands in a numbered release.
-    runtime_image_tag: nightly
+    # DeepSeek V4.1 Flash support is available upstream. Pin the 2026-09-23
+    # multi-architecture nightly manifest, rather than following its mutable
+    # tag. This preserves BuildKit's platform selection for both CUDA stages:
+    # arm64  sha256:8e138f4eac3a39cbab573e11cebe7cadacc939745003d0fd2b460b5576c1015b
+    # amd64  sha256:e0eee5c5506bea9bfe350f7d99b07dc49e37d42647a128c2a57ff184551fba10
+    runtime_image_tag: nightly@sha256:f75fec992c293dd41042745f8aa71bfdf12b188b6a01e0baf075e4bca5d297e5
     # DeepSeek V4.1 Flash is text-only.  Its day-0 image must retain the
     # dependency solution supplied by vLLM nightly, rather than installing the
     # separately released Omni stack with its incompatible Transformers pin.
