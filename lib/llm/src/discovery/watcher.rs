@@ -29,9 +29,7 @@ use crate::{
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
     kv_router::plugins::RouterPluginBuilder,
-    kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, SelectionPolicySource,
-    },
+    kv_router::{EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext},
     local_model::runtime_config::{
         TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
         VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
@@ -414,7 +412,7 @@ impl ModelWatcher {
         card.download_config(self.local_model_path.as_deref())
             .await?;
 
-        validate_policy_worker_role(card, &self.plugins.selection_policy())?;
+        validate_policy_worker_role(card, &self.plugins)?;
 
         // Prepare without exact video routing unless the cohort agreed on a contract.
         if spec.video_contract.is_none()
@@ -1367,13 +1365,9 @@ fn effective_router_config<'a>(
 /// decode or aggregated, so it requires an explicit `worker_type`.
 fn validate_policy_worker_role(
     card: &ModelDeploymentCard,
-    policy: &SelectionPolicySource,
+    plugins: &RouterPluginBuilder,
 ) -> anyhow::Result<()> {
-    if matches!(
-        policy,
-        SelectionPolicySource::Factory(_) | SelectionPolicySource::Prepared(_)
-    ) && card.worker_type.is_none()
-    {
+    if plugins.has_custom_worker_selection() && card.worker_type.is_none() {
         anyhow::bail!(
             "custom worker-selection policies require model cards with an explicit worker_type"
         );
@@ -2139,7 +2133,7 @@ request_classifier:
             }
         });
         let selectors = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
+        let mut registry = dynamo_custom_policy_builtin::default_registry();
         registry
             .register_request_classifier("test", Arc::new(move |_| Ok(factory.clone())))
             .unwrap();
@@ -2152,7 +2146,7 @@ request_classifier:
                         let selectors = selectors.clone();
                         Ok(Arc::new(move |config, role, partition| {
                             selectors.lock().push((role, partition.into_owned()));
-                            dynamo_kv_router::WorkerSelectionPolicy::default(
+                            dynamo_custom_policy_builtin::default_policy(
                                 config.clone(),
                                 role.default_selector_label(),
                             )
@@ -2960,17 +2954,25 @@ request_classifier:
     }
 
     #[test]
-    fn custom_selector_requires_explicit_worker_type() {
-        let registry = SelectionPolicySource::Registry;
-        let factory = SelectionPolicySource::Factory(Arc::new(|_, _, _| {
-            unreachable!("role validation never constructs the policy")
-        }));
+    fn only_explicit_policies_require_typed_model_cards() {
+        let unresolved = RouterPluginBuilder::default();
+        let resolved = dynamo_custom_policy_builtin::default_registry()
+            .resolve_plugins(&dynamo_kv_router::KvRouterConfig::default())
+            .unwrap();
+        assert!(resolved.worker_selection().is_some());
+        let builtin = RouterPluginBuilder::new(resolved);
+        let custom = RouterPluginBuilder::new(
+            dynamo_kv_router::plugins::RouterPlugins::default().with_worker_selection(Arc::new(
+                |_, _, _| unreachable!("role validation never constructs the policy"),
+            )),
+        );
         let mut card = ModelDeploymentCard::with_name_only("model");
-        assert!(validate_policy_worker_role(&card, &registry).is_ok());
-        assert!(validate_policy_worker_role(&card, &factory).is_err());
+        assert!(validate_policy_worker_role(&card, &unresolved).is_ok());
+        assert!(validate_policy_worker_role(&card, &builtin).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom).is_err());
 
         card.worker_type = Some(WorkerType::Decode);
-        assert!(validate_policy_worker_role(&card, &factory).is_ok());
+        assert!(validate_policy_worker_role(&card, &custom).is_ok());
     }
 
     #[test]

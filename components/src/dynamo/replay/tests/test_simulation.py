@@ -514,23 +514,12 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
     assert "aic_pp_size" not in lowered
 
 
-def test_engine_args_removes_neutral_prefill_schedule_interval(monkeypatch) -> None:
-    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
-    monkeypatch.setattr(
-        simulation,
-        "resolve_aic_num_gpu_blocks",
-        lambda payload: payload,
-    )
-
-    engine_args = simulation.DynamoReplayRunner._engine_args(
-        {"engine_type": "vllm", "prefill_schedule_interval": 1}
-    )
-
-    assert "prefill_schedule_interval" not in json.loads(engine_args.payload)
-
-
-def test_engine_args_rejects_nondefault_prefill_schedule_interval(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("field", "neutral"),
+    [("prefill_schedule_interval", 1), ("prefill_decode_interval", 0)],
+)
+def test_engine_args_removes_neutral_prefill_interval(
+    monkeypatch, field, neutral
 ) -> None:
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(
@@ -539,10 +528,26 @@ def test_engine_args_rejects_nondefault_prefill_schedule_interval(
         lambda payload: payload,
     )
 
-    with pytest.raises(ValueError, match="prefill_schedule_interval"):
-        simulation.DynamoReplayRunner._engine_args(
-            {"engine_type": "vllm", "prefill_schedule_interval": 4}
-        )
+    engine_args = simulation.DynamoReplayRunner._engine_args(
+        {"engine_type": "vllm", field: neutral}
+    )
+
+    assert field not in json.loads(engine_args.payload)
+
+
+@pytest.mark.parametrize(
+    "field", ["prefill_schedule_interval", "prefill_decode_interval"]
+)
+def test_engine_args_rejects_nondefault_prefill_interval(monkeypatch, field) -> None:
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(
+        simulation,
+        "resolve_aic_num_gpu_blocks",
+        lambda payload: payload,
+    )
+
+    with pytest.raises(ValueError, match=field):
+        simulation.DynamoReplayRunner._engine_args({"engine_type": "vllm", field: 4})
 
 
 def test_factory_preserves_trtllm_disagg_gate() -> None:

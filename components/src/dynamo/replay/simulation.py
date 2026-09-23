@@ -333,6 +333,13 @@ class DynamoReplayRunner:
                 "Dynamo replay does not support prefill_schedule_interval values "
                 "other than 1"
             )
+        # SGLang's post-EXTEND prefill interval is also neutral at its default.
+        prefill_decode_interval = lowered.pop("prefill_decode_interval", 0)
+        if prefill_decode_interval != 0:
+            raise ValueError(
+                "Dynamo replay does not support prefill_decode_interval values "
+                "other than 0"
+            )
         return MockEngineArgs.from_json(json.dumps(lowered))
 
     def _run_trace(

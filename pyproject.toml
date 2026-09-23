@@ -14,12 +14,15 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.6.0",
+    # This nightly sorts below 0.12.0 but includes Weka, which 0.12.0 lacks.
+    # 0.13 nightlies remove the AIC compatibility imports still used by Dynamo.
     "aisimulate==0.12.0.dev202609170000000044; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
     "prometheus_client>=0.23.1,<1.0",
     "msgspec>=0.19.0",
+    "redis>=6.2.0,<9.0.0",
     "zstandard>=0.23.0,<1.0",
     "pyzmq>=26.0.0",
     # typing.Self is 3.11+; declared minimum is 3.10 (see requires-python),

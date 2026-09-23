@@ -3917,6 +3917,18 @@ mod tests {
 
         assert_eq!(with_json, without_json);
         assert!(with_json.get("llm_metrics").is_none());
+
+        let mut inbound_json = without_json;
+        inbound_json["llm_metrics"] = serde_json::json!({
+            "input_tokens": 1,
+            "output_tokens": 2,
+            "chunk_tokens": 1,
+            "cached_tokens": 1,
+            "image_tokens": 300
+        });
+        let inbound: NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(inbound_json).unwrap();
+        assert_eq!(inbound.llm_metrics, with_metrics.llm_metrics);
     }
 
     #[test]

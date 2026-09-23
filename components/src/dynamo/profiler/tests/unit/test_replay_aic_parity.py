@@ -149,7 +149,11 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         osl=128,
         batch_size=8,
     )
-    expected_ttft_ms = aic["context_latency"] + aic["tpot"]
+    # SGLang samples the first token at the end of the prefill forward pass.
+    # The vLLM replay scheduler includes a separate decode step for that token.
+    expected_ttft_ms = aic["context_latency"]
+    if backend_name == "vllm":
+        expected_ttft_ms += aic["tpot"]
 
     assert report["mean_ttft_ms"] == pytest.approx(expected_ttft_ms, rel=0.05)
     assert report["mean_tpot_ms"] == pytest.approx(aic["tpot"], rel=0.05)

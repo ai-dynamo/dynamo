@@ -12,7 +12,10 @@ import torch
 
 import dynamo.nixl_connect as nixl_connect
 from dynamo.common.http import HttpStatusError
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
 from dynamo.trtllm.utils.disagg_utils import DisaggregatedParamsCodec
 
@@ -292,6 +295,7 @@ class EncodeHelper:
         model_type: str,
         engine,
         mm_processor_kwargs: Optional[dict] = None,
+        cache_scope: str | None = None,
     ):
         """
         Process image URLs via TRT-LLM's MultimodalEncoder (full EPD flow).
@@ -306,6 +310,8 @@ class EncodeHelper:
             model_dir: Path to model directory (unused; kept for API compatibility)
             model_type: Model type string (unused; kept for API compatibility)
             engine: TensorRTLLMEngine with MultimodalEncoder
+            mm_processor_kwargs: Optional model-specific preprocessing options
+            cache_scope: Optional frontend-derived image-cache isolation scope
 
         Yields:
             Response with ep_disaggregated_params, processed_prompt, and prompt_token_ids
@@ -313,7 +319,9 @@ class EncodeHelper:
         # Load images with shared ImageLoader (async, same as multimodal_processor PD flow).
         image_items = [{"Url": u} for u in image_urls]
         image_loader = EncodeHelper._get_image_loader()
-        pil_images = await image_loader.load_image_batch(image_items)
+        pil_images = await image_loader.load_image_batch(
+            image_items, cache_scope=cache_scope
+        )
         if not pil_images:
             logging.error("ENCODE WORKER: no images loaded from image_urls")
             yield {"ep_disaggregated_params": None}
@@ -463,7 +471,8 @@ class EncodeHelper:
                 model_dir,
                 model_type,
                 engine,
-                epd_mm_kwargs,
+                mm_processor_kwargs=epd_mm_kwargs,
+                cache_scope=image_cache_scope_from_request(request),
             ):
                 yield response
 

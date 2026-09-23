@@ -19,6 +19,7 @@ use dynamo_backend_common::{
     RlWorkerMetadata, SamplingOptions, StopConditions,
 };
 use dynamo_llm::model_card::ModelDeploymentCard;
+use dynamo_llm::protocols::common::preprocessed_mm_routing_hash;
 use dynamo_runtime::discovery::{DiscoveryInstance, DiscoveryQuery, DiscoverySpec};
 use dynamo_runtime::distributed::DistributedConfig;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -630,12 +631,13 @@ fn server_info() -> pb::ServerInfo {
 #[test]
 fn engine_config_advertises_supported_capabilities() {
     let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
-    assert!(
-        !model
+    assert_eq!(
+        model
             .engine_config(true)
             .expect("valid KV metadata")
             .runtime_data
-            .contains_key("vllm_inference_v1_generate")
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
     );
     assert_eq!(
         model
@@ -1071,6 +1073,7 @@ fn compatibility_envelope_preserves_typed_controls() {
             })
             .sampling_options(SamplingOptions {
                 n: Some(1),
+                temperature: Some(1.0),
                 ..Default::default()
             })
             .output_options(OutputOptions::default())
@@ -1087,7 +1090,8 @@ fn compatibility_envelope_preserves_typed_controls() {
                         "ignore_eos": true,
                         "logprobs": 2,
                         "prompt_logprobs": 3,
-                        "skip_special_tokens": false
+                        "skip_special_tokens": false,
+                        "return_token_ids": true
                     }
                 }
             })))
@@ -1111,18 +1115,178 @@ fn compatibility_envelope_preserves_typed_controls() {
             Some(pb::candidate_tokens::Select::TopN(3))
         );
         assert_eq!(response.skip_special_tokens, Some(false));
+        assert!(response.output_token_ids);
     }
 }
 
 #[test]
-fn native_sampling_is_rejected_instead_of_silently_discarded() {
+fn compatibility_envelope_accepts_sampling_projected_to_proto() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let mut request = request();
+        if mode.is_decode() {
+            request.prefill_result = decode_request().prefill_result;
+        }
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "sampling_params": {
+                    "temperature": 0.2,
+                    "top_p": 0.9,
+                    "top_k": 4,
+                    "min_p": 0.1,
+                    "seed": 123,
+                    "presence_penalty": 0.3,
+                    "frequency_penalty": 0.4,
+                    "repetition_penalty": 1.1,
+                    "max_tokens": 1,
+                    "min_tokens": 1,
+                    "stop_token_ids": [2],
+                    "ignore_eos": true,
+                    "logprobs": 1,
+                    "prompt_logprobs": 1,
+                    "skip_special_tokens": false
+                }
+            }
+        }));
+        let wire = build_generate_request(request, "native".to_string(), mode)
+            .expect("vllm-proto 0.3 preserves projected sampling controls");
+        assert_eq!(wire.temperature, Some(0.2));
+        let sampling = wire.sampling.expect("sampling");
+        assert_eq!(sampling.top_p, 0.9);
+        assert_eq!(sampling.top_k, 4);
+        assert_eq!(sampling.min_p, 0.1);
+        assert_eq!(sampling.seed, Some(123));
+        let decoding = wire.decoding.expect("decoding");
+        assert_eq!(decoding.presence_penalty, 0.3);
+        assert_eq!(decoding.frequency_penalty, 0.4);
+        assert_eq!(decoding.repetition_penalty, 1.1);
+        assert_eq!(wire.stopping.expect("stopping").stop_token_ids, vec![2]);
+    }
+}
+
+#[test]
+fn released_envelope_hydrates_legacy_sampling_with_canonical_precedence() {
+    let mut legacy = request();
+    legacy.sampling_options = SamplingOptions::default();
+    legacy.stop_conditions = StopConditions::default();
+    legacy.output_options = OutputOptions::default();
+    legacy.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {
+                "temperature": 0.8,
+                "top_p": 0.85,
+                "top_k": 7,
+                "min_p": 0.05,
+                "seed": 321,
+                "presence_penalty": 0.2,
+                "frequency_penalty": 0.3,
+                "repetition_penalty": 1.2,
+                "max_tokens": 9,
+                "min_tokens": 2,
+                "stop_token_ids": [42, 43],
+                "ignore_eos": true,
+                "logprobs": 2,
+                "prompt_logprobs": 3,
+                "skip_special_tokens": false
+            }
+        }
+    }));
+
+    let legacy = normalize_response_options(legacy).expect("normalize v1.4 controls");
+    assert_eq!(legacy.sampling_options.temperature, Some(0.8));
+    assert_eq!(legacy.sampling_options.top_p, Some(0.85));
+    assert_eq!(legacy.sampling_options.top_k, Some(7));
+    assert_eq!(legacy.sampling_options.min_p, Some(0.05));
+    assert_eq!(legacy.sampling_options.seed, Some(321));
+    assert_eq!(legacy.sampling_options.presence_penalty, Some(0.2));
+    assert_eq!(legacy.sampling_options.frequency_penalty, Some(0.3));
+    assert_eq!(legacy.sampling_options.repetition_penalty, Some(1.2));
+    assert_eq!(legacy.stop_conditions.max_tokens, Some(9));
+    assert_eq!(legacy.stop_conditions.min_tokens, Some(2));
+    assert_eq!(legacy.stop_conditions.stop_token_ids, Some(vec![42, 43]));
+    assert_eq!(legacy.stop_conditions.ignore_eos, Some(true));
+    assert_eq!(legacy.output_options.logprobs, Some(2));
+    assert_eq!(legacy.output_options.prompt_logprobs, Some(3));
+    assert_eq!(legacy.output_options.skip_special_tokens, Some(false));
+
+    let mut canonical = legacy.clone();
+    canonical.sampling_options.temperature = Some(0.4);
+    canonical.stop_conditions.stop_token_ids = Some(vec![7]);
+    let canonical = normalize_response_options(canonical).expect("keep canonical controls");
+    assert_eq!(canonical.sampling_options.temperature, Some(0.4));
+    assert_eq!(canonical.stop_conditions.stop_token_ids, Some(vec![7]));
+
+    let mut canonical_hidden = legacy;
+    canonical_hidden.stop_conditions.stop_token_ids = None;
+    canonical_hidden.stop_conditions.stop_token_ids_hidden = Some(vec![7]);
+    let canonical_hidden =
+        normalize_response_options(canonical_hidden).expect("keep canonical hidden stops");
+    assert_eq!(canonical_hidden.stop_conditions.stop_token_ids, None);
+    assert_eq!(
+        canonical_hidden.stop_conditions.stop_token_ids_hidden,
+        Some(vec![7])
+    );
+}
+
+#[test]
+fn native_generate_rejects_unrepresentable_sampling_controls() {
+    let mut defaults = request();
+    defaults.sampling_options.temperature = None;
+    let wire = build_generate_request(
+        defaults,
+        "defaults".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("omitted rendered temperature resolves to the vLLM default");
+    assert_eq!(wire.temperature, Some(1.0));
+
+    for top_k in [-1, 0] {
+        let mut disabled = request();
+        disabled.sampling_options.top_k = Some(top_k);
+        let error = build_generate_request(
+            disabled,
+            "disabled".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("disabled top_k cannot be represented by proto 0.3");
+        assert!(error.to_string().contains("top_k"));
+    }
+
+    let mut disabled = request();
+    disabled.sampling_options.min_p = Some(0.0);
+    let error = build_generate_request(
+        disabled,
+        "disabled".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("disabled min_p cannot be represented by proto 0.3");
+    assert!(error.to_string().contains("min_p"));
+}
+
+#[test]
+fn compatibility_envelope_allows_projected_prefix_cache_bypass() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "skip_reading_prefix_cache": true,
+        "vllm_tito": {"sampling_params": {"skip_reading_prefix_cache": true}}
+    }));
+    let wire = build_generate_request(
+        request,
+        "cache-bypass".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("projected cache bypass should be accepted");
+    assert!(wire.kv.expect("kv options").bypass_prefix_cache);
+}
+
+#[test]
+fn compatibility_envelope_rejects_disabled_token_ids() {
     for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
         let mut request = request();
         request.extra_args = Some(json!({
-            "vllm_tito": {"sampling_params": {"temperature": 0.0}}
+            "vllm_tito": {"sampling_params": {"return_token_ids": false}}
         }));
         let error = build_generate_request(request, "native".to_string(), mode)
-            .expect_err("released protocol cannot preserve native sampling semantics");
+            .expect_err("the gRPC response always requires output token ids");
         assert_eq!(
             error.error_type(),
             ErrorType::Backend(BackendError::InvalidArgument)
@@ -1130,7 +1294,74 @@ fn native_sampling_is_rejected_instead_of_silently_discarded() {
         assert!(
             error
                 .to_string()
-                .contains("sampling_params.temperature is not supported")
+                .contains("sampling_params.return_token_ids must be true")
+        );
+    }
+}
+
+#[test]
+fn rendered_null_passthrough_fields_are_ignored() {
+    const NULLABLE_RENDERER_FIELDS: [&str; 5] = [
+        "assistant_tokens_mask",
+        "token_offsets",
+        "content_parts",
+        "return_token_ids",
+        "ec_transfer_params",
+    ];
+
+    let mut defaults_request = request();
+    defaults_request.extra_args = Some(json!({
+        "vllm_tito": {
+            "sampling_params": {},
+            "assistant_tokens_mask": null,
+            "token_offsets": null,
+            "content_parts": null,
+            "return_token_ids": null,
+            "ec_transfer_params": null
+        }
+    }));
+    build_generate_request(
+        defaults_request,
+        "renderer-defaults".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("nullable stock-renderer metadata should be ignored");
+
+    for field in NULLABLE_RENDERER_FIELDS {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {
+                "sampling_params": {},
+                field: true
+            }
+        }));
+        let error = build_generate_request(
+            request,
+            format!("unsupported-{field}"),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("non-null renderer metadata must not be discarded");
+        assert!(error.to_string().contains(field));
+    }
+}
+
+#[test]
+fn unprojected_native_sampling_is_rejected_instead_of_silently_discarded() {
+    for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
+        let mut request = request();
+        request.extra_args = Some(json!({
+            "vllm_tito": {"sampling_params": {"logit_bias": {"42": 1.0}}}
+        }));
+        let error = build_generate_request(request, "native".to_string(), mode)
+            .expect_err("unprojected sampling controls must not be discarded");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("sampling_params.logit_bias is not supported")
         );
     }
 }
@@ -3531,6 +3762,311 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
         .expect("cancelled terminal")
         .expect("cancelled output");
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+const ALTERNATE_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgSlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+fn image_features(kwargs: &str) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["producer-image-hash"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+fn image_routing_marker(encoded_kwargs: &str) -> String {
+    use base64::Engine as _;
+    let kwargs = base64::engine::general_purpose::STANDARD
+        .decode(encoded_kwargs)
+        .expect("valid test kwargs");
+    preprocessed_mm_routing_hash("image", &kwargs)
+}
+
+#[test]
+fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
+    let request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed features should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_eq!(
+        feature.mm_hash.as_deref(),
+        Some(feature.identifier.as_str())
+    );
+    assert_eq!((feature.offset, feature.length), (1, 2));
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    assert!(feature.is_embed.is_empty());
+}
+
+#[test]
+fn preprocessed_sparse_embedding_mask_is_forwarded_to_vllm_grpc() {
+    let mut features = image_features(VALID_MM_KWARGS_BASE64);
+    features["mm_placeholders"]["image"][0]["offset"] = json!(0);
+    features["mm_placeholders"]["image"][0]["length"] = json!(3);
+    features["mm_placeholders"]["image"][0]["is_embed"] = json!([false, true, false]);
+    let wire = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("sparse embedding mask should be forwarded");
+
+    let Some(pb::media_item::Source::Features(feature)) = wire.media[0].source.as_ref() else {
+        panic!("expected preprocessed features")
+    };
+    assert_eq!(feature.is_embed, vec![false, true, false]);
+}
+
+#[test]
+fn preprocessed_routing_identity_matches_inline_content() {
+    let marker = image_routing_marker(VALID_MM_KWARGS_BASE64);
+    let mut request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("matching content-derived routing identity");
+    let Some(pb::media_item::Source::Features(feature)) = wire.media[0].source.as_ref() else {
+        panic!("expected preprocessed features")
+    };
+    assert_eq!(feature.identifier, marker);
+
+    let mut mismatched =
+        request_with_preprocessed_features(image_features(ALTERNATE_MM_KWARGS_BASE64));
+    mismatched
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            json!([image_routing_marker(VALID_MM_KWARGS_BASE64)]),
+        );
+    let error = build_generate_request(
+        mismatched,
+        "request-2".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing identity from different content must be rejected");
+    assert!(error.to_string().contains("does not match"));
+}
+
+#[test]
+fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
+    let first = build_generate_request(
+        request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64)),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("first feature should be forwarded");
+    let second = build_generate_request(
+        request_with_preprocessed_features(image_features(ALTERNATE_MM_KWARGS_BASE64)),
+        "request-2".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("second feature should be forwarded");
+
+    let cache_key = |request: &pb::GenerateRequest| match request.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature.mm_hash.clone().unwrap(),
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_ne!(cache_key(&first), cache_key(&second));
+}
+
+#[test]
+fn preprocessed_multimodal_identifier_is_scoped_by_lora() {
+    let build = |lora_name: Option<&str>| {
+        let mut request =
+            request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+        request.routing.as_mut().unwrap().lora_name = lora_name.map(str::to_string);
+        build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect("preprocessed features should be forwarded")
+    };
+    fn feature(request: &pb::GenerateRequest) -> &pb::PreprocessedMediaFeatures {
+        match request.media[0].source.as_ref() {
+            Some(pb::media_item::Source::Features(feature)) => feature,
+            other => panic!("expected preprocessed features, got {other:?}"),
+        }
+    }
+
+    let base = build(None);
+    let adapter_a = build(Some("adapter-a"));
+    let adapter_b = build(Some("adapter-b"));
+    let base_feature = feature(&base);
+    let adapter_a_feature = feature(&adapter_a);
+    let adapter_b_feature = feature(&adapter_b);
+
+    assert_eq!(
+        base_feature.mm_hash.as_deref(),
+        Some(base_feature.identifier.as_str())
+    );
+    assert_eq!(adapter_a_feature.mm_hash, base_feature.mm_hash);
+    assert_eq!(adapter_b_feature.mm_hash, base_feature.mm_hash);
+    assert_eq!(
+        adapter_a_feature.identifier,
+        format!("adapter-a:{}", base_feature.identifier)
+    );
+    assert_eq!(
+        adapter_b_feature.identifier,
+        format!("adapter-b:{}", base_feature.identifier)
+    );
+
+    let marker = image_routing_marker(VALID_MM_KWARGS_BASE64);
+    let mut routed_adapter =
+        request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    routed_adapter.routing.as_mut().unwrap().lora_name = Some("adapter-a".to_string());
+    routed_adapter
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert("dynamo_mm_routing_hashes".to_string(), json!([marker]));
+    let routed_adapter = build_generate_request(
+        routed_adapter,
+        "request-routed-adapter".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("adapter identity must remain scoped");
+    assert_eq!(
+        feature(&routed_adapter).identifier,
+        adapter_a_feature.identifier
+    );
+}
+
+#[test]
+fn renderer_mm_metadata_is_accepted_with_complete_inline_kwargs() {
+    let mut with_null = image_features(VALID_MM_KWARGS_BASE64);
+    with_null["mm_metadata"] = serde_json::Value::Null;
+    build_generate_request(
+        request_with_preprocessed_features(with_null),
+        "request-null-metadata".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("the vLLM renderer serializes mm_metadata as null");
+
+    let mut with_metadata = image_features(VALID_MM_KWARGS_BASE64);
+    with_metadata["mm_metadata"] = json!({"image": [{"image_grid_thw": [1, 2, 3]}]});
+    build_generate_request(
+        request_with_preprocessed_features(with_metadata),
+        "request-non-null-metadata".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("redundant renderer metadata is allowed with complete inline kwargs");
+
+    let mut metadata_only = image_features(VALID_MM_KWARGS_BASE64);
+    metadata_only["mm_metadata"] = json!({"image": [{"image_grid_thw": [1, 2, 3]}]});
+    metadata_only
+        .as_object_mut()
+        .expect("feature object")
+        .remove("kwargs_data");
+    let error = build_generate_request(
+        request_with_preprocessed_features(metadata_only),
+        "request-metadata-only".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("renderer metadata without inline kwargs must fail closed");
+    assert!(error.to_string().contains("kwargs_data"));
+}
+
+#[test]
+fn preprocessed_features_reject_routing_metadata_without_payload() {
+    let mut request = request();
+    request
+        .extra_args
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("object extra_args")
+        .insert(
+            "dynamo_mm_routing_hashes".to_string(),
+            json!([image_routing_marker(VALID_MM_KWARGS_BASE64)]),
+        );
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("routing metadata without features must be rejected");
+    assert!(error.to_string().contains("requires preprocessed"));
+}
+
+#[test]
+fn preprocessed_features_cannot_mix_with_raw_media() {
+    let mut request = request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw media and preprocessed features must not be mixed");
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(VALID_MM_KWARGS_BASE64)),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
 }
 
 #[tokio::test]
