@@ -283,7 +283,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # is unavailable. The stock completion path turns that observability exception
 # into a failed KV transfer. Apply the two upstream runtime hunks against the
 # benchmark-pinned nightly and assert their behavioral postcondition.
-RUN --mount=type=bind,source=./container/deps/vllm/patches/nightly-3df4ae153eb385e27b52f26c81f8edb9e20b9984/nixl-telemetry,target=/tmp/vllm-nixl-telemetry-patches,readonly \
+RUN --mount=type=bind,source=./container/deps/vllm/patches/v0.29.1rc1.dev452+g3df4ae153/dsv41-flash-15112,target=/tmp/vllm-nixl-telemetry-patches,readonly \
     --mount=type=bind,source=./container/deps/vllm/validate_nixl_telemetry_runtime.py,target=/tmp/validate_nixl_telemetry_runtime.py,readonly \
     set -eux; \
     python3 -c 'import vllm; assert vllm.__commit_id__ == "g3df4ae153", vllm.__commit_id__'; \
