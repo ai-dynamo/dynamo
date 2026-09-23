@@ -46,11 +46,6 @@ import threading
 import time
 from typing import Callable, Iterable, Optional
 
-from gpu_memory_service.common.gpu_failure_marker import (
-    gpu_failure_marker_path,
-    read_gpu_failure_marker,
-)
-
 from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.env import env_int as _int_env
 
@@ -63,6 +58,20 @@ DEFAULT_STARTUP_GRACE_MS = 30_000
 DEFAULT_STARTUP_TIMEOUT_MS = 5_000
 # Limit receive work per poll so a busy peer cannot starve lost-rank deadlines.
 _MAX_HEARTBEATS_PER_POLL = 64
+
+
+def _gpu_failure_marker_path(cohort: str):
+    # GMS is optional for the base Dynamo components package. Import the
+    # crash-interlock helper only when GMS failover is actually configured.
+    from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
+
+    return gpu_failure_marker_path(cohort)
+
+
+def _read_gpu_failure_marker(path: str):
+    from gpu_memory_service.common.gpu_failure_marker import read_gpu_failure_marker
+
+    return read_gpu_failure_marker(path)
 
 
 def liveness_enabled() -> bool:
@@ -145,7 +154,7 @@ def configured_gpu_failure_marker() -> str | None:
     ):
         cohort = os.environ.get(name)
         if cohort:
-            return str(gpu_failure_marker_path(cohort))
+            return str(_gpu_failure_marker_path(cohort))
     return None
 
 
@@ -490,7 +499,7 @@ class RankLivenessMonitor:
                 cycle_started = time.monotonic()
                 # Recompute every cycle: set_timeout_ms() is used after model
                 if self._failure_marker_path:
-                    failure = read_gpu_failure_marker(self._failure_marker_path)
+                    failure = _read_gpu_failure_marker(self._failure_marker_path)
                     if failure is not None:
                         rank, pid, source = failure
                         logger.warning(
@@ -617,7 +626,7 @@ class RankLivenessMonitor:
             return None
         if rank < 0 or pid <= 0 or not source:
             return None
-        notified_marker = os.path.normpath(str(gpu_failure_marker_path(cohort)))
+        notified_marker = os.path.normpath(str(_gpu_failure_marker_path(cohort)))
         expected_marker = self._rank_failure_marker_paths.get(rank)
         if expected_marker is None and (self._expected_ranks is None or rank == 0):
             expected_marker = self._failure_marker_path
