@@ -89,3 +89,38 @@ async def test_orchestrator_prepares_then_completes_request() -> None:
 def test_orchestrator_requires_generator_model_name() -> None:
     with pytest.raises(ValueError, match="generator_model_name"):
         ExternalEncoderOrchestrator(_Handoff({}), _Generator({}), "")
+
+
+async def test_orchestrator_forwards_text_only_request_without_encoding() -> None:
+    completion = {"token_ids": [5], "index": 0, "finish_reason": "stop"}
+    handoff = _Handoff({"unused": True})
+    generator = _Generator(completion)
+    orchestrator = ExternalEncoderOrchestrator(
+        handoff,
+        generator,
+        "generator-model",
+    )
+    request = {"token_ids": [1, 2, 3]}
+
+    result = await orchestrator(request, context=object())
+
+    assert result is completion
+    assert handoff.request is None
+    assert generator.request == {"token_ids": [1, 2, 3], "model": "generator-model"}
+
+
+async def test_orchestrator_keeps_non_image_media_on_the_handoff_path() -> None:
+    prepared_request = {"model": "generator-model", "token_ids": [1]}
+    handoff = _Handoff(prepared_request)
+    generator = _Generator({"token_ids": [2], "index": 0, "finish_reason": "stop"})
+    orchestrator = ExternalEncoderOrchestrator(
+        handoff,
+        generator,
+        "generator-model",
+    )
+    request = {"token_ids": [1], "multi_modal_data": {"video_url": [{"Url": "v"}]}}
+
+    await orchestrator(request, context=object())
+
+    assert handoff.request is request
+    assert generator.request is prepared_request
