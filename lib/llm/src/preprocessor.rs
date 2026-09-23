@@ -1459,6 +1459,25 @@ fn attach_agent_context_from_context(
     }
 }
 
+fn attach_image_cache_scope_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    use crate::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+
+    if let Ok(session_affinity) = context.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        request.image_cache_scope = Some(session_affinity.as_str().to_owned());
+    }
+}
+
+fn attach_request_context_metadata(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    attach_agent_context_from_context(request, context);
+    attach_image_cache_scope_from_context(request, context);
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
@@ -7154,7 +7173,7 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
@@ -7363,7 +7382,7 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -10630,6 +10649,52 @@ mod tests {
         assert_eq!(
             wire["agent_context"]["compaction"]["trigger"],
             serde_json::json!("manual")
+        );
+    }
+
+    #[test]
+    fn attach_request_context_metadata_keeps_affinity_separate_from_agent_context() {
+        use crate::protocols::common::extensions::{
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        };
+
+        let agent_context = AgentContext {
+            session_id: "agent-session".to_string(),
+            parent_session_id: Some("agent-parent".to_string()),
+            session_final: None,
+            compaction: None,
+            input_trigger: None,
+        };
+        let mut context = PipelineContext::new(());
+        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
+        context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-session"),
+        );
+        let mut request = preprocessed_budget_request(None);
+
+        attach_request_context_metadata(&mut request, &context);
+
+        assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
+        assert_eq!(
+            request.image_cache_scope.as_deref(),
+            Some("routing-session")
+        );
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["agent_context"]["session_id"], "agent-session");
+        assert_eq!(wire["image_cache_scope"], "routing-session");
+
+        let mut affinity_only_context = PipelineContext::new(());
+        affinity_only_context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-only"),
+        );
+        let mut affinity_only_request = preprocessed_budget_request(None);
+        attach_request_context_metadata(&mut affinity_only_request, &affinity_only_context);
+        assert!(affinity_only_request.agent_context.is_none());
+        assert_eq!(
+            affinity_only_request.image_cache_scope.as_deref(),
+            Some("routing-only")
         );
     }
 

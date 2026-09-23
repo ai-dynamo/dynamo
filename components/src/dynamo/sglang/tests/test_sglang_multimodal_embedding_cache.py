@@ -182,6 +182,47 @@ async def test_encode_with_cache_partial_hit_and_reuse(
     assert torch.equal(full_embeddings2, full_embeddings)
 
 
+@pytest.mark.asyncio
+async def test_session_scope_partitions_image_embedding_keys(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    """The same image URL in separate sessions must use separate entries."""
+    cache_handler._session_scoped_cache = True
+    item = {"Url": "https://example.com/image.png"}
+
+    _, first_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-a"
+    )
+    _, second_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-b"
+    )
+    _, first_keys_again, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope="session-a"
+    )
+
+    assert first_keys[0] is not None
+    assert second_keys[0] is not None
+    assert first_keys[0] != second_keys[0]
+    assert first_keys_again == first_keys
+
+
+@pytest.mark.asyncio
+async def test_session_scoped_image_embedding_cache_bypasses_without_scope(
+    cache_handler: MultimodalEncodeWorkerHandler,
+) -> None:
+    """Missing scope must not produce an image embedding-cache key."""
+    cache_handler._session_scoped_cache = True
+    item = {"Url": "https://example.com/image.png"}
+
+    _, missing_keys, _ = await cache_handler._prepare_image_inputs([item])
+    _, blank_keys, _ = await cache_handler._prepare_image_inputs(
+        [item], cache_scope=" "
+    )
+
+    assert missing_keys == [None]
+    assert blank_keys == [None]
+
+
 def test_publish_cache_delta_delegates_to_publisher(
     cache_handler: MultimodalEncodeWorkerHandler,
 ) -> None:
