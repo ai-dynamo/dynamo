@@ -11,13 +11,15 @@
 //! [`DEFAULT_METRICS_PORT`] matches the port GAIE's Go endpoint picker uses,
 //! so existing endpoint-picker scrape configuration keeps working.
 
-use std::sync::{LazyLock, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use axum::{
     Router as AxumRouter, http::StatusCode, http::header::CONTENT_TYPE, response::IntoResponse,
     routing::get,
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
+use dynamo_llm::kv_router::metrics::RouterRequestMetrics;
+use dynamo_runtime::metrics::prometheus_names::name_prefix;
 use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
@@ -56,6 +58,19 @@ pub fn set_served_model(model: impl Into<String>) {
 
 fn served_model_label() -> &'static str {
     SERVED_MODEL.get().map_or(UNKNOWN_MODEL, String::as_str)
+}
+
+/// Register standalone router metrics on the existing EPP scrape endpoint.
+/// Both labels come from startup configuration, never request JSON.
+pub(crate) fn register_router_metrics(
+    model: &str,
+    inference_pool: &str,
+) -> anyhow::Result<Arc<RouterRequestMetrics>> {
+    RouterRequestMetrics::from_registry(
+        &REGISTRY,
+        name_prefix::COMPONENT,
+        &[("model", model), ("inference_pool", inference_pool)],
+    )
 }
 
 /// Prompt tokens the model server reported as prefix-cache hits, read from
@@ -205,5 +220,28 @@ mod tests {
             body.contains("# TYPE dynamo_epp_cached_tokens histogram"),
             "expected histogram metadata, got:\n{body}"
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_router_series_use_the_private_scrape_registry() {
+        let router = register_router_metrics("router-test-model", "router-test-pool").unwrap();
+        router.requests_started_total.inc();
+        router.input_sequence_tokens.observe(19.0);
+        observe_cached_tokens(0);
+
+        let response = render().await.into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let started = body
+            .lines()
+            .find(|line| line.starts_with("dynamo_component_router_requests_started_total{"))
+            .unwrap();
+        assert!(started.contains("model=\"router-test-model\""));
+        assert!(started.contains("inference_pool=\"router-test-pool\""));
+        assert!(started.ends_with("} 1"));
+        assert!(body.contains("dynamo_component_router_input_sequence_tokens_sum{"));
+        assert!(body.contains("# TYPE dynamo_epp_cached_tokens histogram"));
     }
 }

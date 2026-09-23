@@ -45,10 +45,14 @@ Added by `create_metric()` in `lib/runtime/src/metrics.rs` for every metric regi
 
 ## Registration-time labels
 
-Passed via `metrics_labels=` when the worker calls `serve_endpoint()`. Not auto-injected, so presence depends on the backend.
+Bound when the metric is registered. Workers pass these through `metrics_labels=` to `serve_endpoint()`; the standalone EPP uses its startup configuration. They are not auto-injected by the runtime.
 
 <ParamField path="model" type="string">
-  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. Example: `Qwen/Qwen3-0.6B`.
+  `[Shared]` The model being served (OpenAI-style label). Added by vLLM, SGLang, and TRT-LLM workers on inference endpoints; absent on internal endpoints like `worker_kv_indexer_query_dp{N}`. The standalone EPP binds this label from its configured model at startup on `dynamo_component_router_*` and `dynamo_epp_cached_tokens`. Example: `Qwen/Qwen3-0.6B`.
+</ParamField>
+
+<ParamField path="inference_pool" type="string">
+  `[Shared]` On standalone EPP `dynamo_component_router_*` metrics, the inference pool name bound at startup. It is absent from DRT component router metrics and `dynamo_epp_cached_tokens`.
 </ParamField>
 
 <ParamField path="model_name" type="string">
