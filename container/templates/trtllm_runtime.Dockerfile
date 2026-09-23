@@ -42,13 +42,63 @@ ARG ENABLE_GPU_MEMORY_SERVICE
 ARG TARGETARCH
 ARG NIXL_REF
 
+# Create the LD_PRELOAD target before the ENV below names it. ENV applies to
+# every RUN after it, so a preload path that does not exist yet costs one
+# `ld.so: object ... cannot be preloaded ... ignored` line per process for the
+# rest of the stage: 432 of them from the apt layer alone, measured by building
+# this stage against 1.3.0rc27. The lines are noise, and the preload the ENV
+# exists to apply is absent from exactly the steps that follow it.
+#
+# The symlink gives system libstdc++ a stable path, which keeps
+# PyInstaller-bundled tools (specifically `jet`, NVIDIA's internal
+# PyInstaller-packaged CI runner) from shadowing it with an older copy. The
+# `test -f` keeps the build honest if the base image moves the library.
+RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64") && \
+    mkdir -p /opt/dynamo && \
+    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
+    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+
+# One fixed path for the MPI the worker runs on, resolved per architecture, so a
+# single ENV block below can name it.
+#
+# TRT-LLM spawns its executor ranks with MPI.COMM_SELF.Spawn through mpi4py's
+# MpiPoolSession. 1.3.0rc27 repointed /opt/hpcx/ompi and /usr/local/mpi from
+# ompi4 to ompi5, and on amd64 that spawn does not work: the child reaches
+# mpi4py's barrier and dies there, so the worker never binds its gRPC port and
+# every serving test waits out its deadline. Measured in the built image on an
+# amd64 GPU host, running as the image's own uid 1000: VRAM stays at 456 MiB and
+# nothing registers, and the log carries `ucp_ep_create(proc=0) failed:
+# Destination is unreachable` followed by MPI_ERR_OTHER and MPI_ABORT. CI agrees
+# from the other side: at f3fe60fe, where ompi4 reached the shipped image, both
+# tests that hang elsewhere passed, 232s and 184s, and the 2-GPU amd64 job went
+# green for the only time on this branch.
+#
+# arm64 keeps ompi5, and that is not a preference. ompi4 there lacks
+# ompi_mpi_short_float, which the base image's libtorch_cpu.so needs, so the
+# arm64 runtime sanity check fails on `import torch` the moment ompi4 wins.
+#
+# The symlink alone does not do it: with the ENV still naming ompi5's bin and
+# prefix, Open MPI 4 cannot launch its own runtime and the spawn fails at
+# dpm.c:1997. The three ENV entries below are what make it work, measured in the
+# same image: VRAM 456 MiB to 6.7 GB to 41.6 GB, `Registered endpoint` once, and
+# zero MPI errors.
+#
+# Transitional. Delete this and the ENV entries when upstream's ompi5 can spawn,
+# and re-measure rather than assume.
+RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
+    test -d "$t" && \
+    mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
+    echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
+
 # LD_PRELOAD pins TRT-LLM's bundled libnixl to dodge ai-dynamo/nixl#1668
 # (nixl-cu13's UCX 1.20.0 hangs with two agents/host); drop it when fixed.
 # NIXL_VERSION= clears the base image's stale value (see nixl-versions.txt).
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/mpi/bin:/usr/local/bin/etcd:${PATH} \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 
@@ -58,12 +108,9 @@ WORKDIR /workspace
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
 # tooling (etcd, etcdctl, etcdutl) for dynamo_base's directory so the image
-# carries a single copy of each tool, drop the unused wandb developer tooling
-# the DLFW base carries (upstream removes it on main, Dockerfile.multi), and
-# symlink system libstdc++ to a stable
-# path for LD_PRELOAD — keeps PyInstaller-bundled tools (specifically `jet`,
-# NVIDIA's internal PyInstaller-packaged CI runner) from shadowing it with an
-# older copy.
+# carries a single copy of each tool, and drop the unused wandb developer
+# tooling the DLFW base carries (upstream removes it on main,
+# Dockerfile.multi).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && \
@@ -91,10 +138,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         /usr/local/bin/etcdutl && \
     /usr/bin/python3 -m pip uninstall -y --break-system-packages wandb && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null && \
-    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ] && \
-    mkdir -p /opt/dynamo && \
-    LIBSTDCPP=/usr/lib/${ARCH_ALT}-linux-gnu/libstdc++.so.6 && \
-    test -f "$LIBSTDCPP" && ln -sf "$LIBSTDCPP" /opt/dynamo/libstdc++.so.6
+    [ ! -e /usr/local/lib/python3.12/dist-packages/wandb ]
 
 # Restore Triton's default CUDA header/tool paths for SSH-launched ranks that
 # lack the image ENV (GH-14864). Use per-file links inside real directories so
@@ -256,12 +300,15 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     [ ! -e /usr/local/lib/python3.12/dist-packages/opencv_python_headless.libs ]
 
-# Upgrade DALI past its own media-codec cleanup. Upstream restricted DALI's
-# vendored ffmpeg build to drop the software h264/hevc/aac decoders
-# (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1; the base
-# image here carries 2.1.0, which predates it.
+# Hold DALI at a version that carries its own media-codec cleanup. Upstream
+# restricted DALI's vendored ffmpeg build to drop the software h264/hevc/aac
+# decoders (NVIDIA/DALI_deps#162, NVIDIA/DALI#6352), first released in 2.1.1.
+# The base image carried 2.1.0 through 1.3.0rc26, which predates it, and carries
+# 2.2.0 from 1.3.0rc27, which does not. So on this base the install below is a
+# no-op and what the block still buys is the two checks around it: the version
+# tripwire and the decoder enumeration.
 #
-# Upgrade rather than remove. The vendored libav*/libsw* set cannot be trimmed
+# Pin rather than remove. The vendored libav*/libsw* set cannot be trimmed
 # on its own -- every one of them is DT_NEEDED by libdali.so and its siblings, so
 # deleting the codec libraries breaks `import nvidia.dali` outright -- and while
 # nothing in this image imports DALI today, it belongs to TensorRT-LLM rather
@@ -270,21 +317,25 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 #
 # Measured on the shipped image: 2.1.0 registers 446 decoders including h264,
 # hevc, aac, aac_fixed and aac_latm; 2.1.1 and 2.2.0 each register 440 with all
-# five absent and vp8/vp9/mjpeg/av1 retained.
+# five absent and vp8/vp9/mjpeg/av1 retained. 2.2.0 measured again on
+# tensorrt-llm/release:1.3.0rc27 itself, now that DALI arrives with the base.
 #
-# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest -- 2.2.0
-# at the time of writing -- which is a minor-version jump into a component this
-# repo does not own, taken silently at build time. 2.1.1 is the smallest change
-# that removes the decoders, so it is the one to take.
+# Pinned exactly, not a floor. `>=2.1.1` resolves to whatever is newest, which is
+# a jump into a component this repo does not own, taken silently at build time.
+# The pin names the version that was measured, so moving it means measuring the
+# new one.
 #
-# A pin can go stale in the one direction that matters: if TensorRT-LLM later
-# ships a base image with a newer DALI, installing 2.1.1 over it is a downgrade.
+# The pin can go stale in the one direction that matters: if TensorRT-LLM later
+# ships a base image with a newer DALI, installing 2.2.0 over it is a downgrade.
 # The check below turns that into a build failure with instructions rather than a
-# silent regression, which also makes this block self-retiring -- when upstream
-# catches up, the build tells whoever is looking to delete it.
+# silent regression. The pin now equals the base version, so the next base image
+# that moves DALI past 2.2.0 stops the build, which is the point: a human
+# re-measures and moves the pin, or deletes this RUN and lets the base version
+# stand. A base that moves DALI back below 2.2.0 passes that check and the
+# install below puts the measured version back, which is what it is there for.
 #
-# THIS BLOCK IS TRANSITIONAL. It exists because the base image predates upstream's
-# own cleanup. The guards after it and the bundled-libavcodec assertion in
+# THIS BLOCK IS TRANSITIONAL, and on this base it is already down to its checks.
+# The guards after it and the bundled-libavcodec assertion in
 # tests/dependencies/test_no_software_video_codecs.py are NOT transitional: they
 # are the permanent statement of what this image may contain, and they must
 # outlive the workaround.
@@ -293,17 +344,22 @@ RUN /usr/bin/python3 -m pip uninstall -y --break-system-packages opencv-python-h
 # VIRTUAL_ENV set, plain pip targets the venv and leaves the system-site copy in
 # place. The guard enumerates what the library actually registers rather than
 # trusting the version string, so a wheel that reintroduces a decoder fails the
-# build. Mirrored by the pre_runtime whiteout below, which matters more here than
-# for a deletion: DALI's libraries are hash-named, so an upgrade RENAMES them and
-# the squash COPY would otherwise leave the old codec-carrying copy in place
-# beside the new one.
+# build. It finds that library by filename, and a loop over an empty glob checks
+# nothing and exits 0, so it fails on an empty match as well: a release that
+# links the codec into a differently named library has to be looked at, not
+# waved through.
+#
+# Mirrored by the pre_runtime whiteout below, which is inert while the install is
+# a no-op and load-bearing again the moment it is not: DALI's libraries are
+# hash-named, so an upgrade RENAMES them and the squash COPY would otherwise
+# leave the old codec-carrying copy in place beside the new one.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
     before=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI in base image: $before"; \
-    newest=$(printf '%s\n2.1.1\n' "$before" | sort -V | tail -1); \
-    if [ "$newest" != "2.1.1" ]; then \
-        echo "ERROR: base image already carries DALI $before, so pinning 2.1.1 would" >&2; \
+    newest=$(printf '%s\n2.2.0\n' "$before" | sort -V | tail -1); \
+    if [ "$newest" != "2.2.0" ]; then \
+        echo "ERROR: base image already carries DALI $before, so pinning 2.2.0 would" >&2; \
         echo "       downgrade it. Upstream has caught up -- delete this RUN and let" >&2; \
         echo "       the base version stand. Keep the guards below and the bundled-" >&2; \
         echo "       libavcodec assertion in tests/dependencies/, which are what stop" >&2; \
@@ -311,11 +367,20 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         exit 1; \
     fi; \
     /usr/bin/python3 -m pip install --break-system-packages --no-cache-dir \
-        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.1.1'; \
+        --extra-index-url https://pypi.nvidia.com 'nvidia-dali-cuda130==2.2.0'; \
     v=$(/usr/bin/python3 -c 'import importlib.metadata as m; print(m.version("nvidia-dali-cuda130"))'); \
     echo "DALI version: $v"; \
-    [ "$v" = "2.1.1" ] || { echo "ERROR: wanted DALI 2.1.1, got $v" >&2; exit 1; }; \
-    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); do \
+    [ "$v" = "2.2.0" ] || { echo "ERROR: wanted DALI 2.2.0, got $v" >&2; exit 1; }; \
+    libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*'); \
+    if [ -z "$libs" ]; then \
+        echo "ERROR: DALI $v ships no libavcodec under .libs, so the enumeration" >&2; \
+        echo "       below would check nothing and pass. Either the vendored ffmpeg" >&2; \
+        echo "       moved, or the codec is now linked into another library, the way" >&2; \
+        echo "       PyNvVideoCodec 2.2.0 links it into libavformat. Look before this" >&2; \
+        echo "       ships: widen the glob to the library that carries it." >&2; \
+        exit 1; \
+    fi; \
+    for lib in $libs; do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
     /usr/bin/python3 -c 'import nvidia.dali'
@@ -404,16 +469,20 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # This deliberately overrides a dependency of TensorRT-LLM's, which is why the
 # build log carries a pip resolver complaint here:
 #
-#     tensorrt-llm 1.3.0rc24 requires PyNvVideoCodec~=2.1.0,
-#     but you have pynvvideocodec 2.2.0 which is incompatible
+#     tensorrt-llm 1.3.0rc27 requires PyNvVideoCodec~=2.1.0,
+#     but you have pynvvideocodec 2.2.3 which is incompatible
 #
 # The complaint is expected and the override is deliberate. `~=2.1.0` excludes
-# 2.2.0 by construction, and 2.1.0 is the version that bundles the libavcodec.
+# everything above 2.1.x by construction, and 2.1.0 is the version that bundles
+# the libavcodec. The floor here takes the newest release on purpose, which is
+# 2.2.3 at this build, so read the second version in that quote as whatever the
+# build resolved rather than as a fixed number.
 # tensorrt_llm/media/decoding.py is the only consumer; it uses CreateDemuxer,
-# CreateDecoder, PyNvVCException and OutputColorType, all of which 2.2.0 still
+# CreateDecoder, PyNvVCException and OutputColorType, all of which 2.2.x still
 # exports, and it imports PyNvVideoCodec function-locally so `import
 # tensorrt_llm` does not touch it. Re-check that list when this base image moves:
-# if upstream relaxes the pin to allow 2.2.0, this note is the thing to delete.
+# if upstream relaxes its own specifier to admit 2.2.x, this note is the thing
+# to delete.
 #
 # System interpreter for the same reason as the opencv removal and the DALI
 # upgrade above: with VIRTUAL_ENV set, plain pip targets the venv and leaves the
@@ -644,10 +713,20 @@ COPY --from=runtime_full / /
 # back; with it, one copy and clean.
 #
 # Every match is checked, not just the first: the whole point is catching the
-# case where more than one exists.
+# case where more than one exists. Zero matches is a failure too, for the reason
+# the DALI block above gives: a loop over an empty glob checks nothing and exits
+# 0, so an empty match here means DALI's vendored library moved or changed name,
+# and a human has to say whether the new shape is clean.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
-    for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+    libs=$(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); \
+    if [ -z "$libs" ]; then \
+        echo "ERROR: post-overlay DALI carries no libavcodec under .libs, so this" >&2; \
+        echo "       guard checked nothing. Match what the runtime_full block says" >&2; \
+        echo "       about the same glob before changing either one." >&2; \
+        exit 1; \
+    fi; \
+    for lib in $libs; do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
     if find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' 2>/dev/null | grep -q .; then \
@@ -658,10 +737,15 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
         find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*' >&2; \
         exit 1; \
     fi; \
+    examined=0; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec \
             -name 'libavcodec*.so*' -o -name 'libavformat*.so*' 2>/dev/null); do \
+        examined=$((examined + 1)); \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done; \
+    [ "$examined" -gt 0 ] \
+        || { echo "ERROR: found no FFmpeg libraries under PyNvVideoCodec to examine;" >&2; \
+             echo "       the package layout changed and this check went blind." >&2; exit 1; }; \
     tarballs=$(find /usr/local/external/ffmpeg -name 'ffmpeg-*.tar.*' 2>/dev/null | wc -l); \
     if [ "$tarballs" -gt 1 ]; then \
         echo "ERROR: more than one FFmpeg source tarball survived the overlay, so the" >&2; \
@@ -718,18 +802,22 @@ RUN set -eu; \
 {% if target in ("dev", "local-dev") %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
-    PATH=/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% else %}
 ENV DYNAMO_HOME=/workspace \
     HOME=/home/dynamo \
     VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/opt/dynamo/venv/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
+    PATH=/opt/dynamo/venv/bin:/opt/dynamo/mpi/bin:/opt/uv/bin:/usr/local/bin/etcd:${PATH} \
     IMAGEIO_FFMPEG_EXE=/usr/local/bin/ffmpeg \
     LD_PRELOAD=/opt/dynamo/libstdc++.so.6:/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so \
+    LD_LIBRARY_PATH=/opt/dynamo/mpi/lib:${LD_LIBRARY_PATH} \
+    OPAL_PREFIX=/opt/dynamo/mpi \
     NIXL_PLUGIN_DIR=/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/plugins \
     NIXL_VERSION=
 {% endif %}
