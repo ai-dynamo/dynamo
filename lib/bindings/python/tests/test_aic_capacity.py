@@ -30,11 +30,11 @@ def _patch_memory(monkeypatch, return_value=123):
     """Patch aiconfigurator-core's unified estimator and record forwarded kwargs.
 
     ``estimate_num_gpu_blocks`` now delegates the budget math to
-    ``aiconfigurator_core.sdk.memory.estimate_num_gpu_blocks`` (the single source of
+    ``aisimulate_core.sdk.memory.estimate_num_gpu_blocks`` (the single source of
     truth), so these tests assert the dynamo->AIC mapping rather than recompute
     the math themselves.
     """
-    memory = pytest.importorskip("aiconfigurator_core.sdk.memory")
+    memory = pytest.importorskip("aisimulate_core.sdk.memory")
     calls = []
 
     def fake(model_path, system, backend, **kwargs):
@@ -48,15 +48,17 @@ def _patch_memory(monkeypatch, return_value=123):
 
 
 def test_runtime_loader_does_not_import_upper_aiconfigurator(monkeypatch):
-    """The mocker/runtime path must remain usable with only the core wheel."""
-    pytest.importorskip("aiconfigurator_core")
+    """The mocker/runtime path must not load orchestration or artifact generators."""
+    pytest.importorskip("aisimulate_core")
     import dynamo._internal.aic as aic_mod
 
     real_import = builtins.__import__
 
     def reject_upper_package(name, *args, **kwargs):
-        """Reject accidental imports of the upper AIC distribution."""
-        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
+        """The estimator facade may import AISimulate SDK implementation modules."""
+        if name.startswith(
+            ("aisimulate.legacy_cli", "aisimulate.generator", "aisimulate.sdk.task_v2")
+        ):
             raise AssertionError(f"runtime imported upper package: {name}")
         return real_import(name, *args, **kwargs)
 
@@ -77,11 +79,11 @@ def test_runtime_loader_propagates_internal_missing_module(monkeypatch):
 
     real_import = builtins.__import__
     missing_internal = ModuleNotFoundError(
-        name="aiconfigurator_core.sdk.internal_dependency"
+        name="aisimulate_core.sdk.internal_dependency"
     )
 
     def broken_core_module(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk":
+        if name == "aisimulate_core.sdk":
             raise missing_internal
         return real_import(name, *args, **kwargs)
 
@@ -220,8 +222,8 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
     real_import = builtins.__import__
 
     def missing_memory(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk.memory":
-            raise ModuleNotFoundError(name="aiconfigurator_core")
+        if name == "aisimulate_core.sdk.memory":
+            raise ModuleNotFoundError(name="aisimulate_core")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", missing_memory)
@@ -245,7 +247,7 @@ def test_estimate_num_gpu_blocks_propagates_transitive_import_error(monkeypatch)
     missing_dependency = ModuleNotFoundError(name="transitive_dependency")
 
     def broken_memory_module(name, *args, **kwargs):
-        if name == "aiconfigurator_core.sdk.memory":
+        if name == "aisimulate_core.sdk.memory":
             raise missing_dependency
         return real_import(name, *args, **kwargs)
 
@@ -349,7 +351,7 @@ def test_estimate_num_gpu_blocks_forwards_normalized_quant_modes(monkeypatch):
 
 
 def test_resolve_quant_mode_per_field():
-    common = pytest.importorskip("aiconfigurator_core.sdk.common")
+    common = pytest.importorskip("aisimulate_core.sdk.common")
 
     assert _resolve_quant_mode("gemm", "int4") == common.GEMMQuantMode.int4_wo
     assert _resolve_quant_mode("gemm", "fp8") == common.GEMMQuantMode.fp8
@@ -363,7 +365,7 @@ def test_resolve_quant_mode_per_field():
 
 
 def test_resolve_quant_mode_rejects_unsupported_per_field():
-    pytest.importorskip("aiconfigurator_core.sdk.common")
+    pytest.importorskip("aisimulate_core.sdk.common")
 
     # `int4` -> `int4_wo` is valid for GEMM/MoE but not for KV cache or FMHA,
     # which have narrower vocabularies. The error must name the field and the
@@ -379,7 +381,7 @@ def test_resolve_quant_mode_rejects_unsupported_per_field():
 
 
 def test_aic_session_forwards_quant_modes_to_model_config(monkeypatch):
-    common = pytest.importorskip("aiconfigurator_core.sdk.common")
+    common = pytest.importorskip("aisimulate_core.sdk.common")
     import dynamo._internal.aic as aic_mod
 
     captured: dict = {}

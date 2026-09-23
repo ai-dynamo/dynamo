@@ -391,18 +391,18 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 import msgspec
-import aiconfigurator_core
-from aiconfigurator_core.sdk import RustForwardPassPerfModel
-from aiconfigurator_core.sdk.engine import compile_engine
-from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+import aisimulate_core
+from aisimulate_core.sdk import RustForwardPassPerfModel
+from aisimulate_core.sdk.engine import compile_engine
+from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
 from dynamo.common.forward_pass_metrics import (
     ForwardPassMetrics,
     ScheduledRequestMetrics,
 )
 
-assert aiconfigurator_core and compile_engine and estimate_num_gpu_blocks
+assert aisimulate_core and compile_engine and estimate_num_gpu_blocks
 
-package_root = Path(aiconfigurator_core.__file__).resolve().parent
+package_root = Path(aisimulate_core.__file__).resolve().parent
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(

@@ -6,12 +6,12 @@
 use std::sync::Arc;
 
 use aisimulate_core::engine::{
-    Backend, EngineConfig, EngineFactory, PreemptionMode as EnginePreemptionMode, SglangConfig,
-    SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
+    Backend, EngineConfig, EngineFactory, KvEvictionPolicy, PreemptionMode as EnginePreemptionMode,
+    SglangConfig, SglangSchedulePolicy, TimingModel, TimingModelConfig, TransferTimingMode,
     WorkerType as EngineWorkerType,
 };
 use aisimulate_core::replay::{ReplayEngineConfig, ReplayEngineFactory, ReplayRoleConfig};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 
 use crate::common::perf_model::PerfModel;
@@ -40,6 +40,26 @@ pub(crate) fn engine_components(
     let args = args
         .normalized()
         .context("invalid Mocker engine arguments")?;
+    materialize_engine_components(args, emit_kv_events, emit_kv_token_ids)
+}
+
+/// Validate opt-in state-cache configuration using the same native contract
+/// used at engine creation. The caller has already materialized defaults.
+pub(crate) fn validate_native_config(args: &MockEngineArgs) -> Result<()> {
+    let components = materialize_engine_components(args.clone(), false, false)?;
+    engine_factory(components.rank, components.timing)?;
+    Ok(())
+}
+
+fn materialize_engine_components(
+    args: MockEngineArgs,
+    emit_kv_events: bool,
+    emit_kv_token_ids: bool,
+) -> Result<EngineComponents> {
+    ensure!(
+        args.enable_kv_events || !(emit_kv_events || emit_kv_token_ids),
+        "enable_kv_events=false is incompatible with an installed KV event publisher"
+    );
     let backend = match args.engine_type {
         EngineType::Vllm => Backend::Vllm,
         EngineType::Sglang => Backend::Sglang,
@@ -111,6 +131,8 @@ pub(crate) fn engine_components(
         backend,
         num_gpu_blocks: args.num_gpu_blocks,
         block_size: args.block_size,
+        prefix_match_unit: args.prefix_match_unit,
+        state_cache: args.state_cache,
         max_model_len: args.max_model_len,
         max_num_seqs: args.max_num_seqs.unwrap_or(usize::MAX),
         max_num_batched_tokens: args.max_num_batched_tokens.unwrap_or(usize::MAX),
@@ -158,6 +180,7 @@ pub(crate) fn aggregated_replay_setup(
 ) -> Result<(ReplayEngineConfig, ReplayEngineFactory)> {
     let components = engine_components(args.clone(), false, false)?;
     let config = ReplayEngineConfig {
+        kv_eviction_policy: KvEvictionPolicy::Lru,
         dp_size: components.args.dp_size,
         tensor_parallel_size: replay_tensor_parallel_size(&components.args)?,
         num_gpu_blocks_is_explicit: None,
@@ -193,6 +216,7 @@ pub(crate) fn disaggregated_replay_setup(
         rank: decode.rank,
     };
     let config = ReplayEngineConfig {
+        kv_eviction_policy: KvEvictionPolicy::Lru,
         dp_size: prefill_role.dp_size,
         tensor_parallel_size: prefill_role.tensor_parallel_size,
         num_gpu_blocks_is_explicit: prefill_role.num_gpu_blocks_is_explicit,
@@ -310,6 +334,95 @@ mod tests {
         let components = engine_components(args, false, false).unwrap();
         assert_eq!(components.rank.kv_transfer_bytes_per_token, Some(4096));
         assert_eq!(components.rank.kv_cache_bytes_per_token, Some(1024));
+    }
+
+    fn state_cache_args() -> MockEngineArgs {
+        MockEngineArgs::from_json_str(
+            r#"{
+                "num_gpu_blocks": 128,
+                "block_size": 1536,
+                "prefix_match_unit": 128,
+                "state_cache": {"bytes_per_request": 24576},
+                "kv_cache_bytes_per_token": 16,
+                "max_num_batched_tokens": 8192,
+                "enable_kv_events": false
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn state_cache_geometry_survives_serde_adapter_and_native_factory() {
+        let args = state_cache_args();
+        let encoded = serde_json::to_value(&args).unwrap();
+        assert_eq!(encoded["state_cache"]["bytes_per_request"], 24_576);
+        assert_eq!(encoded["prefix_match_unit"], 128);
+        let round_trip: MockEngineArgs = serde_json::from_value(encoded).unwrap();
+        let components = engine_components(round_trip, false, false).unwrap();
+        assert_eq!(components.rank.block_size, 1536);
+        assert_eq!(components.rank.prefix_match_unit, Some(128));
+        assert_eq!(
+            components.rank.state_cache.unwrap().bytes_per_request,
+            24_576
+        );
+        assert_eq!(components.rank.kv_cache_bytes_per_token, Some(16));
+        assert_eq!(components.rank.kv_transfer_bytes_per_token, None);
+        assert_eq!(components.rank.num_gpu_blocks, 128);
+        assert_eq!(components.rank.max_num_batched_tokens, 8192);
+        assert!(!components.rank.emit_kv_events);
+        engine_factory(components.rank, components.timing)
+            .unwrap()
+            .build(EngineIdentity::new(0), NonZeroU32::MIN)
+            .unwrap();
+    }
+
+    #[test]
+    fn state_cache_rejects_injected_publishers_instead_of_silently_disabling_them() {
+        for (events, token_ids) in [(true, false), (true, true), (false, true)] {
+            let error = engine_components(state_cache_args(), events, token_ids)
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("installed KV event publisher"));
+        }
+    }
+
+    #[test]
+    fn native_state_cache_validation_remains_authoritative() {
+        type ConfigMutation = fn(&mut MockEngineArgs);
+        let cases: &[(&str, ConfigMutation)] = &[
+            ("positive divisor", |args| args.prefix_match_unit = Some(0)),
+            ("positive divisor", |args| {
+                args.prefix_match_unit = Some(127)
+            }),
+            ("requires state_cache", |args| args.state_cache = None),
+            ("backend=vllm", |args| args.engine_type = EngineType::Sglang),
+            ("worker_type=aggregated", |args| {
+                args.worker_type = WorkerType::Prefill
+            }),
+            ("speculative decoding", |args| args.aic_nextn = Some(1)),
+            ("kv_transfer_bytes_per_token", |args| {
+                args.kv_bytes_per_token = Some(16)
+            }),
+            ("kv_transfer_bandwidth", |args| {
+                args.kv_transfer_bandwidth = Some(64.0)
+            }),
+            ("kv_cache_bytes_per_token", |args| {
+                args.kv_cache_bytes_per_token = None
+            }),
+            ("must be positive", |args| {
+                args.state_cache.as_mut().unwrap().bytes_per_request = 0
+            }),
+            ("must fit", |args| args.num_gpu_blocks = 1),
+        ];
+        for &(expected, update) in cases {
+            let mut args = state_cache_args();
+            update(&mut args);
+            let error = args.normalized().unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "{expected}: {error:#}"
+            );
+        }
     }
 
     #[test]

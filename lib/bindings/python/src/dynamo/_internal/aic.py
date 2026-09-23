@@ -70,7 +70,7 @@ def _resolve_quant_mode(field: str, value: str | None):
     normalized = _normalize_aic_quant_mode(value)
     if normalized is None:
         return None
-    from aiconfigurator_core.sdk import common
+    from aisimulate_core.sdk import common
 
     enum_cls = {
         "gemm": common.GEMMQuantMode,
@@ -134,15 +134,15 @@ def _pad_nextn_accept_rates(
 
 def _load_aiconfigurator():
     try:
-        from aiconfigurator_core.sdk import config
-        from aiconfigurator_core.sdk.backends.factory import get_backend
-        from aiconfigurator_core.sdk.models import get_model
-        from aiconfigurator_core.sdk.perf_database import (
+        from aisimulate_core.sdk import config
+        from aisimulate_core.sdk.backends.factory import get_backend
+        from aisimulate_core.sdk.models import get_model
+        from aisimulate_core.sdk.perf_database import (
             get_database,
             get_supported_databases,
         )
     except ModuleNotFoundError as exc:
-        if exc.name != "aiconfigurator_core":
+        if exc.name != "aisimulate_core":
             raise
         raise RuntimeError(
             "aisimulate is required for AIC perf modeling but is not installed"
@@ -251,7 +251,7 @@ class AicSession:
         self._engine = self._build_compiled_engine()
 
     def _build_compiled_engine(self):
-        """Build a cached aiconfigurator_core EngineHandle from the already-built
+        """Build a cached aisimulate_core EngineHandle from the already-built
         model, or return None to fall back to the Python op-walk."""
         if os.environ.get("DYNAMO_AIC_DISABLE_COMPILED_ENGINE"):
             logger.info(
@@ -259,7 +259,7 @@ class AicSession:
             )
             return None
         try:
-            from aiconfigurator_core.sdk.rust_engine_step import _cached_engine_handle
+            from aisimulate_core.sdk.rust_engine_step import _cached_engine_handle
         except Exception as exc:  # aiconfigurator-core without the compiled engine
             logger.info(
                 "AIC compiled-engine path unavailable (%s); using Python op-walk.",
@@ -443,20 +443,18 @@ def estimate_num_gpu_blocks(
         memory_fraction_kind = "of_total"
         memory_fraction_value = gpu_memory_utilization
 
-    # Imported lazily from the compatibility namespace shipped by AISimulate.
+    # Imported lazily from the estimator namespace shipped by AISimulate.
     # An AIC-backed call requires AISimulate and fails fast when it is absent.
     # TODO: account for whether specdec is enabled (pass `nextn=...`). Currently
     #   omitted due to a downstream AIC bug where `_get_memory_usage` predicts
     #   negative KV capacity with Eagle.
     try:
-        from aiconfigurator_core.sdk.memory import (
+        from aisimulate_core.sdk.memory import (
             estimate_num_gpu_blocks as aic_estimate_num_gpu_blocks,
         )
     except ImportError as exc:
         missing = exc.name or ""
-        if missing == "aiconfigurator_core" or missing.startswith(
-            "aiconfigurator_core."
-        ):
+        if missing == "aisimulate_core" or missing.startswith("aisimulate_core."):
             raise RuntimeError(
                 "aisimulate is required for AIC KV-cache estimation but is "
                 "not installed"

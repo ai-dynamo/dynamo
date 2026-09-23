@@ -56,6 +56,7 @@ fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -
 }
 
 fn validate_offline_router_mode(
+    args: &MockEngineArgs,
     router_mode: ReplayRouterMode,
     num_workers: usize,
     dp_size: u32,
@@ -63,6 +64,11 @@ fn validate_offline_router_mode(
 ) -> Result<()> {
     if router_mode != ReplayRouterMode::KvRouter {
         return Ok(());
+    }
+    if !args.enable_kv_events {
+        bail!(
+            "router_mode=kv_router requires KV event export; use round_robin when enable_kv_events=false"
+        );
     }
     if scaling_enabled || num_workers.saturating_mul(dp_size.max(1) as usize) > 1 {
         return Ok(());
@@ -79,7 +85,13 @@ pub(super) fn validate_offline_replay_args(
     router_mode: ReplayRouterMode,
     scaling_enabled: bool,
 ) -> Result<()> {
-    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_offline_router_mode(
+        args,
+        router_mode,
+        num_workers,
+        args.dp_size,
+        scaling_enabled,
+    )?;
     validate_replay_args(args, num_workers, "trace replay")
 }
 
@@ -94,7 +106,13 @@ pub(super) fn validate_offline_concurrency_args(
         bail!("concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_offline_router_mode(
+        args,
+        router_mode,
+        num_workers,
+        args.dp_size,
+        scaling_enabled,
+    )?;
     validate_replay_args(args, num_workers, "concurrency replay")
 }
 
@@ -260,6 +278,16 @@ mod tests {
         let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
         args.dp_size = 2;
         validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap();
+    }
+
+    #[test]
+    fn offline_kv_router_rejects_disabled_events_without_falling_back() {
+        let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
+        args.enable_kv_events = false;
+        let error =
+            validate_offline_replay_args(&args, 2, ReplayRouterMode::KvRouter, false).unwrap_err();
+        assert!(error.to_string().contains("requires KV event export"));
+        validate_offline_replay_args(&args, 2, ReplayRouterMode::RoundRobin, false).unwrap();
     }
 
     #[test]

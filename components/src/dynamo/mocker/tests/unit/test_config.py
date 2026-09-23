@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -840,3 +841,267 @@ def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
 
     with pytest.raises(SystemExit):
         parse_args(["--response-plane", "invalid"])
+
+
+def state_cache_cli_args(*extra):
+    return parse_args(
+        [
+            "--num-gpu-blocks-override",
+            "128",
+            "--block-size",
+            "1536",
+            "--kv-cache-bytes-per-token",
+            "16",
+            "--state-cache",
+            '{"bytes_per_request":24576}',
+            "--prefix-match-unit",
+            "128",
+            "--no-enable-kv-events",
+            *extra,
+        ]
+    )
+
+
+def test_state_cache_cli_preserves_physical_geometry_and_disables_events():
+    engine_args = CONFIG.build_mocker_engine_args(state_cache_cli_args())
+    block_size, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert block_size == 1536
+    assert engine_args.prefix_match_unit == 128
+    assert engine_args.state_cache == {"bytes_per_request": 24576}
+    assert engine_args.kv_cache_bytes_per_token == 16
+    assert engine_args.kv_transfer_bytes_per_token is None
+    assert engine_args.num_gpu_blocks == 128
+    assert engine_args.max_num_batched_tokens == 8192
+    assert engine_args.enable_kv_events is False
+    assert runtime_config.total_kv_blocks == 128
+    assert runtime_config.enable_local_indexer is False
+    assert runtime_config.kv_event_publishing_enabled is False
+
+
+def test_unset_state_cache_preserves_legacy_live_defaults():
+    engine_args = CONFIG.build_mocker_engine_args(parse_args([]))
+    block_size, runtime_config = CONFIG.build_runtime_config(engine_args)
+
+    assert block_size == 64
+    assert engine_args.prefix_match_unit is None
+    assert engine_args.state_cache is None
+    assert engine_args.kv_cache_bytes_per_token is None
+    assert engine_args.enable_kv_events is True
+    assert runtime_config.enable_local_indexer is True
+    assert runtime_config.kv_event_publishing_enabled is True
+
+
+@pytest.mark.parametrize(
+    "option", ["--kv-transfer-bytes-per-token", "--kv-bytes-per-token"]
+)
+def test_transfer_byte_alias_does_not_size_physical_cache(option):
+    args = parse_args([option, "4096", "--kv-cache-bytes-per-token", "16"])
+    engine_args = CONFIG.build_mocker_engine_args(args)
+    assert engine_args.kv_transfer_bytes_per_token == 4096
+    assert engine_args.kv_bytes_per_token == 4096
+    assert engine_args.kv_cache_bytes_per_token == 16
+
+
+def test_cli_rejects_duplicate_transfer_byte_aliases():
+    with pytest.raises(SystemExit):
+        parse_args(
+            ["--kv-transfer-bytes-per-token", "4096", "--kv-bytes-per-token", "2048"]
+        )
+
+
+def test_binding_rejects_duplicate_transfer_byte_aliases():
+    with pytest.raises(ValueError, match="legacy alias"):
+        MockEngineArgs(kv_transfer_bytes_per_token=4096, kv_bytes_per_token=2048)
+    with pytest.raises(ValueError, match="legacy alias"):
+        MockEngineArgs().with_overrides(
+            kv_transfer_bytes_per_token=4096, kv_bytes_per_token=2048
+        )
+
+
+def test_worker_transfer_override_preserves_physical_cache():
+    engine_args = MockEngineArgs(kv_cache_bytes_per_token=16)
+    updated = CONFIG.apply_worker_engine_args_overrides(
+        engine_args, kv_transfer_bytes_per_token=4096
+    )
+    assert updated.kv_transfer_bytes_per_token == 4096
+    assert updated.kv_cache_bytes_per_token == 16
+    assert engine_args.kv_transfer_bytes_per_token is None
+
+
+@pytest.mark.parametrize(
+    "field", ["num_gpu_blocks", "block_size", "kv_cache_bytes_per_token"]
+)
+def test_state_cache_requires_explicit_geometry_before_estimation(
+    field, monkeypatch, tmp_path
+):
+    def unexpected_estimation(**kwargs):
+        pytest.fail("manual state-cache geometry must not use an AIC estimate")
+
+    monkeypatch.setattr(CONFIG, "estimate_num_gpu_blocks", unexpected_estimation)
+    args = state_cache_cli_args(
+        "--aic-perf-model", "--model-path", "manual-state-smoke"
+    )
+    setattr(args, field, None)
+    with pytest.raises(ValueError, match="requires explicit"):
+        CONFIG.build_mocker_engine_args(args)
+
+    raw = {
+        "num_gpu_blocks": 128,
+        "block_size": 1536,
+        "kv_cache_bytes_per_token": 16,
+        "state_cache": {"bytes_per_request": 24576},
+        "aic_backend": "vllm",
+        "aic_model_path": "manual-state-smoke",
+    }
+    del raw[field]
+    config_path = tmp_path / "engine.json"
+    config_path.write_text(json.dumps(raw))
+    with pytest.raises(Exception, match="requires explicit"):
+        CONFIG.load_mocker_engine_args(make_args(extra_engine_args=config_path))
+
+
+def test_state_cache_json_roundtrip_preserves_nested_config(tmp_path):
+    config_path = tmp_path / "engine.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "num_gpu_blocks": 128,
+                "block_size": 1536,
+                "kv_cache_bytes_per_token": 16,
+                "state_cache": {"bytes_per_request": 24576},
+                "prefix_match_unit": 128,
+                "enable_kv_events": False,
+                "max_num_batched_tokens": 8192,
+            }
+        )
+    )
+    engine_args = CONFIG.load_mocker_engine_args(
+        make_args(extra_engine_args=config_path)
+    )
+    assert engine_args.state_cache == {"bytes_per_request": 24576}
+    assert engine_args.prefix_match_unit == 128
+    assert engine_args.block_size == 1536
+    assert engine_args.kv_cache_bytes_per_token == 16
+    assert engine_args.max_num_batched_tokens == 8192
+
+
+@pytest.mark.parametrize("config", ["[]", "42", "null", "{broken"])
+def test_state_cache_cli_rejects_non_objects(config):
+    with pytest.raises(SystemExit):
+        parse_args(["--state-cache", config])
+
+
+def test_state_cache_rejects_unknown_nested_field():
+    args = state_cache_cli_args()
+    args.state_cache["prefix_cache_retention_interval"] = 128
+    with pytest.raises(ValueError, match="unknown field"):
+        CONFIG.build_mocker_engine_args(args)
+
+
+@pytest.mark.parametrize(
+    "extra,error",
+    [
+        (["--enable-kv-events"], "KV event"),
+        (["--prefix-match-unit", "127"], "positive divisor"),
+        (["--aic-nextn", "1"], "speculative decoding"),
+        (["--engine-type", "sglang"], "backend=vllm"),
+        (["--disaggregation-mode", "prefill"], "aggregated"),
+        (["--kv-transfer-bytes-per-token", "16"], "kv_transfer"),
+        (["--kv-transfer-bandwidth", "64"], "kv_transfer"),
+        (["--kv-transfer-timing-mode", "destination_missing"], "timing_mode"),
+    ],
+)
+def test_partial_prefix_cli_rejects_unsupported_combinations(extra, error):
+    with pytest.raises(Exception, match=error):
+        CONFIG.build_mocker_engine_args(state_cache_cli_args(*extra))
+
+
+@pytest.mark.parametrize("state_cache_enabled", [False, True])
+def test_worker_preserves_json_sizing_without_model_estimation(
+    tmp_path, monkeypatch, state_cache_enabled
+):
+    main_module = importlib.import_module("dynamo.mocker.main")
+    config = {"kv_transfer_bytes_per_token": 4096, "kv_cache_bytes_per_token": 16}
+    if state_cache_enabled:
+        config = {
+            "state_cache": {"bytes_per_request": 24576},
+            "prefix_match_unit": 128,
+            "block_size": 1536,
+            "num_gpu_blocks": 128,
+            "kv_cache_bytes_per_token": 16,
+            "enable_kv_events": False,
+        }
+    config_path = tmp_path / "engine.json"
+    config_path.write_text(json.dumps(config))
+    args = parse_args(
+        ["--extra-engine-args", str(config_path), "--model-path", "manual-state-smoke"]
+    )
+    monkeypatch.setattr(main_module, "parse_args", lambda: args)
+
+    async def unexpected_prefetch(model_path):
+        pytest.fail("explicit config must not fetch a model for transfer estimation")
+
+    def unexpected_estimation(*args):
+        pytest.fail("explicit config must not auto-compute transfer bytes")
+
+    captured = []
+
+    async def capture_launch(args, engine_args):
+        captured.append(engine_args)
+
+    monkeypatch.setattr(main_module, "prefetch_model", unexpected_prefetch)
+    monkeypatch.setattr(
+        main_module, "compute_kv_bytes_per_token", unexpected_estimation
+    )
+    monkeypatch.setattr(main_module, "launch_workers", capture_launch)
+    asyncio.run(main_module.worker())
+    assert len(captured) == 1
+    assert captured[0].kv_cache_bytes_per_token == 16
+    assert captured[0].kv_transfer_bytes_per_token == (
+        None if state_cache_enabled else 4096
+    )
+
+
+@pytest.mark.parametrize(
+    "option", ["--kv-transfer-bytes-per-token", "--kv-bytes-per-token"]
+)
+def test_worker_preserves_explicit_transfer_cli_override_for_json(
+    tmp_path, monkeypatch, option
+):
+    main_module = importlib.import_module("dynamo.mocker.main")
+    config_path = tmp_path / "engine.json"
+    config_path.write_text(
+        '{"kv_transfer_bytes_per_token":4096,"kv_cache_bytes_per_token":16}'
+    )
+    args = parse_args(["--extra-engine-args", str(config_path), option, "123"])
+    monkeypatch.setattr(main_module, "parse_args", lambda: args)
+    captured = []
+
+    async def capture_launch(args, engine_args):
+        captured.append(engine_args)
+
+    monkeypatch.setattr(main_module, "launch_workers", capture_launch)
+    asyncio.run(main_module.worker())
+    assert captured[0].kv_transfer_bytes_per_token == 123
+    assert captured[0].kv_cache_bytes_per_token == 16
+
+
+@pytest.mark.parametrize("state_cache_enabled", [False, True])
+def test_disabled_events_reject_explicit_kv_routing_before_runtime_creation(
+    monkeypatch, state_cache_enabled
+):
+    main_module = importlib.import_module("dynamo.mocker.main")
+    args = (
+        state_cache_cli_args("--router-mode", "kv")
+        if state_cache_enabled
+        else parse_args(["--no-enable-kv-events", "--router-mode", "kv"])
+    )
+    engine_args = CONFIG.build_mocker_engine_args(args)
+
+    def unexpected_runtime(*args, **kwargs):
+        pytest.fail("unsupported KV routing must fail before runtime creation")
+
+    monkeypatch.setattr(main_module, "create_runtime", unexpected_runtime)
+    with pytest.raises(ValueError, match="--router-mode kv requires KV events"):
+        asyncio.run(main_module.launch_workers(args, engine_args))

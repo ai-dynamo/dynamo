@@ -86,14 +86,6 @@ async def worker():
     args.planner_profile_data = profile_data_result.npz_path
 
     try:
-        # Only when something needs the local files: many workers (rate limiting)
-        # or the KV-bytes estimate below (reads config.json).
-        local_model_path = None
-        if args.model_path and (
-            args.num_workers > 1 or args.kv_bytes_per_token is None
-        ):
-            local_model_path = await prefetch_model(args.model_path)
-
         engine_args = load_mocker_engine_args(args)
         logger.info(
             "Loaded MockEngineArgs from JSON file"
@@ -101,14 +93,33 @@ async def worker():
             else "Created MockEngineArgs from CLI arguments"
         )
 
-        # Auto-compute kv_bytes_per_token from model config if not explicitly set
-        if args.kv_bytes_per_token is None and args.model_path:
-            args.kv_bytes_per_token = compute_kv_bytes_per_token(
+        # Preserve the legacy explicit transport CLI override for JSON configs.
+        transfer_bytes = (
+            args.kv_transfer_bytes_per_token
+            if args.kv_transfer_bytes_per_token is not None
+            else args.kv_bytes_per_token
+        )
+        if transfer_bytes is not None:
+            engine_args = apply_worker_engine_args_overrides(
+                engine_args, kv_transfer_bytes_per_token=transfer_bytes
+            )
+
+        # Physical cache sizing is always explicit. Model-derived sizing applies
+        # only to transport, and must not replace a value loaded from JSON.
+        needs_transfer_estimate = (
+            engine_args.state_cache is None
+            and engine_args.kv_transfer_bytes_per_token is None
+        )
+        local_model_path = None
+        if args.model_path and (args.num_workers > 1 or needs_transfer_estimate):
+            local_model_path = await prefetch_model(args.model_path)
+        if needs_transfer_estimate and args.model_path:
+            transfer_bytes = compute_kv_bytes_per_token(
                 local_model_path or args.model_path, args.kv_cache_dtype
             )
-        engine_args = apply_worker_engine_args_overrides(
-            engine_args, kv_bytes_per_token=args.kv_bytes_per_token
-        )
+            engine_args = apply_worker_engine_args_overrides(
+                engine_args, kv_transfer_bytes_per_token=transfer_bytes
+            )
 
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
@@ -150,6 +161,15 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
     - Independent service registration and stats scraping
     - But still sharing the same tokio runtime (efficient)
     """
+    if (
+        not base_engine_args.enable_kv_events
+        and args.router_advertisement.router_mode == "kv"
+    ):
+        raise ValueError(
+            "--router-mode kv requires KV events; use --router-mode round-robin "
+            "with --no-enable-kv-events"
+        )
+
     futures = []
     runtimes = []
 
