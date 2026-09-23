@@ -1,0 +1,110 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Disaggregated KV-Aware Routing"
+subtitle: "Cache-aware routing to separate prefill and decode workers."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-trtllm-disagg-router-yaml", "target": "kubernetes:trtllm", "label": "disagg_router.yaml", "description": "Disaggregated with KV-aware routing"},
+    {"id": "kubernetes-vllm-disagg-router-yaml", "target": "kubernetes:vllm", "label": "disagg_router.yaml", "description": "Disaggregated with KV-aware routing"},
+    {"id": "kubernetes-vllm-disagg-router-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "disagg_router_xpu_dra.yaml", "description": "Disaggregated with KV-aware routing"},
+    {"id": "local-sglang-disagg-router-sh", "target": "local:sglang", "label": "disagg_router.sh", "description": "Independent Prefill and Decode Pools"},
+    {"id": "local-trtllm-disagg-router-sh", "target": "local:trtllm", "label": "disagg_router.sh", "description": "Cache-Aware Prefill Routing"},
+    {"id": "local-vllm-disagg-router-sh", "target": "local:vllm", "label": "disagg_router.sh", "description": "Independent Prefill and Decode Pools"},
+    {"id": "local-vllm-disagg-router-gaudi-sh", "target": "local:vllm", "label": "disagg_router_gaudi.sh", "description": "KV-Aware Routing on Intel Gaudi"},
+    {"id": "local-vllm-xpu-disagg-router-xpu-gdr-sh", "target": "local:vllm", "label": "xpu/disagg_router_xpu_gdr.sh", "description": "KV Routing with Direct Device Transfer"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-disagg-router-yaml">
+
+[Source: `disagg_router.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg_router.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/disagg_router.yaml" title="disagg_router.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-router-yaml">
+
+[Source: `disagg_router.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_router.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_router.yaml" title="disagg_router.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-router-xpu-dra-yaml">
+
+[Source: `disagg_router_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/disagg_router_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/disagg_router_xpu_dra.yaml" title="disagg_router_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-disagg-router-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/disagg_router.sh)
+```
+
+[Source: `disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_router.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/disagg_router.sh" title="disagg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-router-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg_router.sh)
+```
+
+[Source: `disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_router.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg_router.sh" title="disagg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_router.sh)
+```
+
+[Source: `disagg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_router.sh" title="disagg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-router-gaudi-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_router_gaudi.sh)
+```
+
+[Source: `disagg_router_gaudi.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_router_gaudi.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_router_gaudi.sh" title="disagg_router_gaudi.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-disagg-router-xpu-gdr-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/disagg_router_xpu_gdr.sh)
+```
+
+[Source: `disagg_router_xpu_gdr.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_router_xpu_gdr.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/disagg_router_xpu_gdr.sh" title="disagg_router_xpu_gdr.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

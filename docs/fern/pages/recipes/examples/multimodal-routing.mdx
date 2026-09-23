@@ -1,0 +1,96 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Multimodal KV Routing"
+subtitle: "Route multimodal requests using text and media cache overlap."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-agg-multimodal-router-sh", "target": "local:sglang", "label": "agg_multimodal_router.sh", "description": "Cache-Aware Multimodal Routing"},
+    {"id": "local-trtllm-agg-multimodal-router-sh", "target": "local:trtllm", "label": "agg_multimodal_router.sh", "description": "Cache-Aware Multimodal Routing"},
+    {"id": "local-vllm-agg-multimodal-router-sh", "target": "local:vllm", "label": "agg_multimodal_router.sh", "description": "Cache-Aware Multimodal Routing"},
+    {"id": "local-vllm-agg-multimodal-router-chat-processor-sh", "target": "local:vllm", "label": "agg_multimodal_router_chat_processor.sh", "description": "Multimodal Routing with vLLM Preprocessing"},
+    {"id": "local-vllm-xpu-agg-multimodal-router-chat-processor-xpu-sh", "target": "local:vllm", "label": "xpu/agg_multimodal_router_chat_processor_xpu.sh", "description": "Multimodal Routing with vLLM Preprocessing"},
+    {"id": "local-vllm-xpu-agg-multimodal-router-xpu-sh", "target": "local:vllm", "label": "xpu/agg_multimodal_router_xpu.sh", "description": "Cache-Aware Multimodal Routing"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-multimodal-router-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_multimodal_router.sh)
+```
+
+[Source: `agg_multimodal_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_multimodal_router.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_multimodal_router.sh" title="agg_multimodal_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-multimodal-router-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_multimodal_router.sh)
+```
+
+[Source: `agg_multimodal_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_multimodal_router.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_multimodal_router.sh" title="agg_multimodal_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-multimodal-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_multimodal_router.sh)
+```
+
+[Source: `agg_multimodal_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_multimodal_router.sh" title="agg_multimodal_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-multimodal-router-chat-processor-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_multimodal_router_chat_processor.sh)
+```
+
+[Source: `agg_multimodal_router_chat_processor.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_multimodal_router_chat_processor.sh" title="agg_multimodal_router_chat_processor.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-multimodal-router-chat-processor-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_multimodal_router_chat_processor_xpu.sh)
+```
+
+[Source: `agg_multimodal_router_chat_processor_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_multimodal_router_chat_processor_xpu.sh" title="agg_multimodal_router_chat_processor_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-multimodal-router-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_multimodal_router_xpu.sh)
+```
+
+[Source: `agg_multimodal_router_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_multimodal_router_xpu.sh" title="agg_multimodal_router_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

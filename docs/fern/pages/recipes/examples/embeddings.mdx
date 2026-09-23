@@ -1,0 +1,57 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Text Embeddings"
+subtitle: "Embedding workers, load balancing, and model-name dispatch."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-agg-embed-sh", "target": "local:sglang", "label": "agg_embed.sh", "description": "Text Embeddings"},
+    {"id": "local-vllm-agg-embed-sh", "target": "local:vllm", "label": "agg_embed.sh", "description": "Text Embeddings"},
+    {"id": "local-vllm-agg-embed-multiworker-sh", "target": "local:vllm", "label": "agg_embed_multiworker.sh", "description": "Embedding Load Balancing and Model Dispatch"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-embed-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_embed.sh)
+```
+
+[Source: `agg_embed.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_embed.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_embed.sh" title="agg_embed.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-embed-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_embed.sh)
+```
+
+[Source: `agg_embed.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_embed.sh" title="agg_embed.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-embed-multiworker-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_embed_multiworker.sh)
+```
+
+[Source: `agg_embed_multiworker.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_embed_multiworker.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_embed_multiworker.sh" title="agg_embed_multiworker.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

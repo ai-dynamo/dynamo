@@ -1,0 +1,38 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GPU Failover"
+subtitle: "Active-passive and multinode GPU Memory Service failover."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-failover-yaml", "target": "kubernetes:vllm", "label": "agg_failover.yaml", "description": "Active-passive GPU failover"},
+    {"id": "kubernetes-vllm-gms-failover-yaml", "target": "kubernetes:vllm", "label": "gms-failover.yaml", "description": "Multinode GPU Memory Service with failover"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-failover-yaml">
+
+[Source: `agg_failover.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_failover.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_failover.yaml" title="agg_failover.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-gms-failover-yaml">
+
+This file bundles its Dynamic Resource Allocation resources with the DGD.
+
+[Source: `gms-failover.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gms-failover.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/gms-failover.yaml" title="gms-failover.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

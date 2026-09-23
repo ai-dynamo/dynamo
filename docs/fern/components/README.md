@@ -161,3 +161,58 @@ refreshed by their own workflows, and need no local step.
   do.
 - Keep backticks out of any string inside a CSS template literal, comments
   included. A raw backtick closes the literal and the file stops compiling.
+
+### ExamplesCatalog
+
+The Examples overview owns its cards and their version-aware Markdown links. The component adds
+search and topic/platform/backend filters without duplicating that catalog data.
+
+```mdx
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:vllm kubernetes:vllm" data-keywords="agg.sh agg.yaml">
+
+### [Aggregated Serving](aggregated.mdx)
+
+Frontend and aggregated workers.
+
+</div>
+
+</ExamplesCatalog>
+```
+
+See [Authoring Examples](../pages/recipes/examples/_catalog/README.md) for the card contract.
+
+### ExampleSelector
+
+Use once on a deployment example page. Each option names a DGD/DGDR or launch-script source bundle; the component
+selects the platform, backend, and (when there are multiple choices) the example in one panel.
+It reuses the local installation selector's styles and leaves the selected source blocks open.
+
+```mdx
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg", "target": "kubernetes:vllm", "label": "agg.yaml", "description": "Aggregated serving"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg">
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>
+```
+
+Keep source blocks and links in MDX, rather than passing their contents through component props.
+The first valid target is open in the server-rendered HTML; changing a row switches the source
+bundle in place. Unavailable backend/platform combinations cannot be selected.
+
+Only deployment manifests and launch scripts belong in the picker. Supporting files stay out of the
+selector and its code blocks for now. Singleton rows use the selected button style, not plain text;
+clicking an already-selected axis does not reset the example choice.
