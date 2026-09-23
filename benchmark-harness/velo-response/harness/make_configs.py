@@ -46,5 +46,5 @@ for mode in ('velo-tcp', 'velo-rdma'):
 c = json.loads((a.root / 'configs/discard-velo-rdma.json').read_text())
 c['campaign'].update(name='main-preflight-velo-rdma', fixed_concurrency=8192, preflight_saturation=True)
 c['saturation']['initial_candidates'] = [8192]
-c['runtime']['mocker_system_metrics_base_port'] = 9100
+c['runtime']['mocker_system_metrics_base_port'] = 19100
 (a.root / 'configs/preflight-velo-rdma.json').write_text(json.dumps(c, indent=2) + '\n')
