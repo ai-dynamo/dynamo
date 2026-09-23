@@ -378,6 +378,14 @@ impl RoutingHost {
             "dynamo.dispatch.route",
             self.inner.router_mode().telemetry_label(),
         );
+        request_dispatch.record("dynamo.dispatch.destination.worker.id", initial_worker);
+        let prepare = |request: &mut PreprocessedRequest, target: AffinityTarget| {
+            request_dispatch.record("dynamo.dispatch.destination.worker.id", target.worker_id);
+            if let Some(dp_rank) = target.dp_rank {
+                request_dispatch.record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
+            }
+            prepare(request, target)
+        };
         self.request_metrics
             .input_sequence_tokens
             .observe(request.token_ids.len() as f64);
@@ -510,10 +518,6 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        request_dispatch.record("dynamo.dispatch.destination.worker.id", target.worker_id);
-        if let Some(dp_rank) = target.dp_rank {
-            request_dispatch.record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
-        }
         request_dispatch.record("dynamo.dispatch.result", "accepted");
         drop(request_dispatch);
         guard.retarget_worker(target.worker_id);

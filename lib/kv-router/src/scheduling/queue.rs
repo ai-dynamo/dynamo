@@ -3587,6 +3587,95 @@ policy_classes:
         }
     }
 
+    #[cfg(feature = "runtime-protocols")]
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_concurrent_queue_outcomes() {
+        use crate::plugins::worker_selection::{
+            WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
+        };
+        use crate::scheduling::selector::WorkerSelectionPolicy;
+        use crate::scheduling::test_capture::{Capture, isolated};
+        if isolated("scheduling::queue::tests::lifecycle_concurrent_queue_outcomes") {
+            return;
+        }
+        let capture = Capture::install();
+        struct FirstPicker;
+        impl WorkerPicker for FirstPicker {
+            fn pick(
+                &mut self,
+                _: &WorkerSelectionContext<'_>,
+                _: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                Ok(0)
+            }
+        }
+        let policy =
+            WorkerSelectionPolicy::new(Default::default(), "test", vec![], Box::new(FirstPicker));
+        let (queue, slots) = make_queue_with_custom_selector(2, 16, 64, Some(0.0), policy);
+        let request = |id: &str, worker| {
+            let (mut request, rx) = make_request(id, 64);
+            request.pinned_worker = Some(WorkerWithDpRank::new(worker, 0));
+            (request, rx)
+        };
+        let (active0, rx0) = request("active-0", 0);
+        let (active1, rx1) = request("active-1", 1);
+        tokio::join!(queue.enqueue(active0), queue.enqueue(active1));
+        rx0.await.unwrap().unwrap();
+        rx1.await.unwrap().unwrap();
+
+        let (admitted, admitted_rx) = request("admitted", 0);
+        let (cancelled, cancelled_rx) = request("cancelled", 1);
+        let (expired, expired_rx) = request("expired", 1);
+        let lease = queue
+            .new_request_lifecycle_lease(Some("cancelled"))
+            .unwrap();
+        let (_, lease, _) = tokio::join!(
+            queue.enqueue(admitted),
+            queue.enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease)),
+            queue.enqueue_with_due_at_for_test(expired, Instant::now() + Duration::from_secs(5)),
+        );
+        assert_eq!(queue.pending_count(), 3);
+        drop(cancelled_rx);
+        drop(lease);
+        queue.update().await;
+        assert_eq!(queue.pending_count(), 2);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(matches!(
+            expired_rx.await.unwrap(),
+            Err(KvSchedulerError::DeadlineExceeded)
+        ));
+        slots.free(&"active-0".to_string(), Instant::now()).unwrap();
+        queue.update().await;
+        assert_eq!(
+            admitted_rx.await.unwrap().unwrap().best_worker,
+            WorkerWithDpRank::new(0, 0)
+        );
+        assert_eq!(queue.pending_count(), 0);
+
+        for (id, outcome) in [
+            ("admitted", "admitted"),
+            ("cancelled", "cancelled"),
+            ("expired", "timed_out"),
+        ] {
+            let fields = capture.fields("router.queue", id);
+            assert_eq!(fields["dynamo.router.queue.outcome"], outcome);
+            assert_eq!(fields["dynamo.router.queue.deferred"], "true");
+        }
+        for (id, worker) in [("active-0", "0"), ("active-1", "1"), ("admitted", "0")] {
+            let fields = capture.fields("router.selection", id);
+            assert_eq!(fields["dynamo.router.selected.worker.id"], worker);
+            assert_eq!(fields["dynamo.router.candidate.count"], "1");
+            let detail: serde_json::Value =
+                serde_json::from_str(&fields["dynamo.router.candidates.top_k"]).unwrap();
+            assert_eq!(detail.as_array().unwrap().len(), 1);
+            assert_eq!(detail[0]["worker_id"].as_u64().unwrap().to_string(), worker);
+        }
+        for id in ["active-1", "admitted"] {
+            slots.free(&id.to_string(), Instant::now()).unwrap();
+        }
+        slots.assert_completely_drained(Instant::now());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_concurrent_immediate_admissions_see_prior_booking() {
         let selector = MinDecodeSelector {
