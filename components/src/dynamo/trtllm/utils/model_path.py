@@ -17,6 +17,7 @@ in it, because several workers and concurrent CI jobs share one cache directory.
 It imports nothing that needs CUDA, so it stays testable without a GPU.
 """
 
+import json
 import logging
 import os
 from typing import Optional
@@ -79,11 +80,10 @@ def _hub_cache_dir() -> str:
 
 
 def _is_complete_snapshot(path: str) -> bool:
-    """A config, and no entry still waiting on its blob.
+    """Require materialized standard HF weights, not just an early config link.
 
-    ``huggingface_hub`` links a file into the snapshot only once that blob has
-    finished downloading, so a link that resolves to nothing marks a download
-    another process is still doing, not a snapshot the engine can load.
+    An index enumerates shards that may not have been linked into the snapshot
+    yet. Unknown weight layouts are left to the engine's normal resolution.
     """
     if not os.path.isfile(os.path.join(path, _CONFIG_FILE)):
         return False
@@ -91,7 +91,34 @@ def _is_complete_snapshot(path: str) -> bool:
         entries = os.listdir(path)
     except OSError:
         return False
-    return all(os.path.exists(os.path.join(path, entry)) for entry in entries)
+    if not all(os.path.exists(os.path.join(path, entry)) for entry in entries):
+        return False
+    for weights in ("model.safetensors", "pytorch_model.bin"):
+        index_path = os.path.join(path, weights + ".index.json")
+        if os.path.lexists(index_path):
+            try:
+                with open(index_path, encoding="utf-8") as index_file:
+                    index = json.load(index_file)
+            except (OSError, ValueError):
+                return False
+            if not isinstance(index, dict):
+                return False
+            weight_map = index.get("weight_map")
+            if not isinstance(weight_map, dict) or not weight_map:
+                return False
+            if not all(
+                isinstance(shard, str)
+                and shard
+                and not os.path.isabs(shard)
+                and ".." not in shard.split("/")
+                and os.path.isfile(os.path.join(path, shard))
+                for shard in weight_map.values()
+            ):
+                return False
+            return True
+        if os.path.isfile(os.path.join(path, weights)):
+            return True
+    return False
 
 
 def _ref_is_empty(ref_file: str) -> bool:

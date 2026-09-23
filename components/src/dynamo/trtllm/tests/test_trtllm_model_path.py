@@ -8,7 +8,7 @@ whose ``refs/main`` is empty, which made ``snapshot_download`` hand the engine
 ``<repo>/snapshots`` and crash the worker with "Unrecognized model".
 """
 
-import os
+import json
 
 import pytest
 from huggingface_hub.errors import GatedRepoError
@@ -19,6 +19,7 @@ from dynamo.trtllm.utils.model_path import resolve_model_path
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.trtllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -83,6 +84,7 @@ def _snapshot(repo, commit, complete=True):
     snapshot.mkdir()
     if complete:
         (snapshot / "config.json").write_text('{"model_type": "qwen3"}')
+        (snapshot / "model.safetensors").write_bytes(b"weights")
     return snapshot
 
 
@@ -94,7 +96,6 @@ def test_empty_ref_falls_back_to_the_cached_snapshot(tmp_path, monkeypatch):
     resolved = resolve_model_path(MODEL)
 
     assert resolved == str(snapshot)
-    assert os.path.isfile(os.path.join(resolved, "config.json"))
 
 
 def test_valid_ref_keeps_the_repository_id(tmp_path, monkeypatch):
@@ -134,7 +135,6 @@ def test_ref_naming_an_incomplete_snapshot_keeps_the_repository_id(
 
 @pytest.mark.parametrize("revision", ["release-x", COMMIT])
 def test_explicit_revision_keeps_the_repository_id(tmp_path, monkeypatch, revision):
-    """The one cached snapshot is not evidence that it holds this revision."""
     repo = _repo(_hub(tmp_path, monkeypatch))
     (repo / "refs" / "main").write_text("")
     _snapshot(repo, COMMIT)
@@ -160,7 +160,45 @@ def test_snapshot_with_an_unresolved_link_keeps_the_repository_id(
     repo = _repo(_hub(tmp_path, monkeypatch))
     (repo / "refs" / "main").write_text("")
     snapshot = _snapshot(repo, COMMIT)
+    (snapshot / "model.safetensors").unlink()
     (snapshot / "model.safetensors").symlink_to(repo / "blobs" / "absent")
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+def test_config_without_weights_keeps_the_repository_id(tmp_path, monkeypatch):
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    (snapshot / "model.safetensors").unlink()
+
+    assert resolve_model_path(MODEL) == MODEL
+
+
+@pytest.mark.parametrize("weights", ["model.safetensors", "pytorch_model.bin"])
+def test_sharded_snapshot_requires_every_indexed_shard(tmp_path, monkeypatch, weights):
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    (snapshot / "model.safetensors").unlink()
+    (snapshot / (weights + ".index.json")).write_text(
+        json.dumps({"weight_map": {"a": "shard-1", "b": "shard-2"}})
+    )
+    (snapshot / "shard-1").write_bytes(b"first")
+
+    assert resolve_model_path(MODEL) == MODEL
+
+    (snapshot / "shard-2").write_bytes(b"second")
+
+    assert resolve_model_path(MODEL) == str(snapshot)
+
+
+@pytest.mark.parametrize("index", ["{", "[]", "{}", '{"weight_map": {}}'])
+def test_unusable_weight_index_keeps_the_repository_id(tmp_path, monkeypatch, index):
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    (snapshot / "model.safetensors.index.json").write_text(index)
 
     assert resolve_model_path(MODEL) == MODEL
 

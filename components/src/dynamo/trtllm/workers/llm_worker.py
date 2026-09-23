@@ -168,14 +168,21 @@ def _resolve_model_dir(config: Config) -> str:
     return os.path.dirname(cached) if isinstance(cached, str) else config.model
 
 
-def _resolve_image_token_id(model_type: str, config: Config) -> Optional[int]:
+def _resolve_image_token_id(
+    model_type: str, config: Config, model_path: Optional[str] = None
+) -> Optional[int]:
     """Resolve rc21's in-vocab image marker for a validated model family."""
     if (
         model_type not in _MM_ROUTING_MODEL_TYPES
         or resolve_routing_image_token_id is None
     ):
         return None
-    return resolve_routing_image_token_id(config.model, _resolve_model_dir(config))
+    model_dir = (
+        model_path
+        if model_path is not None and os.path.isdir(model_path)
+        else _resolve_model_dir(config)
+    )
+    return resolve_routing_image_token_id(config.model, model_dir)
 
 
 def build_kv_connector_config(config: Config):
@@ -341,8 +348,6 @@ async def init_llm_worker(
             f"{parsed_namespace}.{parsed_component_name}.{parsed_endpoint_name}"
         ).client()
 
-    # Convert model path to Path object if it's a local path, otherwise keep as string.
-    # A repository id passes through unless its local cache reference is broken.
     model_path = resolve_model_path(str(config.model), config.revision)
 
     if config.gpus_per_node is None:
@@ -651,7 +656,9 @@ async def init_llm_worker(
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
         # only in aggregated mode; disaggregated MM requests are not routed on it.
         if config.disaggregation_mode == DisaggregationMode.AGGREGATED:
-            image_token_id = _resolve_image_token_id(model_config.model_type, config)
+            image_token_id = _resolve_image_token_id(
+                model_config.model_type, config, model_path
+            )
             if image_token_id is not None:
                 logging.info(
                     "MM-aware KV routing enabled (model_type=%s, image_token_id=%d)",
