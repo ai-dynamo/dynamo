@@ -116,6 +116,10 @@ spec:
                 - exaone_moe_mtp
                 - --spec-tokens
                 - "2"
+                # For perf benchmarking only, replace the two entries above with (the engine
+                # resolves the deprecated exaone_moe_mtp alias to mtp):
+                # - --speculative-config
+                # - '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":1.94}'
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0
@@ -201,6 +205,10 @@ spec:
                 - exaone_moe_mtp
                 - --spec-tokens
                 - "2"
+                # For perf benchmarking only, replace the two entries above with (the engine
+                # resolves the deprecated exaone_moe_mtp alias to mtp):
+                # - --speculative-config
+                # - '{"method":"mtp","num_speculative_tokens":2,"rejection_sample_method":"synthetic","synthetic_acceptance_length":1.94}'
               securityContext:
                 runAsUser: 0
                 runAsGroup: 0

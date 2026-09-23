@@ -146,6 +146,7 @@ spec:
           --artifact-dir "${RUN_DIR}" \
           --request-timeout-seconds 1200 \
           --workers-max "${CONCURRENCY}" \
+          --server-metrics "${METRICS_ENDPOINT}" \
           --export-http-trace
           echo "Concurrency ${CONCURRENCY} complete; artifacts in ${RUN_DIR}"
           ls -la "${RUN_DIR}" || true
@@ -155,6 +156,13 @@ spec:
         # --- Edit these to target the DGD + trace you want to benchmark ---
         - name: ENDPOINT
           value: k-exaone-2-vllm-b200-agg-chat-frontend:8000
+        # Acceptance counters live on the WORKER, not the frontend. aiperf enables
+        # --server-metrics by default but points it at the inference URL, which on Dynamo
+        # is the frontend and exposes no vllm:spec_decode_* series -- so acceptance goes
+        # unrecorded unless this is set. Use the decode worker for the disaggregated target:
+        #   k-exaone-2-vllm-b200-disagg-chat-decodeworker:9090
+        - name: METRICS_ENDPOINT
+          value: k-exaone-2-vllm-b200-agg-chat-worker:9090
         - name: TRACE_FILE
           value: /shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl
         # Operating point is per variant: 7 for agg-b200-chat, 14 for disagg-b200-chat.

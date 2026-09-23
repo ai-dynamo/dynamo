@@ -141,6 +141,14 @@ kubectl wait --for=condition=Complete job/k-exaone-2-bench \
 Do not compare partial runs. A completed run must account for successful,
 errored, and unfinished requests before reporting aggregate throughput.
 
+## Speculative decoding
+
+For throughput-only runs at a fixed acceptance length, apply the synthetic `--speculative-config`
+commented into the recipe's `kustomize/base/deploy.yaml`, re-render, and restart the DGD. Keep the
+production flags for functional or quality validation -- synthetic rejection sampling forces
+acceptance behaviour. `perf.yaml` records the achieved acceptance length via
+`--server-metrics "${METRICS_ENDPOINT}"`.
+
 ## Tunable environment variables
 
 | Variable | Default | Notes |
