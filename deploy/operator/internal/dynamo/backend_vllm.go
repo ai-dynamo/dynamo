@@ -311,7 +311,12 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) {
-	args := parseVLLMLaunchArgs(getExpandedArgs(container))
+	// getExpandedCommandLine, not getExpandedArgs: Kubernetes allows a flag in
+	// either Command or Args, and IsElasticEPRayLaunch /
+	// shouldInjectVLLMMpWaitLeaderInit already parse both. Parsing Args alone
+	// here would read a Command-borne "--tensor-parallel-size 16" as the
+	// default of 1 and skip a multinode launch the manifest requires.
+	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
 	needsDistributed := needsTensorParallelMultinodeLaunch(args, containerGPUs)
 
 	if needsDistributed && shouldUseMpBackend(annotations) {
@@ -336,16 +341,6 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		logger := log.Log.WithName("vllm-backend")
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
-}
-
-// getExpandedArgs will expand the containers args in the case where
-// the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
-func getExpandedArgs(container *corev1.Container) []string {
-	expandedArgs := []string{}
-	for _, arg := range container.Args {
-		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
-	}
-	return normalizeVLLMFlags(expandedArgs)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -685,7 +680,7 @@ func (a vllmLaunchArgs) WorldSize() int64 {
 }
 
 // parseVLLMLaunchArgs parses an already-expanded, normalized argument list
-// (see getExpandedArgs / getExpandedCommandLine) into a vllmLaunchArgs value.
+// (see getExpandedCommandLine) into a vllmLaunchArgs value.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
 	// Enum-style flags read the last occurrence's value rather than hasArg's
 	// any-occurrence semantics: with "--data-parallel-backend ray
