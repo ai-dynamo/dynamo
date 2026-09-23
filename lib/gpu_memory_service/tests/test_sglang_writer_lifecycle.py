@@ -35,6 +35,15 @@ def isolated_cohort(tmp_path, monkeypatch):
         os.close(fd)
 
 
+def test_gpu_quiescence_marker_is_scoped_to_current_boot():
+    guard = lifecycle.prepare_writer_cohort()
+
+    assert lifecycle.gpu_quiescence_ready() is False
+    lifecycle.mark_gpu_quiescence_ready()
+    assert lifecycle.gpu_quiescence_ready() is True
+    assert Path(str(guard) + ".gpu-quiesced").read_text() == "ready\n"
+
+
 def _read(fd, count=1):
     readable, _, _ = select.select([fd], [], [], 3.0)
     assert readable, "child process did not report progress"

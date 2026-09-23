@@ -31,6 +31,23 @@ _COHORT_ENV = "GMS_SGLANG_WRITER_COHORT_PATH"
 _writer_fds: list[int] = []
 
 
+def gpu_quiescence_ready() -> bool:
+    """Return whether this boot finished local predecessor GPU recovery."""
+    cohort = os.environ.get(_COHORT_ENV)
+    return bool(cohort) and Path(cohort + ".gpu-quiesced").is_file()
+
+
+def mark_gpu_quiescence_ready() -> None:
+    """Publish local phase-two completion for the scheduler subprocess."""
+    cohort = os.environ.get(_COHORT_ENV)
+    if not cohort:
+        raise RuntimeError("SGLang writer cohort is unavailable")
+    marker = Path(cohort + ".gpu-quiesced")
+    pending = marker.with_name(f"{marker.name}.{os.getpid()}.pending")
+    pending.write_text("ready\n")
+    os.replace(pending, marker)
+
+
 def _hold_writer_guard(path: Path) -> None:
     fd = acquire_writer_guard(path)
     _writer_fds.append(fd)

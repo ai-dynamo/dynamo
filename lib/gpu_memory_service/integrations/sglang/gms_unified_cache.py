@@ -247,6 +247,16 @@ def make_gms_unified_cache_class():
             """Establish one common recovery inventory, once per writer epoch."""
             if self._gms_steady_state:
                 return True
+            if bool(getattr(self._gms_directory, "_standby", False)):
+                from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+                    gpu_quiescence_ready,
+                )
+
+                if not self._gms_tp.all_true(
+                    "steady:gpu-recovery-ready", gpu_quiescence_ready()
+                ):
+                    return False
+
             ready = self._gms_tp.all_true(
                 "steady:writer-ready",
                 bool(

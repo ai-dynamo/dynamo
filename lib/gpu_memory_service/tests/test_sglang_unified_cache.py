@@ -389,6 +389,39 @@ def test_native_eviction_hints_pages_from_cpu_content_map(monkeypatch):
     assert native == [(inserted.last_device_node, tracker)]
 
 
+def test_promoted_standby_waits_for_all_rank_gpu_recovery(monkeypatch):
+    cache, _allocator = _cache(monkeypatch)
+    directory = _Directory()
+    directory._standby = True
+    directory.read_view_is_current_writer = True
+    cache._gms_directory = directory
+    ready = [False]
+    calls = []
+
+    class Cohort:
+        def all_true(self, stage, value):
+            calls.append((stage, value))
+            return bool(value)
+
+        def run_intersection(self, stage, operation):
+            local = operation()
+            calls.append((stage, local))
+            return local, []
+
+    from gpu_memory_service.integrations.sglang import writer_lifecycle
+
+    monkeypatch.setattr(writer_lifecycle, "gpu_quiescence_ready", lambda: ready[0])
+    cache._gms_tp = Cohort()
+
+    assert cache._maybe_enter_steady_state() is False
+    assert calls == [("steady:gpu-recovery-ready", False)]
+    ready[0] = True
+    calls.clear()
+    assert cache._maybe_enter_steady_state() is True
+    assert calls[0] == ("steady:gpu-recovery-ready", True)
+    assert cache._gms_steady_state is True
+
+
 def test_steady_state_requires_common_current_writer_inventory(monkeypatch):
     cache, allocator = _cache(monkeypatch)
     common_hash = b"c" * 32
