@@ -28,7 +28,7 @@ Structurally, that difference is one worker versus two. The rest of the
   services:
     Frontend:
       componentType: frontend
-    VLLMWorker:
+    worker:
       componentType: worker
       # one worker does both prefill and decode
 ```
@@ -40,10 +40,10 @@ Structurally, that difference is one worker versus two. The rest of the
   services:
     Frontend:
       componentType: frontend
-    VLLMPrefillWorker:
+    prefill:
       componentType: worker
       subComponentType: prefill   # prompt processing only
-    VLLMDecodeWorker:
+    decode:
       componentType: worker
       subComponentType: decode    # token generation only
 ```
@@ -119,7 +119,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           imagePullPolicy: IfNotPresent
 ```
 
@@ -135,7 +135,7 @@ rather than a plain worker:
   KV cache instead of generating tokens.
 
 ```yaml
-    VLLMPrefillWorker:
+    prefill:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -147,7 +147,7 @@ rather than a plain worker:
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:
@@ -172,7 +172,7 @@ mirrors the prefill worker with `subComponentType: decode` and
 rather than prompt load.
 
 ```yaml
-    VLLMDecodeWorker:
+    decode:
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -184,7 +184,7 @@ rather than prompt load.
         size: 16Gi
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0
           imagePullPolicy: IfNotPresent
           command: ["python3", "-m", "dynamo.vllm"]
           args:

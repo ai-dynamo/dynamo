@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.llm.exceptions import InvalidArgument
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +77,9 @@ def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
         "remove the corresponding multimodal content."
     )
     logger.error(message)
-    raise RuntimeError(message)
+    # See the note in trtllm handler_base on why this is InvalidArgument
+    # rather than RuntimeError, and on what a streaming client still sees.
+    raise InvalidArgument(message)
 
 
 def extract_media_urls(

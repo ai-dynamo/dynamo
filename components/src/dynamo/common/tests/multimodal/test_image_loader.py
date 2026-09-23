@@ -25,6 +25,7 @@ import pytest
 from PIL import Image
 
 from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
 
@@ -73,7 +74,7 @@ def _mock_fetch_bytes(
         side_effect: If set, the mock raises this exception instead of returning.
     """
 
-    async def _fetch(url, timeout, *, policy=None):
+    async def _fetch(url, timeout, *, policy=None, max_bytes=None):
         if delay > 0:
             await asyncio.sleep(delay)
         if side_effect is not None:
@@ -205,6 +206,34 @@ async def test_http_timeout_raises_408(loader: ImageLoader) -> None:
         assert exc_info.value.status == 408
         assert "Timeout loading image" in exc_info.value.message
         assert "https://example.com/img.png" in exc_info.value.url
+
+
+async def test_http_fetch_honors_configured_media_limit(
+    loader: ImageLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        await loader.load_image("https://example.com/limited.png")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
+
+
+async def test_explicit_media_limit_overrides_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = ImageLoader(
+        max_bytes=2 * 1024 * 1024,
+        url_policy=_permissive_policy(),
+    )
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        await loader.load_image("https://example.com/explicit-limit.png")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 2 * 1024 * 1024
 
 
 async def test_http_connection_error_raises_400(loader: ImageLoader) -> None:
@@ -403,6 +432,89 @@ async def test_image_batch_prioritizes_typed_client_error(
         )
 
     assert exc_info.value is client_error
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "data:image/png;base64,not!!!base64!!!",
+        "data:image/png,abc",
+    ],
+    ids=["invalid-base64", "missing-base64-marker"],
+)
+async def test_malformed_data_url_batch_raises_value_error(
+    loader: ImageLoader, bad_url: str
+) -> None:
+    """A malformed data: URI is a client error. The batch path must preserve
+    ValueError — the bindings map it to Backend(InvalidArgument) → 4xx."""
+    with pytest.raises(ValueError) as exc_info:
+        await loader.load_image_batch([{URL_VARIANT_KEY: bad_url}])
+
+    assert not isinstance(exc_info.value, UrlValidationError)
+    assert "Failed to decoding image" in str(exc_info.value)
+
+
+async def test_unexpected_decoder_error_not_wrapped_as_value_error(
+    loader: ImageLoader,
+) -> None:
+    """An unexpected decoder failure must not be
+    classified as a client validation error: it propagates unchanged from
+    load_image and the batch path folds it into a generic Exception, so the
+    frontend answers 500, not 400."""
+    loader._open_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("decode engine fault")
+    )
+
+    with pytest.raises(RuntimeError, match="decode engine fault"):
+        await loader.load_image("data:image/png;base64,aGVsbG8=")
+
+    with pytest.raises(Exception) as exc_info:
+        await loader.load_image_batch(
+            [{URL_VARIANT_KEY: "data:image/png;base64,aGVsbG8="}]
+        )
+    assert not isinstance(exc_info.value, ValueError)
+    assert "decode engine fault" in str(exc_info.value)
+
+
+async def test_truncated_data_url_batch_raises_400(loader: ImageLoader) -> None:
+    """Truncated image bytes are malformed client input, not a server fault:
+    the batch path should return 400."""
+    img = Image.new("RGB", (64, 64), color="red")
+    buf = BytesIO()
+    img.save(buf, format="JPEG")
+    truncated_url = (
+        f"data:image/jpeg;base64,{base64.b64encode(buf.getvalue()[:-20]).decode()}"
+    )
+
+    with pytest.raises(HttpStatusError) as exc_info:
+        await loader.load_image_batch([{URL_VARIANT_KEY: truncated_url}])
+    assert exc_info.value.status == 400
+    assert "Invalid or truncated image data" in exc_info.value.message
+
+
+async def test_unexpected_http_decoder_error_not_wrapped_as_value_error(
+    loader: ImageLoader,
+) -> None:
+    """An unexpected decoder failure on a fetched image must not be
+    classified as a client validation error: it propagates unchanged
+    from load_image and the batch path folds it into a generic Exception,
+    so the frontend answers 500, not 400.
+    """
+    loader._open_image = AsyncMock(  # type: ignore[method-assign]
+        side_effect=OSError("image file is truncated")
+    )
+    mock_fetch = _mock_fetch_bytes()
+
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        with pytest.raises(OSError, match="truncated"):
+            await loader.load_image("https://example.com/img.png")
+
+        with pytest.raises(Exception) as exc_info:
+            await loader.load_image_batch(
+                [{URL_VARIANT_KEY: "https://example.com/img.png"}]
+            )
+    assert not isinstance(exc_info.value, ValueError)
+    assert "truncated" in str(exc_info.value)
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

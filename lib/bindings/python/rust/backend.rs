@@ -43,7 +43,7 @@ use pythonize::{depythonize, pythonize};
 
 use crate::ModelInput;
 use crate::context::Context as PyContext;
-use crate::errors::{extract_http_like_error, py_exception_to_backend_error};
+use crate::errors::{http_like_error_to_dynamo, py_exception_to_backend_error};
 use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
@@ -230,6 +230,7 @@ impl LlmRegistration {
         bootstrap_host = None,
         bootstrap_port = None,
         enable_eagle = false,
+        max_gpu_lora_count = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -243,6 +244,7 @@ impl LlmRegistration {
         bootstrap_host: Option<String>,
         bootstrap_port: Option<u16>,
         enable_eagle: bool,
+        max_gpu_lora_count: Option<u32>,
     ) -> Self {
         Self {
             inner: RsLlmRegistration {
@@ -251,6 +253,7 @@ impl LlmRegistration {
                 total_kv_blocks,
                 max_num_seqs,
                 max_num_batched_tokens,
+                max_gpu_lora_count,
                 data_parallel_size,
                 data_parallel_start_rank,
                 enable_eagle,
@@ -279,6 +282,10 @@ impl LlmRegistration {
     #[getter]
     fn max_num_batched_tokens(&self) -> Option<u64> {
         self.inner.max_num_batched_tokens
+    }
+    #[getter]
+    fn max_gpu_lora_count(&self) -> Option<u32> {
+        self.inner.max_gpu_lora_count
     }
     #[getter]
     fn data_parallel_size(&self) -> Option<u32> {
@@ -562,11 +569,6 @@ pub struct Worker {
     engine: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     config: RsWorkerConfig,
-    /// `true` if this `Worker` instance constructed the dynamo runtime
-    /// itself (no `DistributedRuntime` already existed in this process).
-    /// Determines whether `run()` should call `runtime.shutdown()` at the
-    /// end — we only want to tear down a runtime we own.
-    owns_runtime: bool,
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
@@ -582,6 +584,8 @@ pub struct Worker {
 
 #[pymethods]
 impl Worker {
+    /// Create a single-use worker and offer the process runtime to the PyO3 bridge.
+    /// Transport overrides are resolved when the worker starts, without env writes.
     #[new]
     #[pyo3(signature = (engine, config, event_loop, raw = false))]
     fn new(
@@ -590,43 +594,16 @@ impl Worker {
         event_loop: PyObject,
         raw: bool,
     ) -> PyResult<Self> {
-        // True existing-only check — `runtime_from_existing()` would
-        // synthesize a fresh runtime here and falsely mark us as shared.
-        let owns_runtime = !rs::Worker::has_existing_runtime();
-
-        if owns_runtime {
-            // Apply RuntimeConfig env overrides synchronously, on the
-            // calling thread, before any tokio worker threads spawn.
-            // Setting env vars from inside the future-into-py block would
-            // race with concurrent env reads in already-running tokio
-            // tasks (NATS / etcd setup).
-            config.inner.runtime.apply_to_env();
-
-            let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-            let primary = worker.tokio_runtime().map_err(to_pyerr)?;
-            // `init_with_runtime` errors if already initialized; that case
-            // means someone called us in a process where the OnceCell was
-            // populated between our check and now. Idempotent — ignore.
-            let _ = pyo3_async_runtimes::tokio::init_with_runtime(primary);
-        } else if config.inner.runtime.has_overrides() {
-            // The shared runtime was constructed before our caller, so its
-            // env-driven config (`DYN_DISCOVERY_BACKEND` etc.) is already
-            // baked in. Setting env vars now wouldn't change the runtime
-            // — surface the silent-drop loudly so operators don't assume
-            // their override took effect.
-            tracing::warn!(
-                "Worker received RuntimeConfig overrides but the dynamo \
-                 runtime was already constructed elsewhere; overrides ignored. \
-                 Set DYN_DISCOVERY_BACKEND / DYN_REQUEST_PLANE / DYN_EVENT_PLANE \
-                 in the environment instead."
-            );
-        }
+        // Fetching may already have initialized Tokio. Transport options belong
+        // to the worker's DistributedRuntime, not the process-wide executor, and
+        // are resolved directly by RsWorker without changing environment vars.
+        let primary = rs::Worker::ensure_process_runtime().map_err(to_pyerr)?;
+        crate::adopt_bridge_runtime(primary);
 
         Ok(Self {
             engine: Arc::new(engine),
             event_loop: Arc::new(event_loop),
             config: config.inner,
-            owns_runtime,
             consumed: AtomicBool::new(false),
             raw,
         })
@@ -653,10 +630,9 @@ impl Worker {
         let engine = self.engine.clone();
         let event_loop = self.event_loop.clone();
         let config = self.config.clone();
-        let owns_runtime = self.owns_runtime;
         let raw = self.raw;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             // No fallback: `runtime_from_existing` creates the process runtime when there isn't
             // one, so it only fails when the settings themselves are bad. Retrying through
             // `Worker::from_settings` would read those same settings and fail the same way.
@@ -703,18 +679,11 @@ impl Worker {
 
             let result = worker.run(runtime.clone()).await.map_err(to_pyerr);
 
-            // Only tear the runtime down if we constructed it. When a
-            // `DistributedRuntime` was already in scope (HTTP frontend,
-            // tests, etc.) it owns the shutdown lifecycle and we'd be
-            // pulling the rug out from other tasks if we called shutdown.
-            if owns_runtime {
-                runtime.shutdown();
-            } else {
-                tracing::debug!(
-                    "Worker.run skipping runtime.shutdown(); runtime is \
-                     shared with another caller"
-                );
-            }
+            // runtime_from_existing() shares Tokio but creates independent
+            // cancellation tokens and a graceful-shutdown tracker. This run
+            // owns that wrapper, including cleanup on engine startup failure;
+            // shutting it down does not cancel another DistributedRuntime.
+            runtime.shutdown();
 
             result
         })
@@ -934,6 +903,7 @@ impl PyEngineCore {
                     total_kv_blocks: opt_attr::<u64>(&v, "total_kv_blocks")?,
                     max_num_seqs: opt_attr::<u64>(&v, "max_num_seqs")?,
                     max_num_batched_tokens: opt_attr::<u64>(&v, "max_num_batched_tokens")?,
+                    max_gpu_lora_count: opt_attr::<u32>(&v, "max_gpu_lora_count")?,
                     data_parallel_size: opt_attr::<u32>(&v, "data_parallel_size")?,
                     data_parallel_start_rank: opt_attr::<u32>(&v, "data_parallel_start_rank")?,
                     enable_eagle: opt_attr::<bool>(&v, "enable_eagle")?.unwrap_or(false),
@@ -1715,21 +1685,28 @@ where
 /// subclasses go through the shared mapping table; built-in Python
 /// exceptions fall back to the closest category.
 fn py_err_to_dynamo(err: PyErr) -> DynamoError {
-    let (backend, message) = Python::with_gil(|py| {
-        if let Some(mapped) = py_exception_to_backend_error(py, &err) {
-            return mapped;
+    Python::with_gil(|py| {
+        if let Some((backend, message)) = py_exception_to_backend_error(py, &err) {
+            let mut builder = DynamoError::builder()
+                .error_type(ErrorType::Backend(backend))
+                .message(message.clone());
+            if backend == BackendError::InvalidArgument {
+                builder = builder.public_message(message);
+            }
+            return builder.build();
         }
-        // See engine.rs::process_item — emit JSON-shaped message so the OpenAI
-        // frontend can read the status code instead of defaulting to 500.
-        if let Some((code, message)) = extract_http_like_error(py, &err) {
-            let backend = if (400..500).contains(&code) {
-                BackendError::InvalidArgument
-            } else {
-                BackendError::Unknown
-            };
-            let json_msg = serde_json::json!({ "message": message, "code": code }).to_string();
-            return (backend, json_msg);
+
+        if let Some(error) = http_like_error_to_dynamo(py, &err) {
+            return error;
         }
+
+        if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
+            return DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine shutting down")
+                .build();
+        }
+
         let backend = if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
             || err.is_instance_of::<pyo3::exceptions::PyTypeError>(py)
         {
@@ -1745,15 +1722,13 @@ fn py_err_to_dynamo(err: PyErr) -> DynamoError {
             BackendError::Disconnected
         } else if err.is_instance_of::<pyo3::exceptions::asyncio::CancelledError>(py) {
             BackendError::Cancelled
-        } else if err.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py) {
-            BackendError::EngineShutdown
         } else {
             BackendError::Unknown
         };
-        (backend, err.to_string())
-    });
-    DynamoError::builder()
-        .error_type(ErrorType::Backend(backend))
-        .message(message)
-        .build()
+
+        DynamoError::builder()
+            .error_type(ErrorType::Backend(backend))
+            .message(err.to_string())
+            .build()
+    })
 }

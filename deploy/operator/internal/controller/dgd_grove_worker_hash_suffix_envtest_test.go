@@ -168,6 +168,7 @@ func createLegacyGroveWorkerHashSuffixTestDGD(
 			},
 		}},
 	}
+	require.NoError(t, ctrl.SetControllerReference(dgd, legacyPCS, env.Client().Scheme()))
 	require.NoError(t, legacyClient.Create(ctx, legacyPCS))
 }
 
