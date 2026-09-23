@@ -146,8 +146,43 @@ A payload row stores the client request under `payload.request`, the completed r
 }
 ```
 
-`input_sequence_hashes` are Dynamo's sequence-aware rolling hashes. DynoSim maps them to compact
-internal IDs while loading the original trace; it does not create an intermediate Mooncake file.
+By default, `input_sequence_hashes` are Dynamo's sequence-aware rolling hashes and output hashes
+are disabled. DynoSim maps input hashes to compact internal IDs while loading the original trace;
+it does not create an intermediate Mooncake file.
+
+### Generated-Prefix Identity
+
+To capture generated-prefix identity, mount a secret file containing a randomly generated 32-byte
+key encoded as 64 hexadecimal characters and set `DYN_REQUEST_TRACE_HASH_KEY_FILE` to its path.
+Request-end tracing must also be enabled. An unreadable or malformed key file fails trace
+initialization. The file is read once at startup; there is no per-request file access.
+
+```bash
+export DYN_REQUEST_TRACE=1
+export DYN_REQUEST_TRACE_RECORDS=request_end
+export DYN_REQUEST_TRACE_HASH_KEY_FILE=/run/secrets/replay-hash-key
+```
+
+In this mode, both `input_sequence_hashes` and `output_sequence_hashes` use a keyed BLAKE3 chain.
+Each digest includes the block size, the preceding sequence identity, and the token block, with
+integers encoded little-endian. Hashes retain the existing 64-bit replay-identity format; they are
+not integrity checks and retain the collision limits of 64-bit identifiers. The replay object adds
+`hash_algorithm` (`blake3-keyed-chain64-v1`) and `hash_key_id` (a key-derived identifier, not the key).
+When an input ends mid-block, its first output hash replaces the trailing input hash; otherwise
+output hashes append. A later request with the same prefix and key produces matching identities.
+
+Use the same secret on frontends whose traces will be replayed together. To rotate, provision a new
+random key and restart those frontends. The key ID and all identities change. Consumers must group
+identities by model/tokenizer, block size, algorithm, and key ID; do not match across key epochs or
+against legacy unkeyed traces. Existing input-only consumers can still deserialize the numeric
+input hashes, but need the namespace handling above when combining trace files. Output-aware
+replay consumers must explicitly implement continuation-chain reconstruction.
+
+Trace records do not serialize output text or token IDs through this feature. Token IDs are held
+transiently while an unfinished block is hashed. Keyed hashes prevent offline token-guessing from
+the hashes alone without the secret; they still reveal prefix equality within a key epoch.
+Protect the key separately from traces, and use independent keys for separate trust domains.
+This option does not redact separately enabled request-payload capture.
 
 ## Supported Replay Requests
 

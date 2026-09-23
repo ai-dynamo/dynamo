@@ -350,6 +350,16 @@ Every result and skipped-point entry in the artifact carries a `kv_seed_regime` 
   Comma-separated record types: `request_end`, `request_payload`, and `tool`.
 </ParamField>
 
+<ParamField path="DYN_REQUEST_TRACE_HASH_KEY_FILE" type="string">
+  Opt in to keyed input and generated-output sequence hashes on eligible request-end records.
+  Path to a secret file containing a random 32-byte key encoded as 64 hexadecimal characters.
+  Unset by default: input hashes retain their existing format and output capture is disabled.
+  Read once at startup; an unreadable or malformed file fails trace initialization. Rotate by
+  replacing the key and restarting. Records include the algorithm and a key-derived ID, never
+  the key, output text, or token IDs from this capture. Tokens may be held transiently in memory.
+  See [generated-prefix identity](request-traces.mdx#generated-prefix-identity) for replay compatibility.
+</ParamField>
+
 <ParamField path="DYN_REQUEST_TRACE_SINKS" type="string" default="file">
   Comma-separated sinks: `file`, `stderr`, `nats`, `otel`, and `s3`.
 </ParamField>

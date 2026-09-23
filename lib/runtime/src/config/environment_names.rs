@@ -628,6 +628,9 @@ pub mod llm {
 
     /// Request trace and request payload logging configuration.
     pub mod request_trace {
+        /// Enables keyed input/output replay identities using a 32-byte hex key file.
+        pub const DYN_REQUEST_TRACE_HASH_KEY_FILE: &str = "DYN_REQUEST_TRACE_HASH_KEY_FILE";
+
         /// Master switch. Truthy enables request trace emission.
         pub const DYN_REQUEST_TRACE: &str = "DYN_REQUEST_TRACE";
 
