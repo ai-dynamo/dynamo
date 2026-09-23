@@ -15,9 +15,11 @@ vLLM integration). #15088 is superseded. The foundation is refreshed onto main
 ## Coverage at the foundation and unit boundaries
 
 The foundation's four families remain instantiated for both vLLM and SGLang.
-New backend units are vLLM-only; common production tests run once. Counts below
-describe retained scope; refreshed execution and historical evidence are
-separated below.
+Shared unit bodies are instantiated for vLLM; SGLang unit adapters remain a
+follow-up. Common production tests run once. The current source declares 11
+common tests, 28 shared vLLM instances and 42 native regressions (81 total), all
+pre-merge. Compiled collection and execution confirmed this inventory; counts
+track coverage rather than an acceptance quota.
 
 | Requirement / retained assertions | Owning layer | Disposition at #15089 |
 | --- | --- | --- |
@@ -25,7 +27,7 @@ separated below.
 | R11/C6/C7 opening failure, premature EOF, stream read error, exact delivered prefix and remote release | #14879 shared failure scenario | Preserve vLLM `Unknown` versus SGLang `EngineShutdown` EOF expectations and typed injected errors. |
 | R12/R14/C8 cancellation before native submission, while opening and during read; request A cancellation leaves B live | #14879 shared cancellation scenario | Preserve both backend enrollments, independent request controls, cancelled terminal/usage and successful completion of B. |
 | R13 active cleanup, cancelled terminal/usage, remote route release and repeated cleanup | #14879 shared cleanup scenario; vLLM isolated worker units | Move only vLLM's no-I/O before-start/idempotent-cleanup subsection after replacement validation. Preserve SGLang's original subsection and both active-stream checks. |
-| R01–R32 endpoint/configuration, conversion, validation and state transitions | #15089 [isolated units](UNITS.md) | Full matrix and original-to-new assertion mapping retained; no new SGLang/TRT units. |
+| R01–R32 endpoint/configuration, conversion, validation and state transitions | #15089 [isolated units](UNITS.md) | Shared bodies and native exceptions retain mapped assertions; vLLM activated, SGLang/TRT unit adapters deferred. |
 | Native request mapping, gRPC rank metadata, discovery/health, connection pool, decode cancellation, opaque handoff, media/Encode, LoRA and RL | Existing [vLLM library tests](../vllm/src/tests.rs) | Preserve transport/runtime assertions. Pure definitions and exact request-field assertions move only to their mapped isolated replacements. |
 | vLLM Mocker streaming/logprobs/usage, opaque prefill/decode, explicit cancellation of active scheduler work, KV relay/indexer | Existing [vLLM Mocker suite](../../mocker/servers/vllm/tests/sidecar.rs) | Retain all four cases at this boundary; replacement deletions belong to #15091. |
 | SGLang Mocker incremental tokens/logprobs/usage, opaque prefill/decode, Abort release, two-request cancellation isolation and shutdown | Existing [SGLang Mocker suite](../../mocker/servers/sglang/tests/sidecar.rs) | Retain all four cases and their distinct assertions. |
@@ -55,14 +57,26 @@ before removing them; moving this work between PRs is not a coverage reduction.
 
 ## Validation and historical evidence
 
-On 2026-09-22, foundation `286d6fd5` collected and passed all eight conformance
-cases and executed all eight retained Mocker cases, with GPUs hidden. Targeted
-Clippy, formatting and commit hooks passed. The restacked unit boundary passed
-62 isolated cases in a network-isolated CPU container, all eight conformance
-cases and all 102 common/vLLM library cases; overlapping selections are not
-added together. See [UNITS.md](UNITS.md) for commands and accounting. Refreshed
-trusted CI is pending. Run the retained wire boundary independently of the
-isolated unit runner:
+The shared-scenario and per-test lane changes passed 81 isolated units from
+compiled binaries (11 common, 28 shared vLLM instances, 42 native regressions)
+and 121 complete common/vLLM library tests (13 common, 108 vLLM), with zero
+failed or ignored. The 81 units are included in the 121 library tests. Five
+runner self-tests, eight retained testkit conformance tests, four vLLM Mocker
+tests and four SGLang Mocker tests also passed. All 81 units were inventoried and
+exported, then passed again from read-only binaries in a CPU container using
+`--network none`, without engines, GPUs or model mounts. Workspace formatting,
+runner/test Ruff and Black checks and workflow YAML parsing passed. Targeted
+Clippy passed for common, vLLM and testkit with warnings denied. No current-head
+GitHub CI or full-workspace test execution was performed for these changes.
+[UNITS.md](UNITS.md) owns the detailed results, compiled inventory/export
+commands, lane semantics and the old-to-new assertion mapping.
+
+Historically, on 2026-09-22, foundation `286d6fd5` passed eight conformance and
+eight retained Mocker cases with GPUs hidden. The previous unit boundary
+`b3ab1638` passed 62 isolated cases in a network-isolated CPU container, eight
+conformance cases and 102 common/vLLM library cases. These selections overlap;
+they cannot be summed or reused as proof for the current changes. Run the
+retained wire boundary independently of the isolated unit runner:
 
 ```sh
 cargo metadata --locked --format-version 1 >/dev/null

@@ -3,6 +3,11 @@
 
 //! Dynamo sidecar for vLLM's released native gRPC API.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/tests/unit/lane.rs"]
+mod test_lane;
+
 mod args;
 mod client;
 mod convert;
@@ -22,3 +27,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../../testkit/tests/unit/fixtures.rs"]
 mod unit_fixtures;
+
+#[cfg(test)]
+#[path = "../../testkit/tests/unit/fixtures/vllm.rs"]
+mod unit_vllm_fixtures;

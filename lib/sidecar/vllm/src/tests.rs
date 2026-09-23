@@ -35,7 +35,7 @@ use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
-use crate::unit_fixtures::*;
+use crate::unit_vllm_fixtures::*;
 
 #[derive(Clone, Default)]
 struct FakeVllm {

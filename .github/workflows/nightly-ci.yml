@@ -1278,6 +1278,9 @@ jobs:
       # cargo llvm-cov is a drop-in for cargo test; --no-report defers output
       # so we can generate multiple formats without re-running the tests.
       run: |
+        if [ '${{ matrix.dir }}' = '.' ]; then
+          python3 lib/sidecar/testkit/run.py --suite unit --lane nightly --list
+        fi
         cargo llvm-cov --locked --all-targets --no-report
         cargo llvm-cov report --output-path coverage-rust.txt
         cargo llvm-cov report --lcov --output-path coverage-rust.lcov
