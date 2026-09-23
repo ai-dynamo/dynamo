@@ -2,6 +2,10 @@
 import bisect, collections, datetime as dt, json, math, re, statistics, sys
 from pathlib import Path
 ROOT=Path('/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923')
+def run_location(label):
+    marker=ROOT/'control'/(label+'-job-id')
+    job=(marker if marker.exists() else ROOT/'control/job-id').read_text().strip()
+    return job,ROOT/'results'/(job+'-main-'+label)/'ablations'/('main-'+label)
 def epoch(x): return dt.datetime.fromisoformat(x).timestamp()
 def rows(path):
     with path.open() as f:
@@ -78,8 +82,7 @@ def window(data,start,end):
     return out
 
 def analyze(label):
-    job=(ROOT/'control/job-id').read_text().strip()
-    run=ROOT/'results'/(job+'-main-'+label)/'ablations'/('main-'+label)
+    job,run=run_location(label)
     end_source='MEASUREMENT_ENDED' if (run/'MEASUREMENT_ENDED').exists() else 'SENDING_ENDED'
     start=epoch((run/'MEASUREMENT_STARTED').read_text().strip());end=epoch((run/end_source).read_text().strip())
     duration=end-start

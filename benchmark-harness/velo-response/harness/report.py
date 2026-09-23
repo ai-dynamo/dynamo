@@ -4,10 +4,9 @@ import json
 from pathlib import Path
 import re
 import statistics
-from analyze_campaign import ROOT
+from analyze_campaign import ROOT, run_location
 
 MODES = ('tcp', 'quic', 'velo-tcp', 'velo-rdma')
-job = (ROOT / 'control/job-id').read_text().strip()
 
 def measurements(result):
     h = result['headline']
@@ -54,10 +53,10 @@ for mode in MODES:
     runs[mode] = []
     for repeat in range(1, 5):
         label = f'r{repeat}-{mode}'
-        run = ROOT / 'results' / f'{job}-main-{label}' / 'ablations' / f'main-{label}'
+        job, run = run_location(label)
         result = json.loads((run / 'matching-window-results.json').read_text())
         assert result['quality']['accepted'], label
-        runs[mode].append({'label': label, 'metrics': measurements(result),
+        runs[mode].append({'label': label, 'job': job, 'metrics': measurements(result),
                            'quality': result['quality'],
                            'client_counts': result['client']['counts'],
                            'error_examples': result['client']['error_examples']})

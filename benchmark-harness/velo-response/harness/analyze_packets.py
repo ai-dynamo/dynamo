@@ -2,7 +2,7 @@
 import json
 import sys
 from pathlib import Path
-from analyze_campaign import ROOT, rows, epoch, scalar
+from analyze_campaign import ROOT, rows, epoch, scalar, run_location
 
 
 def flattened(value, prefix=''):
@@ -16,8 +16,7 @@ def flattened(value, prefix=''):
 
 
 def analyze(label):
-    job = (ROOT / 'control/job-id').read_text().strip()
-    run = ROOT / 'results' / f'{job}-main-{label}' / 'ablations' / f'main-{label}'
+    job, run = run_location(label)
     path = run / 'matching-window-results.json'
     result = json.loads(path.read_text())
     start, end = (result['window'][k] for k in ('epoch_start', 'epoch_end'))

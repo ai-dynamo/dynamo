@@ -3,6 +3,12 @@ set -euo pipefail
 ROOT=/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923
 LABEL=${1:?condition}
 export SLURM_JOB_ID=$(cat "$ROOT/control/job-id")
+END=$(squeue -h -j "$SLURM_JOB_ID" -o '%e')
+if (( $(date -d "$END" +%s) - $(date +%s) < 1800 )); then
+    printf '%s %s\n' "$SLURM_JOB_ID" "$LABEL" > "$ROOT/control/NEEDS_ALLOCATION"
+    echo "Less than 30 minutes remain; resume $LABEL in the continuation allocation."
+    exit 75
+fi
 export DYNAMO_PROFILE_ROOT="$ROOT" PYTHONUNBUFFERED=1
 export PATH="/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-numa/env/services/bin:$PATH"
 export SLURM_TMPDIR="/var/tmp/frontend-main-quic-$SLURM_JOB_ID-$LABEL"
@@ -22,3 +28,4 @@ srun --jobid="$SLURM_JOB_ID" --overlap --input=none --nodes=5 --ntasks=5 --ntask
  --cpu-bind=none --kill-on-bad-exit=1 --label \
  bash -c 'ulimit -Sn 131072; mkdir -p "$SLURM_TMPDIR"; exec python3 "$1" --config "$2"' campaign-rank "$ROOT/harness/saturation_agent.py" "$ROOT/configs/$LABEL.json"
 test -f "$ROOT/results/$SLURM_JOB_ID-main-$LABEL/COMPLETE"
+printf '%s\n' "$SLURM_JOB_ID" > "$ROOT/control/$LABEL-job-id"
