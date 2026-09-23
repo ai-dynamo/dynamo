@@ -734,6 +734,12 @@ async def run_gms_failover_post_lock_fence(
         protected_blocks=protected_blocks,
         protected_leases=protected_leases,
     )
+    if backend_name == "sglang":
+        from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            mark_gms_recovery_ready,
+        )
+
+        await asyncio.to_thread(mark_gms_recovery_ready)
     from gpu_memory_service.integrations.common.gpu_quiescence import (
         gpu_quiescence_provider_configured,
     )

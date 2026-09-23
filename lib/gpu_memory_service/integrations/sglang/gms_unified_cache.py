@@ -249,11 +249,11 @@ def make_gms_unified_cache_class():
                 return True
             if bool(getattr(self._gms_directory, "_standby", False)):
                 from gpu_memory_service.integrations.sglang.writer_lifecycle import (
-                    gpu_quiescence_ready,
+                    gms_recovery_ready,
                 )
 
                 if not self._gms_tp.all_true(
-                    "steady:gpu-recovery-ready", gpu_quiescence_ready()
+                    "steady:gms-recovery-ready", gms_recovery_ready()
                 ):
                     return False
 
@@ -421,6 +421,28 @@ def make_gms_unified_cache_class():
                 # the radix key contains only the page-aligned cached prefix.
                 request_pages = request_pages[:expected_pages]
                 resident_len = len(request_pages) * int(self.page_size)
+                # Before the cohort enters exclusive steady state, validate the
+                # CPU allocator record against SGLang native residency. The CPU
+                # record identifies pages; native indices prove the layout.
+                if not self._gms_steady_state:
+                    if last_device_node is None:
+                        from sglang.srt.mem_cache.base_prefix_cache import (
+                            MatchPrefixParams,
+                        )
+
+                        result = super().match_prefix(MatchPrefixParams(key=key))
+                        indices = result.device_indices
+                    else:
+                        indices = self.tree_core.collect_full_device_indices(
+                            last_device_node,
+                            self.tree_core.root_node_handle(
+                                getattr(key, "extra_key", None)
+                            ),
+                        )
+                    if indices is None:
+                        raise RuntimeError(
+                            "completed SGLang prefix has no resident device indices"
+                        )
             elif last_device_node is None:
                 # Kept for direct callers and tests. The normal completion path
                 # captures the insert result and avoids walking the same radix
@@ -435,6 +457,23 @@ def make_gms_unified_cache_class():
                     last_device_node,
                     self.tree_core.root_node_handle(getattr(key, "extra_key", None)),
                 )
+                # RustTreeCore can return ``None`` after a captured insert has
+                # been finalized, even though the completed prefix remains in
+                # the native cache. Recover through SGLang's authoritative
+                # lookup instead of crashing the scheduler or publishing an
+                # entry without physical-page evidence. This is outside the
+                # normal CPU-page fast path and is only a lifecycle fallback.
+                if indices is None:
+                    from sglang.srt.mem_cache.base_prefix_cache import (
+                        MatchPrefixParams,
+                    )
+
+                    result = super().match_prefix(MatchPrefixParams(key=key))
+                    indices = result.device_indices
+                if indices is None:
+                    raise RuntimeError(
+                        "completed SGLang prefix has no resident device indices"
+                    )
                 resident_len = len(indices)
             if resident_len != len(key):
                 raise RuntimeError("completed SGLang prefix is not fully resident")
