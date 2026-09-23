@@ -21,6 +21,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/webhookconfig"
 	snapshotcrds "github.com/ai-dynamo/snapshot/api/v1alpha1/crds"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -67,6 +68,9 @@ type WebhookSetupFunc func(ctrl.Manager, WebhookSetupOptions) error
 type Options struct {
 	// Admission selects the Helm-rendered admission configurations to install.
 	Admission AdmissionWebhooks
+	// AdditionalAdmission installs dependency admission registrations, such as
+	// the LeaderWorkerSet defaulting webhook, next to the operator's own.
+	AdditionalAdmission webhookconfig.Configurations
 	// SetupWebhooks registers the handlers served by the environment.
 	SetupWebhooks WebhookSetupFunc
 
@@ -227,22 +231,28 @@ func startRuntime(opts Options) (*runtimeEnv, error) {
 }
 
 func webhookInstallOptions(opts Options) (envtest.WebhookInstallOptions, error) {
-	if !opts.Admission.Mutating && !opts.Admission.Validating {
+	additional := opts.AdditionalAdmission
+	if !opts.Admission.Mutating && !opts.Admission.Validating &&
+		len(additional.Mutating) == 0 && len(additional.Validating) == 0 {
 		return envtest.WebhookInstallOptions{}, nil
 	}
-	mutating, validating, err := helmWebhookConfigurations()
-	if err != nil {
-		return envtest.WebhookInstallOptions{}, err
-	}
 	install := envtest.WebhookInstallOptions{}
-	if opts.Admission.Mutating {
-		addMutatingBypassUsers(mutating, opts.Admission.MutatingBypassUsers)
-		install.MutatingWebhooks = mutating
+	if opts.Admission.Mutating || opts.Admission.Validating {
+		mutating, validating, err := helmWebhookConfigurations()
+		if err != nil {
+			return envtest.WebhookInstallOptions{}, err
+		}
+		if opts.Admission.Mutating {
+			addMutatingBypassUsers(mutating, opts.Admission.MutatingBypassUsers)
+			install.MutatingWebhooks = mutating
+		}
+		if opts.Admission.Validating {
+			addValidationBypassUsers(validating, opts.Admission.BypassUsers)
+			install.ValidatingWebhooks = validating
+		}
 	}
-	if opts.Admission.Validating {
-		addValidationBypassUsers(validating, opts.Admission.BypassUsers)
-		install.ValidatingWebhooks = validating
-	}
+	install.MutatingWebhooks = append(install.MutatingWebhooks, additional.Mutating...)
+	install.ValidatingWebhooks = append(install.ValidatingWebhooks, additional.Validating...)
 	return install, nil
 }
 

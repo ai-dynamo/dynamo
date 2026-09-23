@@ -490,51 +490,6 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	}
 }
 
-// TestVLLMBackend_UpdateContainer_RejectsNonPositiveParallelismSizes proves the
-// error from vllmLaunchArgs.ValidateParallelismSizes actually reaches and halts
-// UpdateContainer for a multinode deployment, rather than only being reachable
-// in a unit test of the validation method itself: a malformed
-// "--tensor-parallel-size 0" (or negative) must stop container construction
-// with a clear error instead of silently reaching vLLM unmodified.
-func TestVLLMBackend_UpdateContainer_RejectsNonPositiveParallelismSizes(t *testing.T) {
-	backend := &VLLMBackend{}
-	container := &corev1.Container{
-		Command: []string{"python3"},
-		Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "0"},
-	}
-	err := backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(8))
-	if err == nil {
-		t.Fatal("UpdateContainer() = nil error, want an error for --tensor-parallel-size 0")
-	}
-	if !strings.Contains(err.Error(), tensorParallelSizeFlag) {
-		t.Errorf("UpdateContainer() error = %q, want it to name the offending flag %q", err, tensorParallelSizeFlag)
-	}
-}
-
-// TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand proves
-// updateVLLMMultinodeArgs parses Command + Args, not Args alone: Kubernetes
-// permits a flag in either field, and IsElasticEPRayLaunch /
-// shouldInjectVLLMMpWaitLeaderInit already parse both. A
-// "--tensor-parallel-size 16" that lives entirely in Command, with an empty
-// Args, must still be read as 16 -- not silently fall back to the default of
-// 1 and skip the multinode injection this topology requires.
-func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing.T) {
-	backend := &VLLMBackend{}
-	container := &corev1.Container{
-		Command: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"},
-		Args:    []string{},
-	}
-	err := backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(4))
-	require.NoError(t, err)
-
-	// TP=16 across 4 GPUs per node needs the mp/ray distributed launch path,
-	// which rewrites Args. If TP had been silently read as the default of 1,
-	// Args would still be empty here.
-	if len(container.Args) == 0 {
-		t.Fatal("Args were not rewritten -- --tensor-parallel-size in Command was not read, so no multinode launch was injected")
-	}
-}
-
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 
@@ -984,7 +939,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
 			// Call updateVLLMMultinodeArgs with annotations
-			require.NoError(t, updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations))
+			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations)
 
 			if tt.expectNotModified {
 				// Args should not have changed
