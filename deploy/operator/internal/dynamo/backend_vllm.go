@@ -353,7 +353,6 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		return
 	}
 
-	// Mount the DGD-owned wait scripts into an init container using the main image.
 	mainContainer := &podSpec.Containers[0]
 	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
@@ -396,7 +395,7 @@ func (b *VLLMBackend) resolveLeaderWaitInitConfig(podSpec *corev1.PodSpec, numbe
 		return leaderWaitInitConfig{}, false
 	}
 
-	// MP workers keep their existing TCP-based master-port wait contract.
+	// MP readiness applies to every DGD origin version; only the Ray path is gated.
 	container := &podSpec.Containers[0]
 	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
 	if args.IsMpDistributedExecutorBackend {
@@ -547,9 +546,6 @@ func injectMpDistributedLaunchFlags(
 	injectFlagsIntoContainerCommand(container, mpFlags, needsShell, "vllm")
 }
 
-// injectRayDistributedLaunchFlags injects the Ray launch commands for
-// multi-node TP/PP deployments. Worker pod rendering adds a Ray GCS health
-// gate before this generated worker command starts.
 func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) {
 	switch role {
 	case RoleLeader:
