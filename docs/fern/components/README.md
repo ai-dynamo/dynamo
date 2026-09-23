@@ -32,6 +32,21 @@ Import the component, then place it in the page body. Ambient use without an
 import renders `Unsupported JSX tag`. The `@/` prefix resolves to the `fern/`
 root and is rewritten to a relative path at publish time.
 
+### DiffusionCatalog
+
+The diffusion overview's responsive card grid. Keep card markup, provider images, and its single
+native sidebar-page link in MDX so Fern can rewrite them. The component injects scoped styles on
+the server, including dark mode, keyboard focus, and reduced-motion support; it does not filter or
+fetch model metadata in the browser.
+
+```mdx
+import { DiffusionCatalog } from "@/components/DiffusionCatalog";
+
+<DiffusionCatalog>
+  {/* Native card markup; see pages/recipes/examples/diffusion-overview.mdx. */}
+</DiffusionCatalog>
+```
+
 ### RecipeStyles
 
 Once per recipe/benchmark page, and on the two landing READMEs, immediately

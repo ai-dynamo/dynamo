@@ -17,6 +17,19 @@ Each example has three authoring surfaces:
 2. One card in `overview.mdx`. Its Markdown link is resolved by Fern for each version and locale.
 3. A page entry under **Recipes → Examples** in `docs/fern/index.yml`.
 
+`diffusion-overview.mdx` is a topic landing page, not another source-picker example. Its
+`DiffusionCatalog` component supplies server-rendered styling; native MDX images and one stretched
+page link per card preserve Fern's asset, version, and locale rewriting. Do not embed DGDs or add
+secondary links to these cards. Keep it first under **Examples → Diffusion** and linked from the
+main overview, without an `ExampleSelector` or a duplicate main-catalog card.
+
+Cards identify the source manifest in `data-source` for validation, and carry model, modality,
+backend, weight-size, and experimental metadata. Experimental and regular entries share one grid.
+Weight-size chips use the pinned Hugging Face file metadata in `diffusion-model-sizes.yaml`: decimal
+GB of checkpoint weights, including pipeline components, excluding duplicate root exports. These
+are not GPU memory estimates. Update the snapshot and visible chip values together. The snapshot
+also records the sources of the added provider logos.
+
 The overview cards are the catalog source, matching the model-recipe landing-page pattern. They
 are not generated and do not use the model-recipe performance schema. Each card declares:
 
