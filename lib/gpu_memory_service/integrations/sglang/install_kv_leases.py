@@ -1908,6 +1908,14 @@ def _gms_paged_alloc_extend(
         raise
     if out is None:
         _rollback_reserved_pages(st, leases)
+    else:
+        _record_extend_pages(
+            st,
+            [int(lease.block_id) for lease in leases],
+            prefix_lens_cpu,
+            seq_lens_cpu,
+            int(self.page_size),
+        )
     return out
 
 
@@ -1968,6 +1976,13 @@ def _gms_paged_alloc_decode(self, seq_lens, seq_lens_cpu, last_loc):
         raise
     if out is None:
         _rollback_reserved_pages(st, leases)
+    else:
+        _record_decode_pages(
+            st,
+            [int(lease.block_id) for lease in leases],
+            seq_lens_cpu,
+            int(self.page_size),
+        )
     return out
 
 

@@ -65,6 +65,14 @@ def test_multinode_failover_lock_is_rank_scoped(monkeypatch, node_rank, expected
     assert os.environ["FAILOVER_LOCK_PATH"] == expected
 
 
+def test_sglang_node_rank_is_exported_for_gms_children(monkeypatch):
+    monkeypatch.delenv("GMS_SGLANG_NODE_RANK", raising=False)
+
+    init_llm._export_gms_node_rank(SimpleNamespace(node_rank=15))
+
+    assert os.environ["GMS_SGLANG_NODE_RANK"] == "15"
+
+
 @pytest.mark.parametrize(("tp_size", "nnodes"), [(2, 1), (4, 2)])
 def test_authoritative_tp_requires_rank_local_directory_topology(
     monkeypatch, tp_size, nnodes
@@ -681,6 +689,45 @@ def test_lock_before_init_keeps_release_and_remap_path(monkeypatch):
 
     monkeypatch.setenv("GMS_KV_LEASES", "1")
     assert init_llm._can_prewarm_mapped_standby() is True
+
+
+@pytest.mark.parametrize(("lock_before_init", "expected"), [("0", True), ("1", False)])
+def test_sglang_leader_broadcasts_fast_fence_for_mapped_standby(
+    monkeypatch, lock_before_init, expected
+):
+    from dynamo.common import rank_liveness
+
+    captured = {}
+
+    class Monitor:
+        def __init__(self, callback, **kwargs):
+            captured.update(callback=callback, **kwargs)
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setenv("DYN_GMS_RANK_LIVENESS", "1")
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", lock_before_init)
+    monkeypatch.setattr(rank_liveness, "RankLivenessMonitor", Monitor)
+    target = SimpleNamespace()
+
+    monitor = failover_watchdog.maybe_start_rank_liveness(
+        target,
+        object(),
+        loop=object(),
+        node_rank=0,
+        leader_host=None,
+        expected_ranks=range(1, 4),
+        runtime_armed=False,
+        cohort_identity="leader:29700",
+    )
+
+    assert monitor is not None
+    assert captured["started"] is True
+    assert captured["broadcast_fence"] is expected
+    assert captured["runtime_armed"] is False
+    assert captured["expected_ranks"] == range(1, 4)
 
 
 @pytest.mark.asyncio
