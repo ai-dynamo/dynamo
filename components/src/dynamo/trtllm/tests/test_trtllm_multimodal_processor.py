@@ -213,9 +213,6 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_h264_data_uri_video_routes_through_nvdec(monkeypatch) -> None:
-    """A data: URI carries its bytes inline, so it must reach the same codec
-    probe and NVDEC path as a fetched URL. Previously it fell through to the
-    vendor loader with nothing to probe."""
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
@@ -248,12 +245,15 @@ async def test_h264_data_uri_video_routes_through_nvdec(monkeypatch) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "uri",
-    ["data:video/mp4;base64", "data:video/mp4,%00%01%02"],
-    ids=["no-comma", "percent-encoded"],
+    [
+        "data:video/mp4;base64",
+        "data:video/mp4,%00%01%02",
+        "data:video/mp4;base64,AAAA!!!!",
+    ],
+    ids=["no-comma", "not-base64", "invalid-base64-characters"],
 )
-async def test_non_base64_video_data_uri_is_rejected(uri) -> None:
-    """A data: URI that is not base64 must be refused rather than silently
-    decoded into empty or garbage bytes."""
+async def test_malformed_video_data_uri_is_rejected(uri) -> None:
+    """Malformed payloads must 400 rather than decode to garbage or empty bytes."""
     processor = MultimodalRequestProcessor(
         model_type="multimodal",
         model_dir="unused",
@@ -267,7 +267,64 @@ async def test_non_base64_video_data_uri_is_rejected(uri) -> None:
             ep_disaggregated_params=None,
         )
     assert excinfo.value.status == 400
-    assert "Only base64" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_percent_escaped_base64_video_data_uri_is_accepted(monkeypatch) -> None:
+    """A data: URI may percent-escape its base64 body; decode_data_uri unquotes it."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: True)
+    nvdec = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=object()))
+
+    raw = b"\xfb\x00"  # encodes to "+wA=", whose '+' a client may send as %2B
+    encoded = base64.b64encode(raw).decode().replace("+", "%2B")
+    await processor.process_openai_request(
+        {
+            "multi_modal_data": {
+                "video_url": [{"Url": f"data:video/mp4;base64,{encoded}"}]
+            },
+            "token_ids": [1],
+        },
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+    assert nvdec.call_args.args[0] == raw
+
+
+@pytest.mark.asyncio
+async def test_video_data_uri_exactly_at_the_size_limit_is_accepted(
+    monkeypatch,
+) -> None:
+    """The bound is on the decoded length, so a payload at the limit is not
+    rejected by base64 expansion or padding."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=1,
+        tokenizer=MagicMock(),
+    )
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: True)
+    nvdec = MagicMock(return_value=object())
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    monkeypatch.setattr(mmp, "async_load_video", AsyncMock(return_value=object()))
+
+    raw = b"x" * processor.max_file_size_bytes
+    uri = "data:video/mp4;base64," + base64.b64encode(raw).decode()
+    await processor.process_openai_request(
+        {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+    assert len(nvdec.call_args.args[0]) == processor.max_file_size_bytes
 
 
 @pytest.mark.asyncio

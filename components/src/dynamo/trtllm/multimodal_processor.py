@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import asyncio
-import base64
 import logging
 import tempfile
 import time
@@ -41,7 +40,7 @@ from dynamo.common.multimodal.codec_errors import (
     video_decoder_missing,
 )
 from dynamo.common.multimodal.image_loader import ImageLoader
-from dynamo.common.multimodal.media_source import describe_media_source
+from dynamo.common.multimodal.media_source import decode_data_uri, describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -593,23 +592,14 @@ class MultimodalRequestProcessor:
                         if scheme == "data":
                             # The payload is inline, so decode it here and let the
                             # codec probe below treat it like fetched bytes.
-                            meta, sep, payload = normalized_url.partition(",")
-                            if not sep or "base64" not in meta.lower().split(";")[1:]:
-                                raise HttpStatusError(
-                                    400,
-                                    "Only base64 data: URIs are supported for video",
-                                    source,
-                                )
-                            # Bound it as fetch_bytes bounds a download; 4 base64
-                            # characters carry 3 bytes, so check before allocating.
-                            if len(payload) // 4 * 3 > self.max_file_size_bytes:
+                            content = decode_data_uri(normalized_url)
+                            if len(content) > self.max_file_size_bytes:
                                 raise HttpStatusError(
                                     400,
                                     "Video exceeds the maximum allowed size "
                                     f"({self.max_file_size_mb}MB)",
                                     source,
                                 )
-                            content = base64.b64decode(payload)
                         else:
                             content = await fetch_bytes(
                                 normalized_url,
