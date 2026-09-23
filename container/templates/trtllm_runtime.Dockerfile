@@ -108,19 +108,36 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 #
 # tests/dependencies/test_trtllm_mpi.py checks all of this in the built image:
 # the link's target per architecture, the library mpi4py loads, a
-# MPI.COMM_SELF.Spawn, a two-rank ob1 launch, and the CPU affinity after
-# MPI_Init. container/dev/50-framework-paths.sh prefers the same link in login
-# shells.
+# MPI.COMM_SELF.Spawn, a two-rank ob1 launch, the CPU affinity after MPI_Init,
+# and the PMIX_HOSTNAME hook below. container/dev/50-framework-paths.sh prefers
+# the same link in login shells.
 #
-# Transitional. Delete this, the ENV entries and the test's per-architecture
-# expectation when upstream's ompi5 can spawn, and re-measure rather than assume.
-# On the amd64 GPU host above, the ompi5 failure depends on the network: UCX
+# ompi5 has two spawn defects, and the amd64 choice avoids both. arm64 cannot
+# avoid them that way, because of the libtorch symbol above.
+#
+# First, a singleton cannot MPI_Comm_spawn when the hostname length plus the
+# digits of its pid exceeds 37. The prte daemon it starts closes the
+# connection, and Spawn raises MPI_ERR_UNKNOWN. Measured on arm64 with a 2-digit
+# pid, a 35-character hostname spawns and a 36-character one fails. CI's pod
+# names are longer: ompi5 fails with the arm64 runner's 46-character name and
+# with the amd64 runner's 50-character name, while ompi4 spawns with the
+# 50-character one. A short PMIX_HOSTNAME fixes it, so where ompi5 is selected,
+# a .pth line imports container/deps/trtllm/_dynamo_pmix_hostname.py when
+# Python starts. It sets PMIX_HOSTNAME only for processes that no MPI launcher
+# started, on hosts whose names are longer than 30 characters, so launched
+# ranks keep the real hostname. .dockerignore drops *.pth files, so the RUN
+# writes that line itself.
+#
+# Second, on the amd64 GPU host above, spawn also depends on the network: UCX
 # tries an address of another host interface (10.42.0.0, a k3s flannel address)
-# and fails with the host's interfaces visible, while in a bridge network (eth0
-# and lo only), or with OMPI_MCA_pml=ob1, ompi5 spawns. On CI's amd64 GPU
-# runners the worker did not start on ompi5 either; the logs that would show
-# the mechanism there did not survive.
-RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
+# and fails while the host's interfaces are visible. In a bridge network (eth0
+# and lo only), or with OMPI_MCA_pml=ob1, ompi5 spawns there.
+#
+# Transitional. Delete this, the ENV entries, the hook and the test's
+# per-architecture expectation when upstream's ompi5 can spawn, and re-measure
+# rather than assume.
+RUN --mount=type=bind,source=./container/deps/trtllm/_dynamo_pmix_hostname.py,target=/tmp/_dynamo_pmix_hostname.py \
+    if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
     test -d "$t" && \
     conf="$t/etc/openmpi-mca-params.conf" && \
     test -f "$conf" && \
@@ -128,6 +145,12 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/o
            -e 's/^\(btl = self\)$/#\1/' "$conf" && \
     ! grep -qE '^[[:space:]]*hwloc_base_binding_policy[[:space:]]*=[[:space:]]*core' "$conf" && \
     ! grep -qE '^[[:space:]]*btl[[:space:]]*=[[:space:]]*self[[:space:]]*$' "$conf" && \
+    if [ "$t" = /opt/hpcx/ompi5 ]; then \
+        site=/usr/local/lib/python3.12/dist-packages && \
+        test -d "$site" && \
+        cp /tmp/_dynamo_pmix_hostname.py "$site/" && \
+        echo 'import _dynamo_pmix_hostname' > "$site/dynamo-pmix-hostname.pth"; \
+    fi && \
     mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
     echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
 
