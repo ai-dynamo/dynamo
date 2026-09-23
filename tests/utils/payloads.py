@@ -33,7 +33,11 @@ from tests.utils.constants import DefaultPort
 from tests.utils.http_checks import check_health_generate as check_health_generate
 from tests.utils.http_checks import check_models_api as check_models_api
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
-from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
+from tests.utils.router_nvext import (
+    RouterNvextExpectation,
+    require_router_worker_id,
+    validate_router_nvext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +217,42 @@ class ChatPayload(BasePayload):
             f"Expected {self.expected_num_choices} choices, "
             f"got {len(choices)}: {result}"
         )
+
+
+class DisaggregatedChatPayload(ChatPayload):
+    """Require a completed chat request served by distinct prefill and decode workers."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+        result = response.json()
+        choices = result["choices"]
+        if len(choices) != 1:
+            raise AssertionError(f"Expected one completion, got {choices!r}")
+        if not isinstance(content, str) or not content.strip():
+            raise AssertionError("Completion is empty")
+        if choices[0].get("finish_reason") not in {"stop", "length"}:
+            raise AssertionError(f"Unexpected finish reason: {choices[0]!r}")
+
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            raise AssertionError(f"Missing usage: {result!r}")
+        prompt_tokens = usage.get("prompt_tokens")
+        completion_tokens = usage.get("completion_tokens")
+        if type(prompt_tokens) is not int or prompt_tokens <= 0:
+            raise AssertionError(f"Expected positive prompt usage: {usage!r}")
+        if type(completion_tokens) is not int or completion_tokens <= 1:
+            raise AssertionError(
+                f"Expected decode to generate more than the prefill token: {usage!r}"
+            )
+
+        workers = require_router_worker_id(result, context=type(self).__name__)
+        for role in ("prefill_worker_id", "decode_worker_id"):
+            if type(workers.get(role)) is not int or workers[role] < 0:
+                raise AssertionError(f"Expected a valid {role}: {dict(workers)!r}")
+        if workers["prefill_worker_id"] == workers["decode_worker_id"]:
+            raise AssertionError(
+                f"Expected distinct prefill and decode workers: {dict(workers)!r}"
+            )
 
 
 class RouterNvextChatPayload(ChatPayload):

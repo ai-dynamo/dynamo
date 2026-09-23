@@ -1038,6 +1038,33 @@ fn request() -> PreprocessedRequest {
 }
 
 #[test]
+fn frontend_router_metadata_does_not_require_engine_support() {
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    for (fields, supported) in [
+        (json!(["worker_id", "timing"]), true),
+        (json!(["worker_id", "engine_data"]), false),
+    ] {
+        let mut request = request();
+        request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = fields;
+        let result = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        );
+        if supported {
+            assert_eq!(result.unwrap(), baseline);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
 fn skip_special_tokens_is_forwarded_without_compatibility_envelope() {
     let mut request = request();
     request.output_options.skip_special_tokens = Some(false);
