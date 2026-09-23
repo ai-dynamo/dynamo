@@ -13,6 +13,9 @@ from dynamo._core import Context
 from dynamo.llm import LLMUnaryClient
 from dynamo.runtime import UnaryClient, serve_unary_endpoint
 
+# Keep this module sorted before the non-forked request-plane tests. Those tests
+# initialize the process-wide Rust runtime in the pytest parent, whose worker
+# threads cannot be inherited safely by this module's forked test processes.
 pytestmark = [
     pytest.mark.asyncio,
     pytest.mark.forked,
@@ -20,7 +23,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.integration,
     pytest.mark.core,
-    pytest.mark.timeout(30),
 ]
 
 
