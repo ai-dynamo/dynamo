@@ -29,7 +29,7 @@ use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::system_health::ReadinessHold;
 use dynamo_runtime::telemetry::LifecycleOperationRole;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::worker::EXIT_CODE_SHUTDOWN_TIMEOUT;
+use dynamo_runtime::worker::{EXIT_CODE_SHUTDOWN_TIMEOUT, graceful_shutdown_timeout};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -1402,35 +1402,6 @@ fn drain_timeout_secs() -> f64 {
             }
         },
     }
-}
-
-/// Read the post-signal shutdown deadline from
-/// `DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT` (matching `dynamo_runtime::Worker`).
-/// On expiry the worker hard-exits with [`EXIT_CODE_SHUTDOWN_TIMEOUT`] — same contract as the
-/// upstream `worker.execute` flow we bypass. Defaults are imported from
-/// `dynamo_runtime::worker` so a default change there propagates here
-/// without manual sync.
-fn graceful_shutdown_timeout() -> Duration {
-    use dynamo_runtime::config::environment_names::worker as env_worker;
-    use dynamo_runtime::worker::{
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG, DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE,
-    };
-
-    let default = if cfg!(debug_assertions) {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-    } else {
-        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-    };
-
-    let value = std::env::var(env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT).ok();
-    let secs = graceful_shutdown_timeout_secs(value.as_deref(), default);
-    Duration::from_secs(secs)
-}
-
-fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
@@ -3285,50 +3256,6 @@ mod tests {
         assert_eq!(
             stamped[crate::engine::HEALTH_CHECK_KEY],
             serde_json::json!(true)
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // graceful_shutdown_timeout env-var parsing
-    // -------------------------------------------------------------------
-
-    fn expected_default_timeout_secs() -> u64 {
-        if cfg!(debug_assertions) {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_DEBUG
-        } else {
-            dynamo_runtime::worker::DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE
-        }
-    }
-
-    #[test]
-    fn shutdown_timeout_default_when_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(None, expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_parses_valid_value() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("42"), expected_default_timeout_secs()),
-            42
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_falls_back_to_default_on_parse_error() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some("not-a-number"), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
-        );
-    }
-
-    #[test]
-    fn shutdown_timeout_treats_empty_as_unset() {
-        assert_eq!(
-            graceful_shutdown_timeout_secs(Some(""), expected_default_timeout_secs()),
-            expected_default_timeout_secs()
         );
     }
 
