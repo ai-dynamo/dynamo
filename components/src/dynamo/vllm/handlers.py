@@ -1090,7 +1090,6 @@ def apply_data_parallel_runtime_config(
 
 
 def resolve_rl_weight_world_size(parallel_config: Any) -> int:
-    """Return the NCCL receiver count for the supported RL topology."""
     if (
         parallel_config.data_parallel_size != 1
         or parallel_config.distributed_executor_backend == "external_launcher"
@@ -2687,7 +2686,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
-            async with lock:
+            async with lock, self._pause_lock:
                 capacity_reserved = False
                 committed_lora_info = False
                 try:
@@ -2980,7 +2979,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
-            async with lock:
+            async with lock, self._pause_lock:
                 try:
                     # Check if the LoRA exists *after* waiting for any in-progress load.
                     lora = self._lora_state.loaded_loras.get(lora_name)

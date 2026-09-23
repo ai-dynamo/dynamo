@@ -21,6 +21,12 @@ pytestmark = [
 ]
 
 
+_VALID_MM_KWARGS_BASE64 = (
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSS"
+    "p2JhdGNoZWSBq2tlZXBfb25fY3B1wg=="
+)
+
+
 def _request(*, sampling_params=None, features=None, token_ids=None, **envelope):
     payload = {
         "request_id": "request-1",
@@ -208,7 +214,7 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
                 }
             ]
         },
-        "kwargs_data": None,
+        "kwargs_data": {"image": [_VALID_MM_KWARGS_BASE64]},
     }
     request = _request(features=features)
     request["extra_args"]["dynamo_mm_routing_hashes"] = ["a" * 16 + "0" * 48]
@@ -225,7 +231,8 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     assert adapted.prompt["type"] == "multimodal"
     assert adapted.prompt["prompt_token_ids"] == [11, 22, 33]
     assert adapted.prompt["mm_hashes"] == {"image": ["a" * 16 + "0" * 48]}
-    assert adapted.prompt["mm_kwargs"]["image"] == [None]
+    assert len(adapted.prompt["mm_kwargs"]["image"]) == 1
+    assert adapted.prompt["mm_kwargs"]["image"][0] is not None
     placeholder = adapted.prompt["mm_placeholders"]["image"][0]
     assert (placeholder.offset, placeholder.length) == (1, 2)
     assert placeholder.is_embed.tolist() == [False, True]
@@ -240,7 +247,7 @@ def test_tito_adapter_rejects_preprocessed_features_on_disaggregated_decode():
                 features={
                     "mm_hashes": {"image": ["renderer-hash"]},
                     "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
-                    "kwargs_data": None,
+                    "kwargs_data": {"image": [_VALID_MM_KWARGS_BASE64]},
                 }
             ),
             enable_multimodal=True,
@@ -260,6 +267,7 @@ def test_tito_adapter_rejects_preprocessed_features_on_disaggregated_decode():
             {
                 "mm_hashes": {"image": ["x"]},
                 "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                "kwargs_data": {"image": [_VALID_MM_KWARGS_BASE64]},
             },
             "multimodal",
         ),
@@ -270,6 +278,7 @@ def test_tito_adapter_rejects_preprocessed_features_on_disaggregated_decode():
             {
                 "mm_hashes": {"audio": ["x"]},
                 "mm_placeholders": {"audio": [{"offset": 0, "length": 1}]},
+                "kwargs_data": {"audio": [_VALID_MM_KWARGS_BASE64]},
             },
             "image",
         ),
@@ -293,8 +302,16 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
 @pytest.mark.parametrize(
     "features",
     [
-        {"mm_hashes": {}, "mm_placeholders": {"image": []}},
-        {"mm_hashes": {"image": []}, "mm_placeholders": {}},
+        {
+            "mm_hashes": {},
+            "mm_placeholders": {"image": []},
+            "kwargs_data": {"image": []},
+        },
+        {
+            "mm_hashes": {"image": []},
+            "mm_placeholders": {},
+            "kwargs_data": {"image": []},
+        },
     ],
 )
 def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
@@ -317,7 +334,7 @@ def test_tito_adapter_rejects_routing_hash_count_mismatch():
         features={
             "mm_hashes": {"image": ["one"]},
             "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
-            "kwargs_data": None,
+            "kwargs_data": {"image": [_VALID_MM_KWARGS_BASE64]},
         }
     )
     request["extra_args"]["dynamo_mm_routing_hashes"] = ["one", "two"]
@@ -332,18 +349,19 @@ def test_tito_adapter_rejects_routing_hash_count_mismatch():
         )
 
 
-def test_tito_adapter_rejects_non_object_kwargs_data():
+@pytest.mark.parametrize("kwargs_data", [None, []])
+def test_tito_adapter_rejects_non_object_kwargs_data(kwargs_data):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
     request = _request(
         features={
             "mm_hashes": {"image": ["one"]},
             "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
-            "kwargs_data": [],
+            "kwargs_data": kwargs_data,
         }
     )
 
-    with pytest.raises(TypeError, match="kwargs_data must be an object or null"):
+    with pytest.raises(TypeError, match="kwargs_data must be an object"):
         adapt_engine_generate_request(
             request,
             enable_multimodal=True,
@@ -373,7 +391,7 @@ def test_tito_adapter_rejects_invalid_placeholder_mask_before_tensor_conversion(
             "mm_placeholders": {
                 "image": [{"offset": 0, "length": 1, "is_embed": is_embed}]
             },
-            "kwargs_data": None,
+            "kwargs_data": {"image": [_VALID_MM_KWARGS_BASE64]},
         },
     )
 

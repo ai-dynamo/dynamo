@@ -68,6 +68,8 @@ def _make_prefill_handler():
     handler._served_model_aliases = ("llama2-7b-alias",)
     handler._lora_state = LoRAState()
     handler._engine_loaded_loras = set()
+    handler._pause_lock = asyncio.Lock()
+    handler._paused = False
     return handler
 
 
@@ -472,6 +474,39 @@ async def test_legacy_lora_request_drain_preserves_concurrent_generation():
 
     assert handler._lora_state.active_requests == {}
     assert handler._lora_state.request_drained == {}
+
+
+@pytest.mark.asyncio
+async def test_lora_unload_blocks_keep_pause_until_active_request_drains(monkeypatch):
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
+    handler._engine_loaded_loras = {"adapterA"}
+    handler._lora_state.begin_request("adapterA")
+    handler.engine_client.pause_generation = AsyncMock()
+    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    async def _run_unload():
+        return [
+            result async for result in handler.unload_lora({"lora_name": "adapterA"})
+        ]
+
+    unload_task = asyncio.create_task(_run_unload())
+    await asyncio.sleep(0)
+    pause_task = asyncio.create_task(handler.pause_generation({"mode": "keep"}))
+    await asyncio.sleep(0)
+
+    assert not pause_task.done()
+    handler.engine_client.pause_generation.assert_not_awaited()
+
+    handler._lora_state.end_request("adapterA")
+    results = await unload_task
+    pause_result = await pause_task
+
+    assert results[-1]["status"] == "success"
+    assert pause_result["status"] == "ok"
+    handler.engine_client.pause_generation.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -96,12 +96,11 @@ def _image_features(
     kwargs_data = features.get("kwargs_data")
     if not isinstance(mm_hashes, dict) or not isinstance(mm_placeholders, dict):
         raise TypeError("TITO features require mm_hashes and mm_placeholders objects")
-    if kwargs_data is not None and not isinstance(kwargs_data, dict):
-        raise TypeError("TITO features kwargs_data must be an object or null")
+    if not isinstance(kwargs_data, dict):
+        raise TypeError("TITO features kwargs_data must be an object")
 
     modalities = set(mm_hashes) | set(mm_placeholders)
-    if kwargs_data is not None:
-        modalities.update(kwargs_data)
+    modalities.update(kwargs_data)
     if modalities != {"image"}:
         raise ValueError("TITO preprocessed features currently support image only")
 
@@ -162,18 +161,12 @@ def _image_features(
             PlaceholderRange(offset=offset, length=length, is_embed=is_embed)
         )
 
-    restored_kwargs: list[MultiModalKwargsItem | None]
-    if kwargs_data is None:
-        restored_kwargs = [None] * len(hashes)
-    else:
-        image_data = kwargs_data.get("image")
-        if not isinstance(image_data, list) or len(image_data) != len(hashes):
-            raise ValueError("TITO image tensor and hash counts must match")
-        decode_mm_kwargs_item, _ = _native_generate_api()
-        restored_kwargs = [
-            decode_mm_kwargs_item(value) if value is not None else None
-            for value in image_data
-        ]
+    restored_kwargs: list[MultiModalKwargsItem]
+    image_data = kwargs_data.get("image")
+    if not isinstance(image_data, list) or len(image_data) != len(hashes):
+        raise ValueError("TITO image tensor and hash counts must match")
+    decode_mm_kwargs_item, _ = _native_generate_api()
+    restored_kwargs = [decode_mm_kwargs_item(value) for value in image_data]
 
     return (
         {"image": hashes},
@@ -215,8 +208,8 @@ def adapt_engine_generate_request(
         raise ValueError("TITO multimodal features require an aggregated vLLM worker")
     if isinstance(features, dict):
         kwargs_data = features.get("kwargs_data")
-        if kwargs_data is not None and not isinstance(kwargs_data, dict):
-            raise TypeError("TITO features kwargs_data must be an object or null")
+        if not isinstance(kwargs_data, dict):
+            raise TypeError("TITO features kwargs_data must be an object")
     token_ids = list(request.get("token_ids") or [])
     raw_prompt_start = raw_sampling_params.get("routed_experts_prompt_start", 0)
     if (
