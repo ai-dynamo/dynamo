@@ -2171,7 +2171,12 @@ mod tests {
         let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
             .await
             .unwrap();
-        for difference in ["explicit-default", "overridden-policy", "needs"] {
+        for difference in [
+            "explicit-default",
+            "overridden-policy",
+            "needs",
+            "kv-block-size",
+        ] {
             let endpoint = drt
                 .namespace(difference)
                 .unwrap()
@@ -2195,6 +2200,10 @@ mod tests {
                     });
                 }
                 "needs" => newcomer.needs = vec![vec![WorkerType::Encode]],
+                "kv-block-size" => {
+                    incumbent.kv_cache_block_size = 16;
+                    newcomer.kv_cache_block_size = 32;
+                }
                 _ => unreachable!(),
             }
             let manager = Arc::new(ModelManager::new());
