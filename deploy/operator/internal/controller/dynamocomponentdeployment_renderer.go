@@ -33,7 +33,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -168,8 +167,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	role dynamo.Role,
 	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	renderDCD := dcd.DeepCopy()
-	component := &renderDCD.Spec.DynamoComponentDeploymentSharedSpec
+	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
 	if err != nil {
 		return nil, err
@@ -207,35 +205,8 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		return nil, err
 	}
 
-	// Resolve the two SGLang compatibility settings without changing the rendered envFrom contract.
-	var envFromOverlay *dynamo.ContainerEnvFromOverlay
-	backendFramework, err := dynamo.GetBackendFrameworkFromDynamoComponent(renderDCD)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to determine backend framework")
-	}
-	if backendFramework == dynamo.BackendFrameworkSGLang {
-		if main := dynamo.GetMainContainer(component); main != nil && len(main.EnvFrom) > 0 {
-			version, versionErr := runtimeversion.Resolve(main.Image, component.RuntimeVersionOverride)
-			if versionErr == nil && version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) {
-				resolved, overlay, err := dynamo.MaterializeContainerEnvFrom(
-					ctx,
-					r.reader,
-					renderDCD.Namespace,
-					main,
-					"DYN_SGL_EMBEDDING_WORKER",
-					"DYN_HEALTH_CHECK_PAYLOAD",
-				)
-				if err != nil {
-					return nil, errors.Wrap(err, "failed to resolve SGLang envFrom settings")
-				}
-				*main = *resolved
-				envFromOverlay = overlay
-			}
-		}
-	}
-
 	podSpec, err := dynamo.GenerateBasePodSpecForController(
-		renderDCD,
+		dcd,
 		r.dockerSecretRetriever,
 		r.config,
 		role,
@@ -250,9 +221,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	}
 	if len(podSpec.Containers) == 0 {
 		return nil, errors.New("no containers found in base pod spec")
-	}
-	if envFromOverlay != nil {
-		envFromOverlay.Restore(&podSpec.Containers[0])
 	}
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName

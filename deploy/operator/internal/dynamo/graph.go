@@ -2365,7 +2365,6 @@ type cliqueParams struct {
 	validatedQueueName          string
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 	containerGPUs               ContainerGPUCount
-	envFromOverlay              *ContainerEnvFromOverlay
 }
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
@@ -2380,9 +2379,6 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
-	}
-	if p.envFromOverlay != nil {
-		p.envFromOverlay.Restore(&podSpec.Containers[0])
 	}
 
 	// MinAvailable serves two purposes for Grove PCLQ:
@@ -2649,29 +2645,6 @@ func GenerateGrovePodCliqueSet(
 			return nil, fmt.Errorf("failed to determine backend framework for component %s: %w", componentName, err)
 		}
 
-		// Resolve the two SGLang compatibility settings without changing the rendered envFrom contract.
-		var envFromOverlay *ContainerEnvFromOverlay
-		if backendFramework == BackendFrameworkSGLang {
-			if main := GetMainContainer(component); main != nil && len(main.EnvFrom) > 0 {
-				version, versionErr := runtimeversion.Resolve(main.Image, component.RuntimeVersionOverride)
-				if versionErr == nil && version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) {
-					resolved, overlay, err := MaterializeContainerEnvFrom(
-						ctx,
-						reader,
-						dynamoDeployment.Namespace,
-						main,
-						sglangEmbeddingWorkerEnv,
-						healthCheckPayloadEnv,
-					)
-					if err != nil {
-						return nil, fmt.Errorf("failed to resolve SGLang envFrom settings for component %s: %w", componentName, err)
-					}
-					*main = *resolved
-					envFromOverlay = overlay
-				}
-			}
-		}
-
 		if discoveryBackend != "" {
 			podTemplate.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(discoveryBackend)
 		}
@@ -2715,7 +2688,6 @@ func GenerateGrovePodCliqueSet(
 				validatedQueueName:          validatedQueueName,
 				groveClusterTopologyDomains: groveClusterTopologyDomains,
 				containerGPUs:               containerGPUs,
-				envFromOverlay:              envFromOverlay,
 			})
 			if err != nil {
 				return nil, err

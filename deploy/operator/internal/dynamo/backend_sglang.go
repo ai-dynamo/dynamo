@@ -16,8 +16,7 @@ import (
 const (
 	SglangPort = "29500"
 
-	maxTCPPort       = 65535
-	booleanTrueValue = "true"
+	maxTCPPort = 65535
 
 	sglangEmbeddingWorkerFlag           = "--embedding-worker"
 	sglangNoEmbeddingWorkerFlag         = "--no-embedding-worker"
@@ -25,14 +24,6 @@ const (
 	sglangEmbeddingWorkerEnv            = "DYN_SGL_EMBEDDING_WORKER"
 	healthCheckPayloadEnv               = "DYN_HEALTH_CHECK_PAYLOAD"
 	sglang15EmbeddingHealthCheckPayload = `{"model":"health-check","input":"Test"}`
-)
-
-type sglangEmbeddingWorkerMode int
-
-const (
-	sglangEmbeddingWorkerUnknown sglangEmbeddingWorkerMode = iota
-	sglangEmbeddingWorkerDisabled
-	sglangEmbeddingWorkerEnabled
 )
 
 type SGLangBackend struct{}
@@ -58,18 +49,13 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Supply the embedding request shape that Dynamo 1.5.0 cannot derive for its active canary.
 	if version, err := runtimeversion.Resolve(container.Image, component.RuntimeVersionOverride); err == nil &&
 		version == (runtimeversion.Version{Major: 1, Minor: 5, Patch: 0}) &&
-		!sglangHealthCheckPayloadConfigured(container) {
-		switch sglangEmbeddingWorkerModeForContainer(container) {
-		case sglangEmbeddingWorkerEnabled:
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  healthCheckPayloadEnv,
-				Value: sglang15EmbeddingHealthCheckPayload,
-			})
-		case sglangEmbeddingWorkerUnknown:
-			return fmt.Errorf(
-				"%s is supplied through valueFrom, so the operator cannot determine whether this Dynamo 1.5.0 worker needs the embedding health-check payload; set %s explicitly in env or %s in args, or configure %s as a literal env value or CLI flag",
-				sglangEmbeddingWorkerEnv, healthCheckPayloadEnv, healthCheckPayloadFlag, sglangEmbeddingWorkerEnv)
-		}
+		!sglangHealthCheckPayloadConfigured(container) &&
+		!sglangEnvFromMaySet(container.EnvFrom, healthCheckPayloadEnv) &&
+		sglangEmbeddingWorkerEnabled(container) {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  healthCheckPayloadEnv,
+			Value: sglang15EmbeddingHealthCheckPayload,
+		})
 	}
 
 	if component.CompilationCache != nil {
@@ -104,33 +90,37 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	return nil
 }
 
-// sglangEmbeddingWorkerModeForContainer resolves literal environment and CLI configuration with runtime-equivalent precedence.
-func sglangEmbeddingWorkerModeForContainer(container *corev1.Container) sglangEmbeddingWorkerMode {
-	mode := sglangEmbeddingWorkerDisabled
-
-	// An explicit environment entry overrides envFrom, while valueFrom remains unknown until container startup.
+func sglangEmbeddingWorkerEnabled(container *corev1.Container) bool {
+	enabled := false
 	if env := findEnvVar(container.Env, sglangEmbeddingWorkerEnv); env != nil {
-		if env.ValueFrom != nil {
-			mode = sglangEmbeddingWorkerUnknown
-		} else {
+		if env.ValueFrom == nil {
 			switch strings.ToLower(strings.TrimSpace(env.Value)) {
-			case booleanTrueValue, "1", "yes", "on":
-				mode = sglangEmbeddingWorkerEnabled
+			case "true", "1", "yes", "on":
+				enabled = true
 			}
 		}
 	}
 
-	// CLI flags override the environment-derived default in their original order.
 	for _, arg := range getExpandedCommandLine(container) {
 		switch arg {
 		case sglangEmbeddingWorkerFlag:
-			mode = sglangEmbeddingWorkerEnabled
+			enabled = true
 		case sglangNoEmbeddingWorkerFlag:
-			mode = sglangEmbeddingWorkerDisabled
+			enabled = false
 		}
 	}
 
-	return mode
+	return enabled
+}
+
+// An envFrom source with a matching prefix could provide a user-owned payload.
+func sglangEnvFromMaySet(sources []corev1.EnvFromSource, name string) bool {
+	for _, source := range sources {
+		if strings.HasPrefix(name, source.Prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func sglangHealthCheckPayloadConfigured(container *corev1.Container) bool {
@@ -178,7 +168,7 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if prometheusOn {
 		switch strings.ToLower(enabled.Value) {
 		case "y":
-		case "1", "yes", "on", booleanTrueValue, "enable":
+		case "1", "yes", "on", "true", "enable":
 			return nil
 		case "n", "0", "no", "off", "false", "disable":
 			return nil

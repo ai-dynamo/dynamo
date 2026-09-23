@@ -562,138 +562,104 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 }
 
 func TestSGLangBackend_Dynamo15EmbeddingHealthCheckPayload(t *testing.T) {
-	backend := &SGLangBackend{}
-	customPayload := `{"model":"custom","input":"probe"}`
-	workerConfigName := "worker-config"
+	const image15 = "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0"
+	const customPayload = `{"model":"custom","input":"probe"}`
+	sourced := &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}
+	payload := func(value string) []corev1.EnvVar {
+		return []corev1.EnvVar{{Name: healthCheckPayloadEnv, Value: value}}
+	}
 
-	t.Log("define the runtime, worker mode, and user-override compatibility cases")
 	tests := []struct {
 		name        string
 		image       string
 		args        []string
 		env         []corev1.EnvVar
-		wantPayload string
-		wantEnv     bool
-		wantSourced bool
-		wantErr     string
+		envFrom     []corev1.EnvFromSource
+		wantPayload []corev1.EnvVar
 	}{
 		{
-			name:        "Dynamo 1.5 embedding worker gets compatible payload",
-			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:        []string{"--embedding-worker"},
-			wantPayload: sglang15EmbeddingHealthCheckPayload,
-			wantEnv:     true,
+			name:        "Dynamo 1.5 embedding flag gets compatible payload",
+			image:       image15,
+			args:        []string{sglangEmbeddingWorkerFlag},
+			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
 		},
 		{
-			name:        "Dynamo 1.5 embedding worker environment gets compatible payload",
-			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			env:         []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: booleanTrueValue}},
-			wantPayload: sglang15EmbeddingHealthCheckPayload,
-			wantEnv:     true,
+			name:        "literal embedding environment gets compatible payload",
+			image:       image15,
+			env:         []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
+			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
 		},
 		{
-			name:  "negative CLI flag overrides embedding environment and earlier flag",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:  []string{"--embedding-worker", "--no-embedding-worker"},
-			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: booleanTrueValue}},
+			name:  "last negative CLI flag disables embedding mode",
+			image: image15,
+			args:  []string{sglangEmbeddingWorkerFlag, sglangNoEmbeddingWorkerFlag},
+			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, Value: "true"}},
 		},
 		{
-			name:  "Dynamo 1.5 chat worker is unchanged",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
+			name:  "chat worker is unchanged",
+			image: image15,
 		},
 		{
 			name:  "newer embedding worker is unchanged",
 			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0",
-			args:  []string{"--embedding-worker"},
+			args:  []string{sglangEmbeddingWorkerFlag},
 		},
 		{
-			name:        "user payload takes precedence",
-			image:       "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:        []string{"--embedding-worker"},
-			env:         []corev1.EnvVar{{Name: healthCheckPayloadEnv, Value: customPayload}},
-			wantPayload: customPayload,
-			wantEnv:     true,
+			name:        "literal user payload is preserved",
+			image:       image15,
+			args:        []string{sglangEmbeddingWorkerFlag},
+			env:         payload(customPayload),
+			wantPayload: payload(customPayload),
 		},
 		{
-			name:  "embedding worker valueFrom requires explicit payload",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			env: []corev1.EnvVar{{
-				Name: sglangEmbeddingWorkerEnv,
-				ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
-					Key:                  "embedding-worker",
-				}},
-			}},
-			wantErr: sglangEmbeddingWorkerEnv + " is supplied through valueFrom",
+			name:        "valueFrom user payload is preserved",
+			image:       image15,
+			args:        []string{sglangEmbeddingWorkerFlag},
+			env:         []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
+			wantPayload: []corev1.EnvVar{{Name: healthCheckPayloadEnv, ValueFrom: sourced}},
 		},
 		{
-			name:  "explicit sourced payload resolves unknown embedding mode",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			env: []corev1.EnvVar{
-				{
-					Name: sglangEmbeddingWorkerEnv,
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
-						Key:                  "embedding-worker",
-					}},
-				},
-				{
-					Name: healthCheckPayloadEnv,
-					ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
-						Key:                  "health-check-payload",
-					}},
-				},
-			},
-			wantEnv:     true,
-			wantSourced: true,
+			name:  "CLI user payload is preserved",
+			image: image15,
+			args:  []string{sglangEmbeddingWorkerFlag, healthCheckPayloadFlag + "=" + customPayload},
 		},
 		{
-			name:  "explicit CLI payload resolves unknown embedding mode",
-			image: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.5.0",
-			args:  []string{healthCheckPayloadFlag + "=" + customPayload},
-			env: []corev1.EnvVar{{
-				Name: sglangEmbeddingWorkerEnv,
-				ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: workerConfigName},
-					Key:                  "embedding-worker",
-				}},
-			}},
+			name:  "indirect embedding mode skips the shim",
+			image: image15,
+			env:   []corev1.EnvVar{{Name: sglangEmbeddingWorkerEnv, ValueFrom: sourced}},
+		},
+		{
+			name:    "envFrom may contain user payload",
+			image:   image15,
+			args:    []string{sglangEmbeddingWorkerFlag},
+			envFrom: []corev1.EnvFromSource{{ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}},
+		},
+		{
+			name:        "unrelated envFrom prefix allows default",
+			image:       image15,
+			args:        []string{sglangEmbeddingWorkerFlag},
+			envFrom:     []corev1.EnvFromSource{{Prefix: "OTHER_", ConfigMapRef: &corev1.ConfigMapEnvSource{LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}}}},
+			wantPayload: payload(sglang15EmbeddingHealthCheckPayload),
 		},
 	}
 
+	backend := &SGLangBackend{}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Log("apply the SGLang container compatibility settings")
-			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env}
+			container := &corev1.Container{Image: tt.image, Args: tt.args, Env: tt.env, EnvFrom: tt.envFrom}
 			err := backend.UpdateContainer(
-				container,
-				1,
-				RoleMain,
-				&v1beta1.DynamoComponentDeploymentSharedSpec{},
-				"test-service",
-				&GroveMultinodeDeployer{},
-				staticContainerGPUCount(0),
+				container, 1, RoleMain, &v1beta1.DynamoComponentDeploymentSharedSpec{},
+				"test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0),
 			)
-			if tt.wantErr != "" {
-				require.ErrorContains(t, err, tt.wantErr)
-				return
-			}
 			require.NoError(t, err)
 
-			t.Log("verify the payload is injected only for the affected compatibility case")
-			payload := findEnvVar(container.Env, healthCheckPayloadEnv)
-			if !tt.wantEnv {
-				require.Nil(t, payload)
-				return
+			var got []corev1.EnvVar
+			for _, env := range container.Env {
+				if env.Name == healthCheckPayloadEnv {
+					got = append(got, env)
+				}
 			}
-			require.NotNil(t, payload)
-			if tt.wantSourced {
-				require.NotNil(t, payload.ValueFrom)
-				return
-			}
-			require.Nil(t, payload.ValueFrom)
-			require.Equal(t, tt.wantPayload, payload.Value)
+			require.Equal(t, tt.wantPayload, got)
 		})
 	}
 }
