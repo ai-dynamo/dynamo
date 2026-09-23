@@ -2,16 +2,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Image Generation"
-subtitle: "Aggregated and disaggregated image-generation launch scripts."
+subtitle: "Image-generation deployments and launch scripts across three backends."
 hide-toc: true
 ---
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+The Kubernetes manifests were functionally validated on September 10, 2026 with one H100 GPU and
+Dynamo 1.4.2 serving images and operator. These are correctness checks, not performance benchmarks;
+the local scripts have separate model defaults. See [Text-to-Image](../../use-cases/diffusion/workflows/text-to-image.md) for requests.
+
+Replace the image placeholders with matching 1.4.2 backend runtime images, prepare `hf-token-secret`
+with `HF_TOKEN`, and review model access and GPU requirements before applying a manifest.
+Run local commands from the repository root. Request `response_format: "b64_json"` when using the
+pod-local `file:///tmp/dynamo_media` storage in these examples.
 
 <ExampleSelector
   variants={[
+    {"id": "kubernetes-sglang-agg-image-diffusion-yaml", "target": "kubernetes:sglang", "label": "agg_image_diffusion.yaml", "description": "FLUX.1-schnell · validated on Dynamo 1.4.2"},
+    {"id": "kubernetes-trtllm-agg-image-diffusion-yaml", "target": "kubernetes:trtllm", "label": "agg_image_diffusion.yaml", "description": "FLUX.2-klein-4B · validated on Dynamo 1.4.2"},
+    {"id": "kubernetes-vllm-agg-omni-image-yaml", "target": "kubernetes:vllm", "label": "agg_omni_image.yaml", "description": "Qwen-Image · validated on Dynamo 1.4.2"},
     {"id": "local-sglang-image-diffusion-sh", "target": "local:sglang", "label": "image_diffusion.sh", "description": "Text-to-Image Generation"},
     {"id": "local-trtllm-agg-image-diffusion-sh", "target": "local:trtllm", "label": "agg_image_diffusion.sh", "description": "Text-to-Image Generation"},
     {"id": "local-vllm-agg-omni-image-sh", "target": "local:vllm", "label": "agg_omni_image.sh", "description": "Text-to-Image Generation"},
@@ -19,6 +29,36 @@ Run commands from the repository root. Review each script’s model, GPU, and en
     {"id": "local-vllm-disagg-omni-glm-image-nixl-sh", "target": "local:vllm", "label": "disagg_omni_glm_image_nixl.sh", "description": "Cross-Node GLM-Image with NIXL"}
   ]}
 >
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-image-diffusion-yaml">
+
+Keep `shareProcessNamespace: true` for the tested SGLang runtime; it prevents the worker from treating PID 1 as a dead parent.
+
+[Source: `agg_image_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_image_diffusion.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_image_diffusion.yaml" title="agg_image_diffusion.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-agg-image-diffusion-yaml">
+
+The functional check used a 256×256 image with 10 inference steps.
+
+[Source: `agg_image_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_image_diffusion.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/agg_image_diffusion.yaml" title="agg_image_diffusion.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-omni-image-yaml">
+
+The visual check used a 512×512 image with 20 inference steps.
+
+[Source: `agg_omni_image.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_image.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_omni_image.yaml" title="agg_omni_image.yaml" language="yaml" maxLines={0} />
+
+</div>
 
 <div className="dynamo-example-variant" data-example-variant="local-sglang-image-diffusion-sh">
 

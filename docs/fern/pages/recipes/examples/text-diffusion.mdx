@@ -8,13 +8,29 @@ hide-toc: true
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+The LLaDA 2.0 mini Kubernetes manifest was functionally validated on September 10, 2026 with one
+H100 GPU and Dynamo 1.4.2 serving images and operator. Replace the image placeholders with matching
+1.4.2 SGLang runtime images and prepare `hf-token-secret` with `HF_TOKEN` before applying it.
+This is a functional example, not a performance benchmark. See
+[Text-to-Text](../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) for requests.
+Run local commands from the repository root.
 
 <ExampleSelector
   variants={[
+    {"id": "kubernetes-sglang-agg-llm-diffusion-yaml", "target": "kubernetes:sglang", "label": "agg_llm_diffusion.yaml", "description": "LLaDA 2.0 mini · validated on Dynamo 1.4.2"},
     {"id": "local-sglang-diffusion-llada-sh", "target": "local:sglang", "label": "diffusion_llada.sh", "description": "Diffusion Language Models"}
   ]}
 >
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-llm-diffusion-yaml">
+
+Preserve the diffusion-specific engine flags in this manifest. Review the model’s remote code before enabling `--trust-remote-code`.
+
+[Source: `agg_llm_diffusion.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_llm_diffusion.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_llm_diffusion.yaml" title="agg_llm_diffusion.yaml" language="yaml" maxLines={0} />
+
+</div>
 
 <div className="dynamo-example-variant" data-example-variant="local-sglang-diffusion-llada-sh">
 

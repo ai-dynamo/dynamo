@@ -1077,18 +1077,28 @@ navigation:
               - page: Sequence Classification
                 path: pages/recipes/examples/classification.mdx
                 slug: classification
+              - page: Audio and Realtime Serving
+                path: pages/recipes/examples/audio.mdx
+                slug: audio
+          - section: Diffusion
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Overview
+                path: pages/recipes/examples/diffusion-overview.mdx
+                slug: diffusion
               - page: Image Generation
                 path: pages/recipes/examples/image-generation.mdx
                 slug: image-generation
               - page: Video Generation
                 path: pages/recipes/examples/video-generation.mdx
                 slug: video-generation
+              - page: Audio Generation
+                path: pages/recipes/examples/audio-generation.mdx
+                slug: audio-generation
               - page: Diffusion Language Models
                 path: pages/recipes/examples/text-diffusion.mdx
                 slug: text-diffusion
-              - page: Audio and Realtime Serving
-                path: pages/recipes/examples/audio.mdx
-                slug: audio
               - page: FastVideo
                 path: pages/recipes/examples/fastvideo.mdx
                 slug: fastvideo
