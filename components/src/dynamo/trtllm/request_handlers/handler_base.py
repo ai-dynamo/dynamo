@@ -24,12 +24,18 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional, Protocol, Union
 
+import numpy as np
 import torch
 from tensorrt_llm.executor.request import DEFAULT_REQUEST_PRIORITY
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
+
+try:
+    from tensorrt_llm.llmapi.llm import PreprocessedInputs
+except ImportError:  # older TRT-LLM
+    PreprocessedInputs = None
 from tensorrt_llm.sampling_params import GuidedDecodingParams
 from tensorrt_llm.scheduling_params import SchedulingParams
 
@@ -1011,7 +1017,13 @@ class HandlerBase(BaseGenerativeHandler):
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
 
+        # With DYN_TOKEN_IDS_AS_BYTES the ingress hands token ids over as a packed
+        # little-endian int32 buffer instead of a Python list, so no per-token
+        # Python object is built here or in TRT-LLM's IPC encode.
         request_token_ids = request.get("token_ids")
+        if isinstance(request_token_ids, (bytes, bytearray, memoryview)):
+            request_token_ids = np.frombuffer(request_token_ids, dtype="<i4")
+            request["token_ids"] = request_token_ids
         logging.debug(
             "Request summary: token_ids=%s keys=%s has_embeddings=%s has_ep_disaggregated_params=%s",
             len(request_token_ids) if isinstance(request_token_ids, list) else None,
@@ -1261,6 +1273,11 @@ class HandlerBase(BaseGenerativeHandler):
             conv_kwargs = (
                 {"conversation_params": conversation_params} if conv_affinity else {}
             )
+            if (
+                isinstance(processed_input, np.ndarray)
+                and PreprocessedInputs is not None
+            ):
+                processed_input = PreprocessedInputs(prompt_token_ids=processed_input)
             generate_kwargs = {
                 "inputs": processed_input,  # Use the correctly extracted inputs
                 "sampling_params": sampling_params,
