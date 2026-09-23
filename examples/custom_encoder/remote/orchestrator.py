@@ -50,8 +50,19 @@ class ExternalEncoderOrchestrator:
         *,
         context: Any,
     ) -> dict[str, Any]:
-        generator_request = await self._handoff.prepare_request(
-            request,
-            target_model=self._generator_model_name,
-        )
+        # Only media turns need the handoff; it rejects a request without any.
+        if _has_multimodal_inputs(request):
+            generator_request = await self._handoff.prepare_request(
+                request,
+                target_model=self._generator_model_name,
+            )
+        else:
+            generator_request = {**request, "model": self._generator_model_name}
         return await self._generator.complete(generator_request, context=context)
+
+
+def _has_multimodal_inputs(request: Mapping[str, Any]) -> bool:
+    multi_modal_data = request.get("multi_modal_data")
+    if not isinstance(multi_modal_data, Mapping):
+        return False
+    return any(multi_modal_data.values())
