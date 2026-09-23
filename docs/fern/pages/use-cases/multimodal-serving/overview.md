@@ -68,7 +68,8 @@ frontend-decoded NIXL inputs, video, and audio do not use this cache.
 Dynamo does not provision or discover a cache service. Deploy Redis Cluster or
 Dragonfly separately and provide a cluster endpoint that every participating
 URL-loading worker can reach. The connection URL carries the endpoint,
-authentication, and TLS choice.
+authentication, and TLS choice. See [Cache Service Deployment](#cache-service-deployment)
+for single-node and multi-node layouts.
 
 Set the following environment variables on every participating worker:
 
@@ -105,11 +106,54 @@ env:
 > on an appropriately secured in-cluster network.
 
 Cache reads and fills run on the request path. A miss waits for Redis `SET` so
-the fill completes before the request returns. Redis errors fail open, but an
-outage can add up to `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` of latency.
+the fill completes before the request returns. Redis errors fail open, and each
+cache operation is attempted once. While a cache node is unreachable, an image
+load pays one failed `GET` and one failed `SET`: each is bounded by
+`DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS` when a new connection is
+refused or times out, and by `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` when
+an open connection stops responding.
 Warnings are emitted initially and at most once per minute; individual
 operation failures remain available at debug level. Dynamo does not currently
 use a bounded asynchronous write queue.
+
+### Cache Service Deployment
+
+Dynamo uses the Redis Cluster protocol for both backends. The client uses
+`DYN_MM_SHARED_IMAGE_CACHE_URL` only to discover the cluster: it reads the slot
+map from that endpoint and then connects to each node at the address the node
+announces. When a node stops responding, the client rediscovers through the same
+URL, so point it at an address that survives cache restarts, such as a
+Kubernetes Service that selects every cache node, not at an individual pod.
+After a restart, the nodes announce their new addresses and workers pick them
+up without restarting. Dynamo requires redis-py 6.2 or later.
+
+**Single-node Dragonfly.** Run Dragonfly with `--cluster_mode=emulated` so that
+it answers Redis Cluster commands, and keep its default announced address (the
+pod IP). Do not set `--cluster_announce_ip` to the host in
+`DYN_MM_SHARED_IMAGE_CACHE_URL`: with redis-py 6.2 through 7.1, a node that
+announces the same host and port as the URL removes the URL from the client's
+rediscovery list after one failed operation.
+
+**Redis Cluster.** Run the nodes as a StatefulSet with a headless Service for
+per-pod DNS names, plus a regular Service that selects every node for the URL.
+Configure each node with:
+
+- `cluster-announce-ip` set to the pod IP, or `cluster-announce-hostname` set to
+  the pod's DNS name together with `cluster-preferred-endpoint-type hostname`
+  (Redis 7.0 or later).
+- `cluster-require-full-coverage no`, so the remaining nodes keep serving while
+  one node is down. Images that hash to the unavailable node fall back to the
+  origin.
+- A `nodes.conf` that persists across pod restarts, so a restarted node keeps its
+  identity and slots. A rolling restart then keeps the cluster available. If
+  every node restarts at once, all peer addresses change and the nodes need
+  their peers' new addresses before they can re-form the cluster.
+
+**Multi-node Dragonfly.** With `--cluster_mode=yes`, Dragonfly nodes do not
+discover each other. A cluster orchestrator must push the slot map with
+`DFLYCLUSTER CONFIG` and push it again whenever a node restarts, because the
+map is kept in memory. Point the URL at a Service that selects every node, as
+for Redis Cluster.
 
 ### Session Scoping
 
