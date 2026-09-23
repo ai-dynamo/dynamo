@@ -55,6 +55,7 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
+dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
 aisimulate-core = { version = "=0.12.0" }
 
@@ -62,8 +63,8 @@ aisimulate-core = { version = "=0.12.0" }
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }
 dynamo-llm = { path = "lib/llm", version = "1.6.0" }
 dynamo-rl = { path = "lib/rl", version = "1.6.0" }
-dynamo-tokenizers = { version = "=1.8.1" }
-dynamo-renderer = { version = "=5.2.0" }
+dynamo-tokenizers = { version = "=1.8.2" }
+dynamo-renderer = { version = "=5.3.1" }
 dynamo-tokens = { path = "lib/tokens", version = "1.6.0" }
 dynamo-truthy = { path = "lib/truthy", version = "1.6.0" }
 dynamo-data-gen = { path = "lib/data-gen", version = "1.6.0" }
@@ -71,8 +72,8 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.6.0" }
 dynamo-memory = { path = "lib/memory", version = "1.6.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.6.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.6.0" }
-dynamo-protocols = { version = "=5.4.3" }
-dynamo-parsers = { version = "8.1.0" }
+dynamo-protocols = { version = "=6.0.1" }
+dynamo-parsers = { version = "9.0.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions
@@ -198,7 +199,7 @@ tonic-build = { version = "0.13.1" }
 prost-types-v14 = { package = "prost-types", version = "0.14.3" }
 tonic-v14 = { package = "tonic", version = "0.14.6" }
 tonic-health-v14 = { package = "tonic-health", version = "0.14.6" }
-vllm-proto = { version = "=0.1.0" }
+vllm-proto = { version = "=0.3.0" }
 kube = { version = "2.0.1", default-features = false, features = ["client", "rustls-tls", "aws-lc-rs", "runtime"] }
 k8s-openapi = { version = "0.26.0", features = ["v1_32"] }
 rcgen = { version = "0.13" }

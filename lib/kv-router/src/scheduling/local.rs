@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rustc_hash::FxHashMap;
@@ -20,13 +20,15 @@ use super::queue::{
     BookingHandle, ClassQueueStats, SchedulerBookingCleanup, SchedulerBookingDescriptor,
     SchedulerQueue,
 };
-use super::selector::{DefaultWorkerSelector, WorkerSelector};
+use super::request_classifier::{RequestClassifierRuntime, RequestLifecycle};
+use super::selector::WorkerSelector;
 use super::types::{
     AdmissionAttempt, AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId,
     KvSchedulerError, NonMaxOverlapSelectionObserver, OverloadedWorkerProvider, PotentialLoad,
     ScheduleMode, ScheduleRequest, SchedulingRequest, SchedulingResponse, TierOverlapBlocks,
     WorkerAvailabilityProvider,
 };
+use crate::plugins::request_classifier::{ClassifyRequest, RequestClassifier};
 use crate::protocols::RoutingConstraints;
 use crate::protocols::{LocalBlockHash, WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use crate::sequences::topology::WorkerDpRange;
@@ -43,8 +45,12 @@ enum WorkerConfigReconcileOutcome {
     Rejected,
 }
 
-pub struct LocalScheduler<P, C, Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
-where
+pub struct LocalScheduler<
+    P,
+    C,
+    Sel = super::selector::WorkerSelectionPolicy,
+    RF = NoopOverlapScoresRefresh,
+> where
     P: SequencePublisher,
     C: WorkerConfigLike,
     Sel: WorkerSelector<C>,
@@ -53,6 +59,7 @@ where
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     queue: Arc<SchedulerQueue<P, C, Sel, RF>>,
     queue_updates: watch::Sender<()>,
+    request_classifier: OnceLock<Arc<RequestClassifierRuntime>>,
     track_prefill_tokens_default: bool,
     worker_type: &'static str,
 }
@@ -271,6 +278,7 @@ where
             slots,
             queue,
             queue_updates,
+            request_classifier: OnceLock::new(),
             track_prefill_tokens_default,
             worker_type,
         }
@@ -291,7 +299,20 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let (admitted, booking) = self.schedule_request_with_booking(request).await?;
+        self.schedule_request_admitted_with_context(request, Instant::now())
+            .await
+    }
+
+    /// Schedule with the router's original ingress timing.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted_with_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let (admitted, booking) = self
+            .schedule_request_with_booking_and_context(request, ingress_at)
+            .await?;
         if let Some(booking) = booking {
             let _ = booking.commit();
         }
@@ -305,13 +326,26 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
-        let tracked = request.mode.is_tracked();
+        self.schedule_request_with_booking_and_context(request, Instant::now())
+            .await
+    }
+
+    /// Classify before acquiring a booking lease, preserving the caller's
+    /// ingress timestamp across the classifier's await and returning the
+    /// booking armed for its host.
+    pub(crate) async fn schedule_request_with_booking_and_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: Instant,
+    ) -> Result<(AdmittedSchedulingResponse, Option<BookingHandle>), KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
+        let tracked = request.mode.is_tracked();
+        let classified_request = self.classify_request(&request, ingress_at).await?;
         let lifecycle_lease = self
             .queue
             .new_request_lifecycle_lease(request.mode.lifecycle_request_id());
-        let (request, block_hashes) = self.make_scheduling_request(request, Some(resp_tx));
 
         let lifecycle_lease = self
             .queue
@@ -320,6 +354,8 @@ where
                 block_hashes,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
+                classified_request,
+                ingress_at,
             )
             .await;
 
@@ -341,6 +377,56 @@ where
             .and_then(|lease| lease.commit())
             .map(|booking| self.queue.booking_handle(booking));
         Ok((AdmittedSchedulingResponse { response, attempt }, booking))
+    }
+
+    async fn classify_request(
+        &self,
+        request: &SchedulingRequest,
+        ingress_at: Instant,
+    ) -> Result<Option<ClassifyRequest>, KvSchedulerError> {
+        let Some(classifier) = self.request_classifier.get() else {
+            return Ok(None);
+        };
+        let Some(request_id) = request.mode.tracked_request_id() else {
+            return Ok(None);
+        };
+        // A tracked admission with no registered lifecycle (Python bindings
+        // `best_worker`, `RouterRequest::New`) never emits lifecycle events, so
+        // classifying it would corrupt plugin bookkeeping. It uses the default
+        // queue inputs, exactly as if no classifier were installed.
+        if !classifier.has_request(request_id) {
+            return Ok(None);
+        }
+        classifier
+            .classify_with(self.queue.build_classify_request(request, ingress_at))
+            .await
+            .map(Some)
+    }
+
+    /// Install the request classifier plugin. Must be called from within a
+    /// Tokio runtime: it spawns the classifier's event-delivery task.
+    ///
+    /// Returns `false` when a classifier is already installed.
+    #[doc(hidden)]
+    pub fn install_request_classifier(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+        shutdown: CancellationToken,
+    ) -> bool {
+        self.request_classifier
+            .set(RequestClassifierRuntime::new(classifier, shutdown))
+            .is_ok()
+    }
+
+    #[doc(hidden)]
+    pub fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {
+        self.request_classifier
+            .get()
+            .map(|classifier| classifier.begin_request(request_id))
+            .transpose()
     }
 
     /// Select a worker from current scheduler state without queue admission or booking.
@@ -369,8 +455,8 @@ where
         isl_tokens: usize,
         token_seq: Option<Vec<SequenceHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -416,8 +502,8 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -460,8 +546,8 @@ where
         token_seq: Option<Vec<SequenceHash>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
         tier_overlap_blocks: TierOverlapBlocks,
-        effective_overlap_blocks: HashMap<WorkerWithDpRank, f64>,
-        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        effective_overlap_blocks: FxHashMap<WorkerWithDpRank, f64>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         router_config_override: Option<&super::config::RouterConfigOverride>,
         update_states: bool,
         lora_name: Option<String>,
@@ -728,7 +814,7 @@ where
         &self,
         token_seq: Option<Vec<SequenceHash>>,
         isl_tokens: usize,
-        effective_cached_tokens: HashMap<WorkerWithDpRank, usize>,
+        effective_cached_tokens: FxHashMap<WorkerWithDpRank, usize>,
         track_prefill_tokens: bool,
     ) -> Vec<PotentialLoad> {
         let decay_now = Instant::now();
@@ -779,6 +865,7 @@ where
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
@@ -786,6 +873,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
+    use crate::scheduling::request_classifier::ClassifyFuture;
     use crate::scheduling::selector::DefaultWorkerSelector;
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
@@ -822,7 +910,7 @@ mod tests {
         monitor_worker_configs: bool,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     ) -> (
-        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
@@ -844,7 +932,7 @@ mod tests {
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         replica_sync: bool,
     ) -> (
-        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>>,
         Arc<ActiveSequencesMultiWorker<NoopSequencePublisher>>,
         watch::Sender<HashMap<WorkerId, SimpleWorkerConfig>>,
         CancellationToken,
@@ -892,7 +980,9 @@ mod tests {
     }
 
     async fn wait_for_pending_count(
-        scheduler: &Arc<LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig>>,
+        scheduler: &Arc<
+            LocalScheduler<NoopSequencePublisher, SimpleWorkerConfig, DefaultWorkerSelector>,
+        >,
         expected: usize,
     ) {
         tokio::time::timeout(Duration::from_millis(250), async {
@@ -954,7 +1044,8 @@ mod tests {
             scheduler.get_active_lora_counts(),
             HashMap::from([(String::from("adapter-a"), 1)])
         );
-        let loads = scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, HashMap::new(), true);
+        let loads =
+            scheduler.get_potential_loads(Some(vec![1, 2, 3, 4]), 64, Default::default(), true);
         let worker_load = loads
             .iter()
             .find(|load| load.worker_id == response.best_worker.worker_id && load.dp_rank == 0)
@@ -974,8 +1065,138 @@ mod tests {
             .await
             .unwrap();
 
-        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), false);
+        let loads = scheduler.get_potential_loads(None, 0, Default::default(), false);
         assert_eq!(loads[0].active_requests, 0);
+        cancel_token.cancel();
+    }
+
+    struct CountingClassifier {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl RequestClassifier for CountingClassifier {
+        fn classify(&mut self, request: ClassifyRequest) -> ClassifyFuture {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move { Ok(request) })
+        }
+    }
+
+    /// A tracked admission with no registered lifecycle takes the default
+    /// path without reaching the plugin; only `begin_request_lifecycle` opts
+    /// a request into classification. The runtime itself rejects ids it does
+    /// not know, so this bypass lives here in the scheduler.
+    #[tokio::test]
+    async fn tracked_request_without_lifecycle_bypasses_the_classifier() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "unregistered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("registered")
+            .unwrap()
+            .unwrap();
+        scheduler
+            .schedule_request(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "registered".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn booking_admission_classifies_and_releases_on_drop() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        assert!(scheduler.install_request_classifier(
+            Box::new(CountingClassifier {
+                calls: Arc::clone(&calls),
+            }),
+            cancel_token.clone(),
+        ));
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("booked")
+            .unwrap()
+            .unwrap();
+
+        let (_, booking) = scheduler
+            .schedule_request_with_booking(request(ScheduleMode::TrackedWithLifecycle {
+                request_id: "booked".to_string(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0].active_requests,
+            1
+        );
+        drop(booking.expect("admission must return an armed booking"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0]
+                .active_requests
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the booking must release the attempt");
+        cancel_token.cancel();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn booking_admission_applies_classifier_deadline_from_original_ingress() {
+        struct DeadlineClassifier(Instant);
+        impl RequestClassifier for DeadlineClassifier {
+            fn classify(&mut self, mut request: ClassifyRequest) -> ClassifyFuture {
+                assert_eq!(request.ingress_at(), self.0);
+                request.set_due_at(self.0 + Duration::from_secs(1));
+                Box::pin(async move { Ok(request) })
+            }
+        }
+
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, _slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let ingress_at = Instant::now();
+        assert!(scheduler.install_request_classifier(
+            Box::new(DeadlineClassifier(ingress_at)),
+            cancel_token.clone(),
+        ));
+        let _lifecycle = scheduler
+            .begin_request_lifecycle("expired")
+            .unwrap()
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let result = scheduler
+            .schedule_request_with_booking_and_context(
+                request(ScheduleMode::TrackedWithLifecycle {
+                    request_id: "expired".to_string(),
+                }),
+                ingress_at,
+            )
+            .await;
+        assert!(matches!(result, Err(KvSchedulerError::DeadlineExceeded)));
+        assert_eq!(
+            scheduler.get_potential_loads(None, 0, FxHashMap::default(), false)[0].active_requests,
+            0
+        );
         cancel_token.cancel();
     }
 
@@ -991,8 +1212,8 @@ mod tests {
                 64,
                 None,
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1030,8 +1251,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 Some(&crate::config::RouterConfigOverride {
                     track_prefill_tokens: Some(false),
                     ..Default::default()
@@ -1079,8 +1300,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::from([(worker, 0.75)]),
-                HashMap::from([(worker, 48)]),
+                FxHashMap::from_iter([(worker, 0.75)]),
+                FxHashMap::from_iter([(worker, 48)]),
                 None,
                 true,
                 None,
@@ -1126,8 +1347,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1151,8 +1372,8 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
-                        HashMap::new(),
-                        HashMap::new(),
+                        Default::default(),
+                        Default::default(),
                         None,
                         true,
                         None,
@@ -1197,8 +1418,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1222,8 +1443,8 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
-                        HashMap::new(),
-                        HashMap::new(),
+                        Default::default(),
+                        Default::default(),
                         None,
                         true,
                         None,
@@ -1282,8 +1503,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1307,8 +1528,8 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
-                        HashMap::new(),
-                        HashMap::new(),
+                        Default::default(),
+                        Default::default(),
                         None,
                         true,
                         None,
@@ -1366,8 +1587,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1391,8 +1612,8 @@ mod tests {
                         64,
                         Some(vec![5, 6, 7, 8]),
                         TierOverlapBlocks::default(),
-                        HashMap::new(),
-                        HashMap::new(),
+                        Default::default(),
+                        Default::default(),
                         None,
                         true,
                         None,
@@ -1448,8 +1669,8 @@ mod tests {
                 64,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 Some("adapter-a".to_string()),
@@ -1509,7 +1730,8 @@ mod tests {
             .collect();
         expected.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
-        let mut actual = scheduler.get_potential_loads(Some(token_seq), 128, HashMap::new(), true);
+        let mut actual =
+            scheduler.get_potential_loads(Some(token_seq), 128, Default::default(), true);
         actual.sort_by_key(|load| (load.worker_id, load.dp_rank));
 
         assert_eq!(actual.len(), expected.len());
@@ -1552,8 +1774,8 @@ mod tests {
                 100,
                 Some(vec![1, 2, 3, 4]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1570,7 +1792,7 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(6)).await;
 
-        let loads = scheduler.get_potential_loads(None, 0, HashMap::new(), true);
+        let loads = scheduler.get_potential_loads(None, 0, Default::default(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 40);
 
@@ -1585,7 +1807,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, HashMap::new(), true,)
+                .get_potential_loads(None, 64, Default::default(), true,)
                 .len(),
             1
         );
@@ -1604,7 +1826,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .get_potential_loads(None, 64, Default::default(), true)
                     .len()
                     == 3
                 {
@@ -1663,7 +1885,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .get_potential_loads(None, 64, Default::default(), true)
                     .iter()
                     .any(|load| load.worker_id == 1)
                 {
@@ -1718,7 +1940,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if scheduler
-                    .get_potential_loads(None, 64, HashMap::new(), true)
+                    .get_potential_loads(None, 64, Default::default(), true)
                     .is_empty()
                 {
                     break;
@@ -1740,7 +1962,7 @@ mod tests {
 
         assert_eq!(
             scheduler
-                .get_potential_loads(None, 64, HashMap::new(), true)
+                .get_potential_loads(None, 64, Default::default(), true)
                 .len(),
             1
         );
@@ -1752,7 +1974,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), true);
+        let loads = scheduler.get_potential_loads(None, 64, Default::default(), true);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].worker_id, 0);
 
@@ -1777,8 +1999,8 @@ mod tests {
                 64,
                 Some(vec![11, 22]),
                 TierOverlapBlocks::default(),
-                HashMap::new(),
-                HashMap::new(),
+                Default::default(),
+                Default::default(),
                 None,
                 true,
                 None,
@@ -1793,7 +2015,7 @@ mod tests {
             .await
             .unwrap();
 
-        let loads = scheduler.get_potential_loads(None, 64, HashMap::new(), false);
+        let loads = scheduler.get_potential_loads(None, 64, Default::default(), false);
         assert_eq!(loads.len(), 1);
         assert_eq!(loads[0].potential_prefill_tokens, 64);
 

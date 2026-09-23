@@ -39,6 +39,9 @@ fn local_core_with(
         indexer_threads,
         cancel_token,
         SelectionCacheConfig::default(),
+        std::sync::Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        }),
     )
     .expect("valid test config")
 }
@@ -60,7 +63,14 @@ fn core_with(
         1,
         CancellationToken::new(),
         None,
-        policy_factory,
+        policy_factory.unwrap_or_else(|| {
+            Arc::new(|config, role, _| {
+                crate::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })
+        }),
         host,
         worker_type,
         true,
@@ -693,7 +703,11 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
                 .cache()
                 .expect("CACHE inputs requested")
                 .iter()
-                .map(|cache| cache.shared_beyond_device_blocks())
+                .map(|cache| {
+                    cache.shared_hits().map_or(0, |hits| {
+                        hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
+                    })
+                })
                 .collect(),
         });
         Ok(0)

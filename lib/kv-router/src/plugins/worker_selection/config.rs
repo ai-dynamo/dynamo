@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use super::policy_config::{RouterPolicyConfigError, validate_identifier};
+use crate::scheduling::policy_config::{RouterPolicyConfigError, validate_identifier};
 
 /// Process-wide configuration for worker selection in a custom Dynamo image.
 #[derive(Debug, Clone, PartialEq)]
@@ -71,7 +71,7 @@ impl WorkerSelectionInstance {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct RawWorkerSelectionConfig {
+pub(crate) struct RawWorkerSelectionConfig {
     aggregated: Option<String>,
     prefill: Option<String>,
     decode: Option<String>,
@@ -81,7 +81,7 @@ pub(super) struct RawWorkerSelectionConfig {
 }
 
 impl RawWorkerSelectionConfig {
-    pub(super) fn resolve(self) -> Result<WorkerSelectionConfig, RouterPolicyConfigError> {
+    pub(crate) fn resolve(self) -> Result<WorkerSelectionConfig, RouterPolicyConfigError> {
         if self.instances.is_empty()
             && self.aggregated.is_none()
             && self.prefill.is_none()

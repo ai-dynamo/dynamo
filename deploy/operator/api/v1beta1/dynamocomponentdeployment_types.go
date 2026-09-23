@@ -107,7 +107,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's
+	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
 	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
 	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
 	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for

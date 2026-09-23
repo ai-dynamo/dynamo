@@ -39,9 +39,9 @@ maximum, or pattern. Confirm those facts against the regenerated full reference 
 
 ## Generate the Full Reference
 
-The generation pipeline has two explicit stages.
+The generation pipeline has two stages. `make -C deploy/operator generate-api-docs` runs both.
 
-### Generate the raw CRD reference
+### Generate both reference files
 
 Run:
 
@@ -59,13 +59,14 @@ This target:
    `docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md`.
 4. Runs `deploy/operator/docs/fix-api-anchors.py` to disambiguate type anchors shared by multiple API
    versions and remove known unresolved type links.
+5. Runs `docs/fern/scripts/gen_kubernetes_api.py` to render `full-api-reference.mdx`.
 
 The footer contains operator-injected defaults and implementation notes that do not come directly
 from CRD schema types.
 
-### Render the full Fern page
+### Rerender the full Fern page
 
-Run:
+To rerender MDX from the existing raw Markdown without regenerating it from Go, run:
 
 ```bash
 python3 docs/fern/scripts/gen_kubernetes_api.py
@@ -228,7 +229,6 @@ Run the generation and focused tests:
 
 ```bash
 make -C deploy/operator generate-api-docs
-python3 docs/fern/scripts/gen_kubernetes_api.py
 python3 -m pytest -q \
   docs/fern/scripts/tests/test_gen_kubernetes_api.py \
   docs/fern/scripts/tests/test_api_reference_regressions.py
