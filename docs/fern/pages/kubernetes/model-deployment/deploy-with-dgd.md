@@ -336,7 +336,7 @@ If you are staying aggregated, keep the single worker and continue to the next s
 
 In the disaggregated spec, `type: prefill` and `type: decode` tag the roles, the KV cache moves over NIXL (`--kv-transfer-config`), and `sharedMemorySize` is raised for the transfer. When you disaggregate, the next step's sizing applies to prefill and decode **separately** — you pick TP/PP for each role.
 
-The fastest way to start is to copy a ready-to-apply Kubernetes template rather than type the spec from scratch. Choose the [vLLM](../../recipes/kubernetes-templates/dgd/vllm.mdx), [SGLang](../../recipes/kubernetes-templates/dgd/sglang.mdx), or [TensorRT-LLM](../../recipes/kubernetes-templates/dgd/tensorrt-llm.mdx) templates in the Recipes tab, then adapt the model, image, and parallelism to your case.
+The fastest way to start is to copy a ready-to-apply Kubernetes template rather than type the spec from scratch. Browse [Examples](../../recipes/examples/overview.mdx) in the Recipes tab, select Kubernetes and your backend, then adapt the model, image, and parallelism to your case.
 
 For disaggregation-specific configuration — RDMA resources, UCX environment variables, and prefill/decode scaling — see [Disaggregated Serving](../disaggregated-serving/overview.md).
 

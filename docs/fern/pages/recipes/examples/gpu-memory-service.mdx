@@ -1,0 +1,36 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "GPU Memory Service"
+subtitle: "Aggregated workers with a GPU Memory Service sidecar."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-agg-gms-yaml", "target": "kubernetes:sglang", "label": "agg_gms.yaml", "description": "Aggregated with GPU Memory Service sidecar"},
+    {"id": "kubernetes-vllm-agg-gms-yaml", "target": "kubernetes:vllm", "label": "agg_gms.yaml", "description": "Aggregated with GPU Memory Service sidecar"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-gms-yaml">
+
+[Source: `agg_gms.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_gms.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_gms.yaml" title="agg_gms.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-gms-yaml">
+
+[Source: `agg_gms.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_gms.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_gms.yaml" title="agg_gms.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

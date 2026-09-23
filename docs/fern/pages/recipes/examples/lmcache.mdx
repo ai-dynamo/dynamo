@@ -1,0 +1,110 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "LMCache"
+subtitle: "In-process and external LMCache examples for vLLM."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+For Kubernetes, deploy the LMCache operator resource first. See [Deploy LMCache MP](../../kubernetes/kv-cache-offloading/lmcache.mdx).
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-v1beta1-agg-lmcache-yaml", "target": "kubernetes:vllm", "label": "v1beta1/agg_lmcache.yaml", "description": "Aggregated serving with LMCache MP"},
+    {"id": "local-vllm-agg-lmcache-sh", "target": "local:vllm", "label": "agg_lmcache.sh", "description": "LMCache Offloading for One Worker"},
+    {"id": "local-vllm-agg-lmcache-mp-sh", "target": "local:vllm", "label": "agg_lmcache_mp.sh", "description": "Out-of-Process LMCache Server"},
+    {"id": "local-vllm-agg-lmcache-multiproc-sh", "target": "local:vllm", "label": "agg_lmcache_multiproc.sh", "description": "LMCache with Multiprocess Metrics"},
+    {"id": "local-vllm-disagg-lmcache-sh", "target": "local:vllm", "label": "disagg_lmcache.sh", "description": "LMCache on the Prefill Worker"},
+    {"id": "local-vllm-xpu-agg-lmcache-multiproc-xpu-sh", "target": "local:vllm", "label": "xpu/agg_lmcache_multiproc_xpu.sh", "description": "LMCache with Multiprocess Metrics"},
+    {"id": "local-vllm-xpu-agg-lmcache-xpu-sh", "target": "local:vllm", "label": "xpu/agg_lmcache_xpu.sh", "description": "LMCache Offloading"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-v1beta1-agg-lmcache-yaml">
+
+Deploy the LMCache operator resource first. See [Deploy LMCache MP](../../kubernetes/kv-cache-offloading/lmcache.mdx)
+for the full workflow.
+
+[Source: `agg_lmcache.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml" title="agg_lmcache.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-lmcache-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_lmcache.sh)
+```
+
+[Source: `agg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_lmcache.sh" title="agg_lmcache.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-lmcache-mp-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_lmcache_mp.sh)
+```
+
+[Source: `agg_lmcache_mp.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_mp.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_lmcache_mp.sh" title="agg_lmcache_mp.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-lmcache-multiproc-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_lmcache_multiproc.sh)
+```
+
+[Source: `agg_lmcache_multiproc.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_lmcache_multiproc.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_lmcache_multiproc.sh" title="agg_lmcache_multiproc.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-lmcache-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_lmcache.sh)
+```
+
+[Source: `disagg_lmcache.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_lmcache.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_lmcache.sh" title="disagg_lmcache.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-lmcache-multiproc-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_lmcache_multiproc_xpu.sh)
+```
+
+[Source: `agg_lmcache_multiproc_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_lmcache_multiproc_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_lmcache_multiproc_xpu.sh" title="agg_lmcache_multiproc_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-lmcache-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_lmcache_xpu.sh)
+```
+
+[Source: `agg_lmcache_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_lmcache_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_lmcache_xpu.sh" title="agg_lmcache_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

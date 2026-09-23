@@ -1,0 +1,31 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Snapshot Restore"
+subtitle: "Restore a TensorRT-LLM worker from a checkpoint."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+<Warning>
+**Experimental.** Replace placeholder images, create the `model-cache` PersistentVolumeClaim, and verify the host checkpoint requirements before applying the manifest.
+</Warning>
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-trtllm-snapshot-restore-yaml", "target": "kubernetes:trtllm", "label": "snapshot-restore.yaml", "description": "Restore a TensorRT-LLM worker from a checkpoint"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-snapshot-restore-yaml">
+
+[Source: `snapshot-restore.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/snapshot-restore.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/snapshot-restore.yaml" title="snapshot-restore.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

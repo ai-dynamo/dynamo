@@ -1,0 +1,31 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Sequence Classification"
+subtitle: "vLLM sequence classification and pooling."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-vllm-agg-classify-sh", "target": "local:vllm", "label": "agg_classify.sh", "description": "Sequence Classification and Pooling"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-classify-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_classify.sh)
+```
+
+[Source: `agg_classify.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_classify.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_classify.sh" title="agg_classify.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

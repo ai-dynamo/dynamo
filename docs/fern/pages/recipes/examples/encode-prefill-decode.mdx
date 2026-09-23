@@ -1,0 +1,83 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Separate Encode, Prefill, and Decode"
+subtitle: "Dedicated encode, prefill, and decode workers (E/P/D)."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-multimodal-disagg-sh", "target": "local:sglang", "label": "multimodal_disagg.sh", "description": "Separate Encode, Prefill, and Decode Workers"},
+    {"id": "local-trtllm-epd-disagg-sh", "target": "local:trtllm", "label": "epd_disagg.sh", "description": "Separate Encode, Prefill, and Decode Workers"},
+    {"id": "local-trtllm-epd-multimodal-image-and-embeddings-sh", "target": "local:trtllm", "label": "epd_multimodal_image_and_embeddings.sh", "description": "Image Inputs with Multimodal Embedding Transfer"},
+    {"id": "local-vllm-disagg-multimodal-epd-sh", "target": "local:vllm", "label": "disagg_multimodal_epd.sh", "description": "Separate Encode, Prefill, and Decode Workers"},
+    {"id": "local-vllm-xpu-disagg-multimodal-epd-xpu-sh", "target": "local:vllm", "label": "xpu/disagg_multimodal_epd_xpu.sh", "description": "Separate Encode, Prefill, and Decode Workers"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-multimodal-disagg-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/multimodal_disagg.sh)
+```
+
+[Source: `multimodal_disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/multimodal_disagg.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/multimodal_disagg.sh" title="multimodal_disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-epd-disagg-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/epd_disagg.sh)
+```
+
+[Source: `epd_disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/epd_disagg.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/epd_disagg.sh" title="epd_disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-epd-multimodal-image-and-embeddings-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/epd_multimodal_image_and_embeddings.sh)
+```
+
+[Source: `epd_multimodal_image_and_embeddings.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh" title="epd_multimodal_image_and_embeddings.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-multimodal-epd-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_multimodal_epd.sh)
+```
+
+[Source: `disagg_multimodal_epd.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_epd.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_multimodal_epd.sh" title="disagg_multimodal_epd.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-disagg-multimodal-epd-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/disagg_multimodal_epd_xpu.sh)
+```
+
+[Source: `disagg_multimodal_epd_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_multimodal_epd_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/disagg_multimodal_epd_xpu.sh" title="disagg_multimodal_epd_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

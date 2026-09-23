@@ -1,0 +1,57 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Separate Encode and PD"
+subtitle: "A dedicated encoder with a combined prefill/decode worker (E/PD)."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-multimodal-epd-sh", "target": "local:sglang", "label": "multimodal_epd.sh", "description": "Dedicated Encoder with a Combined Language-Model Worker"},
+    {"id": "local-trtllm-disagg-e-pd-sh", "target": "local:trtllm", "label": "disagg_e_pd.sh", "description": "Dedicated Encoder with a Combined Language-Model Worker"},
+    {"id": "local-vllm-disagg-multimodal-e-pd-sh", "target": "local:vllm", "label": "disagg_multimodal_e_pd.sh", "description": "Dedicated Encoder with a Combined Language-Model Worker"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-multimodal-epd-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/multimodal_epd.sh)
+```
+
+[Source: `multimodal_epd.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/multimodal_epd.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/multimodal_epd.sh" title="multimodal_epd.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-e-pd-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg_e_pd.sh)
+```
+
+[Source: `disagg_e_pd.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_e_pd.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg_e_pd.sh" title="disagg_e_pd.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-multimodal-e-pd-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_multimodal_e_pd.sh)
+```
+
+[Source: `disagg_multimodal_e_pd.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_multimodal_e_pd.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_multimodal_e_pd.sh" title="disagg_multimodal_e_pd.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

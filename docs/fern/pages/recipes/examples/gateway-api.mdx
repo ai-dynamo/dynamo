@@ -1,0 +1,38 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Gateway API Routing"
+subtitle: "Aggregated and disaggregated vLLM behind an Endpoint Picker."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Install the [Gateway API Inference Extension](../../kubernetes/kv-aware-routing/gateway-api.mdx) before applying these manifests.
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-gaie-agg-yaml", "target": "kubernetes:vllm", "label": "gaie/agg.yaml", "description": "Aggregated serving behind an Endpoint Picker"},
+    {"id": "kubernetes-vllm-gaie-disagg-yaml", "target": "kubernetes:vllm", "label": "gaie/disagg.yaml", "description": "Disaggregated serving behind an Endpoint Picker"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-gaie-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gaie/agg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/gaie/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-gaie-disagg-yaml">
+
+[Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gaie/disagg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/gaie/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

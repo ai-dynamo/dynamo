@@ -1,0 +1,57 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "FlexKV"
+subtitle: "Local vLLM cache offloading with FlexKV."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-vllm-agg-flexkv-sh", "target": "local:vllm", "label": "agg_flexkv.sh", "description": "FlexKV Offloading for One Worker"},
+    {"id": "local-vllm-agg-flexkv-router-sh", "target": "local:vllm", "label": "agg_flexkv_router.sh", "description": "FlexKV Offloading with KV Routing"},
+    {"id": "local-vllm-disagg-flexkv-sh", "target": "local:vllm", "label": "disagg_flexkv.sh", "description": "FlexKV on the Prefill Worker"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-flexkv-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_flexkv.sh)
+```
+
+[Source: `agg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_flexkv.sh" title="agg_flexkv.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-flexkv-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_flexkv_router.sh)
+```
+
+[Source: `agg_flexkv_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_flexkv_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_flexkv_router.sh" title="agg_flexkv_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-flexkv-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_flexkv.sh)
+```
+
+[Source: `disagg_flexkv.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_flexkv.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_flexkv.sh" title="disagg_flexkv.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

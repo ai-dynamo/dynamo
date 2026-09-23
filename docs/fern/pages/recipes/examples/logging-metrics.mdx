@@ -1,0 +1,40 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Logging and Metrics"
+subtitle: "SGLang structured logging and TensorRT-LLM worker metrics."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-agg-logging-yaml", "target": "kubernetes:sglang", "label": "agg_logging.yaml", "description": "Aggregated with structured logging"},
+    {"id": "local-trtllm-agg-metrics-sh", "target": "local:trtllm", "label": "agg_metrics.sh", "description": "Worker Metrics"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-logging-yaml">
+
+[Source: `agg_logging.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_logging.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_logging.yaml" title="agg_logging.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-metrics-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_metrics.sh)
+```
+
+[Source: `agg_metrics.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_metrics.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_metrics.sh" title="agg_metrics.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

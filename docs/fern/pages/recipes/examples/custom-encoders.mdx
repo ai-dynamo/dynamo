@@ -1,0 +1,44 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Custom Encoders"
+subtitle: "Launch a language-model backend with a custom vision encoder."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-vllm-agg-custom-sh", "target": "local:vllm", "label": "agg_custom.sh", "description": "Text Decoder with a Custom Encoder"},
+    {"id": "local-vllm-agg-qwen3-5-native-sh", "target": "local:vllm", "label": "agg_qwen3_5_native.sh", "description": "Qwen3.5 with a Teaching Vision Encoder"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-custom-sh">
+
+```bash
+(cd examples/custom_encoder && bash launch/agg_custom.sh)
+```
+
+[Source: `agg_custom.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_encoder/launch/agg_custom.sh)
+
+<Code src="../../../../../examples/custom_encoder/launch/agg_custom.sh" title="agg_custom.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-qwen3-5-native-sh">
+
+```bash
+(cd examples/custom_encoder && bash launch/agg_qwen3_5_native.sh)
+```
+
+[Source: `agg_qwen3_5_native.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_encoder/launch/agg_qwen3_5_native.sh)
+
+<Code src="../../../../../examples/custom_encoder/launch/agg_qwen3_5_native.sh" title="agg_qwen3_5_native.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

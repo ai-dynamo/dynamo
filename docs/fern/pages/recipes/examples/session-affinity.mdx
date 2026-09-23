@@ -1,0 +1,31 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Session Affinity"
+subtitle: "SGLang agentic serving with sticky sessions and KV-aware routing."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-agg-agent-sh", "target": "local:sglang", "label": "agg_agent.sh", "description": "Agentic Workloads with Session Affinity"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-agent-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_agent.sh)
+```
+
+[Source: `agg_agent.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_agent.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_agent.sh" title="agg_agent.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

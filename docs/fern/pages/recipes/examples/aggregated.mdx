@@ -1,0 +1,115 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Aggregated Serving"
+subtitle: "Frontend and workers that each perform prefill and decode."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-agg-yaml", "target": "kubernetes:sglang", "label": "agg.yaml", "description": "Baseline aggregated serving"},
+    {"id": "kubernetes-trtllm-agg-yaml", "target": "kubernetes:trtllm", "label": "agg.yaml", "description": "Baseline aggregated serving"},
+    {"id": "kubernetes-trtllm-agg-with-config-yaml", "target": "kubernetes:trtllm", "label": "agg-with-config.yaml", "description": "Aggregated with an external engine ConfigMap (bundles a ConfigMap)"},
+    {"id": "kubernetes-vllm-agg-yaml", "target": "kubernetes:vllm", "label": "agg.yaml", "description": "Baseline aggregated serving"},
+    {"id": "kubernetes-vllm-agg-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "agg_xpu_dra.yaml", "description": "Baseline aggregated serving"},
+    {"id": "local-sglang-agg-sh", "target": "local:sglang", "label": "agg.sh", "description": "Single-Worker Text Generation"},
+    {"id": "local-trtllm-agg-sh", "target": "local:trtllm", "label": "agg.sh", "description": "Single-Worker Text Generation"},
+    {"id": "local-vllm-agg-sh", "target": "local:vllm", "label": "agg.sh", "description": "Single-Worker Text Generation"},
+    {"id": "local-vllm-xpu-agg-xpu-sh", "target": "local:vllm", "label": "xpu/agg_xpu.sh", "description": "Single-Worker Text Generation"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-agg-with-config-yaml">
+
+[Source: `agg-with-config.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg-with-config.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/agg-with-config.yaml" title="agg-with-config.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-xpu-dra-yaml">
+
+[Source: `agg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml" title="agg_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg.sh)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg.sh)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg.sh)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_xpu.sh)
+```
+
+[Source: `agg_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_xpu.sh" title="agg_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

@@ -1,0 +1,110 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Disaggregated Serving"
+subtitle: "Dedicated prefill and decode workers with KV-cache transfer."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-disagg-yaml", "target": "kubernetes:sglang", "label": "disagg.yaml", "description": "Baseline disaggregated prefill/decode"},
+    {"id": "kubernetes-trtllm-disagg-yaml", "target": "kubernetes:trtllm", "label": "disagg.yaml", "description": "Baseline disaggregated prefill/decode"},
+    {"id": "kubernetes-vllm-disagg-yaml", "target": "kubernetes:vllm", "label": "disagg.yaml", "description": "Baseline disaggregated prefill/decode"},
+    {"id": "kubernetes-vllm-disagg-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "disagg_xpu_dra.yaml", "description": "Baseline disaggregated serving"},
+    {"id": "local-sglang-disagg-sh", "target": "local:sglang", "label": "disagg.sh", "description": "Dedicated Prefill and Decode Workers"},
+    {"id": "local-trtllm-disagg-sh", "target": "local:trtllm", "label": "disagg.sh", "description": "Dedicated Prefill and Decode Workers"},
+    {"id": "local-vllm-disagg-sh", "target": "local:vllm", "label": "disagg.sh", "description": "Dedicated Prefill and Decode Workers"},
+    {"id": "local-vllm-xpu-disagg-hetero-xpu-prefill-sh", "target": "local:vllm", "label": "xpu/disagg_hetero_xpu_prefill.sh", "description": "Heterogeneous XPU Prefill and CPU Decode"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-disagg-yaml">
+
+[Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/disagg.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-disagg-yaml">
+
+[Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-yaml">
+
+[Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-xpu-dra-yaml">
+
+[Source: `disagg_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/disagg_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/disagg_xpu_dra.yaml" title="disagg_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-disagg-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/disagg.sh)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg.sh)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg.sh)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-disagg-hetero-xpu-prefill-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/disagg_hetero_xpu_prefill.sh)
+```
+
+[Source: `disagg_hetero_xpu_prefill.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_hetero_xpu_prefill.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/disagg_hetero_xpu_prefill.sh" title="disagg_hetero_xpu_prefill.sh" language="bash" maxLines={0} />
+
+[Source: `disagg_hetero_cpu_decode.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_hetero_cpu_decode.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/disagg_hetero_cpu_decode.sh" title="disagg_hetero_cpu_decode.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

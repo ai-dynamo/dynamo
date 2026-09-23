@@ -1,0 +1,54 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Planner Autoscaling"
+subtitle: "Disaggregated serving with Dynamo Planner autoscaling."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-disagg-planner-yaml", "target": "kubernetes:sglang", "label": "disagg_planner.yaml", "description": "Disaggregated with Dynamo Planner autoscaling"},
+    {"id": "kubernetes-trtllm-disagg-planner-yaml", "target": "kubernetes:trtllm", "label": "disagg_planner.yaml", "description": "Disaggregated with Dynamo Planner autoscaling"},
+    {"id": "kubernetes-vllm-disagg-planner-yaml", "target": "kubernetes:vllm", "label": "disagg_planner.yaml", "description": "Disaggregated with Dynamo Planner autoscaling"},
+    {"id": "kubernetes-vllm-disagg-planner-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "disagg_planner_xpu_dra.yaml", "description": "Disaggregated with Planner autoscaling"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-disagg-planner-yaml">
+
+[Source: `disagg_planner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/disagg_planner.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/disagg_planner.yaml" title="disagg_planner.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-disagg-planner-yaml">
+
+[Source: `disagg_planner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg_planner.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/disagg_planner.yaml" title="disagg_planner.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-planner-yaml">
+
+[Source: `disagg_planner.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_planner.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_planner.yaml" title="disagg_planner.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-planner-xpu-dra-yaml">
+
+[Source: `disagg_planner_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/disagg_planner_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/disagg_planner_xpu_dra.yaml" title="disagg_planner_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

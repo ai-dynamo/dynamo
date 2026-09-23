@@ -1,0 +1,134 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "OpenTelemetry Tracing"
+subtitle: "Trace requests through aggregated or disaggregated workers."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Start the [local observability stack](../../cli/operations/observability.mdx) before using the local examples.
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-tracing-yaml", "target": "kubernetes:vllm", "label": "agg_tracing.yaml", "description": "Aggregated with OpenTelemetry tracing"},
+    {"id": "kubernetes-vllm-disagg-tracing-yaml", "target": "kubernetes:vllm", "label": "disagg_tracing.yaml", "description": "Disaggregated with OpenTelemetry tracing"},
+    {"id": "kubernetes-vllm-agg-tracing-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "agg_tracing_xpu_dra.yaml", "description": "Aggregated with OpenTelemetry tracing"},
+    {"id": "kubernetes-vllm-disagg-tracing-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "disagg_tracing_xpu_dra.yaml", "description": "Disaggregated with OpenTelemetry tracing"},
+    {"id": "local-vllm-agg-tracing-sh", "target": "local:vllm", "label": "agg_tracing.sh", "description": "OpenTelemetry Tracing"},
+    {"id": "local-vllm-disagg-tracing-sh", "target": "local:vllm", "label": "disagg_tracing.sh", "description": "OpenTelemetry Tracing Across Prefill and Decode"},
+    {"id": "local-sglang-agg-sh", "target": "local:sglang", "label": "agg.sh", "description": "Aggregated tracing"},
+    {"id": "local-sglang-disagg-sh", "target": "local:sglang", "label": "disagg.sh", "description": "Disaggregated tracing"},
+    {"id": "local-trtllm-agg-sh", "target": "local:trtllm", "label": "agg.sh", "description": "Aggregated tracing"},
+    {"id": "local-trtllm-disagg-sh", "target": "local:trtllm", "label": "disagg.sh", "description": "Disaggregated tracing"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-tracing-yaml">
+
+[Source: `agg_tracing.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_tracing.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_tracing.yaml" title="agg_tracing.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-tracing-yaml">
+
+[Source: `disagg_tracing.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_tracing.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_tracing.yaml" title="disagg_tracing.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-tracing-xpu-dra-yaml">
+
+[Source: `agg_tracing_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/agg_tracing_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/agg_tracing_xpu_dra.yaml" title="agg_tracing_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-tracing-xpu-dra-yaml">
+
+[Source: `disagg_tracing_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/disagg_tracing_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/disagg_tracing_xpu_dra.yaml" title="disagg_tracing_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-tracing-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_tracing.sh)
+```
+
+[Source: `agg_tracing.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_tracing.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_tracing.sh" title="agg_tracing.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-tracing-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_tracing.sh)
+```
+
+[Source: `disagg_tracing.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_tracing.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_tracing.sh" title="disagg_tracing.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg.sh --enable-otel)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-disagg-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/disagg.sh --enable-otel)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg.sh --enable-otel)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg.sh --enable-otel)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

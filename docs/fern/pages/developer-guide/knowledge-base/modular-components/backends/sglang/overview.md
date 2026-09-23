@@ -227,7 +227,7 @@ You can deploy SGLang with Dynamo on Kubernetes using a `DynamoGraphDeployment`.
 ## Next Steps
 
 - **[Reference Guide](reference-guide.md)**: Worker types, architecture, and configuration
-- **[Examples](../../../../../recipes/cli-templates/sglang.mdx)**: Local deployment launch scripts
+- **[Examples](../../../../../recipes/examples/overview.mdx)**: Local deployment launch scripts
 - **[Disaggregation](disaggregation.md)**: P/D architecture and KV transfer details
 - **Diffusion**: [image](../../../../../use-cases/diffusion/workflows/text-to-image.md), [video](../../../../../use-cases/diffusion/workflows/text-to-video.md), and [language](../../../../../use-cases/diffusion/workflows/text-to-text-llm-diffusion.md) diffusion models
 - **[Observability](observability.md)**: Metrics, tracing, and Grafana dashboards

@@ -146,7 +146,7 @@ features:
 
 The fastest path to SLA-based scaling is through a DynamoGraphDeploymentRequest,
 which automatically profiles your model. See
-[DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) for copyable DGDR manifests.
+[DGDR Templates](../../../../recipes/examples/dgdr.mdx) for copyable DGDR manifests.
 
 See [Planner Guide](planner-guide.md) for the full workflow.
 
@@ -182,7 +182,7 @@ is set. The decision logs identify the missing capacity metadata.
 | [Planner Design](planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
 | [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) | Replay a trace through the Planner offline, including the experimental retune |
-| [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
+| [DGDR Templates](../../../../recipes/examples/dgdr.mdx) | DGDR YAML examples, sample configurations, advanced patterns |
 | [Global Planner Guide](global-planner-guide.md) | Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments |
 
 ## Configuration Reference
