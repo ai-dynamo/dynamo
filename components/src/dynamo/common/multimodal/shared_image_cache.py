@@ -12,6 +12,8 @@ from collections import defaultdict
 from typing import cast
 
 from redis.asyncio.cluster import RedisCluster
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import RedisClusterException, RedisError
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,13 @@ class SharedImageCache:
             decode_responses=False,
             socket_connect_timeout=connect_timeout_seconds,
             socket_timeout=io_timeout_seconds,
+            # Rediscover through the configured endpoint, typically a Kubernetes
+            # Service, instead of replacing it with the node addresses the
+            # cluster announces; those go stale once every node's IP changes.
+            # The async client accepts this from redis-py 6.2, our floor.
+            dynamic_startup_nodes=False,
+            # Fail fast: an origin fetch is cheaper than retrying a cache call.
+            retry=Retry(NoBackoff(), 0),
         )
         # Do not log the URL: Redis URLs may contain credentials.
         logger.info("Shared image cache enabled")

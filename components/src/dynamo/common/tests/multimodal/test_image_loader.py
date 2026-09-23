@@ -602,12 +602,18 @@ async def test_shared_cache_uses_split_timeouts(monkeypatch) -> None:
     with patch(_REDIS_CLUSTER_FACTORY_PATH) as client_factory:
         ImageLoader(cache_size=4, url_policy=_permissive_policy())
 
-    client_factory.assert_called_once_with(
-        "redis://dragonfly.invalid",
-        decode_responses=False,
-        socket_connect_timeout=0.25,
-        socket_timeout=3.5,
-    )
+    client_factory.assert_called_once()
+    args, kwargs = client_factory.call_args
+    retry = kwargs.pop("retry")
+    assert args == ("redis://dragonfly.invalid",)
+    assert kwargs == {
+        "decode_responses": False,
+        "socket_connect_timeout": 0.25,
+        "socket_timeout": 3.5,
+        "dynamic_startup_nodes": False,
+    }
+    # Retry has no __eq__ at the redis-py 6.2 floor; check the behavior instead.
+    assert retry.get_retries() == 0
 
 
 async def test_shared_cache_hit_skips_origin_fetch(monkeypatch) -> None:
