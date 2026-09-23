@@ -79,7 +79,7 @@ Set the following environment variables on every participating worker:
 | `DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS` | `3600` | Positive cache-entry lifetime in seconds. |
 | `DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS` | `0.1` | Positive connection timeout in seconds. |
 | `DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS` | `2.0` | Positive Redis operation timeout in seconds. |
-| `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum encoded image size downloaded while the shared cache is enabled, in MiB. The limit also applies when a request lacks a session scope and bypasses cache reads and writes. |
+| `DYN_MM_MAX_FILE_SIZE_MB` | `64` | Maximum encoded image size downloaded from the origin, in MiB. The limit applies whether or not the shared cache is enabled, so oversized images are never stored in it. |
 | `DYN_MM_IMAGE_CACHE_SESSION_SCOPED` | `0` | Set to `1` to partition Dynamo image and image-embedding caches by session affinity. |
 
 Store the full connection URL in a Kubernetes Secret and inject it into each
