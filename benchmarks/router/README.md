@@ -132,9 +132,9 @@ python -m dynamo.frontend --namespace "$NAMESPACE" \
 
 Verify it works:
 ```bash
-# Send a request (should show prefill_worker_id and decode_worker_id in nvext)
+# Send a request and request worker attribution in the response.
 curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" \
-    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}' | python3 -m json.tool
+    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10,"nvext":{"extra_fields":["worker_id"]}}' | python3 -m json.tool
 
 # Check router metrics
 curl -s localhost:8000/metrics | grep "^# HELP dynamo_component_router"
@@ -231,6 +231,36 @@ python prefix_ratio_benchmark.py --url http://localhost:8001
 # Specify output directory
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
+
+#### Verify worker participation
+
+Router benchmark success only proves that the endpoint served the workload. To
+also prove that the measured requests exercised the expected number of workers,
+enable worker participation validation:
+
+```bash
+# Aggregated deployment with at least two workers.
+python prefix_ratio_benchmark.py \
+    --minimum-decode-workers 2
+
+# Disaggregated deployment with two prefill and two decode workers.
+python real_data_benchmark.py \
+    --input-dataset trace.jsonl \
+    --minimum-prefill-workers 2 \
+    --minimum-decode-workers 2
+```
+
+Setting either minimum above zero requests `nvext.worker_id` on every measured
+request, enables AIPerf raw export, and writes `worker_participation.json` under
+the run artifact directory. The benchmark fails if no worker attribution is
+returned or either configured minimum is not observed.
+
+The minima are topology sanity checks, not load-balancing assertions. KV-aware
+and affinity routing can legitimately leave workers idle, and a highly skewed
+split such as 99/1 still passes when both workers are observed. Raw exports
+contain every measured request and streaming response chunk, so their size grows
+with request count and output sequence length. Treat these artifacts as workload
+data and account for the additional storage when running long-output workloads.
 
 ### Step 5 (Alternative): Run Benchmarks with Real Trace Data
 
