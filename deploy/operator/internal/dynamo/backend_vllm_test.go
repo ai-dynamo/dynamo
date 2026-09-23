@@ -985,6 +985,12 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		}
 	}
 
+	t.Log("Build the exact elastic-EP Ray worker command used by the exclusion case")
+	elasticEPWorker := corev1.Container{Name: "main", Image: "vllm:elastic-ep"}
+	if !injectElasticEPRayLaunchFlags(&elasticEPWorker, RoleWorker, "test-service", &GroveMultinodeDeployer{}) {
+		t.Fatal("injectElasticEPRayLaunchFlags() = false, want true")
+	}
+
 	tests := []struct {
 		name                string
 		numberOfNodes       int32
@@ -1174,16 +1180,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			},
 			multinodeDeployer: &GroveMultinodeDeployer{},
 			initialPodSpec: &corev1.PodSpec{
-				Containers: []corev1.Container{
-					{
-						Name:    "main",
-						Image:   "vllm:elastic-ep",
-						Command: []string{"/bin/sh", "-c"},
-						Args: []string{
-							"until python3 -c 'check /live'; do sleep 15; done && ray start --address=leader:6379 --block",
-						},
-					},
-				},
+				Containers: []corev1.Container{elasticEPWorker},
 			},
 			expectInitContainer: false,
 		},
