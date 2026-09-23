@@ -34,6 +34,7 @@ const MAX_INITIAL_LOAD_AGE: Duration = Duration::from_secs(5);
 const METRICS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct RoutingState {
+    node: Option<crate::node::NodeMetadata>,
     dp_size: u32,
     dp_targeting: bool,
     heartbeat_timeout: Option<Duration>,
@@ -101,7 +102,7 @@ impl TrtllmSidecarEngine {
         Self::from_parsed(args).map_err(Into::into)
     }
 
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
         }
@@ -249,6 +250,12 @@ impl LLMEngine for TrtllmSidecarEngine {
             let routing_deadline = startup_deadline(self.transport.startup_deadline)?;
             let routing_discovery = async {
                 let server = client.server_info().await?.unwrap_or_default();
+                let node = crate::node::NodeMetadata::from_info(Some(&server))?;
+                if node.as_ref().is_some_and(|node| !node.leader) {
+                    return Err(client::protocol_error(
+                        "Follower endpoint cannot serve inference; use the automatic sidecar launcher",
+                    ));
+                }
                 let metadata = server.extra.unwrap_or_default().fields;
                 let dp_targeting = matches!(
                     metadata
@@ -257,17 +264,8 @@ impl LLMEngine for TrtllmSidecarEngine {
                     Some(prost_types::value::Kind::BoolValue(true))
                 );
                 let heartbeat_timeout =
-                    metadata
-                        .get("kv_event_heartbeat_interval_ms")
-                        .and_then(|value| match value.kind {
-                            Some(prost_types::value::Kind::NumberValue(ms))
-                                if ms.is_finite() && ms > 0.0 && ms <= u32::MAX as f64 =>
-                            {
-                                Some(Duration::from_millis(ms as u64 * 3))
-                            }
-                            _ => None,
-                        });
-                let sources = client.kv_event_sources().await?;
+                    kv_heartbeat_timeout(metadata.get("kv_event_heartbeat_interval_ms"));
+                let mut sources = client.kv_event_sources().await?;
                 let events_enabled = !sources.is_empty();
                 let load = client.get_load(true).await?;
                 let load_enabled = load.used_kv_blocks.is_some()
@@ -295,6 +293,9 @@ impl LLMEngine for TrtllmSidecarEngine {
                 if events_enabled {
                     validate_kv_sources(&sources, dp_size)?;
                 }
+                if let Some(node) = &node {
+                    node.select_local_sources(&mut sources)?;
+                }
                 let initial_snapshots = if load_enabled {
                     load_snapshots(load, dp_size)?
                 } else {
@@ -308,6 +309,7 @@ impl LLMEngine for TrtllmSidecarEngine {
                     "Discovered OpenEngine routing capabilities"
                 );
                 Ok::<RoutingState, DynamoError>(RoutingState {
+                    node,
                     dp_size,
                     dp_targeting,
                     heartbeat_timeout,
@@ -338,7 +340,15 @@ impl LLMEngine for TrtllmSidecarEngine {
             max_output_tokens = ?limits.max_output_tokens,
             "TensorRT-LLM gRPC is ready"
         );
-        Ok(model.engine_config())
+        let mut config = model.engine_config();
+        if let Some(node) = self.routing.get().and_then(|routing| routing.node.as_ref()) {
+            config.runtime_data.insert(
+                crate::node::NODE_METADATA_KEY.to_string(),
+                serde_json::to_value(node)
+                    .map_err(|error| client::protocol_error(error.to_string()))?,
+            );
+        }
+        Ok(config)
     }
 
     async fn generate(
@@ -570,39 +580,17 @@ impl LLMEngine for TrtllmSidecarEngine {
     }
 }
 
-fn validate_kv_sources(sources: &[pb::KvEventSource], dp_size: u32) -> Result<(), DynamoError> {
+pub(crate) fn validate_kv_sources(
+    sources: &[pb::KvEventSource],
+    dp_size: u32,
+) -> Result<(), DynamoError> {
     let mut ranks = HashSet::new();
     for source in sources {
-        if source.transport != "zmq" || source.encoding != "msgpack" {
-            return Err(client::protocol_error(
-                "KV routing requires ZMQ sources with msgpack encoding",
-            ));
-        }
-        if source.schema_version != Some(1) {
-            return Err(client::protocol_error(
-                "GetKvEventSources returned an unsupported schema_version",
-            ));
-        }
-        let rank = source.data_parallel_rank.ok_or_else(|| {
-            client::protocol_error("GetKvEventSources omitted data_parallel_rank")
-        })?;
-        if rank >= dp_size || !ranks.insert(rank) {
+        let rank = validate_kv_source(source, dp_size)?;
+        if !ranks.insert(rank) {
             return Err(client::protocol_error(format!(
-                "GetKvEventSources returned invalid or duplicate rank {rank}",
+                "GetKvEventSources returned duplicate rank {rank}",
             )));
-        }
-        let endpoint = source
-            .endpoint_addr
-            .as_ref()
-            .ok_or_else(|| client::protocol_error("GetKvEventSources omitted endpoint_addr"))?;
-        if endpoint.protocol != "tcp"
-            || endpoint.host.trim().is_empty()
-            || matches!(endpoint.host.as_str(), "*" | "0.0.0.0" | "::")
-            || endpoint.port == 0
-        {
-            return Err(client::protocol_error(
-                "GetKvEventSources returned an invalid TCP endpoint",
-            ));
         }
     }
     if ranks.len() != dp_size as usize {
@@ -614,7 +602,56 @@ fn validate_kv_sources(sources: &[pb::KvEventSource], dp_size: u32) -> Result<()
     Ok(())
 }
 
-fn to_kv_event_source(
+pub(crate) fn validate_kv_source(
+    source: &pb::KvEventSource,
+    dp_size: u32,
+) -> Result<u32, DynamoError> {
+    if source.transport != "zmq" || source.encoding != "msgpack" {
+        return Err(client::protocol_error(
+            "KV routing requires ZMQ sources with msgpack encoding",
+        ));
+    }
+    if source.schema_version != Some(1) {
+        return Err(client::protocol_error(
+            "GetKvEventSources returned an unsupported schema_version",
+        ));
+    }
+    let rank = source
+        .data_parallel_rank
+        .ok_or_else(|| client::protocol_error("GetKvEventSources omitted data_parallel_rank"))?;
+    if rank >= dp_size {
+        return Err(client::protocol_error(format!(
+            "GetKvEventSources returned invalid rank {rank}",
+        )));
+    }
+    let endpoint = source
+        .endpoint_addr
+        .as_ref()
+        .ok_or_else(|| client::protocol_error("GetKvEventSources omitted endpoint_addr"))?;
+    if endpoint.protocol != "tcp"
+        || endpoint.host.trim().is_empty()
+        || matches!(endpoint.host.as_str(), "*" | "0.0.0.0" | "::")
+        || endpoint.port == 0
+    {
+        return Err(client::protocol_error(
+            "GetKvEventSources returned an invalid TCP endpoint",
+        ));
+    }
+    Ok(rank)
+}
+
+pub(crate) fn kv_heartbeat_timeout(value: Option<&prost_types::Value>) -> Option<Duration> {
+    match value.and_then(|value| value.kind.as_ref()) {
+        Some(prost_types::value::Kind::NumberValue(ms))
+            if ms.is_finite() && *ms > 0.0 && *ms <= u32::MAX as f64 =>
+        {
+            Some(Duration::from_millis(*ms as u64 * 3))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn to_kv_event_source(
     source: &pb::KvEventSource,
     heartbeat_timeout: Option<Duration>,
 ) -> Result<KvEventSource, DynamoError> {

@@ -44,8 +44,7 @@ KV events and KV occupancy are discovered independently from the existing `GetKv
 
 ## Protocol
 
-The gRPC types are vendored, like the vLLM and SGLang sidecars': `proto/`
-carries the `openengine.v1` contract from
+The gRPC types are vendored: `proto/` carries the `openengine.v1` contract from
 [`ai-dynamo/openengine`](https://github.com/ai-dynamo/openengine) `v0.1.0`,
 compiled by `build.rs` with `tonic-build`. The pinned revision is the git commit
 behind the Buf Schema Registry module commit (`768a93c7b44e`) TensorRT-LLM's
@@ -124,6 +123,20 @@ dynamo-trtllm-sidecar \
 ```
 
 Run the frontend with `--router-mode kv`. Event discovery validates one msgpack ZMQ source per DP rank; load discovery validates one fresh snapshot per rank. Either feature can be disabled independently on the server. Only enabled occupancy starts the 100 ms load poller, with one `GetLoad` in flight. TensorRT-LLM samples CPU-side counters without iteration statistics or GPU synchronization. Disabling occupancy does not enlarge the attention-DP all-gather payload. DP targeting remains available with both telemetry features disabled.
+
+### Distributed engines: one sidecar per node
+
+With the matching node-discovery build of TensorRT-LLM, launch the same sidecar command on each participating node, pointing it at that node's OpenEngine address. Keep namespace, component, endpoint, and disaggregation mode consistent within an engine. Do not launch one sidecar per GPU. The engine groups ranks by hostname; pods must have distinct hostnames when they represent distinct nodes.
+
+- The sidecar discovers its role from engine metadata; there is no leader/follower CLI switch.
+- The leader registers the engine once for inference, polls engine-wide load, and consumes only its local attention-DP event sources.
+- Followers consume only their local attention-DP sources, maintaining local recovery indexes when enabled by the leader. They publish under the leader's worker ID and each source's global DP rank, without registering another inference worker or polling load.
+- Nodes without a publishing rank remain passive. A follower can start before its leader and waits up to the configured startup deadline.
+- Legacy servers without node metadata retain the single-sidecar behavior. Do not mix an old leader-wide collector with new node-local collectors for the same engine.
+
+Follower metadata uses the same configured OpenEngine port on each host and must be reachable by the colocated sidecar. Configure a nonzero port for multinode engines. The launcher must place the serving ingress with engine rank zero; remote-ingress/Ray placement is not validated. Keep metadata and ZMQ endpoints on trusted interfaces.
+
+Initial recovery requires coordinated restart of the engine and its sidecars. Local indexes help router recovery but do not reconstruct events missed while a sidecar was absent. Deploy exactly one collector per node; redundant collectors are not an active/standby mechanism. A follower exits when its local metadata endpoint or matching leader disappears or changes. This does not by itself remove the leader's inference registration: inference and telemetry failure policies remain distinct.
 
 Negotiated heartbeat loss clears stale event residency after three heartbeat intervals; other backends without this capability retain their behavior. Load RPC failures are logged and do not reject inference. Last published load can remain stale during an outage; removing stale load from routing requires a separate framework health/expiry policy.
 
@@ -280,7 +293,6 @@ all the gain.
 
 ## Packaging
 
-There is no published sidecar image yet. The image contains the vLLM,
-SGLang, and TensorRT-LLM executables and uses a minimal CPU-only base. Until
+There is no published sidecar image yet. The shared sidecar image includes the TensorRT-LLM executable and uses a minimal CPU-only base. Until
 official packaging is available, build and push the sidecar image as described
 in [Build the image](../README.md#build-the-image).

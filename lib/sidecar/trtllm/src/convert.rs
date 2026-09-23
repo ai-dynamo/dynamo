@@ -708,7 +708,7 @@ impl ResponseState {
         };
         let mut log_probs = Vec::with_capacity(tokens.len());
         // `logprobs=0` keeps the selected-token logprob but omits the top
-        // alternatives, matching the vLLM sidecar contract.
+        // alternatives.
         let wants_candidates = count != 0;
         let mut top_logprobs = Vec::with_capacity(if wants_candidates { tokens.len() } else { 0 });
         for info in tokens {
