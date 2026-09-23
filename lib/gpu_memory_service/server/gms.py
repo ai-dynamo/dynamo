@@ -563,6 +563,7 @@ class GMS:
                 pid=msg.client_pid,
                 process_start_time_value=msg.process_start_time,
                 rank=msg.rank,
+                failure_notify_addr=msg.failure_notify_addr,
                 crash_interlock=msg.crash_interlock,
             )
             logger.info(

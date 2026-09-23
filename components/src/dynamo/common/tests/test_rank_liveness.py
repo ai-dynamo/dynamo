@@ -594,3 +594,53 @@ def test_gpu_crash_marker_bypasses_heartbeat_timeout(tmp_path):
         assert calls == [(7, "gpu-crash-interlock")]
     finally:
         monitor.stop()
+
+
+def test_direct_gpu_crash_notification_bypasses_heartbeat_timeout(tmp_path):
+    import zmq
+
+    from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
+
+    cohort = tmp_path / "cohort"
+    cohort.touch(mode=0o600)
+    marker = gpu_failure_marker_path(cohort)
+    endpoint = _endpoint()
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=endpoint,
+        timeout_ms_override=5_000,
+        failure_marker_path=str(marker),
+    )
+
+    sender = zmq.Context.instance().socket(zmq.DEALER)
+    sender.setsockopt(zmq.LINGER, 0)
+    sender.connect(endpoint)
+    monitor.start()
+    try:
+        sender.send_multipart(
+            [
+                b"gpu-failed-v1",
+                str(tmp_path / "other-cohort").encode(),
+                b"7",
+                b"1234",
+                b"signal-11",
+            ]
+        )
+        assert not fired.wait(0.1), "another cohort must not trigger takeover"
+
+        sender.send_multipart(
+            [
+                b"gpu-failed-v1",
+                str(cohort).encode(),
+                b"7",
+                b"1234",
+                b"signal-11",
+            ]
+        )
+        assert fired.wait(0.5), "monitor waited for the heartbeat deadline"
+        assert calls == [(7, "gpu-crash-interlock-zmq")]
+    finally:
+        sender.close(0)
+        monitor.stop()
