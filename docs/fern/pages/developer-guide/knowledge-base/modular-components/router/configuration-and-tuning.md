@@ -111,6 +111,7 @@ link no catalog and reject a configured policy type at startup.
 | Policy type | Behavior |
 |---|---|
 | `default` | Dynamo's built-in selector and cost model. Reserved; always available. |
+| `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:

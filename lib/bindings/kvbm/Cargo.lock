@@ -2058,10 +2058,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
  "dynamo-kv-router",
  "fastrand",
  "parking_lot",
  "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

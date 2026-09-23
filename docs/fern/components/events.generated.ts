@@ -28,6 +28,19 @@ export const UPCOMING_EVENTS: DynamoEvent[] = [];
 
 export const PAST_EVENTS: DynamoEvent[] = [
   {
+    "title": "Dynamo community meeting",
+    "start": "2026-09-23T17:30:00.000Z",
+    "month": "Sep",
+    "day": "23",
+    "year": "2026",
+    "dateLabel": "Wed, Sep 23, 2026",
+    "timeLabel": "10:30 AM",
+    "isPast": true,
+    "location": "Online",
+    "locationUrl": "https://meet.google.com/heb-demu-qok",
+    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+community+meeting&dates=20260923T173000Z%2F20260923T181500Z&location=https%3A%2F%2Fmeet.google.com%2Fheb-demu-qok"
+  },
+  {
     "title": "Baseten x Dynamo x SGLang RL post training meetup",
     "start": "2026-09-11T01:00:00.000Z",
     "month": "Sep",
@@ -91,18 +104,5 @@ export const PAST_EVENTS: DynamoEvent[] = [
     "location": "Luma",
     "locationUrl": "https://luma.com/rxsn0u0h",
     "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=AI+Infra+Builders+Meetup+with+dstack%2C+Crusoe%2C+and+SGLang&dates=20260724T003000Z%2F20260724T043000Z&location=https%3A%2F%2Fluma.com%2Frxsn0u0h"
-  },
-  {
-    "title": "Austin vLLM & llm-d AI Inference Meetup",
-    "start": "2026-07-16T22:00:00.000Z",
-    "month": "Jul",
-    "day": "16",
-    "year": "2026",
-    "dateLabel": "Thu, Jul 16, 2026",
-    "timeLabel": "3:00 PM",
-    "isPast": true,
-    "location": "Luma",
-    "locationUrl": "https://luma.com/rxmldtp2?tk=XiKvay",
-    "addUrl": "https://calendar.google.com/calendar/render?action=TEMPLATE&text=Austin+vLLM+%26+llm-d+AI+Inference+Meetup&dates=20260716T220000Z%2F20260716T230000Z&location=https%3A%2F%2Fluma.com%2Frxmldtp2%3Ftk%3DXiKvay&details=%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A00PM+%E2%80%93+5%3A30PM+%E2%80%94+Doors+Open%2C+Check-In%3C%2Fstrong%3E%3Cbr%3E%3Cbr%3E%3Cstrong%3E5%3A30PM+%E2%80%93+5%3A40PM+%E2%80%94+Welcome+and+Opening+Remarks%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BJake+O%27Shea%2C+Principal%2C+Antler+%26amp%3B+Co-Founder+%2F+Organizer%2C+AITX%3Cbr%3ESasa+Zelenovic%2C+Sr.+Technical+Marketing+Manager%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E5%3A40PM+%E2%80%93+6%3A10PM+%E2%80%94+Intro+to+vLLM+and+Project+Update%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BKyle+Sayers%2C+Sr.+Machine+Learning+Engineer%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A10PM+%E2%80%93+6%3A30PM+%E2%80%94+Intro+to+Scalable%2C+Distributed+Inference+with+Kubernetes+and+llm-d%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BWill+Eaton%2C+Senior+Principal+Software+Engineer%2C+AI+Engineering%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A30PM+%E2%80%93+6%3A45PM+%E2%80%94+NemoClaw%3A+Build+%26amp%3B+Deploy+Always-On+Agents%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BPatrick+Moorhead%2C+Technical+Marketing+Engineer%2C+AI%2C+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E6%3A45PM+%E2%80%93+7%3A00PM+%E2%80%94+ModelExpress%3A+Fast+Weights+and+Compile+Caches+for+Inference+and+RL+Post-Training%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BGanesh+Kudleppanavar+-+Tech+Lead+Manager%2C+AI+Inference+NVIDIA%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A00PM+%E2%80%93+7%3A40PM+%E2%80%94+Hands-on+Workshop%3A+Getting+Started+with+Accurate+Model+Compression+and+Benchmarking%3C%2Fstrong%3E%3C%2Fp%3E%3Cblockquote%3E%3Cp%3E%E2%80%8BLegare+Kerrison%2C+Developer+Advocate%2C+Red+Hat+AI%3Cbr%3EGrace+Ableidinger%2C+Developer+Advocate%2C+Red+Hat+AI%3C%2Fp%3E%3C%2Fblockquote%3E%3Cp%3E%E2%80%8B%3Cstrong%3E7%3A40PM+%E2%80%93+8%3A00PM+%E2%80%94+Discussion+and+Q%26amp%3BA%3C%2Fstrong%3E%3C%2Fp%3E%3Cp%3E%E2%80%8B%3Cstrong%3E8%3A00PM+%E2%80%93+9%3A00PM+%E2%80%94+Networking%2C+Food+and+Drinks%3C%2Fstrong%3E%3C%2Fp%3E"
   }
 ];
