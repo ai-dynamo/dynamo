@@ -569,6 +569,12 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         assert href == f"{source_pages[source]}.mdx"
         assert body.count("<a ") == 1
         assert "aria-label=" in body
+        assert 'className="dynamo-diffusion-name"' in body
+        (footer,) = re.findall(
+            r'<div className="dynamo-diffusion-card-footer" aria-hidden="true">(.*?)</div>',
+            body,
+        )
+        assert footer == "<span>↗</span>"
         (image,) = re.findall(r'<img[^>]+src="([^"]+)"', body)
         assert (page.parent / image).resolve().is_file()
         experimental = "agg_omni_audio" in source.name or "experimental" in source.parts
@@ -618,8 +624,29 @@ def test_diffusion_catalog_is_server_styled_accessible_and_responsive() -> None:
     assert ":focus-visible" in component
     assert "prefers-reduced-motion" in component
     assert "@media (max-width:" in component
+    assert ".dynamo-diffusion-card[hidden] { display: none !important; }" in component
+    assert "<DiffusionCatalogControls>{children}</DiffusionCatalogControls>" in component
     styles = (FERN / "components/examples-layout.ts").read_text()
     assert ".dynamo-diffusion" in styles
+
+
+def test_diffusion_catalog_controls_preserve_native_mdx_cards() -> None:
+    component = (FERN / "components/DiffusionCatalogControls.tsx").read_text()
+    assert '"use client"' in component
+    assert 'type="search"' in component
+    assert 'role="status"' in component
+    assert 'aria-atomic="true"' in component
+    assert "useId()" in component
+    for field in ("type", "backend", "provider", "size", "status"):
+        assert f'key: "{field}"' in component
+    assert "a.sizeGB - b.sizeGB" in component
+    assert "b.sizeGB - a.sizeGB" in component
+    assert 'setQuery("")' in component
+    assert "setFilters(EMPTY_FILTERS)" in component
+    assert 'setSort("default")' in component
+    assert 'className="dynamo-diffusion-grid" ref={grid}>{children}</div>' in component
+    assert "appendChild(node)" in component
+    assert "fetch(" not in component
 
 
 def test_diffusion_overview_keeps_local_only_cases_discoverable() -> None:

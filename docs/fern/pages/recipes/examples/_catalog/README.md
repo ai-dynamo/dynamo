@@ -18,10 +18,14 @@ Each example has three authoring surfaces:
 3. A page entry under **Recipes → Examples** in `docs/fern/index.yml`.
 
 `diffusion-overview.mdx` is a topic landing page, not another source-picker example. Its
-`DiffusionCatalog` component supplies server-rendered styling; native MDX images and one stretched
-page link per card preserve Fern's asset, version, and locale rewriting. Do not embed DGDs or add
-secondary links to these cards. Keep it first under **Examples → Diffusion** and linked from the
-main overview, without an `ExampleSelector` or a duplicate main-catalog card.
+`DiffusionCatalog` component supplies server-rendered styling and a search/filter/sort widget;
+native MDX images and one stretched page link per card preserve Fern's asset, version, and locale
+rewriting. The widget reads the existing card metadata and chip labels, without a second catalog
+or browser-side metadata requests. Keep the title's `dynamo-diffusion-name` class so name sorting
+uses the visible title. The footer contains only a decorative arrow; the stretched link retains
+its descriptive accessible name. Do not embed DGDs or add secondary links to these cards. Keep it
+first under **Examples → Diffusion** and linked from the main overview, without an `ExampleSelector`
+or a duplicate main-catalog card.
 
 Cards identify the source manifest in `data-source` for validation, and carry model, modality,
 backend, weight-size, and experimental metadata. Experimental and regular entries share one grid.
