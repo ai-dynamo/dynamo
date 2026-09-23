@@ -81,10 +81,10 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_
 
 # Start frontend (no router mode)
 echo "Starting frontend..."
-python -m dynamo.frontend &
-
-# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2}.
-unset DYN_SYSTEM_PORT
+# The harness aliases DYN_SYSTEM_PORT to DYN_SYSTEM_PORT1, which belongs to the
+# encode worker; leaving it set makes the frontend bind that worker's port.
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
@@ -122,6 +122,21 @@ if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
     PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
 fi
 
+# Per-worker ports. Standalone runs keep the literal defaults; under
+# DYN_MANAGED_PORTS the harness injects DYN_*_PORT{1,2} and dyn_port refuses a
+# missing or invalid value instead of letting both workers share one default
+# port, which collides when several deployments run on the same machine.
+SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
+SYSTEM_PORT_PD=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+NIXL_PORT_ENCODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")
+NIXL_PORT_PD=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PD:-20098}")
+# Pins the ZMQ endpoint each worker would publish KV events on. Publishing
+# stays off (KVEventsConfig.enable_kv_cache_events defaults to false, as in
+# disagg_multimodal_epd.sh), so this only keeps the endpoint off a shared
+# default.
+KV_PORT_ENCODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")
+KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
+
 # Start encode worker.
 #
 # NOTE: encoder VRAM is STATIC, set by the model — $DYN_ENCODE_GPU_MEM
@@ -149,8 +164,9 @@ fi
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --enable-multimodal \
@@ -158,11 +174,13 @@ python -m dynamo.vllm \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
   $FD_ARGS \
-  $EXTRA_ARGS &
+  $EXTRA_ARGS \
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_ENCODE}\"}" &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PD \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PD \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
@@ -173,6 +191,7 @@ python -m dynamo.vllm \
   $PD_GPU_MEM_ARGS \
   $FD_ARGS \
   $EXTRA_ARGS \
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}" \
   "${EXTRA_PD_ARGS[@]}" &
 
 echo "=================================================="

@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import re
 import subprocess
 from pathlib import Path
+from typing import Dict, Tuple
 
 import pytest
 
@@ -12,6 +15,70 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.port_utils import ServicePorts, reserved_ports
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+_E_PD_LAUNCHER = (
+    Path(__file__).parents[2]
+    / "examples/backends/vllm/launch/disagg_multimodal_e_pd.sh"
+)
+
+# Records the ports one worker was handed, then stays alive: the launch script
+# tears its whole process group down as soon as any child exits, so an
+# instant-exit stub can race the later workers out of the record.
+_STUB_ENGINE = """#!/bin/bash
+printf '%s\\t%s\\t%s\\n' \
+    "${DYN_SYSTEM_PORT:-}" "${VLLM_NIXL_SIDE_CHANNEL_PORT:-}" "$*" >> "$PORT_RECORD"
+sleep 2
+"""
+
+
+def _run_e_pd_launcher(
+    tmp_path: Path, env: Dict[str, str]
+) -> Tuple[subprocess.CompletedProcess, Dict[str, Dict[str, str]]]:
+    """Launch the E+PD script against a stub engine and collect per-worker ports.
+
+    Returns the finished process plus, keyed by role, the system port, the NIXL
+    side-channel port, and the KV-event endpoint port each process received.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "python"
+    stub.write_text(_STUB_ENGINE)
+    stub.chmod(0o755)
+    record = tmp_path / "ports.tsv"
+
+    result = subprocess.run(
+        ["bash", str(_E_PD_LAUNCHER), "--single-gpu"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+        # The launcher's cleanup trap signals its own process group. Without a
+        # new session that group is pytest's.
+        start_new_session=True,
+        env={
+            "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+            "PORT_RECORD": str(record),
+            **env,
+        },
+    )
+
+    workers: Dict[str, Dict[str, str]] = {}
+    lines = record.read_text().splitlines() if record.exists() else []
+    for line in lines:
+        system_port, nixl_port, args = line.split("\t")
+        if "--disaggregation-mode encode" in args:
+            role = "encode"
+        elif "--disaggregation-mode pd" in args:
+            role = "pd"
+        else:
+            role = "frontend"
+        endpoint = re.search(r"tcp://\*:(\d+)", args)
+        workers[role] = {
+            "system": system_port,
+            "nixl": nixl_port,
+            "kv": endpoint.group(1) if endpoint else "",
+        }
+    return result, workers
 
 
 class _RequestNode:
@@ -236,6 +303,68 @@ def test_dyn_port_rejects_out_of_range_fallback() -> None:
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
+
+
+def test_e_pd_launcher_isolates_every_managed_worker_port(tmp_path: Path) -> None:
+    """Hand the E+PD encode and PD workers their own injected ports."""
+    with reserved_ports(6, DynamoPortRange.SERVE.value) as allocated:
+        system_ports = allocated[0:2]
+        kv_event_ports = allocated[2:4]
+        nixl_ports = allocated[4:6]
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                # The harness aliases the unindexed name to worker 1's port.
+                "DYN_SYSTEM_PORT": str(system_ports[0]),
+                "DYN_SYSTEM_PORT1": str(system_ports[0]),
+                "DYN_SYSTEM_PORT2": str(system_ports[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(kv_event_ports[0]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(kv_event_ports[1]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(nixl_ports[0]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(nixl_ports[1]),
+            },
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert set(workers) == {"frontend", "encode", "pd"}, result.stdout
+    assert workers["encode"] == {
+        "system": str(system_ports[0]),
+        "nixl": str(nixl_ports[0]),
+        "kv": str(kv_event_ports[0]),
+    }
+    assert workers["pd"] == {
+        "system": str(system_ports[1]),
+        "nixl": str(nixl_ports[1]),
+        "kv": str(kv_event_ports[1]),
+    }
+    # The frontend must not bind a worker's system port.
+    assert workers["frontend"]["system"] not in {str(port) for port in system_ports}
+
+
+def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> None:
+    """Refuse to start E+PD workers on shared defaults when a port is absent."""
+    with reserved_ports(5, DynamoPortRange.SERVE.value) as allocated:
+        system_ports = allocated[0:2]
+        kv_event_ports = allocated[2:4]
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(system_ports[0]),
+                "DYN_SYSTEM_PORT1": str(system_ports[0]),
+                "DYN_SYSTEM_PORT2": str(system_ports[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(kv_event_ports[0]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(kv_event_ports[1]),
+                # Worker 2's NIXL side-channel port is deliberately missing.
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+            },
+        )
+
+    assert result.returncode != 0
+    assert "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2" in result.stderr
+    assert "encode" not in workers
+    assert "pd" not in workers
 
 
 def test_dyn_port_accepts_high_non_system_port() -> None:

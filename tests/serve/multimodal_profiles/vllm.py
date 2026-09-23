@@ -250,6 +250,11 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 tests=[MmCase(payload=make_image_payload(["green"]))],
             ),
             "e_pd": TopologyConfig(
+                # Probe both worker system ports: without it a worker that dies
+                # during startup only shows up as the launch script exiting,
+                # naming no worker. The default worker count of 2 matches the
+                # encode + PD workers this topology launches.
+                health_check_workers=True,
                 marks=[pytest.mark.post_merge],
                 timeout_s=340,
                 single_gpu=True,
