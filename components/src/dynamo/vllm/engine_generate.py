@@ -34,15 +34,9 @@ def publish_engine_generate_capability(
     tower_connector_lora_enabled: bool,
 ) -> bool:
     """Publish native Generate support and its MM-routing-relevant config."""
-    if model_input != ModelInput.Tokens:
+    if model_input != ModelInput.Tokens or worker_type != WorkerType.Aggregated:
         return False
-    if worker_type == WorkerType.Prefill:
-        supported = model_type == ModelType.Prefill
-    else:
-        supported = worker_type in (WorkerType.Decode, WorkerType.Aggregated) and (
-            model_type.supports_chat() or model_type == ModelType.Completions
-        )
-    if not supported:
+    if not (model_type.supports_chat() or model_type == ModelType.Completions):
         return False
 
     runtime_config.set_engine_specific(
@@ -104,8 +98,8 @@ def _image_features(
     if modalities != {"image"}:
         raise ValueError("TITO preprocessed features currently support image only")
 
-    hashes = mm_hashes["image"]
-    ranges = mm_placeholders["image"]
+    hashes = mm_hashes.get("image")
+    ranges = mm_placeholders.get("image")
     if not isinstance(hashes, list) or not isinstance(ranges, list):
         raise TypeError("TITO image hashes and placeholders must be lists")
     if len(hashes) != len(ranges):
@@ -218,6 +212,11 @@ def adapt_engine_generate_request(
         sampling_params = msgspec.convert(sampling_params, type=SamplingParams)
     if not isinstance(sampling_params, SamplingParams):
         raise TypeError("vLLM GenerateRequest returned invalid sampling_params")
+    if native_request.kv_transfer_params is not None:
+        sampling_params.extra_args = {
+            **(sampling_params.extra_args or {}),
+            "kv_transfer_params": native_request.kv_transfer_params,
+        }
     sampling_params.detokenize = False
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     if sampling_params.n > max_num_seqs:

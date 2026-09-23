@@ -81,6 +81,30 @@ def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
     assert adapted.sampling_params.output_kind is RequestOutputKind.DELTA
 
 
+def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    adapted = adapt_engine_generate_request(
+        _request(
+            sampling_params={
+                "max_tokens": 5,
+                "extra_args": {"existing": "value"},
+            },
+            kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
+        ),
+        enable_multimodal=False,
+        aggregated=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.sampling_params.extra_args == {
+        "existing": "value",
+        "kv_transfer_params": {"connector_data": {"block_ids": [1, 2]}},
+    }
+
+
 def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
@@ -152,6 +176,25 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
             _request(features=features),
             enable_multimodal=enable_multimodal,
             aggregated=aggregated,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+@pytest.mark.parametrize(
+    "features",
+    [
+        {"mm_hashes": {}, "mm_placeholders": {"image": []}},
+        {"mm_hashes": {"image": []}, "mm_placeholders": {}},
+    ],
+)
+def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(TypeError, match="hashes and placeholders must be lists"):
+        adapt_engine_generate_request(
+            _request(features=features, sampling_params={"max_tokens": 1}),
+            enable_multimodal=True,
+            aggregated=True,
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )

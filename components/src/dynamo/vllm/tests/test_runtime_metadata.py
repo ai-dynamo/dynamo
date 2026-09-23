@@ -78,8 +78,8 @@ def test_vllm_token_budget_matches_rejection_policy():
         "expected",
     ),
     [
-        (ModelInput.Tokens, ModelType.Prefill, WorkerType.Prefill, False, True),
-        (ModelInput.Tokens, ModelType.Chat, WorkerType.Decode, True, True),
+        (ModelInput.Tokens, ModelType.Prefill, WorkerType.Prefill, False, False),
+        (ModelInput.Tokens, ModelType.Chat, WorkerType.Decode, True, False),
         (
             ModelInput.Tokens,
             ModelType.Completions,
