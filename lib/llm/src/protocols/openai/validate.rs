@@ -1,11 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{fmt::Display, sync::LazyLock};
+use std::{borrow::Cow, fmt::Display, sync::LazyLock};
 
+use dynamo_protocols::types::{
+    ChatCompletionTool, ChatCompletionToolType, CreateChatCompletionRequest, FunctionObject,
+};
 use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
+use serde_json::Value;
 
 use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
@@ -536,6 +540,102 @@ pub fn validate_top_logprobs(top_logprobs: Option<u8>) -> Result<(), anyhow::Err
         );
     }
     Ok(())
+}
+
+pub(crate) fn validated_effective_tools(
+    request: &CreateChatCompletionRequest,
+) -> Result<Cow<'_, [ChatCompletionTool]>, anyhow::Error> {
+    let dynamic_tools = request
+        .dynamic_system_tools()
+        .enumerate()
+        .map(|(index, tool)| normalize_dynamic_system_tool(tool, index))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let tools = if dynamic_tools.is_empty() {
+        Cow::Borrowed(request.tools.as_deref().unwrap_or_default())
+    } else {
+        let mut tools = request.tools.clone().unwrap_or_default();
+        tools.extend(dynamic_tools);
+        Cow::Owned(tools)
+    };
+
+    validate_tools(&Some(tools.as_ref()))?;
+    Ok(tools)
+}
+
+fn normalize_dynamic_system_tool(
+    tool: &Value,
+    index: usize,
+) -> Result<ChatCompletionTool, anyhow::Error> {
+    let object = tool.as_object().ok_or_else(|| {
+        anyhow::anyhow!("dynamic system tool at index {index} must be a JSON object")
+    })?;
+    let function = match (object.get("type"), object.get("function")) {
+        (Some(Value::String(kind)), Some(Value::Object(function))) if kind == "function" => {
+            function
+        }
+        (Some(kind), _) if kind.as_str() != Some("function") => {
+            anyhow::bail!("dynamic system tool at index {index} must have type=\"function\"");
+        }
+        (Some(_), _) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with type=\"function\" needs a function object"
+            );
+        }
+        (None, Some(_)) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} with a function field needs type=\"function\""
+            );
+        }
+        (None, None) => object,
+    };
+
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("dynamic system tool at index {index} needs a non-empty string name")
+        })?;
+    let description = optional_dynamic_string(function.get("description"), "description", index)?;
+    let parameters = match function.get("parameters") {
+        None | Some(Value::Null) => None,
+        Some(parameters @ Value::Object(_)) => Some(parameters.clone()),
+        Some(_) => {
+            anyhow::bail!(
+                "dynamic system tool at index {index} parameters must be a JSON Schema object"
+            );
+        }
+    };
+    let strict = match function.get("strict") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(strict)) => Some(*strict),
+        Some(_) => {
+            anyhow::bail!("dynamic system tool at index {index} strict must be a boolean");
+        }
+    };
+
+    Ok(ChatCompletionTool {
+        r#type: ChatCompletionToolType::Function,
+        function: FunctionObject {
+            name: name.to_string(),
+            description,
+            parameters,
+            strict,
+        },
+    })
+}
+
+fn optional_dynamic_string(
+    value: Option<&Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<String>, anyhow::Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => anyhow::bail!("dynamic system tool at index {index} {field} must be a string"),
+    }
 }
 
 /// Validates tools array

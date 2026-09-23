@@ -153,7 +153,7 @@ impl VllmSidecarEngine {
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
@@ -691,6 +691,7 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let engine_config = observed.engine_config(!self.mode.is_encode())?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -703,7 +704,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
-        Ok(observed.engine_config())
+        Ok(engine_config)
     }
 
     async fn generate(
@@ -1062,7 +1063,8 @@ impl LLMEngine for VllmSidecarEngine {
             .client
             .get()
             .ok_or_else(|| client::engine_shutdown("vLLM sidecar is not started"))?;
-        let expected_dp_size = self.model.data_parallel_size();
+        let expected_dp_range = self.model.data_parallel_range();
+        let expected_dp_size = expected_dp_range.end - expected_dp_range.start;
         let mut ranks = HashSet::new();
         let mut sources = Vec::new();
         let reported_sources = client.kv_event_sources().await?;
@@ -1083,9 +1085,9 @@ impl LLMEngine for VllmSidecarEngine {
                     "GetKvEventSources returned a ZMQ source without data_parallel_rank",
                 )
             })?;
-            if dp_rank >= expected_dp_size {
+            if !expected_dp_range.contains(&dp_rank) {
                 return Err(client::protocol_error(format!(
-                    "GetKvEventSources returned rank {dp_rank}, outside the expected range 0..{expected_dp_size}",
+                    "GetKvEventSources returned rank {dp_rank}, outside the expected local range {expected_dp_range:?}",
                 )));
             }
             if !ranks.insert(dp_rank) {
@@ -1106,7 +1108,7 @@ impl LLMEngine for VllmSidecarEngine {
         }
         if ranks.len() != expected_dp_size as usize {
             return Err(client::protocol_error(format!(
-                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} data-parallel ranks; KV routing requires one source for every rank",
+                "GetKvEventSources returned ZMQ sources for {} of {expected_dp_size} local data-parallel ranks; KV routing requires one source for every local rank",
                 ranks.len()
             )));
         }

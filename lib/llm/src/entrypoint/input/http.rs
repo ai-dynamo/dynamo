@@ -13,7 +13,7 @@ use crate::{
         FrontendRouteExtension,
         service_v2::{self, HttpService},
     },
-    kv_router::SelectionPolicySource,
+    kv_router::plugins::RouterPluginBuilder,
     local_model::runtime_config::TokenizerBackend,
     model_type::ModelType,
     namespace::NamespaceFilter,
@@ -23,23 +23,33 @@ use crate::{
     },
 };
 use dynamo_kv_router::{
-    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerSelectionPolicyFactory,
-    WorkerType,
+    KvRouterConfig, RoutingPartitionRef, WorkerSelectionPolicy, WorkerType,
+    plugins::{RouterPlugins, request_classifier::RequestClassifierFactory},
 };
 use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::metrics::MetricsHierarchy;
 
 /// Dynamo's complete discovery-backed HTTP frontend.
 ///
-/// The default frontend resolves worker selection from its configuration. A statically linked
-/// external crate can replace only worker selection with [`Self::worker_selection_policy_factory`].
+/// The default frontend resolves worker selection from its configuration.
+/// Statically linked plugins install together through [`Self::plugins`].
 #[derive(Default)]
 pub struct HttpFrontend {
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    plugins: RouterPlugins,
 }
 
 impl HttpFrontend {
+    /// Install a resolved plugin bundle for all routers created by this frontend.
+    ///
+    /// This replaces all previously configured plugins. Call this before
+    /// [`Self::worker_selection_policy_factory`] or [`Self::request_classifier_factory`]
+    /// to retain overrides made by those setters.
+    pub fn plugins(mut self, plugins: RouterPlugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     /// Add system route extensions to the frontend.
     pub fn frontend_route_extensions(
         mut self,
@@ -55,6 +65,7 @@ impl HttpFrontend {
     /// request. Workers must advertise an explicit typed role; legacy untyped cards are rejected
     /// because decode and aggregated workers cannot be distinguished. Dynamo continues to own
     /// discovery, scheduling, validation, and accounting.
+    // TODO(v1.7): Remove this compatibility setter; use plugins with RouterPlugins::with_worker_selection.
     pub fn worker_selection_policy_factory<F>(mut self, factory: F) -> Self
     where
         F: for<'a> Fn(
@@ -66,7 +77,13 @@ impl HttpFrontend {
             + Sync
             + 'static,
     {
-        self.worker_selection_policy_factory = Some(Arc::new(factory));
+        self.plugins = self.plugins.with_worker_selection(Arc::new(factory));
+        self
+    }
+
+    /// Install one catalog-created request classifier per routed decode or aggregated model.
+    pub fn request_classifier_factory(mut self, factory: RequestClassifierFactory) -> Self {
+        self.plugins = self.plugins.with_request_classifier(factory);
         self
     }
 
@@ -76,11 +93,21 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
-        if self.worker_selection_policy_factory.is_some()
-            && !matches!(&engine_config, EngineConfig::Dynamic { .. })
+        if self.plugins.request_classifier().is_some()
+            && !engine_config
+                .local_model()
+                .router_config()
+                .router_mode
+                .is_kv_routing()
         {
-            anyhow::bail!("custom worker-selection policies require a dynamic engine");
+            anyhow::bail!("request classifiers require --router-mode kv");
         }
+        if !self.plugins.is_empty() && !matches!(&engine_config, EngineConfig::Dynamic { .. }) {
+            anyhow::bail!("custom router plugins require a dynamic engine");
+        }
+
+        let plugins = RouterPluginBuilder::new(self.plugins);
+        plugins.validate_config(&engine_config.local_model().router_config().kv_router_config)?;
 
         // Callers that reach the frontend without going through `run_input`
         // still have to drain the trace sinks before the process exits. The
@@ -93,15 +120,11 @@ impl HttpFrontend {
 
         super::initialize_input(&distributed_runtime, &engine_config).await;
 
-        let selection_policy = match self.worker_selection_policy_factory {
-            Some(factory) => SelectionPolicySource::Factory(factory),
-            None => SelectionPolicySource::Registry,
-        };
-        let result = run_with_selection_policy(
+        let result = run_with_router_plugins(
             distributed_runtime,
             engine_config,
             self.frontend_route_extensions,
-            selection_policy,
+            plugins,
         )
         .await;
 
@@ -133,11 +156,11 @@ pub async fn run_with_frontend_route_extensions(
         .await
 }
 
-async fn run_with_selection_policy(
+async fn run_with_router_plugins(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
     frontend_route_extensions: Vec<FrontendRouteExtension>,
-    selection_policy: SelectionPolicySource,
+    plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     let local_model = engine_config.local_model();
     let mut http_service_builder = match (
@@ -241,7 +264,7 @@ async fn run_with_selection_policy(
                 model.runtime_config().tokenizer_backend,
                 model.runtime_config().tokenizer_fallback_enabled,
                 generate_engine_capabilities,
-                selection_policy.clone(),
+                plugins,
             )
             .await?;
             http_service
@@ -330,7 +353,7 @@ async fn run_watcher(
     tokenizer_backend: Option<TokenizerBackend>,
     tokenizer_fallback_enabled: Option<bool>,
     generate_engine_capabilities: Vec<&'static str>,
-    selection_policy: SelectionPolicySource,
+    plugins: RouterPluginBuilder,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled. The
     // controller itself is additionally gated on the allocation config
@@ -340,7 +363,7 @@ async fn run_watcher(
         let _controller_handle = model_manager.start_lora_controller(cancel_token);
     }
 
-    let mut watch_obj = ModelWatcher::new_with_selection_policy(
+    let mut watch_obj = ModelWatcher::new_with_plugins(
         runtime.clone(),
         model_manager,
         router_config,
@@ -349,7 +372,7 @@ async fn run_watcher(
         chat_engine_factory,
         prefill_load_estimator,
         metrics.clone(),
-        selection_policy,
+        plugins,
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
@@ -449,6 +472,61 @@ mod tests {
     use crate::engines::make_echo_engine;
     use crate::model_card::{LoraInfo, ModelDeploymentCard};
     use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+
+    #[tokio::test]
+    async fn configured_classifier_requires_installed_plugin() {
+        use crate::{entrypoint::RouterMode, local_model::LocalModelBuilder};
+        use dynamo_runtime::{Runtime, distributed::DistributedConfig};
+
+        let policy_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy_file.path(), "request_classifier:\n  type: test\n").unwrap();
+        let model = LocalModelBuilder::default()
+            .router_config(Some(RouterConfig::new(
+                RouterMode::KV,
+                KvRouterConfig {
+                    router_policy_config: Some(policy_file.path().display().to_string()),
+                    ..Default::default()
+                },
+            )))
+            .build()
+            .await
+            .unwrap();
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            HttpFrontend::default().run(
+                drt.clone(),
+                EngineConfig::Dynamic {
+                    model: Box::new(model.clone()),
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                },
+            ),
+        )
+        .await
+        .expect("must reject missing classifier before serving")
+        .unwrap_err();
+        assert!(error.to_string().contains("configured but not installed"));
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            super::super::grpc::run(
+                drt,
+                EngineConfig::Dynamic {
+                    model: Box::new(model),
+                    chat_engine_factory: None,
+                    prefill_load_estimator: None,
+                },
+            ),
+        )
+        .await
+        .expect("gRPC must also reject the missing classifier before serving")
+        .unwrap_err();
+        assert!(error.to_string().contains("configured but not installed"));
+        runtime.shutdown();
+    }
 
     // `run` takes a `request_trace::ActiveInput` registration, which is
     // process-wide, so this shares a serialization group with the request-trace

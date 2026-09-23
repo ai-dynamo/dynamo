@@ -774,6 +774,8 @@ mod tests {
             child
                 .args(["--exact", test_name, "--nocapture"])
                 .env("DYNAMO_ROUTING_HOP_TEST", test_name)
+                // The debug routing future exceeds libtest's default 2 MiB stack.
+                .env("RUST_MIN_STACK", (4 * 1024 * 1024).to_string())
                 .env("DYN_TCP_RPC_HOST", "127.0.0.1")
                 .env("DYN_TCP_RPC_PORT", "0")
                 .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
