@@ -56,9 +56,15 @@ for mode in MODES:
         job, run = run_location(label)
         result = json.loads((run / 'matching-window-results.json').read_text())
         assert result['quality']['accepted'], label
+        client = json.loads((run / 'campaign-result.json').read_text())['aiperf']
+        residency = {str(node): json.loads((run / f'numa{node}-settled-residency.json').read_text())
+                     for node in (0, 1)}
         runs[mode].append({'label': label, 'job': job, 'metrics': measurements(result),
                            'quality': result['quality'],
                            'client_counts': result['client']['counts'],
+                           'client_health': {key: client.get(key) for key in
+                               ('client_health_accepted', 'event_loop_warning_count')},
+                           'frontend_resident_pages_by_node': residency,
                            'error_examples': result['client']['error_examples']})
 
 summary = {}
@@ -86,7 +92,8 @@ for mode in MODES:
 
 out = ROOT / 'results/four-way'
 out.mkdir(exist_ok=True)
-(out / 'summary.json').write_text(json.dumps({'runs': runs, 'summary': summary,
+(out / 'summary.json').write_text(json.dumps({'frozen_build': json.loads(
+    (ROOT / 'manifests/frozen-build.json').read_text()), 'runs': runs, 'summary': summary,
     'qualification': qualification}, indent=2) + '\n')
 with (out / 'all-metrics.csv').open('w') as f:
     writer = csv.writer(f)
@@ -104,14 +111,15 @@ for mode in MODES:
     failed = [name for name, passed in qualification[mode]['checks'].items() if not passed]
     lines.append(f'- {mode}: ' + ('pass' if not failed else 'fail: ' + ', '.join(failed)))
 lines += ['', 'Small error counts are retained in this directional comparison.', '',
-          '| Run | Exported completed records | Errors | Error fraction | Cancelled at drain deadline |',
-          '|---|---:|---:|---:|---:|']
+          '| Run | Exported completed records | Errors | Error fraction | Cancelled at drain deadline | Client event-loop warnings |',
+          '|---|---:|---:|---:|---:|---:|']
 for mode in MODES:
     for record in runs[mode]:
         q = record['quality']
         lines.append(f'| {record["label"]} | {record["client_counts"]["profiling_records"]} | '
                      f'{q["error_count"]} | {100*q["error_fraction"]:.6f}% | '
-                     f'{q.get("phase_cancelled_requests",0)} |')
+                     f'{q.get("phase_cancelled_requests",0)} | '
+                     f'{record["client_health"]["event_loop_warning_count"]} |')
 lines += ['', 'The Ethernet and RDMA fabrics differ. Hardware counters cover the full frontend node. '
           'Host packet aggregation and RDMA completions are not wire packets. '
           'Latency percentiles describe successful exported requests; requests cancelled at the drain deadline are counted separately and limit tail comparisons. '
