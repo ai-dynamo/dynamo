@@ -364,7 +364,7 @@ def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> Non
                 "DYN_SYSTEM_PORT2": str(system_ports[1]),
                 "DYN_VLLM_KV_EVENT_PORT1": str(kv_event_ports[0]),
                 "DYN_VLLM_KV_EVENT_PORT2": str(kv_event_ports[1]),
-                # Worker 2's NIXL side-channel port is deliberately missing.
+                # PORT2 omitted on purpose.
                 "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
             },
         )
