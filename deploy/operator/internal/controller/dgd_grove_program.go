@@ -125,7 +125,6 @@ func (p *groveProgram) Reconcile(
 		}
 
 		// Do not keep reporting retired LPX capacity when ordinary reconciliation fails.
-		programResult.Status.LPX = nil
 		for name := range programResult.Status.Components {
 			if req.DGD.GetComponentByName(name) == nil {
 				delete(programResult.Status.Components, name)
@@ -194,7 +193,7 @@ func (p *groveProgram) Reconcile(
 		}
 	}
 
-	result, programResult.Status.LPX = mergeLPXChildStatus(req.DGD, child, result)
+	result = mergeLPXChildStatus(req.DGD, child, result)
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if child != nil && !child.DeletionTimestamp.IsZero() {
 		programResult.RequeueAfter = 5 * time.Second

@@ -22,14 +22,6 @@ type SchedulingSpec struct {
 	AttemptDeadlineSeconds *int64 `json:"attemptDeadlineSeconds,omitempty"`
 }
 
-// DynamoGraphDeploymentLPXStatus contains the public status of a graph's LPX workload.
-// Both served DGD versions use this type, so conversion preserves its live fields natively.
-type DynamoGraphDeploymentLPXStatus struct {
-	// modelDownload contains the model download status for remote builds.
-	// +optional
-	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
-}
-
 // ModelDownloadStatus contains the status of remote LPU model downloads.
 type ModelDownloadStatus struct {
 	// builds is the sorted set of resolved remote LPU build URLs whose artifacts

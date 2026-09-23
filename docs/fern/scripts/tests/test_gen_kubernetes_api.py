@@ -49,7 +49,7 @@ EXPECTED_TYPE_COUNTS = {
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 69,
-    "nvidia.com/v1beta1": 73,
+    "nvidia.com/v1beta1": 71,
     "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -204,24 +204,6 @@ def test_resource_types_link_to_real_types_on_the_same_page(
                 f"{package.name}: Resource Types link '{ref.name}' -> "
                 f"#{ref.anchor} has no matching type section"
             )
-
-
-def test_cross_package_status_links_resolve_to_v1beta1_types(
-    reference: kubernetes_api_discovery.KubernetesReference,
-) -> None:
-    """v1alpha1 may intentionally reuse status types owned by v1beta1."""
-    by_package = {package.name: package for package in reference.packages}
-    alpha = by_package["nvidia.com/v1alpha1"]
-    beta = by_package["nvidia.com/v1beta1"]
-    alpha_status = next(
-        type_ for type_ in alpha.types if type_.name == "DynamoGraphDeploymentStatus"
-    )
-    lpx_field = next(field for field in alpha_status.fields if field.name == "lpx")
-    beta_lpx_status = next(
-        type_ for type_ in beta.types if type_.name == "DynamoGraphDeploymentLPXStatus"
-    )
-
-    assert f"](#{beta_lpx_status.anchor})" in lpx_field.type
 
 
 def test_v1beta1_shared_type_names_use_deduplicated_anchors(
@@ -442,7 +424,6 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
     (
         ("LPXConfig", "DynamoComponentDeploymentSharedSpec"),
         ("SchedulingSpec", "DynamoGraphDeploymentSpec"),
-        ("DynamoGraphDeploymentLPXStatus", "DynamoGraphDeploymentStatus"),
     ),
 )
 def test_shared_lpx_type_links_across_api_versions(

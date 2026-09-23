@@ -10,11 +10,11 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 171 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 169 typed CRD and config sections.
 
 <CardGroup cols={3}>
 <Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
-<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">73 types</Card>
+<Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">71 types</Card>
 <Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">29 types</Card>
 </CardGroup>
 
@@ -1101,12 +1101,6 @@ See [RollingUpdateStatus](#rollingupdatestatus).
 <ParamField path="placement" type="PlacementStatus">
 Placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#placementstatus).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
-LPX contains the status of the graph's LPX workload, when present.
-See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -2928,21 +2922,6 @@ See [KvTransferPolicy](#v1beta1-kvtransferpolicy).
 </ParamField>
 </Accordion>
 
-<Accordion id="dynamographdeploymentlpxstatus" title="DynamoGraphDeploymentLPXStatus">
-DynamoGraphDeploymentLPXStatus contains the public status of a graph's LPX workload.
-Both served DGD versions use this type, so conversion preserves its live fields natively.
-
-
-**Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus), [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
-
-<ParamField path="modelDownload" type="ModelDownloadStatus">
-modelDownload contains the model download status for remote builds.
-See [ModelDownloadStatus](#modeldownloadstatus).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
 <Accordion id="v1beta1-dynamographdeploymentrequest" title="v1beta1 DynamoGraphDeploymentRequest">
 DynamoGraphDeploymentRequest is the Schema for the dynamographdeploymentrequests API.
 It provides a simplified, SLA-driven interface for deploying inference models on Dynamo.
@@ -3318,12 +3297,6 @@ See [RollingUpdateStatus](#v1beta1-rollingupdatestatus).
 <ParamField path="placement" type="PlacementStatus">
 placement groups DGD-level scheduler placement signals (score, reporting state, and any future placement fields).
 See [PlacementStatus](#v1beta1-placementstatus).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="lpx" type="DynamoGraphDeploymentLPXStatus">
-lpx contains the status of the graph's LPX workload, when present.
-See [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
@@ -3705,25 +3678,6 @@ PVCModelPath is the path to the model checkpoint directory within the PVC (e.g. 
 
 <ParamField path="pvcMountPath" type="string" default="/opt/model-cache">
 PVCMountPath is the mount path for the PVC inside the container.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="modeldownloadstatus" title="ModelDownloadStatus">
-ModelDownloadStatus contains the status of remote LPU model downloads.
-
-
-**Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
-
-<ParamField path="builds" type="string array">
-builds is the sorted set of resolved remote LPU build URLs whose artifacts were successfully downloaded into model-storage.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="lastCheckedAt" type="Time">
-lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>

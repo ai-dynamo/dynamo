@@ -235,7 +235,6 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		assert.Equal(c, failed.Reason, ready.Reason)
 		assert.Equal(c, failed.Message, ready.Message)
 		assert.NotNil(c, child.Status.ModelDownload)
-		assert.Nil(c, source.Status.LPX)
 	}, 20*time.Second, 50*time.Millisecond)
 
 	t.Log("The rejected publication created neither Grove workloads nor scheduler requests")
@@ -293,8 +292,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, env.Client().Create(t.Context(), source))
 
 	t.Log("Persist the pending component projection using the real DGD status schema")
-	result := &ReconcileResult{}
-	projectLPXChildStatus(source, nil, result, &source.Status)
+	result := mergeLPXChildStatus(source, nil, ReconcileResult{})
 	source.Status.Components = result.ComponentStatus
 	source.Status.State = result.State
 	require.NoError(t, env.Client().Status().Update(t.Context(), source))
@@ -313,7 +311,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, revision, child.Spec.InputRevision)
 
-	t.Log("Project the observed download payload and its actionable failure")
+	t.Log("Persist the child's download payload and project its actionable failure")
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
 	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,
@@ -330,13 +328,10 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NotNil(t, schedulingFailed)
 	require.True(t, failureTime.Equal(&schedulingFailed.LastTransitionTime))
 	require.Equal(t, child.Generation, schedulingFailed.ObservedGeneration)
-	projected := v1beta1.DynamoGraphDeploymentStatus{}
-	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
-	projectLPXChildStatus(source, child, result, &projected)
+	result = mergeLPXChildStatus(source, child, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 	require.Equal(t, v1beta1.DGDStateFailed, result.State)
 	require.Equal(t, Reason(child.Status.Conditions[0].Reason), result.Reason)
 	require.Equal(t, Message(child.Status.Conditions[0].Message), result.Message)
-	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
 
 	t.Log("Ordinary source metadata does not advance the child generation or frozen source identity")
 	source.Labels = map[string]string{"unrelated": "metadata"}
@@ -345,10 +340,8 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, child.ResourceVersion, unchanged.ResourceVersion)
 	require.Equal(t, child.Annotations, unchanged.Annotations)
-	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
-	projectLPXChildStatus(source, unchanged, result, &projected)
+	result = mergeLPXChildStatus(source, unchanged, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 	require.Equal(t, v1beta1.DGDStateFailed, result.State)
-	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
 
 	t.Log("An LPX template edit advances the real child generation and invalidates the old observation")
 	source.GetComponentByName("lpx").ComponentRole(v1beta1.ComponentRoleLPXAgent).PodTemplate.Spec.Containers[0].Image = "lpu-runtime:next"
@@ -361,11 +354,9 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, revision, updated.Spec.InputRevision)
 	require.Equal(t, child.Status.ObservedGeneration, updated.Status.ObservedGeneration)
-	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
-	projectLPXChildStatus(source, updated, result, &projected)
+	result = mergeLPXChildStatus(source, updated, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 	require.Equal(t, v1beta1.DGDStatePending, result.State)
 	require.Equal(t, Reason("LPXChildPending"), result.Reason)
-	require.Nil(t, projected.LPX)
 
 	t.Log("Reject malformed revision hashes in the API server")
 	invalid := updated.DeepCopy()
@@ -379,10 +370,8 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	stored := &v1alpha1.LPXGraphDeployment{}
 	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(updated), stored))
 	require.Equal(t, updated.Status, stored.Status)
-	result = &ReconcileResult{State: v1beta1.DGDStateSuccessful}
-	projectLPXChildStatus(source, stored, result, &projected)
+	result = mergeLPXChildStatus(source, stored, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 	require.Equal(t, v1beta1.DGDStateFailed, result.State)
-	require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: child.Status.ModelDownload}, projected.LPX)
 	storedSource := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(source), storedSource))
 	require.Equal(t, source.Status, storedSource.Status)

@@ -213,9 +213,6 @@ type DynamoGraphDeploymentStatus struct {
 	// state, and any future placement fields).
 	// +optional
 	Placement *PlacementStatus `json:"placement,omitempty"`
-	// LPX contains the status of the graph's LPX workload, when present.
-	// +optional
-	LPX *v1beta1.DynamoGraphDeploymentLPXStatus `json:"lpx,omitempty"`
 }
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.

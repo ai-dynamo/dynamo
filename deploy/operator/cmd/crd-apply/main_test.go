@@ -76,7 +76,7 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		}
 	}
 
-	t.Log("Verify installed schemas preserve DGD placement, keep LPX status grouped, and keep private child status flat")
+	t.Log("Verify installed schemas preserve DGD placement and keep model downloads on the private child")
 	client, err := apiextensionsclient.NewForConfig(config)
 	if err != nil {
 		t.Fatal(err)
@@ -144,7 +144,8 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 				if status.Properties["placement"].Type != objectType {
 					t.Errorf("%s %s is missing the established status.placement projection", name, version.Name)
 				}
-				status = status.Properties["lpx"]
+				require.NotContains(t, status.Properties, "lpx")
+				continue
 			} else if _, exists := status.Properties["lpx"]; exists {
 				t.Errorf("%s %s unexpectedly groups private child status", name, version.Name)
 			}

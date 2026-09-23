@@ -63,19 +63,13 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 				want = v1beta1.DGDStateFailed
 			}
 			before := child.DeepCopy()
-			result, status := mergeLPXChildStatus(source, child, ReconcileResult{State: v1beta1.DGDStateSuccessful})
+			result := mergeLPXChildStatus(source, child, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 			require.Equal(t, want, result.State)
 
-			t.Log("Publish the aggregate download only for a current child and retain per-component readiness")
+			t.Log("Publish per-component readiness only for a current child")
 			if scenario == "ready" || scenario == "failure" || scenario == "no-download" {
-				require.Equal(t, &v1beta1.DynamoGraphDeploymentLPXStatus{ModelDownload: before.Status.ModelDownload}, status)
 				require.Equal(t, before.Status.Components, result.ComponentStatus)
-				if status.ModelDownload != nil {
-					status.ModelDownload.Builds[0] = "parent-copy"
-					status.ModelDownload.LastCheckedAt.Time = metav1.Unix(2, 0).Time
-				}
 			} else {
-				require.Nil(t, status)
 				for _, component := range result.ComponentStatus {
 					require.False(t, component.Ready)
 					require.Zero(t, component.Replicas)

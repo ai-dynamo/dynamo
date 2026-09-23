@@ -641,7 +641,6 @@ _Appears in:_
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | RollingUpdate tracks the progress of operator manged rolling updates.<br />Currently only supported for singl-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 | `placement` _[PlacementStatus](#placementstatus)_ | Placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
-| `lpx` _[DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)_ | LPX contains the status of the graph's LPX workload, when present. |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -2009,24 +2008,6 @@ _Appears in:_
 | `kvTransferPolicy` _[KvTransferPolicy](#kvtransferpolicy)_ | kvTransferPolicy configures topology-aware routing for KV-cache<br />transfers between prefill and decode workers. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentLPXStatus
-
-
-
-DynamoGraphDeploymentLPXStatus contains the public status of a graph's LPX workload.
-Both served DGD versions use this type, so conversion preserves its live fields natively.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
-- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `modelDownload` _[ModelDownloadStatus](#modeldownloadstatus)_ | modelDownload contains the model download status for remote builds. |  | Optional: \{\} <br /> |
-
-
 #### v1beta1 DynamoGraphDeploymentRequest
 
 
@@ -2222,7 +2203,6 @@ _Appears in:_
 | `checkpoints` _object (keys:string, values:[ComponentCheckpointStatus](#componentcheckpointstatus))_ | checkpoints contains per-component checkpoint status, keyed by component name. |  | Optional: \{\} <br /> |
 | `rollingUpdate` _[RollingUpdateStatus](#rollingupdatestatus)_ | rollingUpdate tracks the progress of operator-managed rolling updates.<br />Currently only supported for single-node, non-Grove deployments (DCD/Deployment). |  | Optional: \{\} <br /> |
 | `placement` _[PlacementStatus](#placementstatus)_ | placement groups DGD-level scheduler placement signals (score, reporting<br />state, and any future placement fields). |  | Optional: \{\} <br /> |
-| `lpx` _[DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)_ | lpx contains the status of the graph's LPX workload, when present. |  | Optional: \{\} <br /> |
 
 
 #### EPPConfig
@@ -2555,21 +2535,6 @@ _Appears in:_
 | `pvcMountPath` _string_ | PVCMountPath is the mount path for the PVC inside the container. | /opt/model-cache | Optional: \{\} <br /> |
 
 
-#### ModelDownloadStatus
-
-
-
-ModelDownloadStatus contains the status of remote LPU model downloads.
-
-
-
-_Appears in:_
-- [DynamoGraphDeploymentLPXStatus](#dynamographdeploymentlpxstatus)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `builds` _string array_ | builds is the sorted set of resolved remote LPU build URLs whose artifacts<br />were successfully downloaded into model-storage. |  | Optional: \{\} <br /> |
-| `lastCheckedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress. |  | Optional: \{\} <br /> |
 
 
 #### ModelReference

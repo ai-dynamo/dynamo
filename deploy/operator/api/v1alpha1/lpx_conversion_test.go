@@ -6,7 +6,6 @@
 package v1alpha1
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -93,7 +92,7 @@ func TestDynamoGraphDeploymentRoleShapesRoundTrip(t *testing.T) {
 }
 
 func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
-	checkedAt := metav1.NewTime(time.Unix(1_800_000_000, 0))
+	transitionTime := metav1.NewTime(time.Unix(1_800_000_000, 0))
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "lpx", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -111,12 +110,10 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 			}},
 		},
 		Status: v1beta1.DynamoGraphDeploymentStatus{
-			LPX: &v1beta1.DynamoGraphDeploymentLPXStatus{
-				ModelDownload: &v1beta1.ModelDownloadStatus{
-					Builds:        []string{"gs://models/draft", "gs://models/target"},
-					LastCheckedAt: &checkedAt,
-				},
-			},
+			Conditions: []metav1.Condition{{
+				Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pending",
+				Message: "Waiting for model downloads to complete", LastTransitionTime: transitionTime,
+			}},
 		},
 	}
 
@@ -142,24 +139,6 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	}
 	if diff := cmp.Diff(src.Spec.Scheduling, alpha.Spec.Scheduling); diff != "" {
 		t.Fatalf("LPX scheduling conversion mismatch (-want +got):\n%s", diff)
-	}
-	if diff := cmp.Diff(src.Status.LPX, alpha.Status.LPX); diff != "" {
-		t.Fatalf("LPX status conversion mismatch (-want +got):\n%s", diff)
-	}
-
-	t.Log("Serialize the native LPX payload under one status group in both versions")
-	payload, err := json.Marshal(src.Status.LPX)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, status := range []any{src.Status, alpha.Status} {
-		raw, err := json.Marshal(status)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if want := `{"state":"","lpx":` + string(payload) + `}`; string(raw) != want {
-			t.Fatalf("%T JSON = %s, want %s", status, raw, want)
-		}
 	}
 
 	t.Log("Edit the alpha configuration and round-trip the complete LPX payload")
@@ -199,23 +178,5 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	}
 	if _, exists := got.Annotations[annDGDStatus]; exists {
 		t.Fatalf("canonical LPX status must not use sparse conversion annotations: %v", got.Annotations)
-	}
-
-	t.Log("Preserve an explicitly empty LPX group through native conversion")
-	alpha.Status.LPX = &v1beta1.DynamoGraphDeploymentLPXStatus{}
-	if err := alpha.ConvertTo(got); err != nil {
-		t.Fatal(err)
-	}
-	if diff := cmp.Diff(alpha.Status.LPX, got.Status.LPX); diff != "" {
-		t.Fatalf("empty LPX group changed (-want +got):\n%s", diff)
-	}
-
-	t.Log("Clearing live alpha LPX status removes the previously populated group")
-	alpha.Status.LPX = nil
-	if err := alpha.ConvertTo(got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Status.LPX != nil {
-		t.Fatalf("cleared LPX status was restored: %#v", got.Status.LPX)
 	}
 }

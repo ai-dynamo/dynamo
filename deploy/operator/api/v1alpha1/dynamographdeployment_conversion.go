@@ -664,7 +664,6 @@ func ConvertFromDynamoGraphDeploymentStatus(src *DynamoGraphDeploymentStatus, ds
 	} else {
 		dst.Placement = nil
 	}
-	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {
@@ -712,7 +711,6 @@ func ConvertToDynamoGraphDeploymentStatus(src *v1beta1.DynamoGraphDeploymentStat
 	} else {
 		dst.Placement = nil
 	}
-	dst.LPX = src.LPX
 	if len(src.Conditions) > 0 {
 		dst.Conditions = make([]metav1.Condition, 0, len(src.Conditions))
 		for _, c := range src.Conditions {

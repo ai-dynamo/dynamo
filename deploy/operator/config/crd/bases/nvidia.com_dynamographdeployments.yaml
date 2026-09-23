@@ -20256,25 +20256,6 @@ spec:
                       - type
                     type: object
                   type: array
-                lpx:
-                  description: LPX contains the status of the graph's LPX workload, when present.
-                  properties:
-                    modelDownload:
-                      description: modelDownload contains the model download status for remote builds.
-                      properties:
-                        builds:
-                          description: |-
-                            builds is the sorted set of resolved remote LPU build URLs whose artifacts
-                            were successfully downloaded into model-storage.
-                          items:
-                            type: string
-                          type: array
-                        lastCheckedAt:
-                          description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
-                          format: date-time
-                          type: string
-                      type: object
-                  type: object
                 observedGeneration:
                   description: ObservedGeneration is the most recent generation observed by the controller.
                   format: int64
@@ -38093,25 +38074,6 @@ spec:
                   x-kubernetes-list-map-keys:
                     - type
                   x-kubernetes-list-type: map
-                lpx:
-                  description: lpx contains the status of the graph's LPX workload, when present.
-                  properties:
-                    modelDownload:
-                      description: modelDownload contains the model download status for remote builds.
-                      properties:
-                        builds:
-                          description: |-
-                            builds is the sorted set of resolved remote LPU build URLs whose artifacts
-                            were successfully downloaded into model-storage.
-                          items:
-                            type: string
-                          type: array
-                        lastCheckedAt:
-                          description: lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
-                          format: date-time
-                          type: string
-                      type: object
-                  type: object
                 observedGeneration:
                   description: observedGeneration is the most recent generation observed by the controller.
                   format: int64

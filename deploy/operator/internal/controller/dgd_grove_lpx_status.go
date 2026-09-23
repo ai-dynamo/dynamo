@@ -17,10 +17,10 @@ func mergeLPXChildStatus(
 	source *v1beta1.DynamoGraphDeployment,
 	child *v1alpha1.LPXGraphDeployment,
 	ordinary ReconcileResult,
-) (ReconcileResult, *v1beta1.DynamoGraphDeploymentLPXStatus) {
+) ReconcileResult {
 	components := lpx.Components(source)
 	if len(components) == 0 && child == nil {
-		return ordinary, nil
+		return ordinary
 	}
 	if ordinary.ComponentStatus == nil {
 		ordinary.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
@@ -35,11 +35,7 @@ func mergeLPXChildStatus(
 
 	current := len(components) > 0 && child != nil && child.DeletionTimestamp.IsZero()
 	observed := current && child.Status.ObservedGeneration == child.Generation
-	var status *v1beta1.DynamoGraphDeploymentLPXStatus
 	if observed {
-		status = &v1beta1.DynamoGraphDeploymentLPXStatus{
-			ModelDownload: child.Status.ModelDownload.DeepCopy(),
-		}
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
 				ordinary.ComponentStatus[component.ComponentName] = *observedStatus.DeepCopy()
@@ -55,15 +51,15 @@ func mergeLPXChildStatus(
 			ready.Reason == v1alpha1.LPXReadyReasonFailed {
 			ordinary.State = v1beta1.DGDStateFailed
 			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
-			return ordinary, status
+			return ordinary
 		}
 		if observed && ready != nil && ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionTrue {
-			return ordinary, status
+			return ordinary
 		}
 		if observed && ordinary.State != v1beta1.DGDStateFailed && ready != nil && ready.ObservedGeneration == child.Generation {
 			ordinary.State = v1beta1.DGDStatePending
 			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
-			return ordinary, status
+			return ordinary
 		}
 	}
 	if ordinary.State != v1beta1.DGDStateFailed {
@@ -71,5 +67,5 @@ func mergeLPXChildStatus(
 		ordinary.Reason = "LPXChildPending"
 		ordinary.Message = "Waiting for the current LPX engine revision and readiness"
 	}
-	return ordinary, status
+	return ordinary
 }
