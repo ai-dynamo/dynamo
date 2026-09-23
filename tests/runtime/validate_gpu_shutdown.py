@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 
 import psutil
@@ -105,6 +106,7 @@ def validate(args):
                 health_check_funcs=[model_ready],
                 **common,
             ) as worker,
+            ExitStack() as alarm_cleanup,
         ):
             assert worker.proc is not None
             payload = {
@@ -135,11 +137,15 @@ def validate(args):
                 raise TimeoutError("worker exceeded the SIGTERM-to-exit deadline")
 
             def wait_for_exit():
-                return worker.proc.wait(
-                    timeout=args.total_timeout + 1
-                ), time.monotonic()
+                return (
+                    worker.proc.wait(timeout=args.total_timeout + 1),
+                    time.monotonic(),
+                )
 
             previous_alarm = signal.signal(signal.SIGALRM, deadline_expired)
+            # Restore the measurement alarm before either process is cleaned up.
+            alarm_cleanup.callback(signal.signal, signal.SIGALRM, previous_alarm)
+            alarm_cleanup.callback(signal.setitimer, signal.ITIMER_REAL, 0)
             with (
                 ThreadPoolExecutor(max_workers=1) as exit_monitor,
                 requests.post(

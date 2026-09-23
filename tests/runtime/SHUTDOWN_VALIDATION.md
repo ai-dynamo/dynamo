@@ -52,11 +52,11 @@ docker run --rm --gpus all --shm-size=2g --entrypoint python3 \
 
 The probe uses `--total-timeout` (default 30 seconds) as one absolute SIGTERM-origin deadline for stream consumption and process exit, with one second of scheduling tolerance. It records process exit concurrently rather than treating stream completion or descendant cleanup as the exit timestamp. Cleanup has a five-second cap inside the total. A short-budget run that interrupts inference fails this graceful-completion probe; it is not automatically evidence of a shutdown defect.
 
-For deliberate expiry, pass `--total-timeout 5 --cleanup-timeout 2 --expect-interrupted`. This mode requires an interrupted stream, an in-flight timeout log, bounded process exit, and no surviving captured descendants. A zero exit additionally requires successful cleanup and runtime stages. It rejects a request that simply finishes before the drain expires. The September 22 vLLM run passed this case: a 503 terminated the unfinished stream and the worker exited zero after 4.57 seconds, including cleanup and runtime teardown.
+For deliberate expiry, pass `--total-timeout 5 --cleanup-timeout 3.5 --expect-interrupted`. This mode requires an interrupted stream, an in-flight timeout log, bounded process exit, and no surviving captured descendants. A zero exit additionally requires successful cleanup and runtime stages. It rejects a request that simply finishes before the drain expires. See the post-review revalidation below for the recorded result; timing depends on the serving environment.
 
 ## Requirement-to-evidence checklist
 
-The September 22 implementation revision is an uncommitted delta over `818cecb2331c954db97b135502c4463230e8c609`. Earlier container and multi-node results validate their recorded revisions only, not this delta.
+The September 22 implementation was validated before being split into the three-PR stack. The post-review implementation was subsequently published as PR #15145 at `6eaf9199a3c8b896c085156a1d9742614ff9c234`, with the source comparison and rebase caveats recorded below. Historical container and multi-node results validate only their recorded source revisions, not every later commit on the PR.
 
 | Contract | Current evidence | Remaining acceptance work |
 | --- | --- | --- |
@@ -98,6 +98,14 @@ A five-second vLLM expiry run with a two-second cleanup reserve was inconclusive
 The shutdown branch's `container/context.yaml` pins `lmsysorg/sglang:v0.5.19-cu130-runtime`. Testing that exact image confirmed `runtime_context.publish` exists and all 24 gateway unit tests pass, without compatibility shims. The pulled image digest was `sha256:710bc11443a7b1807d69803386468101bcfced35f86bf8fe92a8209e05a2f052`. This supersedes the older image's gateway unit-test failure, but does not validate real multi-process GPU gateway serving with the pinned image.
 
 Worker logs still contain pending-task messages at interpreter exit; vLLM also reports a semaphore resource-tracker warning. Multinode, native-sidecar GPU serving, active KV transfer, and Kubernetes deletion were not rerun after the review fixes. These results do not establish complete issue #13286 acceptance.
+
+### PR review follow-up: September 22, 2026
+
+The review fixes preserve positional binding arguments, honor startup cleanup overrides, report discovery failures accurately, and let an embedding host survive a returned cleanup error after runtime teardown. Gateway and embedding children receive a shorter total budget that leaves their parent its cleanup reserve. Child reaping is bounded within the parent's remaining allowance, including escalation for a child that ignores SIGTERM. The GPU probe now restores its deadline alarm before process-context cleanup, including assertion failures.
+
+Validation passed 146 backend-common tests on PR #14674 independently, all 180 backend-common tests on the combined stack, and 63 Python binding/coordinator/transport/process/probe tests against rebuilt bindings. The process cases cover a child consuming its drain allowance, forced reaping of an unresponsive gateway child, shared-memory unlink, and host survival beyond the watchdog deadline after a returned cleanup error. The pinned `lmsysorg/sglang:v0.5.19-cu130-runtime` image passed all 24 gateway unit tests with current source and bindings mounted read-only. That synchronous unit run disabled plugin autoload and emitted dependency/configuration warnings; it did not launch a GPU engine. Docs lint reported no errors in the two edited pages, with unrelated navigation warnings. The Fern CLI was unavailable locally.
+
+GPU inference, multinode serving, active KV transfer, and Kubernetes deletion were not rerun for these fixes. The Python suite still logs pending runtime tasks at interpreter exit; passing these targeted tests does not prove complete resource retirement or full issue #13286 acceptance.
 
 ### Revised Lyris campaign: September 22, 2026
 

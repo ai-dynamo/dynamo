@@ -20,6 +20,7 @@ from dynamo.common.utils.graceful_shutdown import _unregister_endpoints
 logger = logging.getLogger(__name__)
 _DEFAULT_CLEANUP_SECONDS = 5.0
 _MAX_SECONDS = 315_360_000.0
+_CHILD_TOTAL_ENV = "_DYN_WORKER_SHUTDOWN_CHILD_TOTAL_SECS"
 
 
 def _seconds(
@@ -39,6 +40,18 @@ def _seconds(
         logger.warning("Invalid %s=%r; using %s", name, raw, default)
         return default
     return max(0.0, value)
+
+
+def child_shutdown_environment() -> dict[str, str]:
+    """Leave the engine-owning parent its cleanup reserve after children exit."""
+    total = min(float(worker_shutdown_timeout_secs()), _MAX_SECONDS)
+    total = min(total, _seconds(_CHILD_TOTAL_ENV, total))
+    cleanup = _seconds(
+        "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS",
+        _DEFAULT_CLEANUP_SECONDS,
+        positive=True,
+    )
+    return {**os.environ, _CHILD_TOTAL_ENV: str(max(0.0, total - cleanup))}
 
 
 class WorkerShutdown:
@@ -117,6 +130,7 @@ class WorkerShutdown:
         )
         timeout = float(worker_shutdown_timeout_secs())
         total = min(timeout, _MAX_SECONDS)
+        total = min(total, _seconds(_CHILD_TOTAL_ENV, total))
         self._caps = {
             "router_grace": grace,
             "inflight": _seconds("DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS", math.inf),
@@ -149,6 +163,14 @@ class WorkerShutdown:
 
     def _remaining(self) -> float:
         return max(0.0, self._deadline - time.monotonic())
+
+    @property
+    def started(self) -> bool:
+        return self._started
+
+    def cleanup_remaining(self) -> float:
+        """Time still available for engine cleanup and runtime teardown."""
+        return max(0.0, self._hard_deadline - time.monotonic())
 
     def _drain_remaining(self) -> float:
         return max(0.0, self._drain_deadline - time.monotonic())

@@ -1072,7 +1072,18 @@ class WorkerFactory:
                     engine_client.shutdown()
                 finally:
                     if engine_cleanup_resource is not None:
-                        engine_cleanup_resource.cleanup()
+                        if (
+                            isinstance(
+                                engine_cleanup_resource, EmbeddingEngineCleanupResource
+                            )
+                            and self.shutdown is not None
+                            and self.shutdown.started
+                        ):
+                            engine_cleanup_resource.cleanup(
+                                timeout=self.shutdown.cleanup_remaining() / 2
+                            )
+                        else:
+                            engine_cleanup_resource.cleanup()
 
     async def _create_classify_worker(
         self,

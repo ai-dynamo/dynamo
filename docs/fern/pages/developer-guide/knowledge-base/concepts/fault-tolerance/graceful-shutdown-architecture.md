@@ -36,7 +36,7 @@ Rust backends use the `dynamo-backend-common` worker lifecycle. Python vLLM, SGL
 > [!WARNING]
 > A successful request drain establishes that tracked requests have finished. A timed-out drain does not: engine cleanup must handle unfinished execution. Likewise, waiting a fixed KV-transfer fallback allowance is not proof that remote reads have completed.
 
-`runtime.shutdown()` starts teardown without waiting. `runtime.shutdown_and_wait()` joins the runtime-owned teardown task, including bounded lease revocation. Its optional timeout bounds endpoint draining only; worker coordinators additionally bound the entire wait by their remaining shutdown allowance. Outside worker coordination, the default endpoint-drain timeout is `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (900 seconds).
+`runtime.shutdown()` starts teardown without waiting. `runtime.shutdown_and_wait()` joins the runtime-owned teardown task, including bounded lease revocation. The Rust API's optional timeout bounds endpoint draining only; worker coordinators additionally bound the entire wait by their remaining shutdown allowance. When no explicit bound is supplied, Rust uses `DYN_RUNTIME_GRACEFUL_SHUTDOWN_TIMEOUT_SECS` (900 seconds). Python's `shutdown_and_wait()` supplies the worker total-budget setting instead.
 
 ## Endpoint Draining
 

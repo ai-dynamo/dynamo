@@ -17,13 +17,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import types
 from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
-import sglang as sgl
-
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.common.utils.graceful_shutdown import get_grace_period_seconds
+
+import sglang as sgl
 
 if TYPE_CHECKING:
     from dynamo.common.utils.worker_shutdown import WorkerShutdown
@@ -175,8 +176,10 @@ def reserve_system_port_for_children() -> None:
 
 
 def child_environment(index: int, load_time: Optional[float] = None) -> dict[str, str]:
+    from dynamo.common.utils.worker_shutdown import child_shutdown_environment
+
     env = {
-        **os.environ,
+        **child_shutdown_environment(),
         ENV_PARENT_PID: str(os.getpid()),
         ENV_CHILD_INDEX: str(index),
     }
@@ -313,11 +316,16 @@ def build_gateway_engine():
 
 
 def _reap(proc: subprocess.Popen, timeout: Optional[float] = None) -> None:
+    timeout = child_shutdown_timeout() if timeout is None else timeout
+    deadline = time.monotonic() + timeout
     try:
-        proc.wait(timeout=child_shutdown_timeout() if timeout is None else timeout)
+        proc.wait(timeout=timeout * 0.8)
     except subprocess.TimeoutExpired:
         proc.kill()
-        proc.wait()
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            logging.error("gateway child pid=%d did not exit after SIGKILL", proc.pid)
 
 
 async def serve_via_gateway_children(
@@ -389,7 +397,13 @@ async def serve_via_gateway_children(
                 )
     finally:
         notify_children()
-        await asyncio.gather(*(asyncio.to_thread(_reap, p) for p in procs))
+        # Leave half the remaining cleanup allowance for engine/runtime teardown.
+        timeout = (
+            shutdown.cleanup_remaining() / 2
+            if shutdown is not None and shutdown.started
+            else child_shutdown_timeout()
+        )
+        await asyncio.gather(*(asyncio.to_thread(_reap, p, timeout) for p in procs))
         if owns_shm:
             try:
                 shm.unlink()

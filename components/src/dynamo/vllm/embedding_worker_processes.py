@@ -26,6 +26,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable
 
+from dynamo.common.utils.worker_shutdown import child_shutdown_environment
+
 import vllm
 from vllm.config import VllmConfig
 from vllm.usage.usage_lib import UsageContext
@@ -190,7 +192,7 @@ def _child_environment(
     addresses_json: str,
     parent_pid: int,
 ) -> dict[str, str]:
-    env = os.environ.copy()
+    env = child_shutdown_environment()
     env[_ROLE_ENV] = _CHILD_ROLE
     env[_INDEX_ENV] = str(process_index)
     env[_PARENT_PID_ENV] = str(parent_pid)
@@ -249,18 +251,19 @@ def _terminate_processes(
                     continue
 
     deadline = time.monotonic() + timeout
+    graceful_deadline = time.monotonic() + timeout * 0.8
     for _index, child in children:
         if child.poll() is not None:
             continue
         try:
-            child.wait(timeout=max(0.0, deadline - time.monotonic()))
+            child.wait(timeout=max(0.0, graceful_deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             child.kill()
 
     for _index, child in children:
         if child.poll() is None:
             try:
-                child.wait(timeout=1.0)
+                child.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 logger.error(
                     "Embedding child pid=%d did not exit after SIGKILL", child.pid
@@ -339,11 +342,14 @@ class EmbeddingWorkerProcessGroup:
             if self._cleaned:
                 return
             self._cleaned = True
+            deadline = time.monotonic() + timeout
             self.begin_shutdown()
-            _terminate_processes(self.children, timeout, signal_children=False)
+            _terminate_processes(self.children, timeout / 2, signal_children=False)
             if self.engine_manager is not None:
                 try:
-                    self.engine_manager.shutdown(timeout=timeout)
+                    self.engine_manager.shutdown(
+                        timeout=max(0.0, deadline - time.monotonic())
+                    )
                 except Exception:
                     logger.exception("Failed to shut down shared embedding EngineCore")
 
@@ -363,7 +369,7 @@ class EmbeddingWorkerProcessGroup:
             self._monitor_thread.is_alive()
             and threading.current_thread() is not self._monitor_thread
         ):
-            self._monitor_thread.join(timeout=1.0)
+            self._monitor_thread.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 class EmbeddingEngineCleanupResource:
@@ -377,9 +383,9 @@ class EmbeddingEngineCleanupResource:
         self.process_group = process_group
         self.prometheus_temp_dir = prometheus_temp_dir
 
-    def cleanup(self) -> None:
+    def cleanup(self, timeout: float = 10.0) -> None:
         try:
-            self.process_group.cleanup()
+            self.process_group.cleanup(timeout=timeout)
         finally:
             if self.prometheus_temp_dir is not None:
                 self.prometheus_temp_dir.cleanup()

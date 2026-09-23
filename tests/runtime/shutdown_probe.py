@@ -72,6 +72,8 @@ async def sdk_probe():
         except Exception as error:
             assert "synthetic cleanup failure" in str(error), error
             print("CLEANUP_FAILED", flush=True)
+            await asyncio.sleep(1)
+            print("HOST_SURVIVED", flush=True)
             return
         raise AssertionError("worker reported success after cleanup failed")
     await worker.run()
@@ -185,6 +187,9 @@ async def embedding_child():
         asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
     )
     shutdown = WorkerShutdown(runtime, [], asyncio.Event())
+    if len(sys.argv) > 3 and sys.argv[3] == "drain":
+        shutdown.inflight = 1
+        shutdown.idle.clear()
 
     async def worker():
         print("CHILD_READY", flush=True)
@@ -204,7 +209,19 @@ def embedding_probe():
     resource = tempfile.TemporaryDirectory()
     with resource:
         with subprocess.Popen(
-            [sys.executable, __file__, "embedding-child", delay],
+            [
+                sys.executable,
+                __file__,
+                "embedding-child",
+                delay,
+                "drain" if delay == "0.9" else "idle",
+            ],
+            env=processes._child_environment(
+                process_count=2,
+                process_index=1,
+                addresses_json="{}",
+                parent_pid=os.getpid(),
+            ),
             stdout=subprocess.PIPE,
             text=True,
             start_new_session=True,
@@ -231,7 +248,10 @@ async def gateway_probe():
     sgl = ModuleType("sglang")
     sgl.Engine = SimpleNamespace(async_generate=None, _resolve_routed_dp_rank=None)
     mixin = ModuleType("sglang.srt.managers.multi_tokenizer_mixin")
-    mixin.write_data_for_multi_tokenizer = None
+    unlinked = []
+    mixin.write_data_for_multi_tokenizer = lambda *args: SimpleNamespace(
+        unlink=lambda: unlinked.append(True)
+    )
     with patch.dict(sys.modules, {"sglang": sgl, mixin.__name__: mixin}):
         gateway = importlib.import_module("dynamo.sglang.gateway")
         runtime = DistributedRuntime(
@@ -243,8 +263,17 @@ async def gateway_probe():
         popen = subprocess.Popen
 
         def launch(_command, **kwargs):
+            command = (
+                [
+                    sys.executable,
+                    "-c",
+                    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('CHILD_READY', flush=True); time.sleep(30)",
+                ]
+                if sys.argv[1] == "gateway-wedged"
+                else [sys.executable, __file__, "embedding-child", "0.1", "drain"]
+            )
             child = popen(
-                [sys.executable, __file__, "embedding-child", "0.1"],
+                command,
                 stdout=subprocess.PIPE,
                 text=True,
                 **kwargs,
@@ -256,7 +285,14 @@ async def gateway_probe():
             serving = asyncio.create_task(
                 shutdown.run(
                     gateway.serve_via_gateway_children(
-                        SimpleNamespace(_multi_tokenizer_shm=object()),
+                        SimpleNamespace(
+                            _scheduler_init_result=SimpleNamespace(
+                                scheduler_infos=[{}]
+                            ),
+                            tokenizer_manager=SimpleNamespace(startup_time=0),
+                            port_args=None,
+                            server_args=None,
+                        ),
                         1,
                         stop,
                         shutdown=shutdown,
@@ -271,7 +307,9 @@ async def gateway_probe():
                 assert os.getpgrp() == os.getpid()
                 os.killpg(os.getpgrp(), signal.SIGTERM)
                 await serving
-                assert child.returncode == 0, child.returncode
+                expected = -signal.SIGKILL if sys.argv[1] == "gateway-wedged" else 0
+                assert child.returncode == expected, child.returncode
+                assert unlinked == [True]
                 assert not shutdown.accepting
                 print(
                     "ADMISSION_CLOSED\nCHILDREN_DRAINED\nENGINE_CLEANED\nRUNTIME_FINISHED",
@@ -293,7 +331,7 @@ if __name__ == "__main__":
         asyncio.run(embedding_child())
     elif mode.startswith("embedding-"):
         embedding_probe()
-    elif mode == "gateway-group":
+    elif mode.startswith("gateway-"):
         asyncio.run(gateway_probe())
     else:
         asyncio.run(python_probe())

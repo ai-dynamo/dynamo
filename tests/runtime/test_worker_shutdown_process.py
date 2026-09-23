@@ -53,6 +53,7 @@ def test_sdk_shutdown_watchdog_lifetime(mode):
         assert "WORKER_RETURNED" in result.stdout
         assert "HOST_SURVIVED" in result.stdout
     if mode == "sdk-failed":
+        assert "HOST_SURVIVED" in result.stdout
         assert "CLEANUP_FAILED" in result.stdout
         assert "ENGINE_CLEANED" not in result.stdout
 
@@ -67,6 +68,7 @@ def test_sdk_shutdown_watchdog_lifetime(mode):
         "embedding-idle",
         "embedding-slow",
         "gateway-group",
+        "gateway-wedged",
     ],
 )
 def test_python_shutdown_signal_to_exit(mode):

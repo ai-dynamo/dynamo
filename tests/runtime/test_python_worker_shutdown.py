@@ -85,28 +85,28 @@ async def test_python_draining_rejection_survives_transport(
         requested = True
         shutdown.request_shutdown()
         await cleanup_entered.wait()
-        # Registration alone is insufficient: stage observations must reach
-        # the public scrape endpoint while the worker is shutting down.
-        async with httpx.AsyncClient(timeout=2, trust_env=False) as http:
-            response = await http.get(f"http://127.0.0.1:{system_port}/metrics")
-            response.raise_for_status()
-        samples = [
-            line for line in response.text.splitlines() if not line.startswith("#")
-        ]
-        assert any(
-            "shutdown_stage_seconds{" in line
-            and 'stage="cleanup"' in line
-            and 'reason="started"' in line
-            for line in samples
-        )
-        assert any(
-            "shutdown_inflight_requests{" in line and line.endswith(" 0")
-            for line in samples
-        )
-        assert any(
-            "shutdown_kv_quiescent{" in line and line.endswith(" -1")
-            for line in samples
-        )
+        if request_plane == "tcp" and not push:
+            # One representative case checks publication through the shared handle.
+            async with httpx.AsyncClient(timeout=2, trust_env=False) as http:
+                response = await http.get(f"http://127.0.0.1:{system_port}/metrics")
+                response.raise_for_status()
+            samples = [
+                line for line in response.text.splitlines() if not line.startswith("#")
+            ]
+            assert any(
+                "shutdown_stage_seconds{" in line
+                and 'stage="cleanup"' in line
+                and 'reason="started"' in line
+                for line in samples
+            )
+            assert any(
+                "shutdown_inflight_requests{" in line and line.endswith(" 0")
+                for line in samples
+            )
+            assert any(
+                "shutdown_kv_quiescent{" in line and line.endswith(" -1")
+                for line in samples
+            )
     finally:
         release_cleanup.set()
         if not requested:
