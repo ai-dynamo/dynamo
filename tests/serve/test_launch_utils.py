@@ -11,9 +11,14 @@ import pytest
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
 
 LAUNCH_UTILS = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
-EPD_SCRIPT = (
-    Path(__file__).parents[2] / "examples/backends/vllm/launch/disagg_multimodal_epd.sh"
-)
+LAUNCH_DIR = Path(__file__).parents[2] / "examples/backends/vllm/launch"
+
+# The disaggregated multimodal scripts whose workers take a NixlConnector
+# KV-transfer config, and the label each backgrounded process must carry.
+LABELLED_SCRIPTS = {
+    "disagg_multimodal_epd.sh": ["frontend", "encode", "prefill", "decode"],
+    "disagg_multimodal_p_d.sh": ["frontend", "prefill", "decode"],
+}
 
 
 def _run_script(body: str) -> subprocess.CompletedProcess:
@@ -64,15 +69,24 @@ def test_wait_any_exit_keeps_the_generic_message_without_labels() -> None:
     assert "A background process exited with code 3" in result.stdout, result.stdout
 
 
-def test_disagg_multimodal_epd_labels_every_background_process() -> None:
-    """Keep a label on each of the four processes the E/P/D script starts."""
-    script = EPD_SCRIPT.read_text()
-    backgrounded = [line for line in script.splitlines() if line.rstrip().endswith("&")]
-    labels = [
-        line.split()[1]
-        for line in script.splitlines()
-        if line.startswith("dyn_track_worker ")
-    ]
+@pytest.mark.parametrize(
+    "script_name,expected_labels", sorted(LABELLED_SCRIPTS.items())
+)
+def test_disagg_multimodal_labels_every_background_process(
+    script_name: str, expected_labels: list[str]
+) -> None:
+    """Keep a label on every process these launch scripts background.
 
-    assert len(backgrounded) == 4, backgrounded
-    assert labels == ["frontend", "encode", "prefill", "decode"]
+    A worker added later without a label would go back to an anonymous exit
+    code in the nightly log, which is what this check prevents.
+    """
+    lines = (LAUNCH_DIR / script_name).read_text().splitlines()
+    backgrounded = [
+        line
+        for line in lines
+        if line.rstrip().endswith("&") and not line.rstrip().endswith("&&")
+    ]
+    labels = [line.split()[1] for line in lines if line.startswith("dyn_track_worker ")]
+
+    assert len(backgrounded) == len(expected_labels), backgrounded
+    assert labels == expected_labels
