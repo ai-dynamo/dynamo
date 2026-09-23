@@ -509,10 +509,24 @@ def test_shutdown_config_accepts_partial_overrides():
 
 
 def test_worker_config_accepts_a_nested_shutdown_config():
-    """The nested field is what keeps a new knob from needing an edit in the
-    Rust struct, the PyO3 signature and the dataclass."""
+    """Shutdown overrides must preserve the existing positional API prefix."""
     cfg = backend.WorkerConfig(
-        namespace="ns",
+        "ns",
+        "backend",
+        "generate",
+        "model",
+        None,
+        core.ModelInput.Tokens,
+        "chat,completions",
+        None,
+        None,
+        None,
+        True,
+        True,
+        True,
+        [],
+        None,
+        backend.DisaggregationMode.Aggregated,
         shutdown=backend.ShutdownConfig(router_grace_secs=1.0),
     )
     assert cfg is not None
@@ -571,6 +585,7 @@ def test_python_worker_config_forwards_shutdown_to_the_rust_config(monkeypatch):
         ),
     )
     shim = worker_mod.Worker(MagicMock(), cfg)
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", cfg.response_plane)
 
     with pytest.raises(_StopBeforeRuntime):
         asyncio.run(shim.run())

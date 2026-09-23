@@ -212,7 +212,7 @@ pub async fn stage_unregister(
             Ok(Ok(())) => (StageReason::Completed, None),
             Ok(Err(error)) => {
                 tracing::warn!(%error, "discovery unregister failed");
-                (StageReason::Skipped, Some(error.to_string()))
+                (StageReason::Failed, Some(error.to_string()))
             }
             Err(()) => {
                 tracing::warn!(
@@ -594,7 +594,7 @@ mod tests {
     async fn stage_unregister_survives_a_discovery_failure() {
         let outcome =
             stage_unregister(&FlakyDiscovery { fail: true }, &ShutdownBudget::unbounded()).await;
-        assert_eq!(outcome.reason, StageReason::Skipped);
+        assert_eq!(outcome.reason, StageReason::Failed);
         assert!(
             outcome.detail.is_some(),
             "the failure must be reported, not swallowed"
