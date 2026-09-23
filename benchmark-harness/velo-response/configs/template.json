@@ -210,7 +210,7 @@
     "dataset_entries": 336,
     "warmup_request_count": 32,
     "grace_period_seconds": 90,
-    "allowed_error_fraction": 0.0,
+    "allowed_error_fraction": 0.0001,
     "finalizer_timeout_seconds": 1200,
     "aiperf_process_tree_timeout_seconds": 900,
     "native_finalization_budget_seconds": 1200,

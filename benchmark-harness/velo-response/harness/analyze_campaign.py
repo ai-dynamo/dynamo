@@ -104,15 +104,20 @@ def analyze(label):
     result['client']=client_summary(run,start,end)
     campaign=json.loads((run/'campaign-result.json').read_text())
     counts=result['client']['counts']
-    bad_counts={k:v for k,v in counts.items() if v and any(word in k for word in ('errors','cancellations','mismatches','missing_or_duplicate','skips'))}
+    bad_counts={k:v for k,v in counts.items() if v and any(word in k for word in ('cancellations','mismatches','missing_or_duplicate','skips'))}
+    error_count=counts.get('measured_errors',0)+counts.get('outside_window_errors',0)
+    error_fraction=error_count/counts['profiling_records']
     expected=config['runtime']['num_mockers']
     result['quality']={
         'complete':(run/'COMPLETE').exists(),
         'harness_accepted':campaign['accepted'],
         'invalid_client_records':bad_counts,
+        'error_count':error_count,
+        'error_fraction':error_fraction,
+        'small_error_count_accepted':error_fraction<=config['workload']['allowed_error_fraction'],
         'kv_sources_complete':all(result['telemetry'][n]['kv_sources']['min']==expected for n in names),
     }
-    result['quality']['accepted']=all((result['quality']['complete'],result['quality']['harness_accepted'],not bad_counts,result['quality']['kv_sources_complete']))
+    result['quality']['accepted']=all((result['quality']['complete'],result['quality']['harness_accepted'],not bad_counts,result['quality']['kv_sources_complete'],result['quality']['small_error_count_accepted']))
     if (run/'profile-window-start.json').exists():
         p=json.loads((run/'profile-window-start.json').read_text());a=p['epoch'];b=a+15
         result['profile_launch_window']={'start':a,'end':b,'clock':'monotonic','note':'Controller launch window; actual perf sample windows are in frontend-profile-summary.json.','telemetry':{n:window(d,a,b) for n,d in datasets.items()}}

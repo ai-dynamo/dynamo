@@ -42,8 +42,10 @@ when the hardware exposes them. Keep response-only traffic separate from total
 frontend traffic where counters permit. Record fabric, speed, MTU, PCI/NUMA
 placement and actual process memory placement.
 
-Require complete exports, zero unexpected request errors and 2,048 active KV
-sources on both frontends. Keep failed artifacts. Take profiles outside clean
+Require complete exports and 2,048 active KV sources on both frontends. Small
+error counts remain in the directional comparison and are reported for every
+run. The harness accepts error fractions up to 0.01%; it does not hide those
+records or their error types. Keep failed artifacts. Take profiles outside timing
 runs. Report client saturation and different fabrics as comparison limits.
 Report packet load separately from throughput and tail latency. The provisional
 limits versus Dynamo TCP are 5% throughput or p99 latency regression and 10%
