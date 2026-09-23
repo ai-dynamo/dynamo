@@ -984,7 +984,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
 			// Call updateVLLMMultinodeArgs with annotations
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations)
+			require.NoError(t, updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations))
 
 			if tt.expectNotModified {
 				// Args should not have changed

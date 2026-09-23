@@ -658,19 +658,19 @@ func hasFlag(expandedArgs []string, flag string) bool {
 
 // getFlagStringValue returns the value of the last occurrence of flag in
 // expandedArgs, matching vLLM's FlexibleArgumentParser last-value-wins
-// precedence (the same rule getFlagValue applies to integers). ok is false
-// when flag never appears. Using hasArg's first-match semantics for an
-// enum-style flag like --data-parallel-backend would be wrong: with
+// precedence (the same rule getFlagValue applies to integers), or "" when
+// flag never appears. Using hasArg's first-match semantics for an enum-style
+// flag like --data-parallel-backend would be wrong: with
 // "--data-parallel-backend ray --data-parallel-backend mp", vLLM resolves to
 // "mp", but a first-match check would report "ray" instead.
-func getFlagStringValue(expandedArgs []string, flag string) (value string, ok bool) {
+func getFlagStringValue(expandedArgs []string, flag string) string {
+	value := ""
 	for i, arg := range expandedArgs {
 		if arg == flag && i+1 < len(expandedArgs) {
 			value = expandedArgs[i+1]
-			ok = true
 		}
 	}
-	return value, ok
+	return value
 }
 
 // vllmLaunchArgs is the result of parsing a container's launch command line
@@ -747,8 +747,8 @@ func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
 	// hasArg's first-match semantics: with "--data-parallel-backend ray
 	// --data-parallel-backend mp", vLLM resolves to "mp", and a first-match
 	// check would wrongly report "ray".
-	dataParallelBackend, _ := getFlagStringValue(expandedArgs, dataParallelBackendFlag)
-	distributedExecutorBackend, _ := getFlagStringValue(expandedArgs, distributedExecutorFlag)
+	dataParallelBackend := getFlagStringValue(expandedArgs, dataParallelBackendFlag)
+	distributedExecutorBackend := getFlagStringValue(expandedArgs, distributedExecutorFlag)
 
 	return vllmLaunchArgs{
 		TensorParallelSize:             tensorParallelSize,
