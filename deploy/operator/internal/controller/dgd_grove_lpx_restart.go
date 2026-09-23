@@ -28,12 +28,16 @@ func (r *lpxRestartProgressResolver) Resolve(
 	source *v1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
-	childComponents := r.observeRestart(ctx, source)
+	child := r.observeRestart(ctx, source)
 	remaining := make([]string, 0, len(inProgress))
 	for _, name := range inProgress {
-		if !childComponents[name].Ready {
-			remaining = append(remaining, name)
+		if child != nil {
+			ready := meta.FindStatusCondition(child.Status.Components[name].Conditions, v1alpha1.LPXReadyCondition)
+			if ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == child.Generation {
+				continue
+			}
 		}
+		remaining = append(remaining, name)
 	}
 	return remaining
 }
@@ -84,12 +88,12 @@ func resolveCompositeGroveRestartProgress(
 	return remaining
 }
 
-// observeRestart returns component status from one current, ready restart observation.
+// observeRestart returns the child for one current, ready restart observation.
 // A failed read or incomplete child leaves every requested member pending.
 func (r *lpxRestartProgressResolver) observeRestart(
 	ctx context.Context,
 	source *v1beta1.DynamoGraphDeployment,
-) map[string]v1beta1.ComponentReplicaStatus {
+) *v1alpha1.LPXGraphDeployment {
 	child := &v1alpha1.LPXGraphDeployment{}
 	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
 		child.Status.ObservedGeneration != child.Generation || !child.DeletionTimestamp.IsZero() ||
@@ -110,5 +114,5 @@ func (r *lpxRestartProgressResolver) observeRestart(
 	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != child.Generation {
 		return nil
 	}
-	return child.Status.Components
+	return child
 }

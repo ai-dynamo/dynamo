@@ -28,6 +28,21 @@ const (
 
 // updateStatus persists the updated status on the deployment.
 func (r *graphReconciler) updateStatus(ctx context.Context, deployment *v1alpha1.LPXGraphDeployment, previous *v1alpha1.LPXGraphDeploymentStatus) error {
+	for name, component := range deployment.Status.Components {
+		ready := meta.FindStatusCondition(component.Conditions, v1alpha1.LPXReadyCondition)
+		if ready == nil {
+			ready = &metav1.Condition{
+				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionUnknown,
+				ObservedGeneration: deployment.Generation, Reason: "NotObserved",
+				Message: "Component readiness has not been observed",
+			}
+		}
+		// Compare the final observation to persisted history, not intermediate states.
+		component.Conditions = slices.Clone(previous.Components[name].Conditions)
+		meta.SetStatusCondition(&component.Conditions, *ready)
+		deployment.Status.Components[name] = component
+	}
+
 	// Persist the complete observation without overwriting per-workload readiness.
 	if apiequality.Semantic.DeepEqual(previous, &deployment.Status) {
 		return nil
@@ -42,6 +57,10 @@ func (r *graphReconciler) updateStatus(ctx context.Context, deployment *v1alpha1
 
 // setReadyCondition updates the deployment's Ready condition.
 func setReadyCondition(deployment *v1alpha1.LPXGraphDeployment, state v1beta1.DGDState, message string) {
+	meta.SetStatusCondition(&deployment.Status.Conditions, readyCondition(deployment.Generation, state, message))
+}
+
+func readyCondition(generation int64, state v1beta1.DGDState, message string) metav1.Condition {
 	status, reason := metav1.ConditionFalse, v1alpha1.LPXReadyReasonPending
 	switch state {
 	case v1beta1.DGDStateSuccessful:
@@ -49,16 +68,16 @@ func setReadyCondition(deployment *v1alpha1.LPXGraphDeployment, state v1beta1.DG
 	case v1beta1.DGDStateFailed:
 		reason = v1alpha1.LPXReadyReasonFailed
 	}
-	meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{
-		Type: v1alpha1.LPXReadyCondition, Status: status, ObservedGeneration: deployment.Generation,
+	return metav1.Condition{
+		Type: v1alpha1.LPXReadyCondition, Status: status, ObservedGeneration: generation,
 		Reason: reason, Message: truncateConditionMessage(message),
-	})
+	}
 }
 
 // setPipelineRequestReadyCondition reports the first current failure, otherwise the first
 // non-Bound request, and returns whether every desired request is Bound.
-// deployment is non-nil; absent requests and stale receipts are still pending.
-func setPipelineRequestReadyCondition(deployment *v1alpha1.LPXGraphDeployment, requests map[string]*lpxv1alpha1.LPUPipelineRequest) bool {
+// Absent receipts and stale receipts are still pending.
+func setPipelineRequestReadyCondition(conditions *[]metav1.Condition, generation int64, requests map[string]*lpxv1alpha1.LPUPipelineRequest) bool {
 	// Failures outrank pending receipts; stable name order keeps diagnostics consistent.
 	allBound := true
 	var pending *lpxv1alpha1.LPUPipelineRequestStatus
@@ -80,7 +99,7 @@ func setPipelineRequestReadyCondition(deployment *v1alpha1.LPXGraphDeployment, r
 				lpxv1alpha1.RequestPhaseReleasing, lpxv1alpha1.RequestPhaseReleased:
 				// Keep the first pending receipt while checking the remaining requests for failure.
 			default:
-				setPipelineRequestPhaseCondition(deployment, status)
+				setPipelineRequestPhaseCondition(conditions, generation, status)
 				return false
 			}
 		}
@@ -92,17 +111,17 @@ func setPipelineRequestReadyCondition(deployment *v1alpha1.LPXGraphDeployment, r
 	}
 
 	if !allBound {
-		setPipelineRequestPhaseCondition(deployment, pending)
+		setPipelineRequestPhaseCondition(conditions, generation, pending)
 	}
 	return allBound
 }
 
 // setPipelineRequestPhaseCondition formats a non-Bound receipt without copying it.
-// deployment is non-nil; nil status means no current scheduler receipt exists.
-func setPipelineRequestPhaseCondition(deployment *v1alpha1.LPXGraphDeployment, status *lpxv1alpha1.LPUPipelineRequestStatus) {
+// Nil status means no current scheduler receipt exists.
+func setPipelineRequestPhaseCondition(conditions *[]metav1.Condition, generation int64, status *lpxv1alpha1.LPUPipelineRequestStatus) {
 	// A missing or stale receipt cannot establish scheduler progress.
 	if status == nil {
-		setReadyCondition(deployment, v1beta1.DGDStatePending, "LPUPipelineRequest is published")
+		meta.SetStatusCondition(conditions, readyCondition(generation, v1beta1.DGDStatePending, "LPUPipelineRequest is published"))
 		return
 	}
 
@@ -137,7 +156,7 @@ func setPipelineRequestPhaseCondition(deployment *v1alpha1.LPXGraphDeployment, s
 		summary = fmt.Sprintf("LPX scheduler reported unknown phase %q", status.Phase)
 	}
 
-	setReadyCondition(deployment, state, pipelineRequestDiagnosticMessage(summary, status.Diagnostics))
+	meta.SetStatusCondition(conditions, readyCondition(generation, state, pipelineRequestDiagnosticMessage(summary, status.Diagnostics)))
 }
 
 // isSchedulingFailedConditionCurrent reports whether the current generation must remain

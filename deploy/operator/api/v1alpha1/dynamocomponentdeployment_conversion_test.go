@@ -804,7 +804,6 @@ func TestDCD_RoundTrip_Status(t *testing.T) {
 				ComponentNames:  []string{"dcd-0"},
 				GPUsPerEngine:   ptr.To(int64(2)),
 				GPUsPerReplica:  ptr.To(int64(3)),
-				Ready:           true,
 				Replicas:        3,
 				UpdatedReplicas: 3,
 				ReadyReplicas:   ptr.To(int32(3)),

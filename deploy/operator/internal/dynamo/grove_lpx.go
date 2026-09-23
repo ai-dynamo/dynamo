@@ -39,15 +39,10 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 	}
 	verifiedAvailable := int32(0)
 	result := func(ready bool, classification, message string) GroveReadiness {
-		status.Ready = ready
 		if status.AvailableReplicas != nil {
 			status.AvailableReplicas = ptr.To(min(*status.AvailableReplicas, verifiedAvailable))
 		}
 		statuses[component.ComponentName] = status
-		for name, member := range statuses {
-			member.Ready = ready
-			statuses[name] = member
-		}
 		return GroveReadiness{Ready: ready, Classification: classification, Message: message, ComponentStatuses: statuses}
 	}
 	pending := func(message string) GroveReadiness {

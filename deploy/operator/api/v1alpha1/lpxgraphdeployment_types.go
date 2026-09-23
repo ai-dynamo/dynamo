@@ -33,6 +33,17 @@ type LPXGraphDeploymentSpec struct {
 	InputRevision string `json:"inputRevision"`
 }
 
+// LPXComponentStatus reports logical replicas and readiness for one LPX component.
+type LPXComponentStatus struct {
+	v1beta1.ComponentReplicaStatus `json:",inline"`
+
+	// conditions reports component readiness for the current child generation.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
 // LPXGraphDeploymentStatus is the LPX controller's durable lifecycle state.
 // Dynamo consumes readiness only for the current generation and input revision.
 type LPXGraphDeploymentStatus struct {
@@ -49,7 +60,7 @@ type LPXGraphDeploymentStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 	// components reports logical replicas by authored component name, never Agent Pods.
 	// +optional
-	Components map[string]v1beta1.ComponentReplicaStatus `json:"components,omitempty"`
+	Components map[string]LPXComponentStatus `json:"components,omitempty"`
 	// modelDownload retains the existing remote-build download progress.
 	// +optional
 	ModelDownload *v1beta1.ModelDownloadStatus `json:"modelDownload,omitempty"`

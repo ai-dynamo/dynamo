@@ -810,7 +810,6 @@ func ConvertFromServiceReplicaStatus(src *ServiceReplicaStatus, dst *v1beta1.Com
 		ComponentKind:    v1beta1.ComponentKind(src.ComponentKind),
 		ComponentNames:   componentNamesToHub(src),
 		RuntimeNamespace: src.RuntimeNamespace,
-		Ready:            src.Ready,
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}
@@ -840,7 +839,6 @@ func ConvertToServiceReplicaStatus(src *v1beta1.ComponentReplicaStatus, dst *Ser
 		ComponentKind:    ComponentKind(src.ComponentKind),
 		ComponentNames:   componentNames,
 		RuntimeNamespace: src.RuntimeNamespace,
-		Ready:            src.Ready,
 		Replicas:         src.Replicas,
 		UpdatedReplicas:  src.UpdatedReplicas,
 	}

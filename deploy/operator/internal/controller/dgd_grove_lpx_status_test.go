@@ -10,6 +10,7 @@ import (
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -39,11 +40,18 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 				ModelDownload: &v1beta1.ModelDownloadStatus{
 					Builds: []string{"gs://models/first", "gs://models/second"}, LastCheckedAt: &checkedAt,
 				},
-				Components: map[string]v1beta1.ComponentReplicaStatus{},
+				Components: map[string]v1alpha1.LPXComponentStatus{},
 				Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: 2}},
 			}
 			for i, component := range source.Spec.Components {
-				child.Status.Components[component.ComponentName] = v1beta1.ComponentReplicaStatus{Ready: true, Replicas: int32(i + 1)}
+				replicas := int32(i + 1)
+				child.Status.Components[component.ComponentName] = v1alpha1.LPXComponentStatus{
+					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{
+						Replicas: replicas, UpdatedReplicas: replicas, ReadyReplicas: ptr.To(replicas),
+						AvailableReplicas: ptr.To(replicas), ScheduledReplicas: ptr.To(replicas),
+					},
+					Conditions: []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+				}
 			}
 
 			t.Log("Gate the graph on the shared child's current lifecycle")
@@ -66,12 +74,14 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 			result := mergeLPXChildStatus(source, child, ReconcileResult{State: v1beta1.DGDStateSuccessful})
 			require.Equal(t, want, result.State)
 
-			t.Log("Publish per-component readiness only for a current child")
+			t.Log("Publish per-component replica diagnostics only for a current child")
 			if scenario == "ready" || scenario == "failure" || scenario == "no-download" {
-				require.Equal(t, before.Status.Components, result.ComponentStatus)
+				require.Len(t, result.ComponentStatus, len(before.Status.Components))
+				for name, component := range before.Status.Components {
+					require.Equal(t, component.ComponentReplicaStatus, result.ComponentStatus[name])
+				}
 			} else {
 				for _, component := range result.ComponentStatus {
-					require.False(t, component.Ready)
 					require.Zero(t, component.Replicas)
 				}
 			}

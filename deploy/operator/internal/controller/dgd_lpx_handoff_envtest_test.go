@@ -297,7 +297,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	source.Status.State = result.State
 	require.NoError(t, env.Client().Status().Update(t.Context(), source))
 	require.Equal(t, v1beta1.ComponentKindPodCliqueScalingGroup, source.Status.Components["lpx"].ComponentKind)
-	require.False(t, source.Status.Components["lpx"].Ready)
+	require.Zero(t, source.Status.Components["lpx"].Replicas)
 
 	t.Log("Hand off the beta source to one independently observed alpha child with its beta DGD owner")
 	handoff := &dgdLPXHandoff{client: env.Client()}
@@ -316,6 +316,12 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
 	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,
 		LastTransitionTime: metav1.Now(), Reason: v1alpha1.LPXReadyReasonFailed, Message: "Check the namespace quota"}}
+	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+		"lpx": {
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup},
+			Conditions:             []metav1.Condition{child.Status.Conditions[0]},
+		},
+	}
 	failureTime := metav1.NewTime(time.Now().Add(-time.Minute).UTC().Truncate(time.Second))
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
 		Type: "SchedulingFailed", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation,
@@ -323,6 +329,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	})
 	require.NoError(t, env.Client().Status().Update(t.Context(), child))
 	require.NoError(t, env.Client().Get(t.Context(), client.ObjectKeyFromObject(child), child))
+	require.Equal(t, child.Status.Conditions[:1], child.Status.Components["lpx"].Conditions)
 	require.Len(t, child.Status.Conditions, 2)
 	schedulingFailed := meta.FindStatusCondition(child.Status.Conditions, "SchedulingFailed")
 	require.NotNil(t, schedulingFailed)

@@ -978,7 +978,6 @@ func TestDGD_RoundTrip_Status(t *testing.T) {
 					RuntimeNamespace:  "ns-status-worker-abc123",
 					GPUsPerEngine:     ptr.To(int64(2)),
 					GPUsPerReplica:    ptr.To(int64(3)),
-					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					ReadyReplicas:     ptr.To(int32(2)),

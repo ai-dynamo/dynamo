@@ -2022,11 +2022,6 @@ GPUsPerReplica is the unique GPU allocation added when this service scales by on
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="ready" type="boolean">
-Ready is the binary determination of whether the correct number of replicas are scheduled and available.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="replicas" type="integer">
 Replicas is the total number of non-terminated replicas. Required for all component kinds.
 **Validation:** Minimum: 0
@@ -2389,11 +2384,6 @@ gpusPerEngine is the number of GPUs assigned to one inference engine in a compon
 <ParamField path="gpusPerReplica" type="integer">
 gpusPerReplica is the unique GPU allocation added when this component scales by one replica, across all nodes, application and initialization phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod scheduling footprint; shared DRA claims are counted once. A present zero records a successful non-GPU resolution; omission means no current shape is available.
 **Validation:** Minimum: 0  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="ready" type="boolean">
-ready is the binary determination of whether the correct number of replicas are scheduled and available.
-**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="replicas" type="integer">

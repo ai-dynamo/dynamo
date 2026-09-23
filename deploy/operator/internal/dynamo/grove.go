@@ -311,7 +311,6 @@ func evaluateGroveComponents(
 		componentReadiness := componentReadinesses[component.ComponentName]
 		componentStatus := componentReadiness.status
 		componentStatus.RuntimeNamespace = namespacePlan.runtimeNamespace(dgd, component)
-		componentStatus.Ready = componentReadiness.ready
 		componentStatuses[component.ComponentName] = componentStatus
 	}
 

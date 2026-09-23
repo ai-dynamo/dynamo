@@ -204,17 +204,19 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	t.Log("Project exactly one complete LPX engine alongside an ordinary component")
 	child, source, _ := newLPXHandoffFixture(t, "node-local-v2-hybrid")
 	child.Status.ObservedGeneration = child.Generation
-	child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {
-		Replicas: 3, AvailableReplicas: ptr.To(int32(3)), Ready: true,
-		GPUsPerEngine: ptr.To(int64(8)), GPUsPerReplica: ptr.To(int64(8)),
+	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
+		ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{
+			Replicas: 3, AvailableReplicas: ptr.To(int32(3)),
+			GPUsPerEngine: ptr.To(int64(8)), GPUsPerReplica: ptr.To(int64(8)),
+		},
 	}}
 	source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
-	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: ptr.To(int32(4)), Ready: true}}}
+	result := ReconcileResult{State: v1beta1.DGDStateSuccessful, ComponentStatus: map[string]v1beta1.ComponentReplicaStatus{"prefill": {Replicas: 4, AvailableReplicas: ptr.To(int32(4))}}}
 	result = mergeLPXChildStatus(source, child, result)
 	require.Equal(t, v1beta1.DGDStateSuccessful, result.State)
 	require.Len(t, result.ComponentStatus, 2)
-	require.Equal(t, child.Status.Components["lpx"], result.ComponentStatus["lpx"])
+	require.Equal(t, child.Status.Components["lpx"].ComponentReplicaStatus, result.ComponentStatus["lpx"])
 
 	t.Log("Reject missing or stale children and stale Ready conditions")
 	for _, failure := range []string{"missing-child", "generation", "condition"} {
@@ -233,14 +235,14 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 
 	t.Log("A partially ready child retains logical replica counts and GPU capacity in public status")
 	partial := child.Status.Components["lpx"]
-	partial.AvailableReplicas, partial.Ready = ptr.To(int32(2)), false
+	partial.AvailableReplicas = ptr.To(int32(2))
 	child.Status.Components["lpx"] = partial
 	result.Reason = "CheckpointReady"
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonPending, Message: "Waiting for removed LPX requests"})
 	result = mergeLPXChildStatus(source, child, result)
 	require.Equal(t, v1beta1.DGDStatePending, result.State)
 	require.Equal(t, Reason(v1alpha1.LPXReadyReasonPending), result.Reason)
-	require.Equal(t, partial, result.ComponentStatus["lpx"])
+	require.Equal(t, partial.ComponentReplicaStatus, result.ComponentStatus["lpx"])
 	source.Status.Components = result.ComponentStatus
 	request := &v1beta1.DynamoGraphDeploymentRequest{}
 	require.True(t, updateDeploymentInfo(request, source))
@@ -275,7 +277,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Only a current child failure may bypass the complete-observation gate")
 			child, source, _ := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
-			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
+			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1}}}
 			child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonFailed, Message: "Check the namespace quota"}}
 			result := ReconcileResult{State: v1beta1.DGDStateSuccessful}
 			status := v1beta1.DynamoGraphDeploymentStatus{}
@@ -355,7 +357,10 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 			require.Equal(t, "restart-1", updated.Annotations[dynamo.LPXRestartAnnotation])
 			require.Equal(t, []string{"lpx"}, progress(t.Context(), source, []string{"lpx"}))
 			updated.Status.ObservedGeneration = updated.Generation
-			updated.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Ready: true, Replicas: 1, AvailableReplicas: ptr.To(int32(1))}}
+			updated.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
+				ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+				Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: updated.Generation}},
+			}}
 			meta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: updated.Generation, Reason: "Ready"})
 			require.NoError(t, kube.Status().Update(t.Context(), updated))
 
@@ -398,9 +403,13 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend:0"}}}},
 	})
 	child.Status.ObservedGeneration = child.Generation
-	child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-		"lpx":   {Replicas: 1, AvailableReplicas: ptr.To(int32(1)), Ready: true},
-		"draft": {Replicas: 2, AvailableReplicas: ptr.To(int32(2)), Ready: true},
+	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+		"lpx": {
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1, AvailableReplicas: ptr.To(int32(1))},
+		},
+		"draft": {
+			ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2, AvailableReplicas: ptr.To(int32(2))},
+		},
 	}
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 	require.NoError(t, kube.Status().Update(t.Context(), child))
@@ -498,8 +507,15 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, "pair-restart", child.Annotations[dynamo.LPXRestartAnnotation])
 			require.NotEmpty(t, progress(t.Context(), source, source.Status.Restart.InProgress))
 			child.Status.ObservedGeneration = child.Generation
-			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-				"lpx": {Ready: true, Replicas: 1}, "draft": {Ready: true, Replicas: 2},
+			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+				"lpx": {
+					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 1},
+					Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+				},
+				"draft": {
+					ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2},
+					Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+				},
 			}
 			meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready"})
 			require.NoError(t, kube.Status().Update(t.Context(), child))
@@ -538,7 +554,10 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			)
 			ordinaryDGD = projectOrdinaryGroveDeployment(source)
-			child.Status.Components["draft"] = v1beta1.ComponentReplicaStatus{Ready: true, Replicas: 2}
+			child.Status.Components["draft"] = v1alpha1.LPXComponentStatus{
+				ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2},
+				Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
+			}
 			require.NoError(t, kube.Status().Update(t.Context(), child))
 			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
 			beforeSource := source.DeepCopy()

@@ -134,8 +134,8 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 		_, err = r.Reconcile(t.Context(), key)
 		require.NoError(t, err)
 		require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
-		require.False(t, child.Status.Components["lpx"].Ready)
-		require.True(t, child.Status.Components[second.ComponentName].Ready)
+		require.True(t, meta.IsStatusConditionFalse(child.Status.Components["lpx"].Conditions, v1alpha1.LPXReadyCondition))
+		require.True(t, meta.IsStatusConditionTrue(child.Status.Components[second.ComponentName].Conditions, v1alpha1.LPXReadyCondition))
 
 		t.Log("Preserve PCS identity and spec, both groups, all Agents, and the other workload's workers")
 		for _, original := range objects {
@@ -191,8 +191,8 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 	_, err = r.Reconcile(t.Context(), key)
 	require.NoError(t, err)
 	require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
-	require.False(t, child.Status.Components["lpx"].Ready)
-	require.True(t, child.Status.Components[second.ComponentName].Ready)
+	require.True(t, meta.IsStatusConditionFalse(child.Status.Components["lpx"].Conditions, v1alpha1.LPXReadyCondition))
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Components[second.ComponentName].Conditions, v1alpha1.LPXReadyCondition))
 	observedAgent := &grovev1alpha1.PodClique{}
 	require.NoError(t, r.Get(t.Context(), agentKey, observedAgent))
 	require.Equal(t, agent, observedAgent, "reconciliation must preserve user-managed Agent capacity")
@@ -1918,7 +1918,7 @@ func TestLPXScalingWaitsForObservedCapacity(t *testing.T) {
 			require.Equal(t, tc.wantGroupUpdates, groupUpdates)
 			require.Equal(t, 2, cliqueUpdates)
 			require.NoError(t, r.Get(ctx, key.NamespacedName, child))
-			require.False(t, child.Status.Components["lpx"].Ready)
+			require.True(t, meta.IsStatusConditionFalse(child.Status.Components["lpx"].Conditions, v1alpha1.LPXReadyCondition))
 			require.Equal(t, ptr.To(int32(0)), child.Status.Components["lpx"].AvailableReplicas)
 
 			t.Log("Report readiness only after Grove observes the new generation and all requested replicas")
@@ -2238,8 +2238,6 @@ func TestSpecDecodeStatusCountsCompleteDraftInstances(t *testing.T) {
 				require.Equal(t, ptr.To(int32(1)), draft.ReadyReplicas)
 				require.Equal(t, ptr.To(int32(0)), target.AvailableReplicas)
 			}
-			require.Equal(t, readiness.Ready, draft.Ready)
-			require.Equal(t, readiness.Ready, target.Ready)
 		})
 	}
 }
@@ -3063,6 +3061,10 @@ func TestLPXWaitsForAllScalingGroups(t *testing.T) {
 			second := dgd.Spec.Components[0].DeepCopy()
 			second.ComponentName, second.Replicas = "external", nil
 			dgd.Spec.Components = append(dgd.Spec.Components, *second)
+			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+				"lpx":      {Conditions: []metav1.Condition{readyCondition(child.Generation, v1beta1.DGDStateSuccessful, "Previous observation")}},
+				"external": {Conditions: []metav1.Condition{readyCondition(child.Generation, v1beta1.DGDStateSuccessful, "Previous observation")}},
+			}
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
@@ -3106,6 +3108,15 @@ func TestLPXWaitsForAllScalingGroups(t *testing.T) {
 			require.NotNil(t, ready)
 			require.Equal(t, v1alpha1.LPXReadyReasonPending, ready.Reason)
 			require.Equal(t, "Waiting for all LPX scaling groups", ready.Message)
+			require.Len(t, child.Status.Components, 2)
+			for _, component := range child.Status.Components {
+				condition := meta.FindStatusCondition(component.Conditions, v1alpha1.LPXReadyCondition)
+				require.NotNil(t, condition)
+				require.Equal(t, metav1.ConditionUnknown, condition.Status)
+				require.Equal(t, "NotObserved", condition.Reason)
+				require.Equal(t, "Component readiness has not been observed", condition.Message)
+				require.Equal(t, child.Generation, condition.ObservedGeneration)
+			}
 			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 			require.Equal(t, before, pcs)
 			requests, err := r.getPipelineRequests(t.Context(), pcs)
@@ -3214,13 +3225,51 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
 	for groupName, plan := range plans {
 		status := child.Status.Components[workloads[groupName].ServingComponentName()]
-		require.True(t, status.Ready)
+		require.True(t, meta.IsStatusConditionTrue(status.Conditions, v1alpha1.LPXReadyCondition))
+		ready := meta.FindStatusCondition(status.Conditions, v1alpha1.LPXReadyCondition)
+		require.Equal(t, v1alpha1.LPXReadyReasonReady, ready.Reason)
+		require.Equal(t, child.Generation, ready.ObservedGeneration)
 		require.Equal(t, plan.Replicas, status.Replicas)
 		require.Equal(t, []string{plan.LPXScalingGroup}, status.ComponentNames)
 		service := &corev1.Service{}
 		require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: child.Namespace, Name: plan.ResourcePrefix + "-serve"}, service))
 		require.Equal(t, workloads[groupName].ServingComponentName(), service.Spec.Selector[consts.KubeLabelDynamoComponent])
 		require.Equal(t, consts.KubeLabelValueTrue, service.Spec.Selector[dynamo.LPXServingLabel])
+	}
+
+	t.Log("Scheduler progress and failure affect only their own workload, preserving its healthy neighbor")
+	healthy := child.Status.Components["lpx"]
+	bound := meta.FindStatusCondition(child.Status.Components["second-engine"].Conditions, v1alpha1.LPXReadyCondition).DeepCopy()
+	var secondRequest *lpxv1alpha1.LPUPipelineRequest
+	for _, request := range requests {
+		if target := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef; target.Name == secondPlan.LPXScalingGroup && target.ReplicaIndex == 0 {
+			secondRequest = request
+		}
+	}
+	require.NotNil(t, secondRequest)
+	for _, observation := range []struct {
+		phase   lpxv1alpha1.RequestPhase
+		status  metav1.ConditionStatus
+		reason  string
+		message string
+	}{
+		{lpxv1alpha1.RequestPhasePending, metav1.ConditionFalse, v1alpha1.LPXReadyReasonPending, "LPX scheduler is waiting to plan the current request"},
+		{lpxv1alpha1.RequestPhaseUnsupported, metav1.ConditionFalse, v1alpha1.LPXReadyReasonFailed, "LPX scheduler cannot support the current request"},
+		{lpxv1alpha1.RequestPhaseBound, metav1.ConditionTrue, v1alpha1.LPXReadyReasonReady, bound.Message},
+	} {
+		secondRequest.Status.Phase = observation.phase
+		require.NoError(t, r.Update(t.Context(), secondRequest))
+		_, err = r.Reconcile(t.Context(), key)
+		require.NoError(t, err)
+		require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
+		condition := meta.FindStatusCondition(child.Status.Components["second-engine"].Conditions, v1alpha1.LPXReadyCondition)
+		require.NotNil(t, condition)
+		require.Equal(t, observation.status, condition.Status)
+		require.Equal(t, observation.reason, condition.Reason)
+		require.Equal(t, observation.message, condition.Message)
+		require.Equal(t, child.Generation, condition.ObservedGeneration)
+		require.Equal(t, healthy, child.Status.Components["lpx"])
+		require.Equal(t, observation.status, meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition).Status)
 	}
 
 	t.Log("A missing role in the second workload leaves the first workload's readiness intact")
@@ -3230,8 +3279,8 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 	_, err = r.Reconcile(t.Context(), key)
 	require.NoError(t, err)
 	require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
-	require.True(t, child.Status.Components["lpx"].Ready)
-	require.False(t, child.Status.Components["second-engine"].Ready)
+	require.True(t, meta.IsStatusConditionTrue(child.Status.Components["lpx"].Conditions, v1alpha1.LPXReadyCondition))
+	require.True(t, meta.IsStatusConditionFalse(child.Status.Components["second-engine"].Conditions, v1alpha1.LPXReadyCondition))
 	require.False(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
 
 	t.Log("Scale down the explicit workload without replacing the PCS or its neighbor's requests")

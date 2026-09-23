@@ -38,7 +38,7 @@ func mergeLPXChildStatus(
 	if observed {
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
-				ordinary.ComponentStatus[component.ComponentName] = *observedStatus.DeepCopy()
+				ordinary.ComponentStatus[component.ComponentName] = *observedStatus.ComponentReplicaStatus.DeepCopy()
 			}
 		}
 	}

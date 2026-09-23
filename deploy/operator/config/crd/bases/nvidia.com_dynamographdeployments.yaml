@@ -20387,11 +20387,6 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
-                      ready:
-                        description: |-
-                          Ready is the binary determination of whether the correct number of replicas
-                          are scheduled and available.
-                        type: boolean
                       readyReplicas:
                         description: |-
                           ReadyReplicas is the number of ready replicas.
@@ -37965,11 +37960,6 @@ spec:
                         format: int64
                         minimum: 0
                         type: integer
-                      ready:
-                        description: |-
-                          ready is the binary determination of whether the correct number of replicas
-                          are scheduled and available.
-                        type: boolean
                       readyReplicas:
                         description: |-
                           readyReplicas is the number of ready replicas. Populated for

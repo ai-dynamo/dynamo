@@ -1186,7 +1186,6 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"decode": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-decode"},
-					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),
@@ -1195,7 +1194,6 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
-					Ready:             true,
 					Replicas:          3,
 					UpdatedReplicas:   3,
 					AvailableReplicas: ptr.To(int32(3)),
@@ -1346,7 +1344,6 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"frontend": {
 					ComponentKind:     v1beta1.ComponentKindPodClique,
 					ComponentNames:    []string{"test-dgd-0-frontend"},
-					Ready:             true,
 					Replicas:          1,
 					UpdatedReplicas:   1,
 					ReadyReplicas:     ptr.To(int32(1)),
@@ -1363,7 +1360,6 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				"prefill": {
 					ComponentKind:     v1beta1.ComponentKindPodCliqueScalingGroup,
 					ComponentNames:    []string{"test-dgd-0-prefill"},
-					Ready:             true,
 					Replicas:          2,
 					UpdatedReplicas:   2,
 					AvailableReplicas: ptr.To(int32(2)),

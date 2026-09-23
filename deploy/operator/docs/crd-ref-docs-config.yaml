@@ -37,6 +37,7 @@ processor:
     - "ConversionContext$"
     # LPXGraphDeployment is an operator-generated private child, not a public API.
     - "LPXGraphDeployment.*$"
+    - "LPXComponentStatus$"
     - "DynamoComponentDeploymentStatus$"
     - "BaseStatus$"
     - "ExcludedNamespacesChecker"

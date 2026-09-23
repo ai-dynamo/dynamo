@@ -20,6 +20,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
@@ -112,8 +113,8 @@ func TestLPXStatusSkipsUnchangedObservations(t *testing.T) {
 			for index := range child.Status.Conditions {
 				child.Status.Conditions[index].LastTransitionTime = transition
 			}
-			child.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-				"engine": {Ready: state == v1beta1.DGDStateSuccessful},
+			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
+				"engine": {Conditions: []metav1.Condition{child.Status.Conditions[0]}},
 			}
 			r := &graphReconciler{Client: newLPXTestClient(t, child)}
 			previous := child.Status.DeepCopy()
@@ -133,6 +134,10 @@ func TestLPXStatusSkipsUnchangedObservations(t *testing.T) {
 			}
 			setReadyCondition(child, state, "not externally visible")
 			setReadyCondition(child, state, "current observation")
+			component := child.Status.Components["engine"]
+			component.Conditions = []metav1.Condition{readyCondition(child.Generation, different, "intermediate observation")}
+			meta.SetStatusCondition(&component.Conditions, readyCondition(child.Generation, state, "current observation"))
+			child.Status.Components["engine"] = component
 			require.Zero(t, writes)
 			require.NoError(t, r.updateStatus(t.Context(), child, previous))
 			require.Zero(t, writes)
@@ -144,7 +149,20 @@ func TestLPXStatusSkipsUnchangedObservations(t *testing.T) {
 			require.NoError(t, r.updateStatus(t.Context(), child, previous))
 			require.Equal(t, 1, writes)
 			require.True(t, meta.FindStatusCondition(child.Status.Conditions, "Ready").LastTransitionTime.After(transition.Time))
-			require.Equal(t, state == v1beta1.DGDStateSuccessful, child.Status.Components["engine"].Ready)
+			require.True(t, apiequality.Semantic.DeepEqual(previous.Components["engine"].Conditions, child.Status.Components["engine"].Conditions))
+
+			t.Log("Observing the same component state for a new generation preserves its transition time")
+			previous = child.Status.DeepCopy()
+			child.Generation++
+			require.NoError(t, r.Update(t.Context(), child))
+			component = child.Status.Components["engine"]
+			component.Conditions = []metav1.Condition{readyCondition(child.Generation, state, "current observation")}
+			child.Status.Components["engine"] = component
+			require.NoError(t, r.updateStatus(t.Context(), child, previous))
+			require.Equal(t, 2, writes)
+			ready := meta.FindStatusCondition(child.Status.Components["engine"].Conditions, v1alpha1.LPXReadyCondition)
+			require.Equal(t, child.Generation, ready.ObservedGeneration)
+			require.True(t, transition.Equal(&ready.LastTransitionTime))
 		})
 	}
 }
@@ -170,13 +188,13 @@ func TestPipelineRequestReadyConditionGolden(t *testing.T) {
 			request := &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{Generation: 7}, Status: status.DeepCopy()}
 			before := request.DeepCopy()
 			requests := map[string]*lpxv1alpha1.LPUPipelineRequest{"observed": request}
-			require.False(t, setPipelineRequestReadyCondition(deployment, requests))
+			require.False(t, setPipelineRequestReadyCondition(&deployment.Status.Conditions, deployment.Generation, requests))
 			require.Len(t, deployment.Status.Conditions, 1)
 			conditions[string(status.Phase)] = *meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
 
 			t.Log("A failure outranks missing receipts and repeated map observations stay stable")
 			requests["first-open"] = &lpxv1alpha1.LPUPipelineRequest{}
-			require.False(t, setPipelineRequestReadyCondition(deployment, requests))
+			require.False(t, setPipelineRequestReadyCondition(&deployment.Status.Conditions, deployment.Generation, requests))
 			wantReason := v1alpha1.LPXReadyReasonPending
 			if status.Phase == lpxv1alpha1.RequestPhaseUnsupported || status.Phase == "future" {
 				wantReason = v1alpha1.LPXReadyReasonFailed
@@ -184,7 +202,7 @@ func TestPipelineRequestReadyConditionGolden(t *testing.T) {
 			condition := *meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition)
 			require.Equal(t, wantReason, condition.Reason)
 			for range 10 {
-				require.False(t, setPipelineRequestReadyCondition(deployment, requests))
+				require.False(t, setPipelineRequestReadyCondition(&deployment.Status.Conditions, deployment.Generation, requests))
 				require.Equal(t, condition, *meta.FindStatusCondition(deployment.Status.Conditions, v1alpha1.LPXReadyCondition))
 			}
 			require.Equal(t, before, request)
@@ -221,7 +239,7 @@ func TestPipelineRequestReadyConditionRequiresCurrentReceipts(t *testing.T) {
 					Diagnostics: []lpxv1alpha1.StatusDiagnostic{{Detail: "Old diagnostic"}},
 				},
 			}
-			require.Equal(t, tc.allBound, setPipelineRequestReadyCondition(child, map[string]*lpxv1alpha1.LPUPipelineRequest{"request": request}))
+			require.Equal(t, tc.allBound, setPipelineRequestReadyCondition(&child.Status.Conditions, child.Generation, map[string]*lpxv1alpha1.LPUPipelineRequest{"request": request}))
 			if tc.allBound {
 				require.Equal(t, before, &child.Status)
 			} else {

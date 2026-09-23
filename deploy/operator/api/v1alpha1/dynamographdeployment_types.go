@@ -324,11 +324,6 @@ type ServiceReplicaStatus struct {
 	// +kubebuilder:validation:Minimum=0
 	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
 
-	// Ready is the binary determination of whether the correct number of replicas
-	// are scheduled and available.
-	// +optional
-	Ready bool `json:"ready"`
-
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
 	// +kubebuilder:validation:Minimum=0

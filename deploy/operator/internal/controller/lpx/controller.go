@@ -117,7 +117,7 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	}(deployment.Status.DeepCopy())
 
 	for name, component := range deployment.Status.Components {
-		component.Ready = false
+		component.Conditions = nil
 		deployment.Status.Components[name] = component
 	}
 
@@ -423,7 +423,7 @@ func (r *graphReconciler) reconcileReadiness(
 	requests map[string]*lpxv1alpha1.LPUPipelineRequest,
 ) ctrl.Result {
 	readiness := dynamo.GroveReadiness{Ready: true}
-	deployment.Status.Components = make(map[string]v1beta1.ComponentReplicaStatus)
+	deployment.Status.Components = make(map[string]v1alpha1.LPXComponentStatus)
 
 	componentGroups := lpx.ComponentGroups(dgd)
 
@@ -432,14 +432,28 @@ func (r *graphReconciler) reconcileReadiness(
 
 		observed := dynamo.EvaluateLPXGroveReadiness(ctx, dgd, groupName, componentGroups[groupName], pcs, pcsgs[plan.LPXScalingGroup], pclqs)
 
-		maps.Copy(deployment.Status.Components, observed.ComponentStatuses)
+		state := v1beta1.DGDStatePending
+		if observed.Ready {
+			state = v1beta1.DGDStateSuccessful
+		}
+		conditions := []metav1.Condition{readyCondition(deployment.Generation, state, observed.Message)}
+		groupRequests := make(map[string]*lpxv1alpha1.LPUPipelineRequest)
+		for name, request := range requests {
+			if request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name == plan.LPXScalingGroup {
+				groupRequests[name] = request
+			}
+		}
+		setPipelineRequestReadyCondition(&conditions, deployment.Generation, groupRequests)
+		for name, status := range observed.ComponentStatuses {
+			deployment.Status.Components[name] = v1alpha1.LPXComponentStatus{ComponentReplicaStatus: status, Conditions: conditions}
+		}
 
 		if !observed.Ready && readiness.Ready {
 			readiness = observed
 		}
 	}
 
-	if !setPipelineRequestReadyCondition(deployment, requests) {
+	if !setPipelineRequestReadyCondition(&deployment.Status.Conditions, deployment.Generation, requests) {
 		return ctrl.Result{}
 	}
 

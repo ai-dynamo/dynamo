@@ -346,7 +346,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
 		RuntimeNamespace:  dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment),
-		Ready:             ready,
 		Replicas:          deployment.Status.Replicas,
 		UpdatedReplicas:   deployment.Status.UpdatedReplicas,
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
@@ -561,7 +560,6 @@ func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderW
 	return nvidiacomv1beta1.ComponentReplicaStatus{
 		ComponentKind:   nvidiacomv1beta1.ComponentKindLeaderWorkerSet,
 		ComponentNames:  []string{leaderWorkerSet.Name},
-		Ready:           IsLeaderWorkerSetReady(leaderWorkerSet),
 		Replicas:        leaderWorkerSet.Status.Replicas,
 		UpdatedReplicas: leaderWorkerSet.Status.UpdatedReplicas,
 		ReadyReplicas:   &leaderWorkerSet.Status.ReadyReplicas,
