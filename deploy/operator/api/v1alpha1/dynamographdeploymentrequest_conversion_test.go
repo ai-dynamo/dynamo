@@ -397,7 +397,7 @@ func TestDGDRHubOnlyFieldsRoundTripThroughSparseAnnotations(t *testing.T) {
 	original.Spec.Workload.RequestRate = &requestRate
 	original.Spec.SLA.E2ELatency = &e2eLatency
 	original.Spec.Hardware = &v1beta1.HardwareSpec{
-		GPUSKU:    v1beta1.GPUSKUTypeB300SXM,
+		GPUSKU:    v1beta1.GPUSKUTypeH100SXM,
 		TotalGPUs: &totalGPUs,
 	}
 	original.Spec.SearchStrategy = v1beta1.SearchStrategyThorough

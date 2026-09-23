@@ -494,11 +494,6 @@ func TestEnrichHardwareFromDiscovery_NormalizesBareModelFromDCGM(t *testing.T) {
 			dcgmModel:      "NVIDIA B200",
 			expectedGPUSKU: "b200_sxm",
 		},
-		{
-			name:           "NVIDIA B300 SXM6 AC from DCGM normalizes to b300_sxm",
-			dcgmModel:      "NVIDIA B300 SXM6 AC",
-			expectedGPUSKU: "b300_sxm",
-		},
 	}
 
 	for _, tt := range tests {
