@@ -30,7 +30,7 @@ in can be placed against its neighbours. Descriptions are taken from each crate'
 
 | Directory | Package | Role |
 |-----------|---------|------|
-| `llm/` | `dynamo-llm` | The largest crate. HTTP and gRPC entrypoints, preprocessor, protocols, local model handling, migration, block manager, and the LLM-side KV router integration. Also carries a worker/frontend wire-compatibility policy in [`llm/CLAUDE.md`](llm/CLAUDE.md). |
+| `llm/` | `dynamo-llm` | The largest crate. HTTP and gRPC entrypoints, preprocessor, protocols, local model handling, migration, block manager, and the LLM-side KV router integration. Also carries a worker/frontend wire-compatibility policy in [`llm/AGENTS.md`](llm/AGENTS.md). |
 | `backend-common/` | `dynamo-backend-common` | Shared runtime glue for Rust backends: the `LLMEngine` trait an engine author implements, the `Worker` lifecycle owner, and a `run()` helper for each backend's `main.rs`. |
 | `sidecar/` | `dynamo-sidecar-common`, `dynamo-{vllm,sglang,trtllm}-sidecar` | Sidecars that connect Dynamo workers to inference engines over the engines' native gRPC APIs, with the engine in a separate process. See [`sidecar/README.md`](sidecar/README.md). |
 | `router-plugins/catalog/` | `dynamo-worker-selection-policy-catalog` | Build-time catalog of worker-selection policies. |

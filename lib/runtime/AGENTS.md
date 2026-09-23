@@ -98,6 +98,6 @@ cd lib/bindings/python && maturin develop --uv
 
 Because everything depends on this crate, treat changes to the plane selection, the
 component hierarchy, or the wire protocols as cross-cutting: a rename here is a rename
-in `lib/llm`, the bindings, and the Python components. `lib/llm/CLAUDE.md` records a
+in `lib/llm`, the bindings, and the Python components. `lib/llm/AGENTS.md` records a
 worker/frontend wire-compatibility policy that constrains protocol changes visible
 across process boundaries — read it before changing anything on the wire.
