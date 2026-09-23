@@ -1090,6 +1090,14 @@ shared:
   owners:
   - runtime
   - performance
+- glob: lib/sidecar/testkit/tests/support/vllm.rs
+  owners:
+  - runtime
+  - backend-vllm
+- glob: lib/sidecar/testkit/tests/support/sglang.rs
+  owners:
+  - runtime
+  - backend-sglang
 - glob: tests/deploy/
   owners:
   - ops

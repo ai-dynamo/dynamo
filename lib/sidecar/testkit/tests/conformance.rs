@@ -139,7 +139,7 @@ async fn failures<F: SidecarFixture>() {
         let ctx = mock_context();
         let fails_open = matches!(plan.open, OpenAction::Fail);
         let handle = control.request(ctx.id(), plan);
-        let req = request("mocker-model", vec![11, 22, 33], 3);
+        let req = request("mocker-model", vec![11, 22, 33], 6);
         let ctx = GenerateContext::new(ctx, None);
         let outputs = if fails_open {
             collect(&engine, req, ctx).await
@@ -224,7 +224,7 @@ async fn cancellation<F: SidecarFixture>() {
     let mut stream_a = bounded(
         "request A opening",
         engine.generate(
-            request("mocker-model", vec![11, 22, 33], 4),
+            request("mocker-model", vec![11, 22, 33], 8),
             GenerateContext::new(ctx_a.clone(), None),
         ),
     )
@@ -303,7 +303,7 @@ async fn cleanup<F: SidecarFixture>() {
     let mut stream = bounded(
         "generation opening",
         engine.generate(
-            request("mocker-model", vec![11, 22, 33], 3),
+            request("mocker-model", vec![11, 22, 33], 6),
             GenerateContext::new(ctx, None),
         ),
     )
