@@ -271,6 +271,12 @@ STUB_MODULES = [
     "nixl._bindings",
     "aiohttp.web",
     "aiohttp.test_utils",
+    # aiohttp submodules used by the connect-time resolver in
+    # dynamo.common.http; the bare "aiohttp" stub above has no submodules,
+    # so importing these fails collection for every test that reaches it.
+    "aiohttp.abc",
+    "aiohttp.helpers",
+    "aiohttp.resolver",
     "aiconfigurator.generator",
     "aiconfigurator.generator.naive",
     "aiconfigurator.sdk",

@@ -72,7 +72,8 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
 // Skips containers without a nixl port, with NIXL_TELEMETRY_ENABLE set off, or
-// with an exporter other than Prometheus selected.
+// with an exporter other than Prometheus selected. Literal enable values other
+// than y retain their existing port declarations for upgrade compatibility.
 func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount ContainerGPUCount) error {
 	basePort := findContainerPort(container, commonconsts.DynamoNixlPortName)
 	if basePort == nil {
@@ -93,23 +94,37 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if !prometheusOn {
 		sourced = append(sourced, "NIXL_TELEMETRY_ENABLE")
 	}
-	if prometheusOn && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
-		return nil
+
+	// Preserve the existing pod template for non-y truthy values. Users opt in
+	// to rank port declarations by changing the CR's enable value to y.
+	if prometheusOn {
+		switch strings.ToLower(enabled.Value) {
+		case "y":
+		case "1", "yes", "on", "true", "enable":
+			return nil
+		case "n", "0", "no", "off", "false", "disable":
+			return nil
+		default:
+			return fmt.Errorf(
+				"NIXL_TELEMETRY_ENABLE is set to %q, which is not a boolean value recognized by NIXL",
+				enabled.Value)
+		}
 	}
 
 	// Only the Prometheus exporter binds a port per rank, so activate on the
-	// same pair of variables nixl_prometheus_base_port() reads: an absent
-	// selection is the Prometheus default, any other literal selection needs no
-	// ports at all, and a sourced one joins an unreadable enable value in
-	// reserving a range this code cannot rule out.
+	// same pair of variables nixl_prometheus_base_port() reads. An absent
+	// selection or any other literal selection needs no ports at all, while a
+	// sourced one joins an unreadable enable value in reserving a range this
+	// code cannot rule out.
 	exporter := findEnvVar(container.Env, "NIXL_TELEMETRY_EXPORTER")
-	if exporter != nil {
-		if exporter.ValueFrom != nil {
-			prometheusOn = false
-			sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
-		} else if !strings.EqualFold(strings.TrimSpace(exporter.Value), "prometheus") {
-			return nil
-		}
+	if exporter == nil {
+		return nil
+	}
+	if exporter.ValueFrom != nil {
+		prometheusOn = false
+		sourced = append(sourced, "NIXL_TELEMETRY_EXPORTER")
+	} else if exporter.Value != "prometheus" {
+		return nil
 	}
 
 	containerGPUs, err := containerGPUCount()
@@ -121,13 +136,12 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	// the whole range: realign `nixl` with it or it advertises a port rank 0
 	// never binds.
 	override := findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")
-	overridden, literal, err := literalPort(override)
+	overridden, literal, err := nixlPrometheusPort(override)
 	switch {
 	case err != nil:
-		// A base that is present but unusable is the quietest way to lose the
-		// metrics: NIXL binds 0 as an ephemeral port and reports back no port to
-		// scrape, so the container starts while the ports declared here and the
-		// PodMonitor still name the default range. Say so at admission instead.
+		// Reject a setting that cannot name the fixed range declared below. NIXL
+		// throws on malformed and out-of-range values; it accepts zero as an
+		// ephemeral port, but the operator cannot declare or scrape that port.
 		return fmt.Errorf(
 			"NIXL_TELEMETRY_PROMETHEUS_PORT is the base of the NIXL exporter range and %w, so the operator "+
 				"cannot declare the range it names and Prometheus would scrape ports no rank binds. Set "+
@@ -207,23 +221,31 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	return nil
 }
 
-// literalPort reads a TCP port written inline on an environment variable. An
-// unset variable and one taken from valueFrom are both reported as absent,
-// because a value resolved in the container at startup cannot be turned into a
-// container port declaration here. A variable that is set inline to something
-// that is not a usable port is neither absent nor usable, so it is returned as
-// an error rather than folded into either.
-func literalPort(env *corev1.EnvVar) (int32, bool, error) {
+// nixlPrometheusPort parses NIXL's unsigned 16-bit syntax and requires the
+// fixed, nonzero port the operator needs to declare. An unset variable and one
+// taken from valueFrom are both reported as absent because a value resolved in
+// the container at startup cannot become a container port declaration here.
+func nixlPrometheusPort(env *corev1.EnvVar) (int32, bool, error) {
 	if env == nil || env.ValueFrom != nil {
 		return 0, false, nil
 	}
 
-	value := strings.TrimSpace(env.Value)
-	port, err := strconv.Atoi(value)
+	value := env.Value
+	base := 10
+	digits := value
+	if strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X") {
+		base = 16
+		digits = value[2:]
+	}
+	port, err := strconv.ParseUint(digits, base, 64)
 	if err != nil {
 		return 0, false, fmt.Errorf("is set to %q, which is not a number", env.Value)
 	}
-	if port < 1 || port > maxTCPPort {
+	if port == 0 {
+		return 0, false, fmt.Errorf(
+			"is set to 0, which asks NIXL for an ephemeral port the operator cannot declare or scrape")
+	}
+	if port > maxTCPPort {
 		return 0, false, fmt.Errorf("is set to %d, which is outside the port range 1-%d", port, maxTCPPort)
 	}
 	return int32(port), true, nil

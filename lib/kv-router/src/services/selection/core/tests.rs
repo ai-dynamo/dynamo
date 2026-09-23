@@ -39,6 +39,9 @@ fn local_core_with(
         indexer_threads,
         cancel_token,
         SelectionCacheConfig::default(),
+        std::sync::Arc::new(|config, role, _| {
+            crate::WorkerSelectionPolicy::reference(config.clone(), role.default_selector_label())
+        }),
     )
     .expect("valid test config")
 }
@@ -60,7 +63,14 @@ fn core_with(
         1,
         CancellationToken::new(),
         None,
-        policy_factory,
+        policy_factory.unwrap_or_else(|| {
+            Arc::new(|config, role, _| {
+                crate::WorkerSelectionPolicy::reference(
+                    config.clone(),
+                    role.default_selector_label(),
+                )
+            })
+        }),
         host,
         worker_type,
         true,
@@ -693,7 +703,11 @@ impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
                 .cache()
                 .expect("CACHE inputs requested")
                 .iter()
-                .map(|cache| cache.shared_beyond_device_blocks())
+                .map(|cache| {
+                    cache.shared_hits().map_or(0, |hits| {
+                        hits.hits_beyond(cache.device_overlap_blocks().round().max(0.0) as u32)
+                    })
+                })
                 .collect(),
         });
         Ok(0)
@@ -924,7 +938,7 @@ async fn injected_load_providers_restrict_selection() {
     let provider_state = Arc::clone(&available);
     let core = core_with_host(SelectionHost {
         load: HostLoad {
-            available_workers: Some(Arc::new(move || provider_state.lock().clone())),
+            available_workers: Some(Arc::new(move |_| provider_state.lock().clone())),
             overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
             ..HostLoad::default()
         },

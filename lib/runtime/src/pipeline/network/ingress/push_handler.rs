@@ -12,6 +12,7 @@ use crate::metrics::work_handler_perf::{
 };
 use crate::pipeline::network::StreamPrologueError;
 use crate::pipeline::{ManyIn, RequestStream};
+use crate::telemetry::{LifecycleStage, LifecycleTrace};
 use futures::StreamExt;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::Deserialize;
@@ -457,6 +458,12 @@ struct ParsedRequest<Req> {
     payload_codec: RequestPlanePayloadCodec,
 }
 
+#[derive(Clone, Copy)]
+struct ResponsePlaneModes {
+    configured: ResponsePlaneMode,
+    advertised: ResponsePlaneMode,
+}
+
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -469,7 +476,8 @@ trait IngressDispatch: Send + Sync {
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
 }
 
@@ -484,10 +492,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
         let data = data.ok_or_else(|| {
@@ -543,10 +550,9 @@ where
 
     async fn parse_and_build_request(
         &self,
-        payload: Bytes,
+        control_msg: RequestControlMessage,
+        data: Option<Bytes>,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
-        let (control_msg, data) = self.decode_control_message(payload)?;
-
         // Bidirectional envelopes are header-only — all request frames
         // (including the first) flow on the request-stream socket once it's
         // dialed in. A data payload means the sender used the unary wire
@@ -673,14 +679,19 @@ where
         request: Req,
         payload_codec: RequestPlanePayloadCodec,
         start_time: Instant,
-        configured_mode: ResponsePlaneMode,
-        advertised_mode: ResponsePlaneMode,
+        response_modes: ResponsePlaneModes,
+        lifecycle: &LifecycleTrace,
         mut publisher: P,
     ) -> Result<(), PipelineError>
     where
         Self: IngressDispatch<Request = Req>,
         P: ResponsePublisher,
     {
+        let ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        } = response_modes;
+
         if configured_mode != advertised_mode {
             let message = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",
@@ -694,26 +705,32 @@ where
 
         let request_context = request.context();
         tracing::trace!("calling generate");
+        let worker_operation = lifecycle.start_worker_operation();
         // Route backend generation through the transport-independent admission
         // boundary. Admission errors follow the existing generate error path.
-        let stream = admission_gate::global()
-            .admit(
-                Some(request_context.as_ref()),
-                self.segment
-                    .get()
-                    .expect("segment not set")
-                    .generate(request),
-            )
-            .await
-            .map_err(|error| {
-                if let Some(metrics) = self.metrics() {
-                    metrics
-                        .error_counter
-                        .with_label_values(&[work_handler::error_types::GENERATE])
-                        .inc();
-                }
-                PipelineError::GenerateError(error)
-            });
+        let stream = async {
+            admission_gate::global()
+                .admit(
+                    Some(request_context.as_ref()),
+                    self.segment
+                        .get()
+                        .expect("segment not set")
+                        .generate(request)
+                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                )
+                .await
+        }
+        .instrument(worker_operation.clone())
+        .await
+        .map_err(|error| {
+            if let Some(metrics) = self.metrics() {
+                metrics
+                    .error_counter
+                    .with_label_values(&[work_handler::error_types::GENERATE])
+                    .inc();
+            }
+            PipelineError::GenerateError(error)
+        });
 
         let stream = match stream {
             Ok(stream) => {
@@ -767,8 +784,13 @@ where
             }
         };
 
-        self.pump_response_stream(stream, &publisher, payload_codec)
-            .await;
+        async {
+            self.pump_response_stream(stream, &publisher, payload_codec)
+                .instrument(lifecycle.start_worker_response_streaming())
+                .await
+        }
+        .instrument(worker_operation)
+        .await;
         let finish = if publisher.reset_on_stop()
             && request_context.is_stopped()
             && !request_context.is_killed()
@@ -805,7 +827,6 @@ where
             .unwrap_or_default()
             .as_nanos() as u64;
         let start_time = std::time::Instant::now();
-
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {
             m.request_counter.inc();
@@ -822,12 +843,30 @@ where
             }
         });
 
+        let (control_msg, data) = self.decode_control_message(payload)?;
+        let lifecycle = match self.registered_lifecycle_role() {
+            Some(role)
+                if control_msg
+                    .metadata
+                    .get(crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY)
+                    .is_some_and(|version| version == "v1") =>
+            {
+                LifecycleTrace::from_request_id_with_role(control_msg.id.clone(), role)
+            }
+            _ => LifecycleTrace::new(false),
+        };
+
+        // Admission begins after the envelope selects capture, before payload
+        // decoding and response setup. Hold without entering it: response
+        // readers capture the current span and live until the request ends.
+        // They must inherit handle_payload, not prolong worker.admission.
+        let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(payload).await?;
+        } = self.parse_and_build_request(control_msg, data).await?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -840,6 +879,10 @@ where
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let configured_mode = ResponsePlaneMode::configured()
             .map_err(|error| PipelineError::Generic(error.to_string()))?;
+        let response_modes = ResponsePlaneModes {
+            configured: configured_mode,
+            advertised: advertised_mode,
+        };
         let cancellation_counter = self
             .metrics()
             .map(|metrics| metrics.cancellation_total.clone());
@@ -862,12 +905,13 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
-                    configured_mode,
-                    advertised_mode,
+                    response_modes,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
@@ -893,12 +937,13 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
+                drop(worker_admission);
                 self.generate_and_publish(
                     request,
                     payload_codec,
                     start_time,
-                    configured_mode,
-                    advertised_mode,
+                    response_modes,
+                    &lifecycle,
                     publisher,
                 )
                 .await?;
@@ -920,6 +965,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -952,6 +1001,10 @@ where
     U: Data + std::fmt::Debug,
     Adapter: IngressPayloadAdapter<T, U> + Send + Sync + 'static,
 {
+    fn bind_endpoint(&self, endpoint: &crate::component::Endpoint) {
+        self.bind_lifecycle_endpoint(endpoint);
+    }
+
     fn add_metrics(
         &self,
         endpoint: &crate::component::Endpoint,
@@ -1038,6 +1091,155 @@ mod tests {
         assert_eq!(error.reason().as_str(), "runtime.unclassified");
     }
 
+    #[derive(Clone, Default)]
+    struct AdmissionCapture {
+        started: Arc<AtomicBool>,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if attrs.metadata().name() == "worker.admission" {
+                self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_close(&self, id: tracing::span::Id, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if ctx.span(&id).unwrap().metadata().name() == "worker.admission" {
+                self.closed.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    struct AdmissionProbe(AdmissionCapture, bool);
+
+    #[async_trait]
+    impl crate::engine::AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for AdmissionProbe
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            assert_eq!(self.0.started.load(Ordering::SeqCst), self.1);
+            assert_eq!(
+                self.0.closed.load(Ordering::SeqCst),
+                self.1,
+                "admission must close before generation, while the TCP reader is still alive"
+            );
+            anyhow::bail!("admission probe finished")
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_closes_before_generation_and_skips_control_calls() {
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::prelude::*;
+
+        // Configuration is process-scoped. Isolate this enabled-mode test from
+        // other tests which may have initialized the disabled default already.
+        const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated admission regression failed");
+            return;
+        }
+
+        temp_env::async_with_vars(
+            [
+                ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
+                ("DYN_RESPONSE_PLANE", Some("tcp")),
+            ],
+            async {
+                for (inference, rooted) in
+                    [(true, true), (true, false), (false, true), (false, false)]
+                {
+                    let capture = AdmissionCapture::default();
+                    let subscriber = tracing_subscriber::registry().with(capture.clone());
+                    async {
+                        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                        let address = listener.local_addr().unwrap().to_string();
+                        let peer = tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
+                        });
+                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let ingress = if inference {
+                            TestIngress::for_engine_with_lifecycle_role(
+                                engine,
+                                crate::telemetry::LifecycleOperationRole::Worker,
+                            )
+                        } else {
+                            TestIngress::for_engine(engine)
+                        }
+                        .unwrap();
+                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                            address,
+                            subject: "admission-probe".to_string(),
+                            context: "admission-probe".to_string(),
+                            stream_type: crate::pipeline::network::StreamType::Response,
+                        }
+                        .into();
+                        let metadata = if rooted {
+                            std::collections::BTreeMap::from([(
+                                crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
+                                "v1",
+                            )])
+                        } else {
+                            std::collections::BTreeMap::new()
+                        };
+                        let header = serde_json::to_vec(&serde_json::json!({
+                            "id": "admission-probe",
+                            "request_type": "single_in",
+                            "response_type": "many_out",
+                            "connection_info": connection,
+                            "metadata": metadata,
+                        }))
+                        .unwrap();
+                        let payload = TwoPartCodec::default()
+                            .encode_message(TwoPartMessage::from_parts(
+                                header.into(),
+                                Bytes::from_static(b"{}"),
+                            ))
+                            .unwrap();
+                        let error = tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            ingress
+                                .handle_payload_shared(payload, Some("admission-probe".to_string()))
+                                .instrument(tracing::info_span!("handle_payload")),
+                        )
+                        .await
+                        .expect("local admission probe timed out")
+                        .unwrap_err();
+                        assert!(error.to_string().contains("admission probe finished"));
+                        peer.abort();
+                        let _ = peer.await;
+                    }
+                    .with_subscriber(subscriber)
+                    .await;
+                }
+            },
+        )
+        .await;
+    }
+
     #[derive(Default)]
     struct MismatchPublisher {
         prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
@@ -1074,14 +1276,18 @@ mod tests {
             let publisher = MismatchPublisher::default();
             let prologue = publisher.prologue.clone();
             let finished = publisher.finished.clone();
+            let lifecycle = LifecycleTrace::new(false);
 
             let error = ingress
                 .generate_and_publish(
                     Context::new(serde_json::json!({})),
                     RequestPlanePayloadCodec::Json,
                     Instant::now(),
-                    configured,
-                    advertised,
+                    ResponsePlaneModes {
+                        configured,
+                        advertised,
+                    },
+                    &lifecycle,
                     publisher,
                 )
                 .await
