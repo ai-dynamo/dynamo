@@ -52,6 +52,10 @@ from gpu_memory_service.common.protocol.messages import (
     MetadataPutRequest,
     MetadataPutResponse,
     PersistentAllocationInfo,
+    QuiesceGPUCohortRequest,
+    QuiesceGPUCohortResponse,
+    RegisterGPUClientRequest,
+    RegisterGPUClientResponse,
     ReleasePersistentAllocationRequest,
     ReleasePersistentAllocationResponse,
     UnclaimPersistentAllocationRequest,
@@ -60,6 +64,7 @@ from gpu_memory_service.common.protocol.messages import (
 
 from .allocations import AllocationInfo, GMSAllocationManager
 from .fsm import Connection, ServerState, StateEvent
+from .gpu_quiescence import GPUQuiescenceManager
 from .persistent_allocations import (
     PersistentAllocationManager,
     PersistentClaimConflictError,
@@ -109,6 +114,7 @@ class GMS:
         # Last-observed active persistent-claim count, used to project the
         # persistent KV layout onto the FSM event history.
         self._persistent_layout_count = 0
+        self._gpu_quiescence = GPUQuiescenceManager()
         logger.info("GMS initialized: device=%d", device)
 
     @property
@@ -549,6 +555,76 @@ class GMS:
         # ----------------------------------------------------------------
         # Persistent allocations (KV-pool namespace; lock-state-independent)
         # ----------------------------------------------------------------
+
+        if msg_type is RegisterGPUClientRequest:
+            crash_fd = self._gpu_quiescence.register(
+                backend=msg.backend,
+                cohort=msg.cohort,
+                pid=msg.client_pid,
+                process_start_time_value=msg.process_start_time,
+                rank=msg.rank,
+                crash_interlock=msg.crash_interlock,
+            )
+            logger.info(
+                "Registered GPU client backend=%s cohort=%s pid=%d rank=%d interlock=%s",
+                msg.backend,
+                msg.cohort,
+                msg.client_pid,
+                msg.rank,
+                crash_fd >= 0,
+            )
+            return (
+                RegisterGPUClientResponse(
+                    registered=True,
+                    crash_interlock_armed=crash_fd >= 0,
+                ),
+                crash_fd,
+                False,
+            )
+
+        if msg_type is QuiesceGPUCohortRequest:
+            try:
+                result = await self._gpu_quiescence.quiesce(
+                    backend=msg.backend,
+                    predecessor_cohort=msg.predecessor_cohort,
+                    successor_cohort=msg.successor_cohort,
+                    terminate_host=msg.terminate_host,
+                )
+            except Exception as exc:  # Provider failure must not kill persistent GMS.
+                logger.exception("GPU cohort quiescence provider failed closed")
+                return (
+                    QuiesceGPUCohortResponse(
+                        quiesced=False,
+                        provider="gms-mps",
+                        client_count=0,
+                        detail=f"GPU quiescence provider failed: {exc}",
+                        elapsed_ms=0.0,
+                    ),
+                    -1,
+                    False,
+                )
+            log = logger.info if result.quiesced else logger.warning
+            log(
+                "GPU cohort quiescence backend=%s predecessor=%s clients=%d "
+                "quiesced=%s elapsed_ms=%.2f detail=%s",
+                msg.backend,
+                msg.predecessor_cohort or "<all predecessors>",
+                result.client_count,
+                result.quiesced,
+                result.elapsed_ms,
+                result.detail,
+            )
+            return (
+                QuiesceGPUCohortResponse(
+                    quiesced=result.quiesced,
+                    provider=result.provider,
+                    client_count=result.client_count,
+                    detail=result.detail,
+                    elapsed_ms=result.elapsed_ms,
+                ),
+                -1,
+                False,
+            )
 
         if msg_type is ClaimPersistentAllocationRequest:
             claims = self._persistent_claims_by_session.setdefault(

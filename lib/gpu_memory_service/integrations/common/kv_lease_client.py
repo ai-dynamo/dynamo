@@ -152,6 +152,21 @@ def _owner_hash(owner_id: str) -> int:
     )
 
 
+def current_kv_lease_owner_id(engine: str, device: int) -> str:
+    """Return one owner identity shared by a writer cohort and its children."""
+    engine_upper = engine.upper().replace("-", "_")
+    explicit = os.environ.get(
+        f"GMS_{engine_upper}_KV_LEASE_OWNER_ID"
+    ) or os.environ.get("GMS_KV_LEASE_OWNER_ID")
+    if explicit:
+        return explicit
+    cohort = os.environ.get(f"GMS_{engine_upper}_WRITER_COHORT_PATH")
+    if cohort:
+        cohort_id = Path(cohort).name
+        return f"{engine}-cohort-{cohort_id}-{device}"
+    return f"{engine}-{os.getpid()}-{device}"
+
+
 def _read_shm_header(fd: int) -> tuple[int, int, int, int, int, int] | None:
     try:
         data = os.pread(fd, _KV_LEASE_SHM_HEADER_SIZE, 0)
@@ -210,10 +225,19 @@ class KVLeaseClient(Protocol):
     def seal(self, leases: list[KVLease]) -> None:
         ...
 
+    def park_idle(self, leases: list[KVLease]) -> None:
+        ...
+
+    def activate_idle(self, leases: list[KVLease]) -> None:
+        ...
+
     def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None:
         ...
 
     def unpin_read(self, claim: KVReadClaim) -> None:
+        ...
+
+    def exact_recoverable(self, leases: list[KVLease]) -> bool:
         ...
 
     def adopt(self, leases: list[KVLease]) -> list[KVLease]:
@@ -285,12 +309,7 @@ class SharedMemoryKVLeaseClient:
                 ),
             )
         if owner_id is None:
-            owner_id = os.environ.get(
-                f"GMS_{engine_upper}_KV_LEASE_OWNER_ID",
-                os.environ.get(
-                    "GMS_KV_LEASE_OWNER_ID", f"{engine}-{os.getpid()}-{device}"
-                ),
-            )
+            owner_id = current_kv_lease_owner_id(engine, device)
         return cls(
             _kv_lease_shm_path(engine, namespace),
             namespace=namespace,
@@ -310,10 +329,15 @@ class SharedMemoryKVLeaseClient:
             "kv_lease_acquire",
             "kv_lease_acquire_lockless_if_unreserved",
             "kv_lease_seal",
+            "kv_lease_park_idle",
+            "kv_lease_activate_idle",
             "kv_lease_pin_read",
             "kv_lease_unpin_read",
+            "kv_lease_exact_recoverable",
             "kv_lease_release",
             "kv_lease_reclaim_foreign",
+            "kv_lease_quarantine_foreign",
+            "kv_lease_reclaim_quarantined",
         )
         missing = [name for name in required if not hasattr(gms_rust_ring, name)]
         if missing:
@@ -587,6 +611,41 @@ class SharedMemoryKVLeaseClient:
                 f"GMS KV lease seal committed {sealed}/{len(leases)} blocks"
             )
 
+    def park_idle(self, leases: list[KVLease]) -> None:
+        """Publish owner-retained pages whose final GPU access is complete."""
+        if not leases:
+            return
+        parked = int(
+            self._rust.kv_lease_park_idle(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+                int(self._owner_hash),
+            )
+        )
+        if parked != len(leases):
+            raise RuntimeError(
+                f"GMS KV lease idle park committed {parked}/{len(leases)} blocks"
+            )
+
+    def activate_idle(self, leases: list[KVLease]) -> None:
+        """Move exact owner IDLE pages back to writable allocation state."""
+        if not leases:
+            return
+        activated = int(
+            self._rust.kv_lease_activate_idle(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+                int(self._owner_hash),
+            )
+        )
+        if activated != len(leases):
+            raise RuntimeError(
+                "GMS KV lease idle activation committed "
+                f"{activated}/{len(leases)} blocks"
+            )
+
     def pin_read(self, leases: list[KVLease]) -> KVReadClaim | None:
         """Pin exact sealed generations and return a single-use claim."""
         leases = list(leases)
@@ -632,6 +691,19 @@ class SharedMemoryKVLeaseClient:
             raise RuntimeError(
                 f"GMS KV read unpin released {released}/{len(leases)} blocks"
             )
+
+    def exact_recoverable(self, leases: list[KVLease]) -> bool:
+        """Check whether exact generations still name immutable recovery KV."""
+        leases = list(leases)
+        if not leases:
+            return False
+        return bool(
+            self._rust.kv_lease_exact_recoverable(
+                self._mmap,
+                [int(lease.block_id) for lease in leases],
+                [int(lease.generation) for lease in leases],
+            )
+        )
 
     def adopt(self, leases: list[KVLease]) -> list[KVLease]:
         if not leases:
@@ -700,6 +772,26 @@ class SharedMemoryKVLeaseClient:
                 self._mmap,
                 int(self._owner_hash),
                 max(0, int(max_blocks)),
+            )
+        )
+
+    def quarantine_foreign(
+        self, *, protected_blocks: set[int] | None = None
+    ) -> tuple[int, int]:
+        """Release safe IDLE headroom and quarantine ambiguous foreign pages."""
+        released_idle, quarantined = self._rust.kv_lease_quarantine_foreign(
+            self._mmap,
+            sorted(int(block_id) for block_id in (protected_blocks or set())),
+            int(self._owner_hash),
+        )
+        return int(released_idle), int(quarantined)
+
+    def reclaim_quarantined(self) -> int:
+        """Reclaim quarantine after caller-proven predecessor GPU quiescence."""
+        return int(
+            self._rust.kv_lease_reclaim_quarantined(
+                self._mmap,
+                int(self._owner_hash),
             )
         )
 
@@ -779,12 +871,13 @@ class KVLeaseReclaimResult:
     errors: int = 0
 
 
-def _owner_id_from_env(engine: str, device: int) -> str:
-    engine_upper = engine.upper().replace("-", "_")
-    return os.environ.get(
-        f"GMS_{engine_upper}_KV_LEASE_OWNER_ID",
-        os.environ.get("GMS_KV_LEASE_OWNER_ID", f"{engine}-{os.getpid()}-{device}"),
-    )
+@dataclass(frozen=True)
+class KVLeaseRecoveryResult:
+    files: int = 0
+    released_idle_blocks: int = 0
+    quarantined_blocks: int = 0
+    reclaimed_blocks: int = 0
+    errors: int = 0
 
 
 def _kv_lease_shm_dir(engine: str) -> str:
@@ -795,6 +888,61 @@ def _kv_lease_shm_dir(engine: str) -> str:
     if not base_dir:
         base_dir = "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir()
     return base_dir
+
+
+def _lease_target_paths(
+    engine: str,
+    device: int,
+    *,
+    shm_dir: str | None,
+    namespace_suffix: str,
+) -> list[Path]:
+    engine_upper = engine.upper().replace("-", "_")
+    namespace = os.environ.get(
+        f"GMS_{engine_upper}_KV_LEASE_NAMESPACE",
+        os.environ.get(
+            "GMS_KV_LEASE_NAMESPACE",
+            f"{engine}:gpu{device}:{namespace_suffix}",
+        ),
+    )
+    explicit_path = os.environ.get(
+        f"GMS_{engine_upper}_KV_LEASE_SHM_PATH"
+    ) or os.environ.get("GMS_KV_LEASE_SHM_PATH")
+    if explicit_path:
+        return [Path(explicit_path)]
+    base_dir = Path(shm_dir or _kv_lease_shm_dir(engine))
+    digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()[:20]
+    return [base_dir / f"gms-kv-lease-{digest}.shm"]
+
+
+def _exact_protected_blocks(
+    buf: mmap.mmap,
+    total_blocks: int,
+    *,
+    protected_blocks: set[int] | None,
+    protected_leases: set[tuple[int, int]] | None,
+) -> list[int]:
+    if protected_leases is None:
+        return sorted(int(block_id) for block_id in (protected_blocks or set()))
+    exact: list[int] = []
+    for block_id, generation in protected_leases:
+        block_id = int(block_id)
+        if block_id < 0 or block_id >= total_blocks:
+            continue
+        state, observed_generation = _KV_LEASE_SHM_RECORD_PREFIX_STRUCT.unpack_from(
+            buf,
+            _KV_LEASE_SHM_HEADER_SIZE + block_id * _KV_LEASE_SHM_RECORD_SIZE,
+        )
+        if observed_generation != int(generation):
+            continue
+        if state & _KV_LEASE_STATE_MASK not in (
+            _KV_LEASE_STATE_SEALED,
+            _KV_LEASE_STATE_TRANSITION,
+        ):
+            continue
+        exact.append(block_id)
+    exact.sort()
+    return exact
 
 
 def reclaim_foreign_kv_leases_in_shm_dir(
@@ -852,7 +1000,7 @@ def reclaim_foreign_kv_leases_in_shm_dir(
         )
         return KVLeaseReclaimResult(errors=1)
 
-    owner = owner_id or _owner_id_from_env(engine, device)
+    owner = owner_id or current_kv_lease_owner_id(engine, device)
     owner_hash = _owner_hash(owner)
     # Resolve THIS engine+device's own lease file only (never a directory glob).
     engine_upper = engine.upper().replace("-", "_")
@@ -949,6 +1097,104 @@ def reclaim_foreign_kv_leases_in_shm_dir(
             os.close(fd)
     return KVLeaseReclaimResult(
         files=files,
+        reclaimed_blocks=reclaimed,
+        errors=errors,
+    )
+
+
+def recover_foreign_kv_leases_in_shm_dir(
+    engine: str,
+    device: int,
+    *,
+    owner_id: str | None = None,
+    shm_dir: str | None = None,
+    protected_blocks: set[int] | None = None,
+    protected_leases: set[tuple[int, int]] | None = None,
+    namespace_suffix: str = "kv",
+    gpu_quiesced: bool = False,
+) -> KVLeaseRecoveryResult:
+    """Classify predecessor leases, then optionally reclaim quarantine.
+
+    Phase one is always safe after CPU writer fencing: foreign ``IDLE`` pages
+    become free, exact directory-backed ``SEALED`` generations remain readable,
+    and every page that may still have predecessor GPU work is quarantined.
+    Phase two is requested with ``gpu_quiesced=True`` only after a capability
+    has proved that the predecessor CUDA context can no longer access memory.
+    """
+
+    rust = _load_optional_rust_ring()
+    required = ("kv_lease_quarantine_foreign", "kv_lease_reclaim_quarantined")
+    if rust is None or any(not hasattr(rust, name) for name in required):
+        return KVLeaseRecoveryResult(errors=1)
+
+    owner_hash = _owner_hash(owner_id or current_kv_lease_owner_id(engine, device))
+    files = 0
+    released_idle = 0
+    quarantined = 0
+    reclaimed = 0
+    errors = 0
+    for path in _lease_target_paths(
+        engine,
+        device,
+        shm_dir=shm_dir,
+        namespace_suffix=namespace_suffix,
+    ):
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except FileNotFoundError:
+            continue
+        try:
+            header = _read_shm_header(fd)
+            if not _valid_shm_header(header):
+                continue
+            assert header is not None
+            total_blocks = int(header[2])
+            map_size = (
+                _KV_LEASE_SHM_HEADER_SIZE + total_blocks * _KV_LEASE_SHM_RECORD_SIZE
+            )
+            buf = mmap.mmap(fd, map_size)
+            try:
+                file_idle = 0
+                file_quarantined = 0
+                file_reclaimed = 0
+                if gpu_quiesced:
+                    # Phase two must never classify current ring contents. A
+                    # delayed proof may belong to an older takeover, so it may
+                    # only reclaim quarantine stamped by that recovery owner.
+                    file_reclaimed = int(
+                        rust.kv_lease_reclaim_quarantined(buf, int(owner_hash))
+                    )
+                else:
+                    exact = _exact_protected_blocks(
+                        buf,
+                        total_blocks,
+                        protected_blocks=protected_blocks,
+                        protected_leases=protected_leases,
+                    )
+                    file_idle, file_quarantined = rust.kv_lease_quarantine_foreign(
+                        buf,
+                        exact,
+                        int(owner_hash),
+                    )
+            finally:
+                buf.close()
+            files += 1
+            released_idle += int(file_idle)
+            quarantined += int(file_quarantined)
+            reclaimed += int(file_reclaimed)
+        except Exception:
+            errors += 1
+            logger.warning(
+                "GMS KV failover lease classification failed for %s",
+                path,
+                exc_info=True,
+            )
+        finally:
+            os.close(fd)
+    return KVLeaseRecoveryResult(
+        files=files,
+        released_idle_blocks=released_idle,
+        quarantined_blocks=quarantined,
         reclaimed_blocks=reclaimed,
         errors=errors,
     )

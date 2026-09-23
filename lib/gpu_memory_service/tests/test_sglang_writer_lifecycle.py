@@ -26,6 +26,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux writer fe
 @pytest.fixture(autouse=True)
 def isolated_cohort(tmp_path, monkeypatch):
     monkeypatch.setenv("FAILOVER_LOCK_PATH", str(tmp_path / "failover.lock"))
+    monkeypatch.delenv("GMS_SGLANG_WRITER_COHORT_PATH", raising=False)
     monkeypatch.setattr(lifecycle, "_boot", None)
     descriptors = []
     monkeypatch.setattr(lifecycle, "_writer_fds", descriptors)
@@ -157,6 +158,19 @@ def test_engine_uses_picklable_guarded_scheduler_entry():
     assert entry.args[0] == os.getpid()
     assert entry.args[2] is _fake_scheduler
     assert engine.server_args == "args"
+    assert os.environ["GMS_SGLANG_WRITER_COHORT_PATH"] == entry.args[1]
+
+
+def test_guarded_scheduler_exports_cohort_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(lifecycle, "arm_parent_death_signal", lambda **kwargs: None)
+    guard = tmp_path / "scheduler-cohort"
+    guard.touch()
+
+    assert lifecycle.run_guarded_scheduler(
+        os.getppid(),
+        str(guard),
+        lambda: os.environ["GMS_SGLANG_WRITER_COHORT_PATH"],
+    ) == str(guard)
 
 
 def test_cancelled_fence_does_not_publish_successor():
