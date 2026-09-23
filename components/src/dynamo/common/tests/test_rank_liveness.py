@@ -511,6 +511,7 @@ def test_noisy_ack_socket_cannot_starve_leader_timeout(monkeypatch, caplog):
     """A connected/misbehaving transport is not engine progress."""
     import zmq
 
+    monkeypatch.setattr(rl, "configured_gpu_failure_marker", lambda: None)
     clock = [0.0]
     calls = []
 
@@ -640,6 +641,58 @@ def test_direct_gpu_crash_notification_bypasses_heartbeat_timeout(tmp_path):
             ]
         )
         assert fired.wait(0.5), "monitor waited for the heartbeat deadline"
+        assert calls == [(7, "gpu-crash-interlock-zmq")]
+    finally:
+        sender.close(0)
+        monitor.stop()
+
+
+def test_direct_gpu_crash_notification_accepts_registered_remote_rank(tmp_path):
+    import zmq
+
+    from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
+
+    leader_cohort = tmp_path / "rank-0-cohort"
+    remote_cohort = tmp_path / "rank-7-cohort"
+    leader_cohort.touch(mode=0o600)
+    remote_cohort.touch(mode=0o600)
+    remote_marker = str(gpu_failure_marker_path(remote_cohort))
+    endpoint = _endpoint()
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=endpoint,
+        timeout_ms_override=5_000,
+        expected_ranks={7},
+        failure_marker_path=str(gpu_failure_marker_path(leader_cohort)),
+    )
+
+    sender = zmq.Context.instance().socket(zmq.DEALER)
+    sender.setsockopt(zmq.IDENTITY, b"rank-7")
+    sender.setsockopt(zmq.LINGER, 0)
+    sender.connect(endpoint)
+    monitor.start()
+    try:
+        sender.send_multipart([remote_marker.encode(), b"hb"])
+        deadline = time.monotonic() + 0.5
+        while (
+            monitor._rank_failure_marker_paths.get(7) != remote_marker
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.01)
+        assert monitor._rank_failure_marker_paths[7] == remote_marker
+
+        sender.send_multipart(
+            [
+                b"gpu-failed-v1",
+                str(remote_cohort).encode(),
+                b"7",
+                b"1234",
+                b"signal-11",
+            ]
+        )
+        assert fired.wait(0.5), "monitor rejected its registered remote cohort"
         assert calls == [(7, "gpu-crash-interlock-zmq")]
     finally:
         sender.close(0)

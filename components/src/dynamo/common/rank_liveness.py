@@ -239,6 +239,8 @@ class RankLivenessClient:
         started = time.monotonic()
         last_ack: float | None = None
         previous_cycle_started = started
+        failure_marker = configured_gpu_failure_marker()
+        heartbeat = None if failure_marker is None else [failure_marker.encode(), b"hb"]
         try:
             while not self._stop.is_set():
                 cycle_started = time.monotonic()
@@ -248,7 +250,10 @@ class RankLivenessClient:
                 )
                 previous_cycle_started = cycle_started
                 try:
-                    sock.send(b"hb", flags=zmq.NOBLOCK)
+                    if heartbeat is None:
+                        sock.send(b"hb", flags=zmq.NOBLOCK)
+                    else:
+                        sock.send_multipart(heartbeat, flags=zmq.NOBLOCK)
                 except zmq.ZMQError:
                     logger.debug(
                         "[GMS liveness] rank %d heartbeat send failed",
@@ -381,6 +386,7 @@ class RankLivenessMonitor:
         self._bind_ready = threading.Event()
         self._bind_error: Optional[BaseException] = None
         self._seen_ranks: set[int] = set()
+        self._rank_failure_marker_paths: dict[int, str] = {}
         self._seen_changed = threading.Condition()
 
     def start(self) -> None:
@@ -542,6 +548,15 @@ class RankLivenessMonitor:
                                 "[GMS liveness] ignoring unexpected rank %d", rank
                             )
                             continue
+                        if len(frames) == 3:
+                            try:
+                                marker = frames[-2].decode()
+                            except UnicodeDecodeError:
+                                marker = ""
+                            if marker:
+                                self._rank_failure_marker_paths.setdefault(
+                                    rank, os.path.normpath(marker)
+                                )
                         if rank not in last_seen:
                             logger.info("[GMS liveness] rank %d registered", rank)
                         last_seen[rank] = now
@@ -602,10 +617,13 @@ class RankLivenessMonitor:
             return None
         if rank < 0 or pid <= 0 or not source:
             return None
-        expected_marker = str(gpu_failure_marker_path(cohort))
-        if not self._failure_marker_path or os.path.normpath(
+        notified_marker = os.path.normpath(str(gpu_failure_marker_path(cohort)))
+        expected_marker = self._rank_failure_marker_paths.get(rank)
+        if expected_marker is None and (self._expected_ranks is None or rank == 0):
+            expected_marker = self._failure_marker_path
+        if expected_marker is None or notified_marker != os.path.normpath(
             expected_marker
-        ) != os.path.normpath(self._failure_marker_path):
+        ):
             logger.warning(
                 "[GMS liveness] ignoring GPU crash notification for another cohort %s",
                 cohort,
