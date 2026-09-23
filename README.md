@@ -138,7 +138,7 @@ the Gateway API setup, supported features, and configuration.
 
 ### Option A: Container (fastest)
 
-Choose either vLLM or SGLang:
+Choose vLLM, SGLang, or TensorRT-LLM:
 
 #### vLLM
 
@@ -176,7 +176,23 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.5.0`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+#### TensorRT-LLM
+
+```bash
+# Pull a prebuilt container
+docker run --gpus all --network host --ipc host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0
+
+# Inside the container — start frontend and worker
+python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --discovery-backend file &
+
+# Once the worker is ready, send a request
+curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+  "model": "Qwen/Qwen3-0.6B",
+  "messages": [{"role": "user", "content": "Hello!"}],
+  "max_tokens": 100
+}' | jq
+```
 
 ### Option B: Install from PyPI
 
@@ -194,7 +210,13 @@ uv pip install --prerelease=allow "ai-dynamo[vllm]"
 uv pip install --prerelease=allow "ai-dynamo[sglang]"
 ```
 
-> **Note:** TensorRT-LLM requires `pip` with `--extra-index-url https://pypi.nvidia.com`. See the [install guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for TRT-LLM-specific instructions.
+#### TensorRT-LLM
+
+```bash
+pip install --pre "ai-dynamo[trtllm]" --extra-index-url https://pypi.nvidia.com
+```
+
+See the [TensorRT-LLM installation guide](https://nvidia.github.io/TensorRT-LLM/installation/linux.html) for prerequisites.
 
 Then start the frontend and the matching worker as shown above. See the [full installation guide](docs/fern/pages/cli/installation/install-dynamo.mdx) for system dependencies and backend-specific notes.
 
