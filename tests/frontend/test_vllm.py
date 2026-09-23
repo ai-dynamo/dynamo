@@ -76,6 +76,10 @@ SYSTEM_HEALTH_TOOL = {
 # behaviour it had before rather than failing on a missing dependency.
 FALLBACK_GPU_MEMORY_UTILIZATION = "0.01"
 
+# vLLM needs --gpu-memory-utilization below 1.0, so the startup guard can never
+# be asked to hold back more than this share of a card.
+MAX_GPU_MEMORY_UTILIZATION = 0.95
+
 
 def _visible_gpu_total_memory_gib() -> Optional[float]:
     """Return the total memory in GiB of the GPU this worker will run on.
@@ -198,7 +202,17 @@ class WorkerProcess(ManagedProcess):
         total_gib = _visible_gpu_total_memory_gib()
         if self.required_vram_gib is None or total_gib is None:
             return FALLBACK_GPU_MEMORY_UTILIZATION
-        fraction = min(max(self.required_vram_gib / total_gib, 0.01), 0.95)
+        guardable_gib = total_gib * MAX_GPU_MEMORY_UTILIZATION
+        if self.required_vram_gib > guardable_gib:
+            # Clamping here would hand vLLM a guard weaker than the budget, the
+            # very thing this method exists to prevent. The scheduler never
+            # assigns a card this small, but a direct pytest run has no such
+            # admission filter, so refuse the card instead of the budget.
+            pytest.skip(
+                f"needs {self.required_vram_gib} GiB, above the "
+                f"{guardable_gib:.1f} GiB this {total_gib:.1f} GiB GPU can guard"
+            )
+        fraction = max(self.required_vram_gib / total_gib, 0.01)
         return f"{fraction:.4f}"
 
 
