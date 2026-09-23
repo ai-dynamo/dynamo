@@ -8,7 +8,12 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.pre_merge,
+    pytest.mark.gpu_0,
+    pytest.mark.timeout(120),
+]
 
 LAUNCH_UTILS = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
 LAUNCH_DIR = Path(__file__).parents[2] / "examples/backends/vllm/launch"
@@ -19,6 +24,30 @@ LABELLED_SCRIPTS = {
     "disagg_multimodal_epd.sh": ["frontend", "encode", "prefill", "decode"],
     "disagg_multimodal_p_d.sh": ["frontend", "prefill", "decode"],
 }
+
+# Stands in for a worker that stays up. Blocks on an fd rather than a timer,
+# so the surviving workers cost no wall-clock time and cannot exit first.
+STAY_UP = "tail -f /dev/null"
+
+# The one process that leaves. It has to outlive the `wait` it is meant to
+# wake, so this is a short timed exit rather than an immediate one: a worker
+# reaped before the wait starts is dropped from bash's jobs table, which the
+# wait cannot then report on.
+LEAVE_WITH = "(sleep 0.2; exit {code})"
+
+UNNAMED = "A background process exited with code"
+
+# `wait -n -p`, the only way to learn which child exited, arrived in bash 5.1.
+# launch_utils.sh still supports 4.3, where every exit stays unnamed, so the
+# label assertions have to follow whichever bash the runner installed.
+_VERSINFO = subprocess.run(
+    ["bash", "-c", 'printf "%s %s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"'],
+    capture_output=True,
+    text=True,
+    check=True,
+    timeout=60,
+).stdout.split()
+BASH_NAMES_WORKERS = tuple(int(part) for part in _VERSINFO) >= (5, 1)
 
 
 def _run_script(body: str) -> subprocess.CompletedProcess:
@@ -37,36 +66,58 @@ def _run_script(body: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_wait_any_exit_names_the_labelled_process_that_left() -> None:
-    """Report which labelled process exited, not just its exit code."""
+def test_wait_any_exit_names_the_labelled_worker_that_left() -> None:
     result = _run_script(
-        """
-        sleep 30 & dyn_track_worker frontend
-        (sleep 0.2; exit 7) & dyn_track_worker prefill
-        sleep 30 & dyn_track_worker decode
+        f"""
+        {STAY_UP} & dyn_track_worker frontend
+        {LEAVE_WITH.format(code=7)} & dyn_track_worker prefill
+        {STAY_UP} & dyn_track_worker decode
         wait_any_exit
         """
     )
 
     assert result.returncode == 7, result.stderr
-    assert "Worker 'prefill' (pid" in result.stdout, result.stdout
     assert "exited with code 7" in result.stdout, result.stdout
-    assert "Worker 'frontend'" not in result.stdout, result.stdout
-    assert "Worker 'decode'" not in result.stdout, result.stdout
+    if BASH_NAMES_WORKERS:
+        assert "Worker 'prefill' (pid" in result.stdout, result.stdout
+        assert "Worker 'frontend'" not in result.stdout, result.stdout
+        assert "Worker 'decode'" not in result.stdout, result.stdout
+    else:
+        assert UNNAMED in result.stdout, result.stdout
 
 
 def test_wait_any_exit_keeps_the_generic_message_without_labels() -> None:
-    """Leave unlabelled launch scripts on the original message."""
     result = _run_script(
-        """
-        sleep 30 &
-        (sleep 0.2; exit 3) &
+        f"""
+        {STAY_UP} &
+        {LEAVE_WITH.format(code=3)} &
         wait_any_exit
         """
     )
 
     assert result.returncode == 3, result.stderr
-    assert "A background process exited with code 3" in result.stdout, result.stdout
+    assert f"{UNNAMED} 3" in result.stdout, result.stdout
+
+
+def test_wait_any_exit_never_names_an_untracked_process() -> None:
+    """Keep every label out of the report unless that worker is the one that left.
+
+    Naming a worker that is still up would send the reader after the wrong
+    process, so an untracked exit has to stay on the generic message even
+    while labelled workers are running.
+    """
+    result = _run_script(
+        f"""
+        {STAY_UP} & dyn_track_worker frontend
+        {STAY_UP} & dyn_track_worker decode
+        {LEAVE_WITH.format(code=5)} &
+        wait_any_exit
+        """
+    )
+
+    assert result.returncode == 5, result.stderr
+    assert "Worker '" not in result.stdout, result.stdout
+    assert f"{UNNAMED} 5" in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize(

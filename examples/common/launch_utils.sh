@@ -164,6 +164,13 @@ wait_any_exit() {
     else
         wait -n || _rc=$?
     fi
+    # A child that had already been reaped before we got here is no longer in
+    # the jobs table, and `wait -n` can then return a pid that is still up.
+    # Naming a live worker as the one that left sends the reader after the
+    # wrong process, so fall back to the unnamed message instead.
+    if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+        _pid=""
+    fi
     local _label="${DYN_TRACKED_WORKERS[${_pid:-0}]:-}"
     if [[ -n "$_label" ]]; then
         echo "Worker '$_label' (pid $_pid) exited with code $_rc"
