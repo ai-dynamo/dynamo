@@ -2105,10 +2105,14 @@ dependencies = [
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
  "dynamo-kv-router",
  "fastrand",
  "parking_lot",
  "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

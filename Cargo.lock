@@ -2465,6 +2465,7 @@ dependencies = [
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
  "criterion",
  "dynamo-kv-router",
  "fastrand",
@@ -2472,7 +2473,9 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
