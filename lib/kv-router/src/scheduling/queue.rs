@@ -1696,6 +1696,10 @@ impl<
                 best_worker: selected.selection.worker,
                 effective_overlap_blocks: selected.selection.effective_overlap_blocks,
                 cached_tokens: selected.selection.cached_tokens,
+                max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+                selected_raw_cached_tokens: selected.selection.max_raw_cached_tokens.map(|_| {
+                    request.raw_cached_tokens_for(selected.selection.worker, self.block_size)
+                }),
                 selected_worker_tiers: selected.selected_worker_tiers,
                 target_cached_prefix_blocks,
                 kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -1728,6 +1732,11 @@ impl<
             best_worker: selected.selection.worker,
             effective_overlap_blocks: selected.selection.effective_overlap_blocks,
             cached_tokens: selected.selection.cached_tokens,
+            max_raw_cached_tokens: selected.selection.max_raw_cached_tokens,
+            selected_raw_cached_tokens: selected
+                .selection
+                .max_raw_cached_tokens
+                .map(|_| request.raw_cached_tokens_for(selected.selection.worker, self.block_size)),
             selected_worker_tiers: selected.selected_worker_tiers,
             target_cached_prefix_blocks,
             kv_transfer_candidates: request.kv_transfer_candidates.take(),
@@ -2168,6 +2177,7 @@ mod tests {
                 required_blocks: request.request_blocks(block_size),
                 effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
                 cached_tokens: request.effective_cached_tokens_for(worker),
+                max_raw_cached_tokens: None,
                 potential_decode_blocks: request
                     .potential_decode_blocks_after_admission(worker, block_size),
             })

@@ -3219,6 +3219,38 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         }
 
     @staticmethod
+    def _kv_cache_hit_engine_data(request_output: RequestOutput) -> Dict[str, Any]:
+        """Expose final cache counters for internal router observability."""
+        prompt_tokens = getattr(request_output, "prompt_token_ids", None)
+        local_hits = getattr(request_output, "num_local_cached_tokens", None)
+        aggregate_hits = getattr(request_output, "num_cached_tokens", None)
+        external_hits = getattr(request_output, "num_external_cached_tokens", None)
+        if not isinstance(external_hits, int):
+            external_hits = getattr(
+                request_output, "num_external_computed_tokens", None
+            )
+        external_hits = external_hits if isinstance(external_hits, int) else 0
+        if not isinstance(local_hits, int):
+            local_hits = (
+                max(aggregate_hits - external_hits, 0)
+                if isinstance(aggregate_hits, int)
+                else None
+            )
+        external_lookups = getattr(request_output, "num_external_lookup_tokens", None)
+        if not isinstance(external_lookups, int):
+            external_lookups = None
+        values = (local_hits, external_hits)
+        if prompt_tokens is None or any(not isinstance(value, int) for value in values):
+            return {"complete": False}
+        return {
+            "complete": True,
+            "prompt_tokens": len(prompt_tokens),
+            "gpu_hit_tokens": local_hits,
+            "cpu_hit_tokens": external_hits,
+            "cpu_lookup_tokens": external_lookups,
+        }
+
+    @staticmethod
     def _extract_logprobs(
         output, num_output_tokens_so_far: int, tokenizer=None
     ) -> tuple[list[float] | None, list[list[dict]] | None]:
@@ -3388,6 +3420,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             request_output=res,
                             completion_token_counts=total_output_tokens_by_index,
                         )
+                        out.setdefault("engine_data", {})[
+                            "kv_cache_hit"
+                        ] = BaseWorkerHandler._kv_cache_hit_engine_data(res)
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload

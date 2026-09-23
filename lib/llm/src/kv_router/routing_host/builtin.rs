@@ -89,6 +89,7 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
         required_blocks: 0,
         effective_overlap_blocks: 0.0,
         cached_tokens: 0,
+        max_raw_cached_tokens: None,
         potential_decode_blocks: 0,
     }
 }
@@ -368,6 +369,15 @@ impl RoutingHost {
         let request_context = request.context().clone();
         self.request_metrics
             .input_sequence_tokens
+            .with_label_values(&[
+                request
+                    .tracker
+                    .as_ref()
+                    .map(|tracker| tracker.phase())
+                    .unwrap_or_default()
+                    .as_str(),
+                &request.model,
+            ])
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 

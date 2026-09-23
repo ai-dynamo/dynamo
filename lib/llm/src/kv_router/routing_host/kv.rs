@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
+use crate::kv_router::{
+    FindBestMatchAdmission,
+    routing_host::{kv_selection::SelectionOutcome, request_guard::RouteObservation},
+};
 
 impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
@@ -410,11 +413,26 @@ impl RoutingHost {
         let chooser = self.kv_router();
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
+        let kv_route = if !is_query_only {
+            selection
+                .max_raw_cached_tokens
+                .zip(selection.selected_raw_cached_tokens)
+                .map(
+                    |(max_raw_cached_tokens, selected_raw_cached_tokens)| RouteObservation {
+                        prompt_tokens: routing_parts.token_ids.len() as u64,
+                        best_router_tokens: max_raw_cached_tokens as u64,
+                        selected_router_tokens: selected_raw_cached_tokens as u64,
+                    },
+                )
+        } else {
+            None
+        };
         let mut guard = match cleanup {
             Some(cleanup) => RequestGuard::new_kv_with_cleanup(
                 self.request_metrics.clone(),
                 cleanup,
                 request,
+                kv_route,
                 selection.request_lifecycle.take(),
             ),
             None => RequestGuard::new_kv(
@@ -424,6 +442,7 @@ impl RoutingHost {
                 selected_worker,
                 selection.booking.take(),
                 request,
+                kv_route,
                 selection.request_lifecycle.take(),
             ),
         };
@@ -503,10 +522,21 @@ impl RoutingHost {
                     guard.request_metrics().kv_hit_rate.observe(hit_rate);
                 }
             }
-            guard
-                .request_metrics()
-                .input_sequence_tokens
-                .observe(request.token_ids.len() as f64);
+            if !is_query_only {
+                guard
+                    .request_metrics()
+                    .input_sequence_tokens
+                    .with_label_values(&[
+                        request
+                            .tracker
+                            .as_ref()
+                            .map(|tracker| tracker.phase())
+                            .unwrap_or_default()
+                            .as_str(),
+                        &request.model,
+                    ])
+                    .observe(request.token_ids.len() as f64);
+            }
             Ok(())
         }
         .await;

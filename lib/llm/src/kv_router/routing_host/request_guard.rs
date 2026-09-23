@@ -68,6 +68,75 @@ struct MaterializedOutputBlocks {
     private_blocks: usize,
 }
 
+/// Router-side cached-prefix estimate captured for one tracked routing attempt: the prompt
+/// length, the best cached prefix among eligible workers, and the cached prefix on the
+/// selected worker (all raw tokens).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RouteObservation {
+    pub(super) prompt_tokens: u64,
+    pub(super) best_router_tokens: u64,
+    pub(super) selected_router_tokens: u64,
+}
+
+/// Cache-hit report the worker attaches to its final chunk (`engine_data.kv_cache_hit`).
+#[derive(serde::Deserialize)]
+struct WorkerCacheHitReport {
+    complete: bool,
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    gpu_hit_tokens: u64,
+    #[serde(default)]
+    cpu_hit_tokens: u64,
+    #[serde(default)]
+    cpu_lookup_tokens: Option<u64>,
+}
+
+/// Worker cache-hit report latched for one tracked attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkerReport {
+    /// `[lookup tokens, reused tokens]` from a valid report.
+    Tokens([u64; 2]),
+    LookupUnavailable(u64),
+    /// A valid report whose token sums overflow `u64`; finalizes as incomplete.
+    Overflowed,
+}
+
+/// `None` when the report is not usable (incomplete, or describes a different prompt
+/// length); otherwise the latched report.
+fn worker_cache_hit_tokens(
+    route: RouteObservation,
+    value: &serde_json::Value,
+) -> Option<WorkerReport> {
+    let report = <WorkerCacheHitReport as serde::Deserialize>::deserialize(value).ok()?;
+    if !report.complete || report.prompt_tokens != route.prompt_tokens {
+        return None;
+    }
+    let reused = report.gpu_hit_tokens.checked_add(report.cpu_hit_tokens);
+    let Some(external_lookup) = report.cpu_lookup_tokens else {
+        return Some(reused.map_or(WorkerReport::Overflowed, WorkerReport::LookupUnavailable));
+    };
+    let lookup = report.gpu_hit_tokens.checked_add(external_lookup);
+    Some(match lookup.zip(reused) {
+        Some((lookup, reused)) => WorkerReport::Tokens([lookup, reused]),
+        None => WorkerReport::Overflowed,
+    })
+}
+
+/// The worker-side emission for an attempt: the latched tokens only if the stream completed.
+fn kv_worker_hit_for(
+    stream_completed: bool,
+    report: Option<WorkerReport>,
+) -> Option<(Option<u64>, u64)> {
+    match report {
+        Some(WorkerReport::Tokens([lookup, reused])) if stream_completed => {
+            Some((Some(lookup), reused))
+        }
+        Some(WorkerReport::LookupUnavailable(reused)) if stream_completed => Some((None, reused)),
+        _ => None,
+    }
+}
+
 pub(crate) fn prompt_private_blocks(
     token_count: usize,
     complete_blocks: usize,
@@ -569,6 +638,11 @@ pub(super) struct RequestGuard {
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    kv_route: Option<RouteObservation>,
+    kv_worker_report: Option<WorkerReport>,
+    kv_model: String,
+    kv_phase: RequestPhase,
+    kv_worker_recorded: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
 
@@ -580,12 +654,14 @@ impl RequestGuard {
         worker: WorkerWithDpRank,
         booking: Option<BookingHandle>,
         request: &PreprocessedRequest,
+        kv_route: Option<RouteObservation>,
         request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, booking),
             request,
+            kv_route,
             request_lifecycle,
         )
     }
@@ -594,6 +670,7 @@ impl RequestGuard {
         request_metrics: Arc<RouterRequestMetrics>,
         mut cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
+        kv_route: Option<RouteObservation>,
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         if let Some(lifecycle) = request_lifecycle.as_mut() {
@@ -615,6 +692,19 @@ impl RequestGuard {
         if attempt_id.is_some() {
             request_metrics.requests_started_total.inc();
         }
+        let phase = request
+            .tracker
+            .as_ref()
+            .map(|tracker| tracker.phase())
+            .unwrap_or_default();
+        if let Some(route) = kv_route {
+            request_metrics.observe_kv_route_estimate(
+                phase,
+                &request.model,
+                route.best_router_tokens,
+                route.selected_router_tokens,
+            );
+        }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
             .as_ref()
@@ -633,6 +723,11 @@ impl RequestGuard {
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            kv_route,
+            kv_worker_report: None,
+            kv_worker_recorded: false,
+            kv_model: request.model.clone(),
+            kv_phase: phase,
             _lora_load: None,
         }
     }
@@ -662,6 +757,15 @@ impl RequestGuard {
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            kv_route: None,
+            kv_worker_report: None,
+            kv_worker_recorded: false,
+            kv_model: request.model.clone(),
+            kv_phase: request
+                .tracker
+                .as_ref()
+                .map(|tracker| tracker.phase())
+                .unwrap_or_default(),
             _lora_load: lora_load,
         }
     }
@@ -795,6 +899,7 @@ impl RequestGuard {
             );
         }
         self.observability.observe_tokens(new_tokens);
+        self.capture_kv_worker_hit(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
@@ -823,6 +928,7 @@ impl RequestGuard {
             lifecycle.complete();
         }
         // Metrics must observe the completed request before cleanup releases its state.
+        self.record_kv_worker_outcome(true);
         self.observability
             .record_metrics(self.record_itl_at_completion);
         self.cleanup.finish().await;
@@ -849,18 +955,149 @@ impl RequestGuard {
         if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
             lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
         }
+        self.record_kv_worker_outcome(false);
         self.cleanup.finish().await;
+    }
+
+    /// Latch the first valid worker cache-hit report for this attempt.
+    fn capture_kv_worker_hit(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if self.kv_worker_recorded || self.kv_worker_report.is_some() {
+            return;
+        }
+        let Some(route) = self.kv_route else {
+            return;
+        };
+        self.kv_worker_report = item
+            .data
+            .as_ref()
+            .and_then(|data| data.engine_data.as_ref())
+            .and_then(|data| data.get("kv_cache_hit"))
+            .and_then(|value| worker_cache_hit_tokens(route, value));
+    }
+
+    /// Emit the worker-side series once per tracked attempt: lookup/reused tokens plus a
+    /// complete outcome when the stream finished with a valid report, otherwise incomplete.
+    fn record_kv_worker_outcome(&mut self, stream_completed: bool) {
+        if self.kv_route.is_none() || std::mem::replace(&mut self.kv_worker_recorded, true) {
+            return;
+        }
+        let hit = kv_worker_hit_for(stream_completed, self.kv_worker_report.take());
+        let phase = self.kv_phase;
+        let metrics = self.observability.request_metrics();
+        match hit {
+            Some(tokens) => metrics.observe_kv_worker_hit(phase, &self.kv_model, tokens),
+            None => metrics.observe_kv_worker_incomplete(phase, &self.kv_model),
+        }
     }
 }
 
 impl Drop for RequestGuard {
     fn drop(&mut self) {
+        self.record_kv_worker_outcome(false);
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
     }
 }
 
+#[cfg(test)]
+mod kv_cache_hit_tests {
+    use super::*;
+
+    fn route() -> RouteObservation {
+        RouteObservation {
+            prompt_tokens: 100,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        }
+    }
+
+    fn report(gpu_hit: u64, cpu_hit: u64, cpu_lookup: u64) -> serde_json::Value {
+        serde_json::json!({
+            "complete": true,
+            "prompt_tokens": 100,
+            "gpu_hit_tokens": gpu_hit,
+            "cpu_hit_tokens": cpu_hit,
+            "cpu_lookup_tokens": cpu_lookup,
+        })
+    }
+
+    #[test]
+    fn worker_outcomes_can_exceed_router_observations() {
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &report(70, 15, 20)),
+            Some(WorkerReport::Tokens([90, 85]))
+        );
+    }
+
+    #[test]
+    fn worker_values_may_exceed_router_estimate_and_prompt_length() {
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &report(120, 15, 20)),
+            Some(WorkerReport::Tokens([140, 135]))
+        );
+    }
+
+    #[test]
+    fn incomplete_or_mismatched_reports_are_rejected() {
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &serde_json::json!({"complete": false})),
+            None
+        );
+        let mut mismatched = report(70, 15, 20);
+        mismatched["prompt_tokens"] = 99.into();
+        assert_eq!(worker_cache_hit_tokens(route(), &mismatched), None);
+    }
+
+    #[test]
+    fn counter_overflow_marks_the_observation_incomplete() {
+        // A valid report whose sums overflow is latched (blocking later reports) and
+        // finalizes as incomplete — same as the PR head.
+        let overflowing = report(u64::MAX, 0, 1);
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &overflowing),
+            Some(WorkerReport::Overflowed)
+        );
+        assert_eq!(
+            kv_worker_hit_for(true, Some(WorkerReport::Overflowed)),
+            None
+        );
+    }
+
+    #[test]
+    fn successful_stream_emits_the_latched_hit() {
+        assert_eq!(
+            kv_worker_hit_for(true, Some(WorkerReport::Tokens([90, 85]))),
+            Some((Some(90), 85))
+        );
+    }
+
+    #[test]
+    fn missing_lookup_is_not_a_zero_or_a_reuse_estimate() {
+        let mut value = report(70, 15, 20);
+        value["cpu_lookup_tokens"] = serde_json::Value::Null;
+        let parsed = worker_cache_hit_tokens(route(), &value);
+        assert_eq!(parsed, Some(WorkerReport::LookupUnavailable(85)));
+        assert_eq!(kv_worker_hit_for(true, parsed), Some((None, 85)));
+        assert_eq!(kv_worker_hit_for(false, parsed), None);
+        value.as_object_mut().unwrap().remove("cpu_lookup_tokens");
+        assert_eq!(worker_cache_hit_tokens(route(), &value), parsed);
+        value["gpu_hit_tokens"] = u64::MAX.into();
+        assert_eq!(
+            worker_cache_hit_tokens(route(), &value),
+            Some(WorkerReport::Overflowed)
+        );
+    }
+
+    #[test]
+    fn stream_error_discards_a_buffered_hit() {
+        assert_eq!(
+            kv_worker_hit_for(false, Some(WorkerReport::Tokens([90, 85]))),
+            None
+        );
+        assert_eq!(kv_worker_hit_for(true, None), None);
+    }
+}
 #[cfg(test)]
 mod output_hash_tests {
     use super::*;
@@ -1021,32 +1258,7 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
-        fn hist(name: &str) -> prometheus::Histogram {
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
-        }
-        fn hist_vec(name: &str) -> prometheus::HistogramVec {
-            prometheus::HistogramVec::new(prometheus::HistogramOpts::new(name, name), &["reason"])
-                .unwrap()
-        }
-        Arc::new(RouterRequestMetrics {
-            requests_started_total: prometheus::IntCounter::new("requests_started_total", "test")
-                .unwrap(),
-            requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
-            time_to_first_token_seconds: hist("ttft_seconds"),
-            inter_token_latency_seconds: hist("itl_seconds"),
-            input_sequence_tokens: hist("isl_tokens"),
-            output_sequence_tokens: hist("osl_tokens"),
-            kv_hit_rate: hist("kv_hit_rate"),
-            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
-            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
-            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
-            non_max_overlap_selections_total: prometheus::IntCounterVec::new(
-                prometheus::Opts::new("non_max_overlap_selections_total", "test"),
-                &["reason"],
-            )
-            .unwrap(),
-            overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
-        })
+        RouterRequestMetrics::for_test(&prometheus::Registry::new())
     }
 
     async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {

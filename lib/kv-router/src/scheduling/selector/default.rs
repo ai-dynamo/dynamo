@@ -925,6 +925,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.worker.worker_id, 1);
+        assert_eq!(result.max_raw_cached_tokens, None);
     }
 
     #[test]

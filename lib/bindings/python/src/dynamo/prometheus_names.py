@@ -117,6 +117,18 @@ class frontend_service:
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker at selection (per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank at selection
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = "kv_selected_cached_prefix_tokens_total"
+    # Worker-reported GPU hits plus external lookup tokens
+    KV_WORKER_LOOKUP_TOKENS_TOTAL = "kv_worker_lookup_tokens_total"
+    # Backend-reported cache-hit tokens
+    KV_WORKER_REUSED_TOKENS_TOTAL = "kv_worker_reused_tokens_total"
+    # Worker cache-hit reports per tracked attempt, labelled result=complete|lookup_unavailable|incomplete
+    KV_WORKER_OUTCOMES_TOTAL = "kv_worker_outcomes_total"
     # Upper-bound estimation of KV cache transfer latency in disaggregated serving (seconds)
     KV_TRANSFER_ESTIMATED_LATENCY_SECONDS = "kv_transfer_estimated_latency_seconds"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
@@ -465,6 +477,20 @@ class router:
     OUTPUT_SEQUENCE_TOKENS = "router_output_sequence_tokens"
     # Predicted KV cache hit rate at routing time (0.0-1.0)
     KV_HIT_RATE = "router_kv_hit_rate"
+    # Raw cached prefix tokens on the best eligible worker (counter, per routing attempt)
+    KV_BEST_ELIGIBLE_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_best_eligible_cached_prefix_tokens_total"
+    )
+    # Raw cached prefix tokens on the selected worker and DP rank (counter)
+    KV_SELECTED_CACHED_PREFIX_TOKENS_TOTAL = (
+        "router_kv_selected_cached_prefix_tokens_total"
+    )
+    # Worker-reported GPU hits plus external lookup tokens (counter)
+    KV_WORKER_LOOKUP_TOKENS_TOTAL = "router_kv_worker_lookup_tokens_total"
+    # Backend-reported cache-hit tokens (counter)
+    KV_WORKER_REUSED_TOKENS_TOTAL = "router_kv_worker_reused_tokens_total"
+    # Worker cache-hit reports per tracked attempt, result=complete|lookup_unavailable|incomplete
+    KV_WORKER_OUTCOMES_TOTAL = "router_kv_worker_outcomes_total"
     # Shared cache hit rate (0.0-1.0): fraction of request blocks found in shared cache
     SHARED_CACHE_HIT_RATE = "router_shared_cache_hit_rate"
     # Shared cache blocks beyond device overlap for the selected worker

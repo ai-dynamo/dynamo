@@ -36,7 +36,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
-    kv_router::RoutingLoadContext,
+    kv_router::{RoutingLoadContext, routing_host::request_guard::RouteObservation},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
@@ -678,6 +678,11 @@ async fn terminal_item_does_not_skip_transport_eof() {
         WorkerWithDpRank::from_worker_id(0),
         None,
         &request(),
+        Some(RouteObservation {
+            prompt_tokens: 1,
+            best_router_tokens: 0,
+            selected_router_tokens: 0,
+        }),
         None,
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -691,11 +696,233 @@ async fn terminal_item_does_not_skip_transport_eof() {
     runtime.shutdown();
 }
 
+struct KvHitSnapshot {
+    best: u64,
+    selected: u64,
+    lookup: u64,
+    reused: u64,
+    complete: u64,
+    incomplete: u64,
+    lookup_unavailable: u64,
+}
+
+fn kv_hit_snapshot(metrics: &crate::kv_router::metrics::RouterRequestMetrics) -> KvHitSnapshot {
+    // The fixture request carries no tracker, so the guard labels it `aggregated`.
+    let phase = RequestPhase::Aggregated.as_str();
+    let model = "test";
+    let counter = |h: &prometheus::IntCounterVec| h.with_label_values(&[phase, model]).get();
+    KvHitSnapshot {
+        best: counter(&metrics.kv_best_eligible_cached_prefix_tokens),
+        selected: counter(&metrics.kv_selected_cached_prefix_tokens),
+        lookup: counter(&metrics.kv_worker_lookup_tokens),
+        reused: counter(&metrics.kv_worker_reused_tokens),
+        complete: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&[phase, model, "complete"])
+            .get(),
+        incomplete: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&[phase, model, "incomplete"])
+            .get(),
+        lookup_unavailable: metrics
+            .kv_worker_outcomes_total
+            .with_label_values(&[phase, model, "lookup_unavailable"])
+            .get(),
+    }
+}
+
+/// Drive one tracked attempt through the real guard and return the metric deltas.
+async fn run_kv_hit_attempt(final_frame: LLMEngineOutput) -> (KvHitSnapshot, KvHitSnapshot) {
+    let (router, runtime) = router(None).await;
+    let metrics = Arc::clone(&router.request_metrics);
+    let before = kv_hit_snapshot(&metrics);
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![7],
+                ..Default::default()
+            });
+            yield Annotated::from_data(final_frame);
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&metrics),
+        "kv-hit-attempt".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        None,
+        &request(),
+        Some(RouteObservation {
+            prompt_tokens: 100,
+            best_router_tokens: 75,
+            selected_router_tokens: 60,
+        }),
+        None,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+    while monitored.next().await.is_some() {}
+    let after = kv_hit_snapshot(&metrics);
+    drop(router);
+    runtime.shutdown();
+    (before, after)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_complete_attempt_records_every_stage_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": 20,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    // Router estimates at selection, worker tokens at completion, each exactly once across finish + Drop.
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 90);
+    assert_eq!(after.reused - before.reused, 85);
+    assert_eq!(after.complete - before.complete, 1);
+    assert_eq!(after.incomplete - before.incomplete, 0);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_attempt_without_worker_report_is_incomplete_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 0);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 1);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_cancelled_attempt_discards_valid_report() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Cancelled),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": 20,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 0);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 1);
+}
+
 fn cancelled_frame() -> Annotated<LLMEngineOutput> {
     Annotated::from_data(LLMEngineOutput {
         finish_reason: Some(FinishReason::Cancelled),
         ..Default::default()
     })
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_completion_keeps_selection_phase() {
+    let (router, runtime) = router(None).await;
+    let metrics =
+        crate::kv_router::metrics::RouterRequestMetrics::for_test(&prometheus::Registry::new());
+    let tracker = Arc::new(RequestTracker::new());
+    let permit = tracker.set_phase(RequestPhase::Prefill).await;
+    let mut req = request();
+    req.tracker = Some(tracker.clone());
+    let mut guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        metrics.clone(),
+        "phase-test".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        None,
+        &req,
+        Some(RouteObservation {
+            prompt_tokens: 1,
+            best_router_tokens: 1,
+            selected_router_tokens: 1,
+        }),
+        None,
+    );
+    drop(permit);
+    let _permit = tracker.set_phase(RequestPhase::Decode).await;
+    guard
+        .on_item(&Annotated::from_data(LLMEngineOutput {
+            engine_data: Some(serde_json::json!({"kv_cache_hit": {
+                "complete": true, "prompt_tokens": 1, "gpu_hit_tokens": 1,
+                "cpu_hit_tokens": 0, "cpu_lookup_tokens": 0
+            }})),
+            ..Default::default()
+        }))
+        .await;
+    guard.finish().await;
+    drop(guard);
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["prefill", "test"])
+            .get(),
+        1
+    );
+    assert_eq!(
+        metrics
+            .kv_worker_reused_tokens
+            .with_label_values(&["decode", "test"])
+            .get(),
+        0
+    );
+    drop(router);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_cache_hit_without_lookup_records_only_reuse_once() {
+    let (before, after) = run_kv_hit_attempt(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Stop),
+        engine_data: Some(serde_json::json!({
+            "kv_cache_hit": {
+                "complete": true,
+                "prompt_tokens": 100,
+                "gpu_hit_tokens": 70,
+                "cpu_hit_tokens": 15,
+                "cpu_lookup_tokens": null,
+            }
+        })),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(after.best - before.best, 75);
+    assert_eq!(after.selected - before.selected, 60);
+    assert_eq!(after.lookup - before.lookup, 0);
+    assert_eq!(after.reused - before.reused, 85);
+    assert_eq!(after.lookup_unavailable - before.lookup_unavailable, 1);
+    assert_eq!(after.complete - before.complete, 0);
+    assert_eq!(after.incomplete - before.incomplete, 0);
 }
 
 fn engine_shutdown_frame() -> Annotated<LLMEngineOutput> {
@@ -749,6 +976,7 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         None,
         &request(),
         None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -796,6 +1024,7 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         None,
         &request(),
         None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -834,6 +1063,7 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         WorkerWithDpRank::from_worker_id(0),
         None,
         &request(),
+        None,
         None,
     );
     let monitored = monitor_response_stream(source, context, guard);
@@ -891,6 +1121,7 @@ async fn trailing_error_within_the_drain_window_still_reaches_migration() {
         None,
         &request(),
         None,
+        None,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -937,6 +1168,7 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         WorkerWithDpRank::from_worker_id(0),
         None,
         &request(),
+        None,
         None,
     );
     let monitored = monitor_response_stream(source, context, guard);

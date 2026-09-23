@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
+use std::{cell::Cell, collections::HashMap};
 
 mod default;
 mod policy;
@@ -137,10 +137,30 @@ pub(crate) struct LogitWeights {
 struct MaterializedSelectionInput<'a> {
     request: &'a SchedulingRequest,
     context: WorkerSelectionContext<'a>,
+    // Both default and custom selection materialize a row for every worker rank
+    // accepted by RoutingEligibility::validate_worker_rank before returning a
+    // successful selection.
+    // That is the same worker set an eligibility-scoped maximum would scan, so
+    // accumulating here preserves F2 without a second traversal.
+    max_raw_cached_tokens: Cell<Option<usize>>,
 }
 
 impl<'a> MaterializedSelectionInput<'a> {
     fn new(request: &'a SchedulingRequest, block_size: u32, weights: LogitWeights) -> Self {
+        Self::new_with_worker_stage_tracking(
+            request,
+            block_size,
+            weights,
+            request.mode.is_tracked(),
+        )
+    }
+
+    fn new_with_worker_stage_tracking(
+        request: &'a SchedulingRequest,
+        block_size: u32,
+        weights: LogitWeights,
+        track_worker_stages: bool,
+    ) -> Self {
         Self {
             request,
             context: WorkerSelectionContext {
@@ -155,7 +175,12 @@ impl<'a> MaterializedSelectionInput<'a> {
                     .as_ref()
                     .and_then(|config| config.router_temperature),
             },
+            max_raw_cached_tokens: Cell::new(track_worker_stages.then_some(0)),
         }
+    }
+
+    fn max_raw_cached_tokens(&self) -> Option<usize> {
+        self.max_raw_cached_tokens.get()
     }
 
     fn row(
@@ -179,6 +204,13 @@ impl<'a> MaterializedSelectionInput<'a> {
         inputs: WorkerInputs,
         select_device_overlap: impl FnOnce(f64, f64) -> f64,
     ) -> WorkerCandidate {
+        if let Some(current_max) = self.max_raw_cached_tokens.get() {
+            let raw_cached_tokens = self
+                .request
+                .raw_cached_tokens_for(worker, self.context.block_size);
+            self.max_raw_cached_tokens
+                .set(Some(current_max.max(raw_cached_tokens)));
+        }
         let cached_tokens = if inputs.contains(WorkerInputs::CACHE)
             || (inputs.contains(WorkerInputs::LOAD) && self.request.track_prefill_tokens)
         {
@@ -276,12 +308,14 @@ fn selection_result(
     request: &SchedulingRequest,
     worker: WorkerWithDpRank,
     block_size: u32,
+    max_raw_cached_tokens: Option<usize>,
 ) -> WorkerSelectionResult {
     WorkerSelectionResult {
         worker,
         required_blocks: request.request_blocks(block_size),
         effective_overlap_blocks: request.effective_overlap_blocks_for(worker),
         cached_tokens: request.effective_cached_tokens_for(worker),
+        max_raw_cached_tokens,
         potential_decode_blocks: request
             .potential_decode_blocks_after_admission(worker, block_size),
     }
@@ -447,7 +481,7 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
         }
         return Err(KvSchedulerError::NoEndpoints);
     };
-    let result = selection_result(request, worker, block_size);
+    let result = selection_result(request, worker, block_size, input.max_raw_cached_tokens());
     log_selection(
         workers,
         request,
@@ -542,5 +576,116 @@ mod test_support {
                 )
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod worker_stage_tests {
+    use super::test_support::base_request;
+    use super::*;
+    use crate::test_utils::SimpleWorkerConfig;
+
+    fn weights() -> LogitWeights {
+        LogitWeights {
+            overlap_score_credit: 0.0,
+            overlap_score_credit_decay: 0.0,
+            prefill_load_scale: 0.0,
+            shared_cache_multiplier: 0.0,
+        }
+    }
+
+    #[test]
+    fn worker_stage_tracking_is_enabled_for_tracked_requests() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::Tracked {
+            request_id: "test".into(),
+        };
+        let first = WorkerWithDpRank::from_worker_id(1);
+        let second = WorkerWithDpRank::from_worker_id(2);
+        request.overlap.effective_cached_tokens.insert(first, 120);
+        request.overlap.effective_cached_tokens.insert(second, 16);
+        request.overlap.tier_overlap_blocks.device.insert(first, 2);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(first, 1);
+        request.overlap.tier_overlap_blocks.device.insert(second, 4);
+        request.overlap.tier_overlap_blocks.disk.insert(second, 2);
+        let input = MaterializedSelectionInput::new(&request, 16, weights());
+
+        input.row(first, None, WorkerInputs::NONE);
+        input.row(second, None, WorkerInputs::NONE);
+
+        assert_eq!(input.max_raw_cached_tokens(), Some(96));
+    }
+
+    #[test]
+    fn query_only_worker_stage_tracking_keeps_optional_result_empty() {
+        let mut request = base_request(128);
+        request.mode = crate::scheduling::ScheduleMode::QueryOnly { request_id: None };
+        let worker = WorkerWithDpRank::from_worker_id(1);
+        request.overlap.effective_cached_tokens.insert(worker, 96);
+        let input = MaterializedSelectionInput::new(&request, 16, weights());
+
+        input.row(worker, None, WorkerInputs::NONE);
+
+        assert_eq!(input.max_raw_cached_tokens(), None);
+    }
+
+    #[test]
+    fn raw_overlap_is_specific_to_the_selected_dp_rank() {
+        let mut request = base_request(128);
+        let selected = WorkerWithDpRank::new(1, 0);
+        let other_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .host_pinned
+            .insert(selected, 2);
+        request.overlap.tier_overlap_blocks.disk.insert(selected, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(other_rank, 7);
+        request.overlap.effective_cached_tokens.insert(selected, 3);
+        assert_eq!(request.raw_cached_tokens_for(selected, 16), 64);
+        assert_eq!(request.raw_cached_tokens_for(other_rank, 16), 112);
+    }
+
+    #[test]
+    fn worker_stage_tracking_excludes_out_of_range_dp_rank() {
+        let workers = HashMap::from([(1, SimpleWorkerConfig::default())]);
+        let mut request = base_request(128);
+        let invalid_rank = WorkerWithDpRank::new(1, 1);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(invalid_rank, 6);
+        let input = MaterializedSelectionInput::new_with_worker_stage_tracking(
+            &request,
+            16,
+            weights(),
+            true,
+        );
+        let eligibility = request.eligibility();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| {
+            input.row(worker, None, WorkerInputs::NONE);
+        });
+
+        assert!(
+            eligibility
+                .validate_worker_rank(&workers, invalid_rank)
+                .is_err()
+        );
+        assert_eq!(input.max_raw_cached_tokens(), Some(0));
     }
 }
