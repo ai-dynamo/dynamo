@@ -4,6 +4,7 @@
 """process_openai_request must let client-error types from image loading
 propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
+import base64
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -208,6 +209,85 @@ async def test_h264_video_routes_through_nvdec(monkeypatch) -> None:
     nvdec.assert_called_once()  # the NVDEC transform ran ...
     assert nvdec.call_args.args[0] == b"h264 bytes"
     load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+
+
+@pytest.mark.asyncio
+async def test_h264_data_uri_video_routes_through_nvdec(monkeypatch) -> None:
+    """A data: URI carries its bytes inline, so it must reach the same codec
+    probe and NVDEC path as a fetched URL. Previously it fell through to the
+    vendor loader with nothing to probe."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    sentinel = object()
+    fetch = AsyncMock()
+    monkeypatch.setattr(mmp, "fetch_bytes", fetch)
+    monkeypatch.setattr(mmp, "probe_video_codec", lambda content: "h264")
+    monkeypatch.setattr(mmp, "should_use_nvdec", lambda codec: codec == "h264")
+    nvdec = MagicMock(return_value=sentinel)
+    monkeypatch.setattr(mmp, "_nvdec_video_data", nvdec)
+    load_video = AsyncMock(return_value=object())
+    monkeypatch.setattr(mmp, "async_load_video", load_video)
+
+    uri = "data:video/mp4;base64," + base64.b64encode(b"h264 bytes").decode()
+    await processor.process_openai_request(
+        {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    nvdec.assert_called_once()  # the inline bytes reached the NVDEC transform ...
+    assert nvdec.call_args.args[0] == b"h264 bytes"
+    load_video.assert_not_awaited()  # ... and the vendor decoder was bypassed
+    fetch.assert_not_awaited()  # ... without any network fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "uri",
+    ["data:video/mp4;base64", "data:video/mp4,%00%01%02"],
+    ids=["no-comma", "percent-encoded"],
+)
+async def test_non_base64_video_data_uri_is_rejected(uri) -> None:
+    """A data: URI that is not base64 must be refused rather than silently
+    decoded into empty or garbage bytes."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+    assert "Only base64" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_oversized_video_data_uri_is_rejected() -> None:
+    """The inline decode is bounded the same way fetch_bytes bounds a download."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=1,
+        tokenizer=MagicMock(),
+    )
+    uri = "data:video/mp4;base64," + base64.b64encode(b"x" * (2 * 1024 * 1024)).decode()
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"multi_modal_data": {"video_url": [{"Url": uri}]}, "token_ids": [1]},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+    assert excinfo.value.status == 400
+    assert "maximum allowed size" in str(excinfo.value)
 
 
 @pytest.mark.asyncio

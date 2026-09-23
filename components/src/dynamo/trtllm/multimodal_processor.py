@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import base64
 import logging
 import tempfile
 import time
@@ -587,13 +588,35 @@ class MultimodalRequestProcessor:
                     )
                 try:
                     normalized_url = await validate_media_url(url, self._url_policy)
-                    if urlparse(normalized_url).scheme in ("http", "https"):
-                        content = await fetch_bytes(
-                            normalized_url,
-                            30.0,
-                            policy=self._url_policy,
-                            max_bytes=self.max_file_size_bytes,
-                        )
+                    scheme = urlparse(normalized_url).scheme
+                    if scheme in ("http", "https", "data"):
+                        if scheme == "data":
+                            # The payload is inline, so decode it here and let the
+                            # codec probe below treat it like fetched bytes.
+                            meta, sep, payload = normalized_url.partition(",")
+                            if not sep or "base64" not in meta.lower().split(";")[1:]:
+                                raise HttpStatusError(
+                                    400,
+                                    "Only base64 data: URIs are supported for video",
+                                    source,
+                                )
+                            # Bound it as fetch_bytes bounds a download; 4 base64
+                            # characters carry 3 bytes, so check before allocating.
+                            if len(payload) // 4 * 3 > self.max_file_size_bytes:
+                                raise HttpStatusError(
+                                    400,
+                                    "Video exceeds the maximum allowed size "
+                                    f"({self.max_file_size_mb}MB)",
+                                    source,
+                                )
+                            content = base64.b64decode(payload)
+                        else:
+                            content = await fetch_bytes(
+                                normalized_url,
+                                30.0,
+                                policy=self._url_policy,
+                                max_bytes=self.max_file_size_bytes,
+                            )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
                         nvdec_video = None
