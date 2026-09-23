@@ -61,10 +61,6 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		if err != nil {
 			return err
 		}
-
-		if err := setupLPUEviction(mgr); err != nil {
-			return fmt.Errorf("unable to create LPU Eviction controller: %w", err)
-		}
 	}
 
 	if err := r.setupWithManager(mgr); err != nil {

@@ -129,7 +129,7 @@ SPDX-License-Identifier: Apache-2.0
   cleanup; scheduler Pod references and release journals do not authorize it.
 - A terminating LPR is pending cleanup, not a reason to delete its PCS or Pods.
   Wait for scheduler finalization through watches, including when external
-  capacity is unchanged. The eviction controller has a separate disruption policy.
+  capacity is unchanged.
 
 # Scheduling Cycles
 

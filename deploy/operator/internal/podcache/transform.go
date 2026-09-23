@@ -83,15 +83,12 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 	return corev1.PodSpec{
 		// Topology and snapshot controllers require the assigned node.
 		NodeName: in.NodeName,
-		// Node-local LPX disruption recovery distinguishes Agent Pods scheduled
-		// through LPX from unrelated Pods.
-		SchedulerName: in.SchedulerName,
 		// Model endpoint classification requires the main container's command
 		// and arguments.
 		Containers: projectContainers(in.Containers),
 		// GMS Pod replacement requires native init-sidecar identity.
 		InitContainers: projectInitContainers(in.InitContainers),
-		// Topology uses DownwardAPI fields; LPX eviction uses runtime ConfigMap references.
+		// Topology uses DownwardAPI fields.
 		Volumes: projectVolumes(in.Volumes),
 	}
 }
@@ -127,17 +124,6 @@ func projectInitContainers(in []corev1.Container) []corev1.Container {
 func projectVolumes(in []corev1.Volume) []corev1.Volume {
 	out := make([]corev1.Volume, 0, len(in))
 	for i := range in {
-		// Keep only ConfigMap identity, not its projected keys or mount settings.
-		if in[i].ConfigMap != nil {
-			out = append(out, corev1.Volume{
-				Name: in[i].Name,
-				VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: in[i].ConfigMap.LocalObjectReference,
-				}},
-			})
-			continue
-		}
-
 		if in[i].DownwardAPI == nil {
 			continue
 		}
@@ -180,8 +166,7 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// lifecycle phase.
 		Phase: in.Phase,
 		// Model endpoint classification requires Ready; Snapshot-aware GMS replacement
-		// requires the public restore outcome; node-local LPX disruption recovery
-		// requires DisruptionTarget and its Kubernetes reason.
+		// requires the public restore outcome.
 		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures.
 		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
@@ -199,7 +184,7 @@ func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 		}
 		switch in[i].Type {
 		case corev1.PodReady:
-		case corev1.PodConditionType(podcontract.RestoredCondition), corev1.DisruptionTarget:
+		case corev1.PodConditionType(podcontract.RestoredCondition):
 			condition.Reason = in[i].Reason
 		default:
 			continue

@@ -93,6 +93,7 @@ func TestProjectConsumerContract(t *testing.T) {
 					}},
 				},
 				{Name: "discarded-secret", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "large"}}},
+				{Name: "discarded-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "config"}}}},
 			},
 		},
 		Status: corev1.PodStatus{
@@ -162,8 +163,8 @@ func TestProjectConsumerContract(t *testing.T) {
 		require.Len(t, got.Spec.Containers, 1)
 		assert.Equal(t, corev1.Container{Name: "main", Command: []string{"python"}, Args: []string{"-m", "dynamo"}}, got.Spec.Containers[0])
 	})
-	t.Run("snapshot and LPX retain restore and disruption state", func(t *testing.T) {
-		assert.Equal(t, "lpx-scheduler", got.Spec.SchedulerName)
+	t.Run("snapshot retains restore state", func(t *testing.T) {
+		assert.Empty(t, got.Spec.SchedulerName)
 		assert.Equal(t, []corev1.PodCondition{
 			{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 			{
@@ -171,7 +172,6 @@ func TestProjectConsumerContract(t *testing.T) {
 				Status: corev1.ConditionFalse,
 				Reason: podcontract.RestoreReasonFailed,
 			},
-			{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "EvictionByEvictionAPI"},
 		}, got.Status.Conditions)
 	})
 	t.Run("failover DGDR GMS replacement and Recreate retain status state", func(t *testing.T) {
@@ -299,22 +299,4 @@ func TestConfigureRejectsDuplicatePodEntries(t *testing.T) {
 
 func resourceQuantity(value string) resource.Quantity {
 	return resource.MustParse(value)
-}
-
-func TestProjectRetainsRuntimeConfigMapIdentity(t *testing.T) {
-	t.Log("Project a runtime ConfigMap volume without retaining its file layout")
-	pod := &corev1.Pod{Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
-		Name: "config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: "pcs-workload-lpu-hash"},
-			Items:                []corev1.KeyToPath{{Key: "partition_models", Path: "models"}},
-			Optional:             ptr.To(false), DefaultMode: ptr.To(int32(0444)),
-		}},
-	}}}}
-	require.Equal(t, []corev1.Volume{{Name: "config", VolumeSource: corev1.VolumeSource{
-		ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "pcs-workload-lpu-hash"}},
-	}}}, Project(pod).Spec.Volumes)
-
-	t.Log("Reapplying the cache projection preserves the same reference")
-	before := pod.DeepCopy()
-	require.Equal(t, before, Project(pod))
 }
