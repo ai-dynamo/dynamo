@@ -712,6 +712,72 @@ def test_exclusive_decode_records_pages_without_device_read(monkeypatch):
     assert list(state["cpu_free_pages"]) == [4]
 
 
+def test_startup_extend_records_reserved_pages(monkeypatch):
+    req = SimpleNamespace(_gms_kv_page_ids=[2])
+    leases = [KVLease(3, 7)]
+    allocator = SimpleNamespace(
+        page_size=64,
+        need_sort=False,
+        free_pages=torch.tensor([3, 4]),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=lambda *args, **kwargs: leases),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "active_batch": SimpleNamespace(reqs=[req]),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(
+        hooks, "orig_paged_alloc_extend", lambda *args, **kwargs: object()
+    )
+    monkeypatch.setattr(hooks, "get_num_new_pages", lambda **kwargs: 1)
+
+    result = hooks._gms_paged_alloc_extend(
+        allocator,
+        torch.tensor([64]),
+        torch.tensor([64]),
+        torch.tensor([65]),
+        torch.tensor([65]),
+        torch.tensor([127]),
+        1,
+    )
+
+    assert result is not None
+    assert req._gms_kv_page_ids == [2, 3]
+
+
+def test_startup_decode_records_reserved_pages(monkeypatch):
+    req = SimpleNamespace(_gms_kv_page_ids=[2])
+    leases = [KVLease(3, 7)]
+    allocator = SimpleNamespace(
+        page_size=64,
+        need_sort=False,
+        free_pages=torch.tensor([3, 4]),
+        _gms_tp_consistency=TPConsistency(),
+    )
+    state = {
+        "client": SimpleNamespace(acquire=lambda *args, **kwargs: leases),
+        "leases_by_page": {},
+        "retained_pages": set(),
+        "active_batch": SimpleNamespace(reqs=[req]),
+        "tp_reserved_pages": [],
+        "tp_reservation_aligned": True,
+    }
+    monkeypatch.setitem(hooks._STATE, id(allocator), state)
+    monkeypatch.setattr(hooks, "orig_paged_alloc_decode", lambda *args: object())
+    monkeypatch.setattr(hooks, "get_num_new_pages", lambda **kwargs: 1)
+
+    result = hooks._gms_paged_alloc_decode(
+        allocator, torch.tensor([65]), torch.tensor([65]), torch.tensor([127])
+    )
+
+    assert result is not None
+    assert req._gms_kv_page_ids == [2, 3]
+
+
 def test_exclusive_adoption_can_consume_hidden_recoverable_page(monkeypatch):
     allocator = SimpleNamespace(
         page_size=2,

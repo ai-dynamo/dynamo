@@ -68,6 +68,10 @@ def _install_publication_gate() -> None:
             end()
 
     def stream_output(streamer, *args, **kwargs):
+        publish_live = getattr(streamer.tree_cache, "_gms_publish_live_prefixes", None)
+        if callable(publish_live):
+            reqs = args[0] if args else kwargs.get("reqs", ())
+            publish_live(reqs)
         flush = getattr(streamer.tree_cache, "_gms_flush_publications", None)
         if callable(flush):
             flush()
@@ -142,6 +146,21 @@ def _standby() -> bool | None:
     return True
 
 
+def _standby_headroom_pages() -> int:
+    """Reserve one warmup page per configured concurrent standby request."""
+    if _standby() is None:
+        return 0
+    raw = os.environ.get(
+        "GMS_SGLANG_STANDBY_HEADROOM_PAGES",
+        os.environ.get("DYN_SGLANG_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "1"),
+    )
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("Ignoring invalid GMS_SGLANG_STANDBY_HEADROOM_PAGES=%r", raw)
+        return 1
+
+
 def _make_directory(page_size: int) -> ContentDirectory:
     return ContentDirectory(
         os.environ.get("GMS_KV_DIRECTORY_SOCKET")
@@ -182,6 +201,7 @@ def make_gms_unified_cache_class():
     """Return the cache subclass after SGLang is importable."""
     import torch
     from sglang.srt.mem_cache.base_prefix_cache import InsertParams
+    from sglang.srt.mem_cache.radix_cache import RadixKey
     from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
     from sglang.srt.mem_cache.utils import get_hash_str
 
@@ -201,7 +221,7 @@ def make_gms_unified_cache_class():
             # pool. This is based on topology, not the startup role: a sleeping
             # standby becomes the active writer without reconstructing the cache.
             self.token_to_kv_pool_allocator._gms_standby_headroom_pages = (
-                1 if _standby() is not None else 0
+                _standby_headroom_pages()
             )
             self._gms_tp = TPConsistency(self.tp_group, self.tp_world_size)
             self.token_to_kv_pool_allocator._gms_tp_consistency = self._gms_tp
@@ -552,21 +572,26 @@ def make_gms_unified_cache_class():
             lease_map = self.token_to_kv_pool_allocator._gms_kv_leases_by_page
             retained = self.token_to_kv_pool_allocator._gms_retained_pages
             item_by_hash = {}
-            unique_pages = []
-            seen_pages = set()
-            for hashes, pages, items in prepared:
-                for item in items:
+            for _hashes, _pages, prepared_items in prepared:
+                for item in prepared_items:
                     content_hash = bytes(item["content_hash"])
                     previous = item_by_hash.setdefault(content_hash, item)
                     if previous != item:
-                        raise RuntimeError(
-                            "one completed SGLang hash maps to divergent HBM pages"
+                        logger.debug(
+                            "[GMS-KVDirectory] deduplicating concurrent SGLang "
+                            "content hash on pages %s and %s",
+                            previous["slot_ids"],
+                            item["slot_ids"],
                         )
-                for page in pages:
-                    if page not in seen_pages:
-                        seen_pages.add(page)
-                        unique_pages.append(page)
+            # Concurrent identical prompts may compute equivalent KV into
+            # different pages before either radix insertion becomes visible to
+            # its peer. The first completion is the native/cache winner; seal
+            # exactly that page and leave redundant pages under normal native
+            # ownership and eviction.
             all_items = list(item_by_hash.values())
+            unique_pages = list(
+                dict.fromkeys(int(item["slot_ids"][0]) for item in all_items)
+            )
             # A sealed exact-generation mapping is already durable. Repeated
             # native prefix hits should touch its retention order, not resend
             # the same hash and re-seal the same page on every completion.
@@ -683,8 +708,10 @@ def make_gms_unified_cache_class():
                         _logical_layout_digest(items),
                         seal_and_publish,
                     )
-                for hashes, pages, _items in prepared:
-                    self._remember_local_pages(hashes, pages)
+                self._remember_local_pages(
+                    [bytes(item["content_hash"]) for item in all_items],
+                    [int(item["slot_ids"][0]) for item in all_items],
+                )
                 self._gms_recovery_candidates.difference_update(retired_hashes)
                 for page in unique_pages:
                     self._gms_retained_order.pop(page, None)
@@ -844,6 +871,52 @@ def make_gms_unified_cache_class():
                     [int(page) for page in pages],
                 )
             return super()._evict_device_leaf(node_id, tracker)
+
+        def _gms_publish_live_prefixes(self, reqs) -> None:
+            """Seal newly committed full pages before their tokens reach clients."""
+            if not self._gms_steady_state or not self._gms_directory.authoritative:
+                return
+            page_size = int(self.page_size)
+            for req in reqs:
+                finished = getattr(req, "finished", None)
+                if callable(finished) and finished():
+                    continue
+                committed = int(getattr(req.kv, "kv_committed_len", 0))
+                sealed_len = committed // page_size * page_size
+                if sealed_len <= int(getattr(req, "_gms_published_kv_len", 0)):
+                    continue
+                pages = getattr(req, "_gms_kv_page_ids", None)
+                expected_pages = sealed_len // page_size
+                if pages is None or len(pages) < expected_pages:
+                    if (
+                        getattr(req, "_gms_live_publish_deferred_len", None)
+                        != sealed_len
+                    ):
+                        logger.warning(
+                            "[GMS-KVDirectory] deferring live SGLang prefix; "
+                            "CPU page metadata is incomplete (%s/%s)",
+                            0 if pages is None else len(pages),
+                            expected_pages,
+                        )
+                        req._gms_live_publish_deferred_len = sealed_len
+                    continue
+                token_ids = (req.origin_input_ids + req.output_ids)[:sealed_len]
+                if len(token_ids) != sealed_len:
+                    logger.warning(
+                        "[GMS-KVDirectory] deferring live SGLang prefix; "
+                        "committed token metadata is incomplete (%s/%s)",
+                        len(token_ids),
+                        sealed_len,
+                    )
+                    continue
+                key = RadixKey(
+                    token_ids,
+                    req.extra_key,
+                    is_bigram=self.tree_core.is_eagle,
+                    cache_salt=req.cache_salt,
+                ).page_aligned(page_size)
+                self._publish_finished_prefix(key, request_pages=pages)
+                req._gms_published_kv_len = sealed_len
 
         def cache_finished_req(
             self, req, is_insert: bool = True, *, kv_len_to_handle: int, **kwargs

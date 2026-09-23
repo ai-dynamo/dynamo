@@ -158,6 +158,20 @@ def _test_hashes(key, prior_hash=None, *, page_size):
     return result
 
 
+def test_standby_headroom_covers_configured_warmup_concurrency(monkeypatch):
+    monkeypatch.setenv("DYN_GMS_FAILOVER_SHADOW_MODE", "1")
+    monkeypatch.setenv("DYN_SGLANG_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "4")
+
+    assert adapter._standby_headroom_pages() == 4
+
+
+def test_standby_headroom_has_no_cost_outside_failover(monkeypatch):
+    monkeypatch.delenv("DYN_GMS_FAILOVER_SHADOW_MODE", raising=False)
+    monkeypatch.setenv("DYN_SGLANG_GMS_FAILOVER_PROMOTION_WARMUP_CONCURRENCY", "4")
+
+    assert adapter._standby_headroom_pages() == 0
+
+
 def test_directory_role_is_lock_authoritative_not_engine_order(monkeypatch):
     monkeypatch.delenv("GMS_KV_DIRECTORY_STANDBY", raising=False)
     monkeypatch.delenv("DYN_GMS_FAILOVER_ACTIVE_LOCK_HELD", raising=False)
@@ -309,6 +323,49 @@ def test_finished_publication_uses_cpu_pages_without_device_collection(monkeypat
 
     assert len(cache._gms_directory.published) == 1
     assert cache._gms_directory.published[0]["slot_ids"] == [3]
+
+
+def test_live_prefix_publication_seals_only_newly_committed_full_pages(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    leases = {page: KVLease(page, 10 + page) for page in (3, 4, 5)}
+    allocator._gms_kv_leases_by_page = leases
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+    monkeypatch.setattr(
+        cache,
+        "_hashes_for_key",
+        lambda key, page_size: [
+            index.to_bytes(32, "little")
+            for index in range(1, len(key) // page_size + 1)
+        ],
+    )
+
+    def retain(_allocator, pages):
+        allocator._gms_retained_pages.update(pages)
+        return [leases[page] for page in pages]
+
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
+    req = SimpleNamespace(
+        kv=SimpleNamespace(kv_committed_len=4),
+        origin_input_ids=[1, 2, 3, 4, 5, 6],
+        output_ids=[],
+        extra_key=None,
+        cache_salt=None,
+        _gms_kv_page_ids=[3, 4, 5],
+        finished=lambda: False,
+    )
+
+    cache._gms_publish_live_prefixes([req])
+    cache._gms_publish_live_prefixes([req])
+
+    assert len(cache._gms_directory.published) == 2
+    assert req._gms_published_kv_len == 4
+
+    req.kv.kv_committed_len = 6
+    cache._gms_publish_live_prefixes([req])
+
+    assert len(cache._gms_directory.published) == 3
+    assert cache._gms_directory.published[-1]["slot_ids"] == [5]
 
 
 def test_finished_publication_falls_back_when_captured_node_has_no_indices(
@@ -757,6 +814,41 @@ def test_publication_retires_oldest_page_with_batched_generation_tombstone(monke
     assert cache._gms_local_pages_by_hash[old_hashes[0]] == 1
     assert cache._gms_local_hashes_by_page[1] == {old_hashes[0]}
     assert old_hashes[0] not in cache._gms_recovery_candidates
+
+
+def test_concurrent_identical_prefixes_publish_one_canonical_page(monkeypatch):
+    cache, allocator = _cache(monkeypatch)
+    content_hash = b"h" * 32
+    allocator._gms_kv_leases_by_page = {
+        3: KVLease(3, 13),
+        4: KVLease(4, 14),
+    }
+    cache._gms_steady_state = True
+    cache._gms_directory = _Directory()
+
+    def retain(_allocator, pages):
+        allocator._gms_retained_pages.update(pages)
+        return [allocator._gms_kv_leases_by_page[page] for page in pages]
+
+    monkeypatch.setattr(adapter, "retain_hbm_pages", retain)
+    first = {
+        "content_hash": content_hash,
+        "engine_id": "0",
+        "slot_ids": [3],
+        "generations": [13],
+        "tier": "hbm",
+        "active": False,
+    }
+    duplicate = {**first, "slot_ids": [4], "generations": [14]}
+
+    cache._commit_finished_prefixes(
+        [([content_hash], [3], [first]), ([content_hash], [4], [duplicate])]
+    )
+
+    assert cache._gms_directory.published == [first]
+    assert allocator._gms_retained_pages == {3}
+    assert cache._gms_local_pages_by_hash == {content_hash: 3}
+    assert list(cache._gms_retained_order) == [3]
 
 
 def test_publication_validates_layout_before_retaining_pages(monkeypatch):

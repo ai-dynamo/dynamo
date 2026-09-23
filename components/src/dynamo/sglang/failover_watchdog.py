@@ -25,6 +25,11 @@ def _watchdog_enabled() -> bool:
     return _truthy_env("DYN_SGLANG_GMS_FAILOVER_CHILD_WATCHDOG", default=True)
 
 
+def _mapped_sleeping_standby() -> bool:
+    value = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1")
+    return value.strip().lower() in {"0", "false", "no", "off"}
+
+
 def _poll_interval_s() -> float:
     raw = os.environ.get("DYN_SGLANG_GMS_FAILOVER_CHILD_WATCHDOG_POLL_MS", "5")
     try:
@@ -548,6 +553,11 @@ def maybe_start_rank_liveness(
         bind_addr=rl.leader_bind_addr(cohort_identity),
         expected_ranks=expected_ranks,
         runtime_armed=runtime_armed,
+        # A mapped standby can take over immediately after every pod-local
+        # writer lock is released. Tell surviving primary ranks to fail-stop
+        # as soon as the leader observes any cohort failure; the per-rank lock
+        # barrier remains the authoritative proof that fencing completed.
+        broadcast_fence=_mapped_sleeping_standby(),
     )
     target._gms_rank_liveness_monitor = monitor
     monitor.start()
