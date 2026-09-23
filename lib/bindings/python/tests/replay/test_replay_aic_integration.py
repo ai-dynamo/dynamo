@@ -46,7 +46,7 @@ def _engine_args(worker_type: str | None = None):
 
 
 def test_real_aic_memory_estimates_gpu_blocks() -> None:
-    from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+    from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
 
     blocks = estimate_num_gpu_blocks(
         model_path=AIC_MODEL,
@@ -81,7 +81,7 @@ def test_default_aic_capacity_uses_queryable_version() -> None:
 
 
 def test_aggregated_replay_uses_native_aic_engine() -> None:
-    from aiconfigurator_core.sdk.engine import compile_engine
+    from aisimulate_core.sdk.engine import compile_engine
 
     from dynamo.replay import run_synthetic_trace_replay
 

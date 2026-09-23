@@ -185,6 +185,9 @@ impl FpmPublisher {
 /// interpreted only by Dynamo adapters.
 pub use aisimulate_core::replay::DirectRequest;
 
+/// Complete recurrent-state allocation for one simulated rank/GPU.
+pub use aisimulate_core::engine::StateCacheConfig;
+
 /// Signal for output token generation with completion status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputSignal {
@@ -426,6 +429,8 @@ struct MockEngineArgsSerde {
     engine_type: OptionalConfigValue<String>,
     num_gpu_blocks: OptionalConfigValue<usize>,
     block_size: OptionalConfigValue<usize>,
+    prefix_match_unit: OptionalConfigValue<usize>,
+    state_cache: OptionalConfigValue<StateCacheConfig>,
     max_model_len: OptionalConfigValue<usize>,
     max_num_seqs: OptionalConfigValue<usize>,
     max_num_batched_tokens: OptionalConfigValue<usize>,
@@ -459,6 +464,7 @@ struct MockEngineArgsSerde {
     mem_fraction_static: OptionalConfigValue<f64>,
     free_gpu_memory_fraction: OptionalConfigValue<f64>,
     enable_local_indexer: OptionalConfigValue<bool>,
+    enable_kv_events: OptionalConfigValue<bool>,
     bootstrap_port: OptionalConfigValue<u16>,
     handoff_session_timeout_ms: OptionalConfigValue<u64>,
     #[serde(alias = "kv_transfer_bytes_per_token")]
@@ -524,6 +530,17 @@ pub struct MockEngineArgs {
 
     #[builder(default = "0")]
     pub block_size: usize,
+
+    /// Prefix matching granularity in tokens, independent of physical KV blocks.
+    /// Requires state_cache; unset preserves block-aligned prefix matching.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefix_match_unit: Option<usize>,
+
+    /// Complete recurrent-state size per rank, shared with the native engine.
+    #[builder(default = "None")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_cache: Option<StateCacheConfig>,
 
     /// Optional vLLM sequence-length limit, including prompt and generated
     /// tokens. Requests with no room to generate are rejected before admission.
@@ -695,6 +712,11 @@ pub struct MockEngineArgs {
     #[builder(default = "false")]
     pub enable_local_indexer: bool,
 
+    /// Permit KV event publishing and worker-local indexing. Disable for
+    /// fine-grained state-cache prefix matching, which cannot export KV events.
+    #[builder(default = "true")]
+    pub enable_kv_events: bool,
+
     /// Bootstrap port for disaggregated serving rendezvous.
     /// Prefill workers listen on this port; decode workers connect to it.
     /// If None, bootstrap rendezvous is disabled.
@@ -711,7 +733,8 @@ pub struct MockEngineArgs {
     #[builder(default = "None")]
     pub kv_bytes_per_token: Option<usize>,
 
-    /// Physical KV-cache bytes occupied by one token, independent of transfer geometry.
+    /// Physical KV-cache bytes occupied by one token per rank/GPU, independent
+    /// of transfer geometry. This is a manual sizing input, not DCP layout inference.
     #[builder(default = "None")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_cache_bytes_per_token: Option<usize>,
@@ -777,6 +800,22 @@ fn mock_engine_args_validation_error(code: &'static str, message: String) -> Val
 }
 
 fn validate_mock_engine_args(args: &MockEngineArgs) -> Result<(), ValidationError> {
+    if args.prefix_match_unit.is_some() && args.enable_kv_events {
+        return Err(mock_engine_args_validation_error(
+            "prefix_match_unit_kv_events",
+            "prefix_match_unit does not support KV event export; set enable_kv_events=false and use round-robin routing".to_string(),
+        ));
+    }
+    if !args.enable_kv_events
+        && (args.enable_local_indexer
+            || args.zmq_kv_events_port.is_some()
+            || args.zmq_replay_port.is_some())
+    {
+        return Err(mock_engine_args_validation_error(
+            "kv_events_disabled",
+            "enable_kv_events=false is incompatible with enable_local_indexer or ZMQ KV event ports".to_string(),
+        ));
+    }
     if args.block_size == 0 {
         return Err(mock_engine_args_validation_error(
             "block_size_zero",
@@ -872,6 +911,16 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
     type Error = String;
 
     fn try_from(compat: MockEngineArgsSerde) -> Result<Self, Self::Error> {
+        if matches!(compat.state_cache, OptionalConfigValue::Present(Some(_)))
+            && (!matches!(compat.num_gpu_blocks, OptionalConfigValue::Present(Some(_)))
+                || !matches!(compat.block_size, OptionalConfigValue::Present(Some(size)) if size > 0)
+                || !matches!(
+                    compat.kv_cache_bytes_per_token,
+                    OptionalConfigValue::Present(Some(_))
+                ))
+        {
+            return Err("state_cache requires explicit num_gpu_blocks, positive block_size, and kv_cache_bytes_per_token for manual per-rank sizing".to_string());
+        }
         let mut builder = Self::builder();
 
         if let Some(engine_type) = compat.engine_type.into_non_null("engine_type")? {
@@ -882,6 +931,12 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         }
         if let Some(block_size) = compat.block_size.into_non_null("block_size")? {
             builder = builder.block_size(block_size);
+        }
+        if let Some(prefix_match_unit) = compat.prefix_match_unit.into_nullable() {
+            builder = builder.prefix_match_unit(prefix_match_unit);
+        }
+        if let Some(state_cache) = compat.state_cache.into_nullable() {
+            builder = builder.state_cache(state_cache);
         }
         if let Some(max_model_len) = compat.max_model_len.into_nullable() {
             builder = builder.max_model_len(max_model_len);
@@ -1043,6 +1098,9 @@ impl TryFrom<MockEngineArgsSerde> for MockEngineArgs {
         {
             builder = builder.enable_local_indexer(enable_local_indexer);
         }
+        if let Some(enable_kv_events) = compat.enable_kv_events.into_non_null("enable_kv_events")? {
+            builder = builder.enable_kv_events(enable_kv_events);
+        }
         if let Some(bootstrap_port) = compat.bootstrap_port.into_nullable() {
             builder = builder.bootstrap_port(bootstrap_port);
         }
@@ -1185,6 +1243,9 @@ impl MockEngineArgs {
             self.aic_nextn_accept_rates =
                 Some(crate::common::speculative::format_accept_rates(&rates));
         }
+        if self.state_cache.is_some() || self.prefix_match_unit.is_some() {
+            crate::engine_adapter::validate_native_config(self)?;
+        }
         Ok(())
     }
 
@@ -1197,7 +1258,7 @@ impl MockEngineArgs {
     }
 
     pub fn needs_kv_publisher(&self) -> bool {
-        self.enable_prefix_caching && !self.is_decode()
+        self.enable_kv_events && self.enable_prefix_caching && !self.is_decode()
     }
 
     pub fn undiscounted_aic_accept_rates(&self) -> Option<String> {
@@ -1227,6 +1288,58 @@ mod tests {
 
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn state_cache_json_requires_manual_sizing_and_preserves_full_config() {
+        let config = json!({
+            "num_gpu_blocks": 128,
+            "block_size": 1536,
+            "prefix_match_unit": 128,
+            "state_cache": {"bytes_per_request": 24576},
+            "kv_cache_bytes_per_token": 16,
+            "enable_kv_events": false,
+        });
+        let args = MockEngineArgs::from_json_str(&config.to_string()).unwrap();
+        assert!(!args.needs_kv_publisher());
+        assert_eq!(args.prefix_match_unit, Some(128));
+        assert_eq!(args.state_cache.unwrap().bytes_per_request, 24_576);
+
+        for field in ["num_gpu_blocks", "block_size", "kv_cache_bytes_per_token"] {
+            let mut missing = config.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let error = MockEngineArgs::from_json_str(&missing.to_string()).unwrap_err();
+            assert!(error.to_string().contains("manual per-rank sizing"));
+        }
+        let mut unknown = config;
+        unknown["state_cache"]["checkpoint_interval"] = json!(128);
+        let error = MockEngineArgs::from_json_str(&unknown.to_string()).unwrap_err();
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn disabled_kv_events_reject_indexer_and_zmq_configuration() {
+        for field in [
+            "enable_local_indexer",
+            "zmq_kv_events_port",
+            "zmq_replay_port",
+        ] {
+            let mut config = json!({"enable_kv_events": false});
+            config[field] = if field == "enable_local_indexer" {
+                json!(true)
+            } else {
+                json!(5557)
+            };
+            let error = MockEngineArgs::from_json_str(&config.to_string()).unwrap_err();
+            assert!(error.to_string().contains("incompatible"));
+        }
+        let error = MockEngineArgs::from_json_str(r#"{"prefix_match_unit":128}"#).unwrap_err();
+        assert!(error.to_string().contains("enable_kv_events=false"));
+
+        let legacy = MockEngineArgs::from_json_str("{}").unwrap();
+        assert!(legacy.needs_kv_publisher());
+        assert!(legacy.state_cache.is_none());
+        assert!(legacy.prefix_match_unit.is_none());
+    }
 
     #[derive(Default)]
     struct FailingRawSink {

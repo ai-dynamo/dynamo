@@ -20,8 +20,9 @@ use parking_lot::Mutex;
 use pyo3::{
     exceptions::{PyException, PyValueError},
     prelude::*,
+    types::PyDict,
 };
-use pythonize::pythonize;
+use pythonize::{depythonize, pythonize};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -253,6 +254,18 @@ impl TrtllmArgs {
     }
 }
 
+fn resolve_transfer_bytes_alias(
+    legacy: Option<usize>,
+    canonical: Option<usize>,
+) -> PyResult<Option<usize>> {
+    if legacy.is_some() && canonical.is_some() {
+        return Err(PyValueError::new_err(
+            "set only kv_transfer_bytes_per_token or its legacy alias kv_bytes_per_token",
+        ));
+    }
+    Ok(canonical.or(legacy))
+}
+
 #[pyclass]
 #[derive(Clone, Debug, Default)]
 pub struct MockEngineArgs {
@@ -273,7 +286,7 @@ impl MockEngineArgs {
 #[pymethods]
 impl MockEngineArgs {
     #[new]
-    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None))]
+    #[pyo3(signature = (engine_type="vllm", num_gpu_blocks=None, block_size=0, max_num_seqs=Some(256), max_num_batched_tokens=Some(8192), enable_prefix_caching=true, enable_chunked_prefill=true, speedup_ratio=1.0, decode_speedup_ratio=1.0, dp_size=1, startup_time=None, worker_type="aggregated", planner_profile_data=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=42, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_local_indexer=false, bootstrap_port=None, handoff_session_timeout_ms=300000, kv_bytes_per_token=None, kv_transfer_bandwidth=None, kv_transfer_timing_mode="full_prompt", reasoning=None, response_replay_trace_path=None, zmq_kv_events_port=None, zmq_replay_port=None, preemption_mode="lifo", router_queue_policy=None, sglang=None, trtllm=None, max_model_len=None, prefix_match_unit=None, state_cache=None, kv_cache_bytes_per_token=None, kv_transfer_bytes_per_token=None, enable_kv_events=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         engine_type: &str,
@@ -323,7 +336,25 @@ impl MockEngineArgs {
         sglang: Option<SglangArgs>,
         trtllm: Option<TrtllmArgs>,
         max_model_len: Option<usize>,
+        prefix_match_unit: Option<usize>,
+        state_cache: Option<Bound<'_, PyDict>>,
+        kv_cache_bytes_per_token: Option<usize>,
+        kv_transfer_bytes_per_token: Option<usize>,
+        enable_kv_events: bool,
     ) -> PyResult<Self> {
+        if state_cache.is_some()
+            && (num_gpu_blocks.is_none() || block_size == 0 || kv_cache_bytes_per_token.is_none())
+        {
+            return Err(PyValueError::new_err(
+                "state_cache requires explicit num_gpu_blocks, block_size and kv_cache_bytes_per_token",
+            ));
+        }
+        let state_cache = state_cache
+            .map(|config| depythonize(&config))
+            .transpose()
+            .map_err(|error| PyValueError::new_err(format!("invalid state_cache: {error}")))?;
+        let kv_bytes_per_token =
+            resolve_transfer_bytes_alias(kv_bytes_per_token, kv_transfer_bytes_per_token)?;
         let engine_type = parse_mocker_engine_type(engine_type)?;
         let worker_type = parse_worker_type(worker_type)?;
         let preemption_mode = parse_preemption_mode(preemption_mode)?;
@@ -341,6 +372,10 @@ impl MockEngineArgs {
         let mut builder = RsMockEngineArgs::builder()
             .engine_type(engine_type)
             .block_size(block_size)
+            .prefix_match_unit(prefix_match_unit)
+            .state_cache(state_cache)
+            .kv_cache_bytes_per_token(kv_cache_bytes_per_token)
+            .enable_kv_events(enable_kv_events)
             .max_model_len(max_model_len)
             .max_num_seqs(max_num_seqs)
             .max_num_batched_tokens(max_num_batched_tokens)
@@ -445,6 +480,28 @@ impl MockEngineArgs {
     }
 
     #[getter]
+    fn prefix_match_unit(&self) -> Option<usize> {
+        self.inner.prefix_match_unit
+    }
+
+    #[getter]
+    fn state_cache(&self, py: Python<'_>) -> PyResult<PyObject> {
+        pythonize(py, &self.inner.state_cache)
+            .map(Bound::unbind)
+            .map_err(to_pyerr)
+    }
+
+    #[getter]
+    fn kv_cache_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_cache_bytes_per_token
+    }
+
+    #[getter]
+    fn enable_kv_events(&self) -> bool {
+        self.inner.enable_kv_events
+    }
+
+    #[getter]
     fn num_gpu_blocks(&self) -> usize {
         self.inner.num_gpu_blocks
     }
@@ -511,6 +568,11 @@ impl MockEngineArgs {
             dynamo_mocker::common::protocols::EngineType::Sglang => "sglang",
             dynamo_mocker::common::protocols::EngineType::Trtllm => "trtllm",
         }
+    }
+
+    #[getter]
+    fn kv_transfer_bytes_per_token(&self) -> Option<usize> {
+        self.inner.kv_bytes_per_token
     }
 
     #[getter]
@@ -767,7 +829,7 @@ impl MockEngineArgs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None))]
+    #[pyo3(signature = (bootstrap_port=None, zmq_kv_events_port=None, zmq_replay_port=None, kv_bytes_per_token=None, num_gpu_blocks=None, aic_backend=None, aic_system=None, aic_backend_version=None, aic_tp_size=None, aic_model_path=None, aic_moe_tp_size=None, aic_moe_ep_size=None, aic_attention_dp_size=None, aic_nextn=None, aic_nextn_accept_rates=None, aic_mtp_seed=None, aic_gemm_dtype=None, aic_moe_dtype=None, aic_fmha_dtype=None, aic_kv_cache_dtype=None, aic_comm_dtype=None, gpu_memory_utilization=None, mem_fraction_static=None, free_gpu_memory_fraction=None, enable_prefix_caching=None, worker_type=None, kv_transfer_bytes_per_token=None))]
     fn with_overrides(
         &self,
         bootstrap_port: Option<u16>,
@@ -796,7 +858,10 @@ impl MockEngineArgs {
         free_gpu_memory_fraction: Option<f64>,
         enable_prefix_caching: Option<bool>,
         worker_type: Option<String>,
+        kv_transfer_bytes_per_token: Option<usize>,
     ) -> PyResult<Self> {
+        let kv_bytes_per_token =
+            resolve_transfer_bytes_alias(kv_bytes_per_token, kv_transfer_bytes_per_token)?;
         let mut inner = self.inner.clone();
         let mut num_gpu_blocks_explicit = self.num_gpu_blocks_explicit;
         if let Some(port) = bootstrap_port {
@@ -2306,6 +2371,7 @@ fn build_synthetic_workload(
             mean: output_tokens,
             stddev: 0.0,
         },
+        cached_prefix_tokens: 0,
         shared_prefix_ratio,
         num_prefix_groups,
         first_turn_arrivals,

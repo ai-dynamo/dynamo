@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one published AISimulate release."""
+"""Keep Dynamo's Python and Rust engines on one immutable AISimulate commit."""
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from importlib import metadata
@@ -31,6 +32,8 @@ pytestmark = [
 
 ROOT = Path(__file__).resolve().parents[2]
 AISIMULATE_REQUIREMENTS = ROOT / "container/deps/requirements.aisimulate.txt"
+AISIMULATE_REPOSITORY = "https://github.com/ai-dynamo/aisimulate.git"
+AISIMULATE_SUBDIRECTORY = "python/aisimulate"
 LOCKFILES = (
     ROOT / "Cargo.lock",
     ROOT / "lib/bindings/python/Cargo.lock",
@@ -59,8 +62,8 @@ def _python_requirement(pyproject: dict) -> Requirement:
 def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
     matches: list[Requirement] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        requirement = line.split("#", 1)[0].strip()
-        if not requirement or requirement.startswith("--"):
+        requirement = re.split(r"\s+#", line, maxsplit=1)[0].strip()
+        if not requirement or requirement.startswith(("#", "--")):
             continue
         parsed = Requirement(requirement)
         if canonicalize_name(parsed.name) == "aisimulate":
@@ -69,16 +72,18 @@ def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
     return matches[0]
 
 
-def _exact_version(requirement: Requirement) -> Version:
-    assert requirement.url is None, "AISimulate must resolve from PyPI"
-    specifiers = list(requirement.specifier)
-    assert (
-        len(specifiers) == 1 and specifiers[0].operator == "=="
-    ), "AISimulate must use one exact PyPI version"
-    return Version(specifiers[0].version)
+def _git_commit(requirement: Requirement) -> str:
+    assert not requirement.specifier, "AISimulate must use its immutable source pin"
+    match = re.fullmatch(
+        rf"git\+{re.escape(AISIMULATE_REPOSITORY)}@([0-9a-f]{{40}})"
+        rf"#subdirectory={re.escape(AISIMULATE_SUBDIRECTORY)}",
+        requirement.url or "",
+    )
+    assert match, "AISimulate must use a full Git SHA and its Python subdirectory"
+    return match.group(1)
 
 
-def _locked_cargo_version(path: Path) -> Version:
+def _locked_cargo_version(path: Path, commit: str) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
     matches = [package for package in packages if package["name"] == "aisimulate-core"]
@@ -86,23 +91,24 @@ def _locked_cargo_version(path: Path) -> Version:
 
     package = matches[0]
     assert package.get("source") == (
-        "registry+https://github.com/rust-lang/crates.io-index"
-    ), f"aisimulate-core must resolve from crates.io in {path}"
-    assert re.fullmatch(
-        r"[0-9a-f]{64}", str(package.get("checksum", ""))
-    ), f"aisimulate-core must have a registry checksum in {path}"
+        f"git+{AISIMULATE_REPOSITORY}?rev={commit}#{commit}"
+    ), f"aisimulate-core must resolve to the Python source commit in {path}"
+    assert "checksum" not in package, f"unexpected registry package in {path}"
     return Version(str(package["version"]))
 
 
-def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
+def test_dynamo_pins_one_immutable_aisimulate_commit() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
-    python_version = _exact_version(python_requirement)
+    commit = _git_commit(python_requirement)
+    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
+        benchmark_requirement = _python_requirement(tomllib.load(handle))
     container_requirement = _requirements_file_aisimulate_requirement(
         AISIMULATE_REQUIREMENTS
     )
 
     assert python_requirement.marker is not None
+    assert benchmark_requirement.marker == python_requirement.marker
     environment = default_environment()
     environment["python_version"] = "3.10"
     assert not python_requirement.marker.evaluate(environment)
@@ -115,40 +121,44 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     environment["python_version"] = "3.14"
     assert not python_requirement.marker.evaluate(environment)
     assert container_requirement.marker is None
-    assert _exact_version(container_requirement) == python_version
+    assert _git_commit(benchmark_requirement) == commit
+    assert _git_commit(container_requirement) == commit
 
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
-    assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
-    cargo_requirement = str(cargo_dependency["version"])
-    assert cargo_requirement.startswith(
-        "="
-    ), "aisimulate-core must use one exact crates.io version"
-    cargo_version = Version(cargo_requirement.removeprefix("="))
+    assert cargo_dependency == {"git": AISIMULATE_REPOSITORY, "rev": commit}
+    with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
+        binding_dependency = tomllib.load(handle)["dependencies"]["aisimulate-core"]
+    assert binding_dependency == {
+        **cargo_dependency,
+        "optional": True,
+        "features": ["python"],
+    }
+    assert len({_locked_cargo_version(path, commit) for path in LOCKFILES}) == 1
 
-    assert cargo_version == python_version
-    assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
 
-
-def test_container_stages_the_published_aisimulate_wheel() -> None:
+def test_container_builds_the_pinned_aisimulate_source_wheel() -> None:
     pyproject, _ = _root_configs()
-    python_version = _exact_version(_python_requirement(pyproject))
-    container_version = _exact_version(
+    python_commit = _git_commit(_python_requirement(pyproject))
+    container_commit = _git_commit(
         _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
     )
     wheel_builder = (ROOT / "container/templates/wheel_builder.Dockerfile").read_text(
         encoding="utf-8"
     )
 
-    assert container_version == python_version
-    assert "requirements.aisimulate.txt" in wheel_builder
-    assert (
-        "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
-        in wheel_builder
+    assert container_commit == python_commit
+    build_step = next(
+        step
+        for step in wheel_builder.split("\nRUN ")
+        if "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
+        in step
     )
-    assert "--only-binary=:all:" in wheel_builder
-    assert "--no-deps" in wheel_builder
-    assert "--no-index" in wheel_builder
-    assert "--find-links https://pypi.nvidia.com/aisimulate/" in wheel_builder
+    assert "python -m pip wheel" in build_step
+    assert "--wheel-dir /opt/dynamo/dist" in build_step
+    assert "--no-deps" in build_step
+    assert "--only-binary" not in build_step
+    assert "--no-index" not in build_step
+    assert "--find-links https://pypi.nvidia.com/aisimulate/" not in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()
@@ -164,13 +174,34 @@ def test_planner_ci_image_collects_unified_cli_e2e_tests() -> None:
     assert "components/src/dynamo/replay/tests/test_main.py" not in planner_template
 
 
-def test_installed_aisimulate_matches_the_declared_release() -> None:
+def test_installed_aisimulate_matches_the_native_version() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
     pyproject, _ = _root_configs()
-    expected = _exact_version(_python_requirement(pyproject))
+    commit = _git_commit(_python_requirement(pyproject))
+    expected = _locked_cargo_version(LOCKFILES[0], commit)
 
     assert Version(metadata.version("aisimulate")) == expected
+
+
+def test_installed_aisimulate_vcs_provenance_matches_the_declared_commit() -> None:
+    if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
+        pytest.skip("AISimulate supports Python 3.11 through 3.13")
+    pyproject, _ = _root_configs()
+    expected = _git_commit(_python_requirement(pyproject))
+    direct_url = metadata.distribution("aisimulate").read_text("direct_url.json")
+    if direct_url is None:
+        pytest.skip("installed AISimulate wheel has no direct_url.json VCS provenance")
+    provenance = json.loads(direct_url)
+    if "vcs_info" not in provenance:
+        pytest.skip(
+            "installed AISimulate local wheel does not retain its source commit"
+        )
+    assert provenance["url"] == AISIMULATE_REPOSITORY
+    assert provenance["subdirectory"] == AISIMULATE_SUBDIRECTORY
+    assert provenance["vcs_info"]["vcs"] == "git"
+    assert provenance["vcs_info"]["commit_id"] == expected
+    assert provenance["vcs_info"]["requested_revision"] == expected
 
 
 def test_ai_dynamo_registers_only_its_aisimulate_providers() -> None:

@@ -57,7 +57,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 [workspace.dependencies]
 dynamo-custom-policy-builtin = { path = "lib/router-plugins/builtin", version = "1.6.0" }
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.12.0" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "c59a00a3fb7d531eea6bea9887235e92b535ec38" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.6.0" }

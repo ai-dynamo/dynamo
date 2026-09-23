@@ -2537,6 +2537,51 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::partial_state_hit(24_192, 24_408)]
+    #[case::state_boundary_fallback(23_700, 25_560)]
+    #[case::one_token_short_of_checkpoint(24_191, 25_560)]
+    #[case::no_shared_prefix(0, 48_600)]
+    fn native_state_cache_replays_partial_prefixes_in_token_units(
+        #[case] shared_prefix: usize,
+        #[case] expected_prefill: u64,
+    ) {
+        let args = MockEngineArgs::from_json_str(
+            r#"{
+                "num_gpu_blocks": 128,
+                "block_size": 1536,
+                "prefix_match_unit": 128,
+                "state_cache": {"bytes_per_request": 24576},
+                "kv_cache_bytes_per_token": 16,
+                "max_num_batched_tokens": 8192,
+                "enable_kv_events": false,
+                "timing_model": {"type":"fixed", "prefill_ms":1, "decode_ms":1}
+            }"#,
+        )
+        .unwrap();
+        let cold = (0..24_300).collect::<Vec<u32>>();
+        let mut warm = cold.clone();
+        for token in &mut warm[shared_prefix..] {
+            *token += 100_000;
+        }
+        let requests = [cold, warm]
+            .into_iter()
+            .enumerate()
+            .map(|(index, tokens)| DirectRequest {
+                tokens,
+                max_output_tokens: 2,
+                output_token_ids: Some(vec![200_000, 200_001]),
+                uuid: Some(Uuid::from_u128(index as u128 + 1)),
+                arrival_timestamp_ms: Some(index as f64 * 100.0),
+                ..Default::default()
+            })
+            .collect();
+        let report = simulate_trace_requests(args, requests, 1, 1.0).unwrap();
+        assert_eq!(report.request_counts.completed_requests, 2);
+        assert_eq!(report.request_counts.total_output_tokens, 4);
+        assert_eq!(report.committed_prefill_tokens, expected_prefill);
+    }
+
     #[test]
     fn one_worker_sglang_impossible_request_returns_dead_end_error() {
         let args = MockEngineArgs::builder()

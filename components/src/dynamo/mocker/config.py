@@ -14,6 +14,7 @@ from dynamo._internal.aic import (
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import ModelRuntimeConfig
 from dynamo.mocker import MockEngineArgs, ReasoningConfig, SglangArgs, TrtllmArgs
+from dynamo.mocker.utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
 
 _DEFAULT_NUM_GPU_BLOCKS = 16384
 _DEFAULT_MAX_NUM_SEQS = 256
@@ -183,7 +184,9 @@ def _resolve_raw_engine_args(
     *,
     fallback_model_path: str | None = None,
 ) -> dict:
-    if raw.get("num_gpu_blocks") is not None:
+    # State-cache geometry must be explicit; let the shared Rust validator reject
+    # missing fields instead of silently estimating capacity from a model.
+    if raw.get("state_cache") is not None or raw.get("num_gpu_blocks") is not None:
         return raw
 
     aic_backend = raw.get("aic_backend")
@@ -244,6 +247,20 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         aic_attention_dp_size = getattr(args, "aic_attention_dp_size", None)
     engine_type = getattr(args, "engine_type", None) or "vllm"
     max_model_len = getattr(args, "max_model_len", None)
+    state_cache = getattr(args, "state_cache", None)
+    if state_cache is not None and (
+        getattr(args, "num_gpu_blocks", None) is None
+        or not getattr(args, "block_size", None)
+        or getattr(args, "kv_cache_bytes_per_token", None) is None
+    ):
+        raise ValueError(
+            "state_cache requires explicit --num-gpu-blocks-override, --block-size "
+            "and --kv-cache-bytes-per-token (per rank/GPU)"
+        )
+    kv_transfer_bandwidth = getattr(args, "kv_transfer_bandwidth", None)
+    if kv_transfer_bandwidth is None and state_cache is None:
+        kv_transfer_bandwidth = DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
+    enable_kv_events = getattr(args, "enable_kv_events", True)
     num_gpu_blocks = _resolve_num_gpu_blocks(
         explicit_num_gpu_blocks=getattr(args, "num_gpu_blocks", None),
         engine_type=engine_type,
@@ -295,9 +312,14 @@ def build_mocker_engine_args(args: argparse.Namespace) -> MockEngineArgs:
         gpu_memory_utilization=getattr(args, "gpu_memory_utilization", None),
         mem_fraction_static=getattr(args, "mem_fraction_static", None),
         free_gpu_memory_fraction=getattr(args, "free_gpu_memory_fraction", None),
-        enable_local_indexer=True,
+        enable_local_indexer=enable_kv_events,
+        enable_kv_events=enable_kv_events,
+        prefix_match_unit=getattr(args, "prefix_match_unit", None),
+        state_cache=state_cache,
+        kv_cache_bytes_per_token=getattr(args, "kv_cache_bytes_per_token", None),
         kv_bytes_per_token=getattr(args, "kv_bytes_per_token", None),
-        kv_transfer_bandwidth=getattr(args, "kv_transfer_bandwidth", None),
+        kv_transfer_bytes_per_token=getattr(args, "kv_transfer_bytes_per_token", None),
+        kv_transfer_bandwidth=kv_transfer_bandwidth,
         kv_transfer_timing_mode=getattr(args, "kv_transfer_timing_mode", "full_prompt"),
         reasoning=_parse_reasoning_config(getattr(args, "reasoning", None)),
         response_replay_trace_path=args.response_replay_trace_path,
@@ -323,6 +345,7 @@ def apply_worker_engine_args_overrides(
     engine_args: MockEngineArgs,
     *,
     kv_bytes_per_token: int | None = None,
+    kv_transfer_bytes_per_token: int | None = None,
     bootstrap_port: int | None = None,
     zmq_kv_events_port: int | None = None,
     zmq_replay_port: int | None = None,
@@ -333,6 +356,7 @@ def apply_worker_engine_args_overrides(
         zmq_kv_events_port=zmq_kv_events_port,
         zmq_replay_port=zmq_replay_port,
         kv_bytes_per_token=kv_bytes_per_token,
+        kv_transfer_bytes_per_token=kv_transfer_bytes_per_token,
         aic_mtp_seed=aic_mtp_seed,
     )
 
@@ -351,10 +375,14 @@ def build_runtime_config(
     if rc.max_num_batched_tokens is None:
         rc.max_num_batched_tokens = _DEFAULT_MAX_NUM_BATCHED_TOKENS
     rc.enable_local_indexer = (
-        engine_args.enable_local_indexer and not engine_args.is_decode()
+        engine_args.enable_kv_events
+        and engine_args.enable_local_indexer
+        and not engine_args.is_decode()
     )
     rc.kv_event_publishing_enabled = (
-        engine_args.enable_prefix_caching and not engine_args.is_decode()
+        engine_args.enable_kv_events
+        and engine_args.enable_prefix_caching
+        and not engine_args.is_decode()
     )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")

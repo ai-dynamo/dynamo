@@ -2045,6 +2045,11 @@ class MockEngineArgs:
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
+        prefix_match_unit: Optional[int] = None,
+        state_cache: Optional[dict[str, int]] = None,
+        kv_cache_bytes_per_token: Optional[int] = None,
+        kv_transfer_bytes_per_token: Optional[int] = None,
+        enable_kv_events: bool = True,
     ) -> None:
         ...
 
@@ -2056,6 +2061,24 @@ class MockEngineArgs:
 
     @property
     def block_size(self) -> int: ...
+
+    @property
+    def prefix_match_unit(self) -> Optional[int]: ...
+
+    @property
+    def state_cache(self) -> Optional[dict[str, int]]: ...
+
+    @property
+    def kv_cache_bytes_per_token(self) -> Optional[int]: ...
+
+    @property
+    def kv_transfer_bytes_per_token(self) -> Optional[int]: ...
+
+    @property
+    def kv_bytes_per_token(self) -> Optional[int]: ...
+
+    @property
+    def enable_kv_events(self) -> bool: ...
 
     @property
     def num_gpu_blocks(self) -> int: ...
@@ -2251,6 +2274,7 @@ class MockEngineArgs:
         free_gpu_memory_fraction: Optional[float] = None,
         enable_prefix_caching: Optional[bool] = None,
         worker_type: Optional[str] = None,
+        kv_transfer_bytes_per_token: Optional[int] = None,
     ) -> "MockEngineArgs": ...
 
 class WorkerType:

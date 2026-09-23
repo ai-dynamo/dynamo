@@ -2,6 +2,7 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
+import json
 import logging
 import os
 import tempfile
@@ -29,6 +30,17 @@ def positive_int(value: str) -> int:
         raise argparse.ArgumentTypeError(str(error)) from error
     if parsed <= 0:
         raise argparse.ArgumentTypeError(f"must be positive, got {parsed}")
+    return parsed
+
+
+def json_object(value: str) -> dict:
+    """Parse a nested engine configuration without dropping unknown fields."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object")
     return parsed
 
 
@@ -205,6 +217,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Token block size for KV cache blocks. When unset, the default "
         "depends on engine: vLLM 64, SGLang 1, TRTLLM 32.",
+    )
+    parser.add_argument(
+        "--prefix-match-unit",
+        type=positive_int,
+        default=None,
+        help="Prefix matching granularity in tokens, distinct from physical --block-size. "
+        "Requires --state-cache and --no-enable-kv-events; aggregated vLLM only.",
+    )
+    parser.add_argument(
+        "--state-cache",
+        type=json_object,
+        default=None,
+        help='Full AISimulate state-cache JSON object, currently {"bytes_per_request":24576}. '
+        "bytes_per_request is one complete recurrent state per rank. Requires explicit "
+        "--num-gpu-blocks-override, --block-size and --kv-cache-bytes-per-token.",
+    )
+    parser.add_argument(
+        "--enable-kv-events",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Publish KV events and maintain the worker's local KV index (default: enabled). "
+        "Disable for partial prefix matching and use round-robin routing.",
     )
     parser.add_argument(
         "--max-model-len",
@@ -551,9 +585,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--kv-transfer-bandwidth",
         type=float,
-        default=_default_kv_transfer_bandwidth_gbps(),
+        default=None,
         help="KV cache transfer bandwidth in GB/s for disaggregated serving latency simulation. "
-        "Default: 64.0 (inter-node InfiniBand). Set to 0 to disable KV transfer delay. "
+        "Default without state cache: 64.0 (inter-node InfiniBand); unset with state cache. "
+        "Set to 0 to disable KV transfer delay. "
         "For intra-node NVLink, typical value is ~450.",
     )
     parser.add_argument(
@@ -575,15 +610,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "fp8_e5m2",
             "fp8_inc",
         ],
-        help="Data type for KV cache, used to compute kv_bytes_per_token. "
+        help="Data type used to compute transfer bytes per token, not physical cache sizing. "
         "'auto' uses the model's dtype (default).",
     )
     parser.add_argument(
-        "--kv-bytes-per-token",
-        type=int,
+        "--kv-cache-bytes-per-token",
+        type=positive_int,
         default=None,
-        help="KV cache bytes per token. If not specified, auto-computed from model config "
-        "using: num_layers * 2 * num_kv_heads * head_dim * dtype_bytes.",
+        help="Physical KV bytes per token per rank/GPU for cache allocation. "
+        "Manual sizing; independent of transfer bytes and not divided by TP or DCP.",
+    )
+    transfer_size = parser.add_mutually_exclusive_group()
+    transfer_size.add_argument(
+        "--kv-transfer-bytes-per-token",
+        type=positive_int,
+        default=None,
+        help="KV bytes transferred per token for disaggregated transfer timing. "
+        "If unset, auto-computed from model config unless state cache is enabled.",
+    )
+    transfer_size.add_argument(
+        "--kv-bytes-per-token",
+        type=positive_int,
+        default=None,
+        help="Legacy alias for --kv-transfer-bytes-per-token; does not size physical KV allocation.",
     )
     parser.add_argument(
         "--stagger-delay",
@@ -678,9 +727,3 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             args.endpoint = DEFAULT_ENDPOINT
             logger.debug(f"Using default endpoint: {args.endpoint}")
     return args
-
-
-def _default_kv_transfer_bandwidth_gbps() -> float:
-    from .utils.kv_cache import DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS
-
-    return DEFAULT_KV_TRANSFER_BANDWIDTH_GBPS

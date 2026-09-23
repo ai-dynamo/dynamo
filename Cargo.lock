@@ -34,9 +34,8 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d266db788afdb866421aad39f8fbc7096dba9517105ff7d770ee83ad70f82bb"
+version = "0.13.0"
+source = "git+https://github.com/ai-dynamo/aisimulate.git?rev=c59a00a3fb7d531eea6bea9887235e92b535ec38#c59a00a3fb7d531eea6bea9887235e92b535ec38"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -49,13 +48,17 @@ dependencies = [
  "parquet",
  "pep440_rs",
  "quick_cache",
+ "rand 0.8.6",
  "rand 0.9.4",
+ "rand_chacha 0.3.1",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "sha2 0.10.9",
  "slotmap",
+ "tempfile",
  "thiserror 2.0.18",
  "tracing",
  "uuid",
@@ -137,7 +140,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -148,7 +151,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9291,7 +9294,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

@@ -1651,8 +1651,10 @@ mod tests {
                 max_num_seqs: 8,
                 max_num_batched_tokens: 256,
                 timing_model: TimingModelConfig::Fixed {
-                    prefill_ms: 100.0,
-                    decode_ms: 0.0,
+                    // Decode workers do not charge prefill timing. Keep a real
+                    // pass in flight while the sibling reservation is applied.
+                    prefill_ms: 0.0,
+                    decode_ms: 100.0,
                 },
                 ..EngineConfig::default()
             },
@@ -1669,18 +1671,22 @@ mod tests {
             panic!("expected grouped pass start");
         };
         let group_duration_ms = started.end_ms - started.started_at_ms;
+        assert_eq!(group_duration_ms, 100.0);
 
         let handoff_id = HandoffId::from(Uuid::from_u128(72));
-        handle
-            .apply_command(SchedulerCommand::new(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            handle.apply_command(SchedulerCommand::new(
                 1,
                 Command::ReserveDestination {
                     handoff_id,
                     request: request(73, 4, 1),
                 },
-            ))
-            .await
-            .unwrap();
+            )),
+        )
+        .await
+        .expect("idle-sibling reservation must apply before the pass completes")
+        .unwrap();
         let GroupedLiveEvent::CommandApplied {
             pass_in_flight,
             effects,

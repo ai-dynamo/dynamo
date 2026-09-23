@@ -282,7 +282,11 @@ def test_synthetic_disagg_preserves_request_count_and_load(monkeypatch) -> None:
     assert seen["num_decode_workers"] == 4
     assert seen["capture_per_request"] is False
     assert seen["capture_planner_details"] is False
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics == {
+        "output_throughput_tok_s": 99.0,
+        "power_w": None,
+        "power_coverage": None,
+    }
 
 
 def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
@@ -316,7 +320,11 @@ def test_synthetic_request_rate_preserves_open_loop_load(monkeypatch) -> None:
     assert seen["request_count"] == 200
     assert seen["replay_concurrency"] is None
     assert seen["arrival_interval_ms"] == 50.0
-    assert report.metrics == {"output_throughput_tok_s": 99.0}
+    assert report.metrics == {
+        "output_throughput_tok_s": 99.0,
+        "power_w": None,
+        "power_coverage": None,
+    }
 
 
 @pytest.mark.parametrize("request_rate", [0.0, -1.0])
@@ -417,11 +425,13 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supported_backend_topologies=(),
             supported_hooks=(),
             supports_disaggregated_attention_dp=False,
+            supports_agentic_lanes=False,
         ):
             seen["version"] = replay_spec_api_version
             seen[
                 "supports_disaggregated_attention_dp"
             ] = supports_disaggregated_attention_dp
+            seen["supports_agentic_lanes"] = supports_agentic_lanes
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks
@@ -433,6 +443,7 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
     assert simulation._REPLAY_SPEC_API_VERSION == 1
     assert seen["version"] == 1
     assert seen["supports_disaggregated_attention_dp"] is False
+    assert seen["supports_agentic_lanes"] is True
 
 
 def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None:
