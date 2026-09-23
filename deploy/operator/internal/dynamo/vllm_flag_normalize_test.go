@@ -48,7 +48,10 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 		}
 		for name, args := range spellings {
 			t.Run(fmt.Sprintf("%s/%s", tc.flag, name), func(t *testing.T) {
-				got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tc.flag)
+				got, err := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tc.flag)
+				if err != nil {
+					t.Fatalf("getFlagValue(%q) unexpected error: %v", args, err)
+				}
 				if got != 4 {
 					t.Errorf("%s spelled %q read as %d, want 4 -- vLLM accepts all of these forms, "+
 						"so every reader in this package must too", tc.flag, args, got)
@@ -76,7 +79,10 @@ func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 			if !IsElasticEPRayLaunch(container) {
 				t.Fatalf("spelling %q should qualify as an elastic-EP Ray launch", args)
 			}
-			got := getFlagValue(getExpandedCommandLine(container), dataParallelSizeFlag)
+			got, err := getFlagValue(getExpandedCommandLine(container), dataParallelSizeFlag)
+			if err != nil {
+				t.Fatalf("getFlagValue(%q) unexpected error: %v", args, err)
+			}
 			if got != 4 {
 				t.Errorf("qualified as elastic EP but its declared width read as %d, want 4. A shape "+
 					"that qualifies must also size correctly, or the leader renders with no width "+
@@ -143,7 +149,10 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame(t *testing.T) {
 		"equals":    {"--tensor_parallel_size=4"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			got, err := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			if err != nil {
+				t.Fatalf("getFlagValue(%q) unexpected error: %v", args, err)
+			}
 			if got != 4 {
 				t.Errorf("getFlagValue(%q) = %d, want 4 -- vLLM treats \"_\" and \"-\" as "+
 					"interchangeable in long option names", args, got)
@@ -166,6 +175,52 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
 // implementation: rewriting by prefix or substring rather than by whole token. "-dpb" must not
 // be read as "-dp" with a stray "b", and a longer flag that merely starts with a short alias
 // must be left alone.
+// TestValidateParallelismSizes_RejectsNonPositive pins the operator to refusing a
+// parallelism size vLLM itself would refuse. Accepting it means building a topology for
+// a launch that cannot start, and the malformed flag then reaches the engine unchanged
+// with no operator-side error.
+func TestValidateParallelismSizes_RejectsNonPositive(t *testing.T) {
+	for name, rawArgs := range map[string][]string{
+		"zero tensor-parallel-size":     {tensorParallelSizeFlag, "0"},
+		"negative tensor-parallel-size": {tensorParallelSizeFlag, "-1"},
+		"negative pipeline-parallel-size combined": {
+			tensorParallelSizeFlag, "2", pipelineParallelSizeFlag, "-1",
+		},
+		"zero data-parallel-size":     {dataParallelSizeFlag, "0"},
+		"negative data-parallel-size": {dataParallelSizeFlag, "-1"},
+		"unparseable value":           {tensorParallelSizeFlag, "not-a-number"},
+		"valid then unparseable":      {tensorParallelSizeFlag, "4", tensorParallelSizeFlag, "nope"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(rawArgs...)))
+			if err := args.ValidateParallelismSizes(); err == nil {
+				t.Errorf("ValidateParallelismSizes() = nil, want an error for %q", rawArgs)
+			}
+		})
+	}
+}
+
+// TestValidateParallelismSizes_AcceptsAbsentOrPositive confirms an absent flag
+// (getFlagValue's default of 1) and explicit positive values are not errors -- only an
+// explicitly bad value is rejected.
+func TestValidateParallelismSizes_AcceptsAbsentOrPositive(t *testing.T) {
+	for name, rawArgs := range map[string][]string{
+		"nothing set":              {},
+		"positive tensor-parallel": {tensorParallelSizeFlag, "4"},
+		"positive data-parallel":   {dataParallelSizeFlag, "8"},
+		"all three set and positive": {
+			tensorParallelSizeFlag, "2", pipelineParallelSizeFlag, "2", dataParallelSizeFlag, "4",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(rawArgs...)))
+			if err := args.ValidateParallelismSizes(); err != nil {
+				t.Errorf("ValidateParallelismSizes() = %v, want nil for %q", err, rawArgs)
+			}
+		})
+	}
+}
+
 func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 	got := normalizeVLLMFlags([]string{"-dpb", "ray", "-dpx", "1", "--dp", "2"})
 	want := []string{dataParallelBackendFlag, "ray", "-dpx", "1", "--dp", "2"}
@@ -188,7 +243,10 @@ func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
 		"short then short": {"-tp", "1", "-tp", "4"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			got, err := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+			if err != nil {
+				t.Fatalf("getFlagValue(%q) unexpected error: %v", args, err)
+			}
 			if got != 4 {
 				t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
 					"applies the last value when a flag is repeated", args, got)
