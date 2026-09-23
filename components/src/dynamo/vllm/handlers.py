@@ -1923,6 +1923,15 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"Invalid mode '{mode}'; expected keep|wait|abort",
             }
         async with self._pause_lock:
+            active_loras = sorted(self._lora_state.active_requests)
+            if mode == "keep" and active_loras:
+                return {
+                    "status": "error",
+                    "message": (
+                        "Cannot pause generation in keep mode with active LoRA requests: "
+                        + ", ".join(active_loras)
+                    ),
+                }
             try:
                 try:
                     await self.engine_client.pause_generation(
@@ -2746,6 +2755,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
+                            if getattr(
+                                self, "_paused", False
+                            ) and self._lora_state.active_requests.get(lora_name, 0):
+                                raise RuntimeError(
+                                    f"Cannot hot-swap LoRA '{lora_name}' while generation "
+                                    "is paused with active requests; resume generation or "
+                                    "abort the requests first"
+                                )
                             await self._lora_state.wait_until_idle(lora_name)
                             await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
@@ -2978,6 +2995,19 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     lora_id = lora.id
 
                     if lora_name in self._engine_loaded_loras:
+                        if getattr(
+                            self, "_paused", False
+                        ) and self._lora_state.active_requests.get(lora_name, 0):
+                            yield {
+                                "status": "error",
+                                "message": (
+                                    f"Cannot unload LoRA '{lora_name}' while generation "
+                                    "is paused with active requests; resume generation or "
+                                    "abort the requests first"
+                                ),
+                                "lora_name": lora_name,
+                            }
+                            return
                         await self._lora_state.wait_until_idle(lora_name)
 
                     # Stop advertising the adapter before mutating engine or
@@ -3754,6 +3784,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 request,
                 enable_multimodal=self._multimodal_request_processor.enable_multimodal,
                 decode_capable=mode != DisaggregationMode.PREFILL,
+                allow_multimodal_features=mode == DisaggregationMode.AGGREGATED,
                 vllm_config=self.engine_client.vllm_config,
                 default_sampling_params=self.default_sampling_params,
             )

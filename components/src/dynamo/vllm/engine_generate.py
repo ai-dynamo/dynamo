@@ -189,6 +189,7 @@ def adapt_engine_generate_request(
     decode_capable: bool,
     vllm_config: Any,
     default_sampling_params: dict[str, Any],
+    allow_multimodal_features: bool = True,
 ) -> EngineGenerateInput | None:
     """Adapt one Rust-frontend TITO envelope at the Python engine boundary."""
     import msgspec
@@ -210,6 +211,8 @@ def adapt_engine_generate_request(
     if not isinstance(raw_sampling_params, dict):
         raise TypeError("extra_args.vllm_tito.sampling_params must be an object")
     features = envelope.get("features")
+    if features is not None and not allow_multimodal_features:
+        raise ValueError("TITO multimodal features require an aggregated vLLM worker")
     if isinstance(features, dict):
         kwargs_data = features.get("kwargs_data")
         if kwargs_data is not None and not isinstance(kwargs_data, dict):
@@ -219,11 +222,10 @@ def adapt_engine_generate_request(
     if (
         isinstance(raw_prompt_start, bool)
         or not isinstance(raw_prompt_start, int)
-        or not 0 <= raw_prompt_start < len(token_ids)
+        or raw_prompt_start < 0
     ):
         raise ValueError(
-            "sampling_params.routed_experts_prompt_start must be a non-negative "
-            "integer smaller than the prompt length"
+            "sampling_params.routed_experts_prompt_start must be a non-negative integer"
         )
     reconstructed = {**envelope, "token_ids": token_ids}
     _, generate_request_type = _native_generate_api()

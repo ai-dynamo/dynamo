@@ -107,7 +107,7 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
     }
 
 
-@pytest.mark.parametrize("prompt_start", [True, 1.0, -1, 3])
+@pytest.mark.parametrize("prompt_start", [True, 1.0, -1])
 def test_tito_adapter_rejects_invalid_routed_experts_prompt_start(prompt_start):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
@@ -124,6 +124,29 @@ def test_tito_adapter_rejects_invalid_routed_experts_prompt_start(prompt_start):
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
+
+
+@pytest.mark.parametrize("prompt_start", [3, 99])
+def test_tito_adapter_accepts_prompt_length_or_larger_routed_experts_start(
+    prompt_start,
+):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    adapted = adapt_engine_generate_request(
+        _request(
+            sampling_params={
+                "max_tokens": 1,
+                "routed_experts_prompt_start": prompt_start,
+            }
+        ),
+        enable_multimodal=False,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+
+    assert adapted is not None
+    assert adapted.sampling_params.routed_experts_prompt_start == prompt_start
 
 
 def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():
@@ -206,6 +229,26 @@ def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
     placeholder = adapted.prompt["mm_placeholders"]["image"][0]
     assert (placeholder.offset, placeholder.length) == (1, 2)
     assert placeholder.is_embed.tolist() == [False, True]
+
+
+def test_tito_adapter_rejects_preprocessed_features_on_disaggregated_decode():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(ValueError, match="aggregated vLLM worker"):
+        adapt_engine_generate_request(
+            _request(
+                features={
+                    "mm_hashes": {"image": ["renderer-hash"]},
+                    "mm_placeholders": {"image": [{"offset": 0, "length": 1}]},
+                    "kwargs_data": None,
+                }
+            ),
+            enable_multimodal=True,
+            decode_capable=True,
+            allow_multimodal_features=False,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
 
 
 @pytest.mark.parametrize(

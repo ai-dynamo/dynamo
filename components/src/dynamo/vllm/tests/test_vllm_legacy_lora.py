@@ -193,6 +193,58 @@ async def test_decode_load_still_eagerly_adds_to_engine(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hot_swap_rejects_paused_adapter_with_active_request(monkeypatch):
+    handler = _make_prefill_handler()
+    handler.config.disaggregation_mode = DisaggregationMode.AGGREGATED
+    handler._paused = True
+    handler._lora_state.loaded_loras = {"adapterA": LoRAInfo(id=123, path="/cache/old")}
+    handler._engine_loaded_loras = {"adapterA"}
+    handler._lora_state.begin_request("adapterA")
+    manager = SimpleNamespace(
+        download_lora=AsyncMock(
+            return_value={"status": "success", "local_path": "/cache/new"}
+        )
+    )
+    monkeypatch.setenv("DYN_LORA_HOTSWAP_ENABLED", "true")
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+
+    results = [
+        result
+        async for result in handler.load_lora(
+            {"lora_name": "adapterA", "source": {"uri": "file:///adapter"}}
+        )
+    ]
+
+    assert results[-1]["status"] == "error"
+    assert "paused" in results[-1]["message"]
+    handler.engine_client.remove_lora.assert_not_awaited()
+    handler._lora_state.end_request("adapterA")
+
+
+@pytest.mark.asyncio
+async def test_unload_rejects_paused_adapter_with_active_request(monkeypatch):
+    handler = _make_prefill_handler()
+    handler._paused = True
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
+    handler._engine_loaded_loras = {"adapterA"}
+    handler._lora_state.begin_request("adapterA")
+    unregister = AsyncMock()
+    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+
+    results = [
+        result async for result in handler.unload_lora({"lora_name": "adapterA"})
+    ]
+
+    assert results[-1]["status"] == "error"
+    assert "paused" in results[-1]["message"]
+    unregister.assert_not_awaited()
+    handler.engine_client.remove_lora.assert_not_awaited()
+    handler._lora_state.end_request("adapterA")
+
+
+@pytest.mark.asyncio
 async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     handler = _make_prefill_handler()
     manager = SimpleNamespace(

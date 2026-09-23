@@ -2148,6 +2148,23 @@ class TestRLAdminRouteHardening:
                 assert "JSON object" in resp["message"]
 
     @pytest.mark.asyncio
+    async def test_keep_pause_rejects_active_lora_requests(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler._lora_state = mod.LoRAState()
+        handler.engine_client = MagicMock()
+        handler.engine_client.pause_generation = AsyncMock()
+        handler._lora_state.begin_request("adapterA")
+
+        resp = await handler.pause_generation({"mode": "keep"})
+
+        assert resp["status"] == "error"
+        assert "active LoRA requests" in resp["message"]
+        handler.engine_client.pause_generation.assert_not_awaited()
+        handler._lora_state.end_request("adapterA")
+
+    @pytest.mark.asyncio
     async def test_distributed_update_can_match_async_rl_semantics(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
