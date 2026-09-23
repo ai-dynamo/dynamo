@@ -41,7 +41,7 @@ use crate::{
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -583,6 +583,28 @@ impl RoutingHost {
         }
     }
 
+    /// The group key for a subagent: a request that carries a parent session id binds under the
+    /// parent's group instead of its own session, so siblings share a worker while the parent
+    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// it cannot be rejected against, or rebind, the group.
+    fn group_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Option<Arc<SessionAffinityId>> {
+        if explicit.is_some() {
+            return None;
+        }
+        let parent_session_id = request
+            .content()
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref())?;
+        Some(Arc::new(SessionAffinityId::new(
+            subagent_group_affinity_id(parent_session_id),
+        )))
+    }
+
     /// Commit a held session to the dispatched worker; a request without a
     /// session passes its stream through.
     fn bind_affinity(
@@ -709,6 +731,9 @@ impl RoutingHost {
             return Ok((select(None).await?, None));
         };
         let explicit = explicit_target(request.content(), phase)?;
+        let session_id = self
+            .group_binding_id(request, explicit)
+            .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));

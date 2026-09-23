@@ -632,13 +632,15 @@ fn engine_config_advertises_supported_capabilities() {
     let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
     assert!(
         !model
-            .engine_config()
+            .engine_config(true)
+            .expect("valid KV metadata")
             .runtime_data
             .contains_key("vllm_inference_v1_generate")
     );
     assert_eq!(
         model
-            .engine_config()
+            .engine_config(true)
+            .expect("valid KV metadata")
             .runtime_data
             .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
         Some(&json!(true))
@@ -1401,6 +1403,54 @@ fn discovery_rejects_nonzero_dp_start_without_local_size() {
 }
 
 #[test]
+fn engine_config_uses_effective_attention_block_size() {
+    for (case, dcp, physical, reported, expected) in [
+        ("DCP=1", 1, 16, Some(16), Ok(Some(16))),
+        ("DCP=2", 2, 16, Some(32), Ok(Some(32))),
+        ("engine is authoritative", 2, 16, Some(64), Ok(Some(64))),
+        ("legacy DCP=1", 1, 16, None, Ok(Some(16))),
+        ("legacy DCP=2", 2, 16, None, Ok(Some(16))),
+        ("legacy unknown size", 1, 0, None, Ok(None)),
+        ("zero", 1, 16, Some(0), Err("nonzero size")),
+        (
+            "overflow",
+            1,
+            16,
+            Some(u64::from(u32::MAX) + 1),
+            Err("fits u32"),
+        ),
+    ] {
+        let mut server = server_info();
+        server
+            .parallelism
+            .as_mut()
+            .unwrap()
+            .decode_context_parallel_size = dcp;
+        server.kv_block_size = physical;
+        server.effective_attention_block_size = reported;
+        let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+        let result = model.engine_config(true);
+        match expected {
+            Ok(size) => {
+                let registration = result.unwrap().llm.unwrap();
+                assert_eq!(registration.kv_cache_block_size, size, "{case}");
+                assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
+            }
+            Err(message) => assert!(result.unwrap_err().to_string().contains(message), "{case}"),
+        }
+        let registration = model.engine_config(false).unwrap().llm.unwrap();
+        assert_eq!(
+            registration.kv_cache_block_size, None,
+            "{case}: KV routing disabled"
+        );
+        assert_eq!(
+            registration.total_kv_blocks, None,
+            "{case}: KV routing disabled"
+        );
+    }
+}
+
+#[test]
 fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let mut server = server_info();
     server
@@ -1412,7 +1462,11 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
 
     let model =
         DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-    let registration = model.engine_config().llm.expect("LLM registration");
+    let registration = model
+        .engine_config(true)
+        .expect("valid KV metadata")
+        .llm
+        .expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
 }
@@ -1425,7 +1479,11 @@ fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
 
         let model =
             DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-        let registration = model.engine_config().llm.expect("LLM registration");
+        let registration = model
+            .engine_config(true)
+            .expect("valid KV metadata")
+            .llm
+            .expect("LLM registration");
 
         assert_eq!(
             registration.total_kv_blocks, expected_per_rank_blocks,

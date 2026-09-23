@@ -169,9 +169,17 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = if enable_kv_routing {
+            self.kv_cache_block_size()?
+        } else {
+            None
+        };
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
@@ -183,8 +191,10 @@ impl DiscoveredModel {
             .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: nonzero(self.server.kv_block_size),
-                total_kv_blocks: self.total_kv_blocks_per_rank(),
+                kv_cache_block_size,
+                total_kv_blocks: enable_kv_routing
+                    .then(|| self.total_kv_blocks_per_rank())
+                    .flatten(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
@@ -192,7 +202,22 @@ impl DiscoveredModel {
                 data_parallel_start_rank: parallelism.map(|_| self.data_parallel_range.start),
                 ..Default::default()
             }),
-        }
+        })
+    }
+
+    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let Some(block_size) = self.server.effective_attention_block_size else {
+            return Ok(nonzero(self.server.kv_block_size));
+        };
+        let block_size = u32::try_from(block_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
+                ))
+            })?;
+        Ok(Some(block_size))
     }
 
     pub(crate) fn data_parallel_range(&self) -> &Range<u32> {

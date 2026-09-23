@@ -2276,12 +2276,7 @@ impl AsyncResponseStream {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = match pyobj.ok() {
-                            Ok(pyobj) => pyobj,
-                            Err(e) => {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
-                            }
-                        };
+                        let pyobj = crate::errors::check_response_error(pyobj)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };
