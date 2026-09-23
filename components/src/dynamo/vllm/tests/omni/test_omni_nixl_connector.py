@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
+import yaml
 
 try:
     from dynamo.vllm.omni.connectors import nixl_connector as nixl_module
@@ -158,15 +158,50 @@ def test_nixl_connector_cleanup_clears_pending(fake_nixl):
         connector.close()
 
 
-def test_register_dynamoomni_nixl_connector_registers_when_missing(monkeypatch):
-    factory = MagicMock()
-    factory.list_registered_connectors.return_value = []
-    monkeypatch.setattr(nixl_module, "OmniConnectorFactory", factory)
-    monkeypatch.setattr(nixl_module, "_OMNI_FACTORY_IMPORT_ERROR", None)
+@pytest.mark.parametrize("is_inline", [False, True])
+def test_nixl_connector_initializes_router_edge(
+    monkeypatch, tmp_path, fake_nixl, is_inline
+):
+    from vllm_omni.distributed.omni_connectors import initialize_orchestrator_connectors
 
-    nixl_module.register_dynamoomni_nixl_connector()
-
-    factory.register_connector.assert_called_once_with(
-        "NixlConnector",
-        nixl_module.create_dynamoomni_nixl_connector,
+    from dynamo.vllm.omni.stage_worker import (
+        _ensure_stage_connectors,
+        _uses_nixl_connector,
     )
+
+    factory = nixl_module.OmniConnectorFactory
+    monkeypatch.setattr(factory, "_registry", dict(factory._registry))
+    builtin = factory._registry.get("NixlConnector")
+    config_path = tmp_path / "connectors.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "connectors": {"output": {"name": "NixlConnector", "extra": {}}},
+                "stages": [
+                    {
+                        "stage_id": 0,
+                        "output_connectors": {
+                            "to_stage_router": (
+                                {"name": "NixlConnector", "extra": {}}
+                                if is_inline
+                                else "output"
+                            )
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    connector_path = _ensure_stage_connectors(str(config_path), [])
+    assert _uses_nixl_connector(connector_path, [])
+    nixl_module.register_dynamoomni_nixl_connector()
+    nixl_module.register_dynamoomni_nixl_connector()
+    _, connectors = initialize_orchestrator_connectors(connector_path)
+    try:
+        assert isinstance(
+            connectors[("0", "router")], nixl_module.DynamoOmniNixlConnector
+        )
+        assert factory._registry.get("NixlConnector") is builtin
+    finally:
+        for connector in connectors.values():
+            connector.close()

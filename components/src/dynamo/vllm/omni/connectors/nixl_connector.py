@@ -609,7 +609,7 @@ def register_dynamoomni_nixl_connector() -> None:
         if OmniConnectorFactory is None:
             raise ImportError(str(_OMNI_FACTORY_IMPORT_ERROR))
 
-        connector_name = "NixlConnector"
+        connector_name = "DynamoOmniNixlConnector"
         if connector_name in OmniConnectorFactory.list_registered_connectors():
             logger.info(
                 "[DynamoOmniNixlConnector] %s already registered; skipping",

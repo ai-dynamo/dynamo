@@ -859,18 +859,85 @@ def test_create_engine_omits_env_when_stage_declares_none():
     assert "env" not in deploy["stages"][0]
 
 
-def test_create_engine_resolves_pipeline_with_the_configured_deploy_config():
-    _, factory = _single_stage_deploy_config(
-        SimpleNamespace(
-            engine_args=SimpleNamespace(model_stage="dit"),
-            runtime=SimpleNamespace(devices="0"),
-            final_output_type="image",
-        ),
-        deploy_config_path="/deploy/dit_only.yaml",
-    )
+@pytest.mark.parametrize(
+    "pipeline,stage_id,model_stage,sampling",
+    [
+        ("qwen3_tts", 1, "code2wav", {"temperature": 0.0, "max_tokens": 8}),
+        ("wan2_2_ti2v", 0, "dit", {"num_inference_steps": 3}),
+    ],
+)
+def test_create_engine_preserves_resolved_stage_config(
+    monkeypatch, tmp_path, pipeline, stage_id, model_stage, sampling
+):
+    from vllm_omni.config import resolve_omni_config
+    from vllm_omni.config.pipeline_registry import OMNI_PIPELINES
 
-    factory.get_pipeline_config.assert_called_once_with(
-        model="model",
-        trust_remote_code=False,
-        deploy_config_path="/deploy/dit_only.yaml",
+    from dynamo.vllm.omni.utils import resolve_stage_configs
+
+    model = str(tmp_path)
+    (tmp_path / "config.json").write_text('{"model_type": "qwen3_tts"}')
+    deploy_path = tmp_path / "deploy.yaml"
+    deploy_path.write_text(
+        yaml.safe_dump(
+            {
+                "pipeline": pipeline,
+                "async_chunk": False,
+                "stages": [{"stage_id": i} for i in range(stage_id)]
+                + [
+                    {
+                        "stage_id": stage_id,
+                        "devices": "0",
+                        "env": {"OMP_NUM_THREADS": "4"},
+                        "default_sampling_params": sampling,
+                    }
+                ],
+            }
+        )
     )
+    upstream = resolve_omni_config(
+        model,
+        trust_remote_code=False,
+        deploy_config_path=str(deploy_path),
+        cli_overrides={},
+        stage_overrides=None,
+        strategy_config_path=None,
+    )
+    if not hasattr(upstream.stage_configs[stage_id], "stage_pipeline_config"):
+        pytest.skip(
+            "Requires typed Omni stage configs; the legacy YAML round trip is unsupported"
+        )
+
+    _, stages = resolve_stage_configs(
+        model, trust_remote_code=False, deploy_config_path=str(deploy_path)
+    )
+    stage = stages[stage_id]
+    assert stage.engine_args.model_stage == model_stage
+    assert stage.engine_input_source == ([0] if stage_id else [])
+    params = _build_sampling_params(stage, None)[0]
+    for name, value in sampling.items():
+        assert getattr(params, name) == value
+
+    resolved = []
+
+    def capture_engine(**kwargs):
+        _, single_stage = resolve_stage_configs(
+            kwargs["model"],
+            trust_remote_code=kwargs["trust_remote_code"],
+            deploy_config_path=kwargs["deploy_config"],
+        )
+        resolved.extend(single_stage)
+        return MagicMock()
+
+    monkeypatch.setattr("dynamo.vllm.omni.stage_worker.AsyncOmni", capture_engine)
+    registry_before = set(OMNI_PIPELINES)
+    _create_engine(model, stage, stage.stage_type, stage_id, False, str(deploy_path))
+    assert set(OMNI_PIPELINES) == registry_before
+    assert len(resolved) == 1
+    actual = resolved[0]
+    assert actual.stage_id == 0
+    assert actual.engine_args.model_stage == model_stage
+    assert actual.runtime.devices == "0"
+    assert actual.runtime.env == {"OMP_NUM_THREADS": "4"}
+    assert actual.engine_input_source == []
+    for name, value in sampling.items():
+        assert actual.default_sampling_params[name] == value
