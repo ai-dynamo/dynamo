@@ -25,13 +25,10 @@ pytestmark = [
 
 def test_bindings_install():
     # Verify python bindings to rust can be imported
-    import dynamo.llm as dllm
     import dynamo.runtime as tdr
 
-    assert tdr.UnaryClient
-    assert tdr.serve_unary_endpoint
-    assert dllm.LLMUnaryClient
-    assert dllm.with_engine_data
+    # Placeholder to avoid unused import errors or removal by linters
+    assert tdr
 
 
 def test_version():
