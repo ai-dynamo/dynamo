@@ -25,10 +25,35 @@ mod ports;
 mod scripted_chat_engine;
 
 use http_harness::{
-    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
+    HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture,
+    parse_responses_sse as parse_json_sse,
 };
 
 const ENV: [(&str, Option<&str>); 1] = [(DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS, Some("0"))];
+
+#[tokio::test]
+async fn responses_sse_requires_terminal_event_without_trailers() {
+    for terminal in [
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+    ] {
+        let body = format!("event: {terminal}\ndata: {{\"type\":\"{terminal}\"}}\n\n");
+        assert!(parse_json_sse(&body).await.is_ok());
+        for trailer in [
+            "data: [DONE]\n\n",
+            "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\"}\n\n",
+        ] {
+            assert!(parse_json_sse(&format!("{body}{trailer}")).await.is_err());
+        }
+    }
+    assert!(parse_json_sse("").await.is_err());
+    assert!(
+        parse_json_sse("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
+            .await
+            .is_err()
+    );
+}
 
 /// Unsupported tool definitions return HTTP 400 before backend dispatch for both
 /// unary and streaming requests, including mixed tools and namespace members.
@@ -281,7 +306,7 @@ async fn streaming_text_baseline() {
         .await;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let raw = response.text().await.unwrap();
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        assert!(!raw.contains("data: [DONE]"));
         let events = parse_json_sse(&raw).await.unwrap();
         insta::assert_json_snapshot!(
             "responses_streaming_text",
@@ -526,7 +551,7 @@ async fn finish_signal_publishes_function_call_before_usage_tail() {
         }
 
         let raw = parser.into_body().expect("response SSE was not UTF-8");
-        assert_eq!(raw.matches("data: [DONE]").count(), 1);
+        assert!(!raw.contains("data: [DONE]"));
         let events = parse_json_sse(&raw).await.unwrap();
         assert_eq!(
             events
