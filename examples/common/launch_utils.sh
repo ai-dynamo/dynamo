@@ -137,15 +137,7 @@ dynamo_exit_trap() {
 declare -A DYN_TRACKED_WORKERS=()
 
 # dyn_track_worker <label> [pid]
-#
-# Records a label for a backgrounded process so wait_any_exit can say WHICH
-# process left, not just that one did. Call it immediately after the `&`:
-#
-#   python -m dynamo.frontend &
-#   dyn_track_worker frontend
-#
-# With no pid argument it labels `$!`, the process just backgrounded.
-# Labelling is optional: an unlabelled process still gets the generic message.
+# Labels the process just backgrounded ($! by default); call it right after `&`.
 dyn_track_worker() {
     local _label="$1"
     local _pid="${2:-$!}"
@@ -166,9 +158,8 @@ wait_any_exit() {
     local _rc=0
     local _pid=""
     if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-        # `wait -n -p VAR` (bash 5.1+) also reports which child exited. Without
-        # it a launch failure prints only an exit code, and the EXIT trap then
-        # kills the healthy processes, so the log never names the one that left.
+        # `-p VAR` reports which child exited but needs bash 5.1+; the file's
+        # floor is 4.3, so fall back to a plain `wait -n` below.
         wait -n -p _pid || _rc=$?
     else
         wait -n || _rc=$?
