@@ -71,7 +71,7 @@ func (p *componentProgram) Reconcile(
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
 
-	// Reject components that the component pathway cannot materialize.
+	// Admission prevents this combination; guard previously stored or admission-bypassed objects.
 	for i := range req.DGD.Spec.Components {
 		component := &req.DGD.Spec.Components[i]
 		if !component.ManagedByExternalController() {
@@ -82,7 +82,7 @@ func (p *componentProgram) Reconcile(
 			component.ComponentName,
 			component.ComponentType,
 		)
-		programResult.Fail(req.DGD.Generation, "LPXRejected", err)
+		programResult.Fail(req.DGD.Generation, "UnsupportedComponent", err)
 		return programResult, reconcile.TerminalError(err)
 	}
 

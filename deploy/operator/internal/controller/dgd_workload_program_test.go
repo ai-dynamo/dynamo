@@ -134,11 +134,11 @@ func TestComponentProgramRejectsExternallyManagedComponents(t *testing.T) {
 	result, err := (&componentProgram{}).Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
 	require.ErrorIs(t, err, reconcile.TerminalError(nil))
 
-	t.Log("Verify the program returns the public LPX rejection without a terminal-error prefix")
+	t.Log("Verify the program returns the component rejection without a terminal-error prefix")
 	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, "LPXRejected", ready.Reason)
+	assert.Equal(t, "UnsupportedComponent", ready.Reason)
 	assert.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 

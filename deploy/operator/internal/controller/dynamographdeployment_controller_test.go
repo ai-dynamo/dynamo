@@ -183,7 +183,7 @@ func TestDynamoGraphDeploymentReconcilePersistsComponentProgramLPXRejection(t *t
 	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	require.Equal(t, metav1.ConditionFalse, ready.Status)
-	require.Equal(t, "LPXRejected", ready.Reason)
+	require.Equal(t, "UnsupportedComponent", ready.Reason)
 	require.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 
