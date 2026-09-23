@@ -851,17 +851,17 @@ from dynamo.common.multimodal import ImageLoader
 ```
 
 ```python
-ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None)
+ImageLoader(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None)
 ```
 
-[`components/src/dynamo/common/multimodal/image_loader.py#L66`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L66)
+[`components/src/dynamo/common/multimodal/image_loader.py#L110`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L110)
 
 **Public methods**
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-init">__init__</h4>
 
 ```python
-__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None)
+__init__(cache_size: int = CACHE_SIZE_MAXIMUM, http_timeout: float = 30.0, enable_frontend_decoding: bool = False, url_policy: UrlValidationPolicy | None = None, max_bytes: int | None = None, session_scoped_cache: bool | None = None)
 ```
 
 Initialize the ImageLoader with caching, HTTP settings, and optional NIXL config for receiving frontend decoding.
@@ -888,23 +888,29 @@ Policy for validating URLs. Defaults to UrlValidationPolicy.from_env().
 Maximum remote image size in bytes. When omitted, resolve
 DYN_MM_MAX_FILE_SIZE_MB for each request.
 </ParamField>
+<ParamField path="session_scoped_cache" type="bool | None">
+Include a caller-provided cache scope in local,
+in-flight, and shared-cache keys. ``None`` (default) reads
+DYN_MM_IMAGE_CACHE_SESSION_SCOPED (default off). When enabled,
+HTTP loads without a scope bypass all image caches.
+</ParamField>
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L69)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L113)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image">load_image</h4>
 
 ```python
-load_image(image_url: str) -> Image.Image
+load_image(image_url: str, *, cache_scope: str | None = None) -> Image.Image
 ```
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L223)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L334)
 
 <h4 id="api-dynamo-common-multimodal-image-loader-imageloader-load-image-batch">load_image_batch</h4>
 
 ```python
-load_image_batch(image_mm_items: List[Dict[str, Any]], *, preserve_uuid_slots: bool = False) -> list[Any]
+load_image_batch(image_mm_items: List[Dict[str, Any]], *, preserve_uuid_slots: bool = False, cache_scope: str | None = None) -> list[Any]
 ```
 
 Load a batch of images from multimodal data items.
@@ -924,6 +930,10 @@ List of multimodal data items for images
 Allow UUID-only items and preserve their positions
 as None. This is enabled only by backends that resolve such slots.
 </ParamField>
+<ParamField path="cache_scope" type="str | None">
+Stable session or request identifier used when
+DYN_MM_IMAGE_CACHE_SESSION_SCOPED is enabled.
+</ParamField>
 
 **Returns**
 
@@ -938,7 +948,7 @@ as None. This is enabled only by backends that resolve such slots.
 - `ValueError` — If enable_frontend_decoding=True but nixl_connector is None
 - `ValueError` — If a UUID-only slot is received without opting in
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L308)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/multimodal/image_loader.py#L426)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-llmengine" title="LLMEngine (class)">
