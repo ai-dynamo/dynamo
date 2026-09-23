@@ -234,8 +234,13 @@ pub(crate) fn guided_tool_constraint(
     if has_explicit_guided_decoding(request) {
         return Ok(GuidedToolConstraint::None);
     }
-    // K3 forced requests are served by a prompt-level XTML instruction; no JSON schema.
-    if uses_kimi_k3_parser(tool_call_parser, reasoning_parser) {
+    let parser_tool_choice = convert_tool_choice(tool_choice);
+    // Kimi forced requests use marker-delimited native formats that generic JSON
+    // guidance cannot represent. Keep this compatibility path aligned with
+    // request preprocessing for either configured parser slot.
+    if requires_native_tool_call_format(tool_call_parser, &parser_tool_choice)
+        || requires_native_tool_call_format(reasoning_parser, &parser_tool_choice)
+    {
         return Ok(GuidedToolConstraint::None);
     }
     // Validate the forced choice against the actual tools the same way
@@ -252,15 +257,6 @@ pub(crate) fn guided_tool_constraint(
         Ok(None) => Ok(GuidedToolConstraint::None),
         Err(e) => Err(invalid_argument(e.to_string())),
     }
-}
-
-/// True when either configured parser is Kimi K3.
-///
-/// K3 forced requests are served by a prompt-level XTML instruction, so they must
-/// NOT be reported as guided JSON even though their `tool_choice` is forced.
-fn uses_kimi_k3_parser(tool_call_parser: Option<&str>, reasoning_parser: Option<&str>) -> bool {
-    let is_k3 = |parser: &str| matches!(parser, "kimi_k3" | "kimi-k3");
-    tool_call_parser.is_some_and(is_k3) || reasoning_parser.is_some_and(is_k3)
 }
 
 /// Map a forced `tool_choice` onto the guided-JSON parser constraint for its grammar.
@@ -501,18 +497,35 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_is_detected_from_either_parser_slot() {
-        assert!(uses_kimi_k3_parser(Some("kimi_k3"), None));
-        assert!(uses_kimi_k3_parser(Some("kimi-k3"), None));
-        assert!(uses_kimi_k3_parser(None, Some("kimi_k3")));
-        assert!(uses_kimi_k3_parser(None, Some("kimi-k3")));
-    }
+    fn native_format_forced_choices_install_no_compatibility_json_constraint() {
+        let requests = [
+            request(json!({
+                "tools": tools(),
+                "tool_choice": "required"
+            })),
+            request(json!({
+                "tools": tools(),
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"}
+                }
+            })),
+        ];
 
-    #[test]
-    fn non_k3_parsers_are_not_mistaken_for_k3() {
-        assert!(!uses_kimi_k3_parser(None, None));
-        assert!(!uses_kimi_k3_parser(Some("kimi_k2"), Some("qwen3")));
-        assert!(!uses_kimi_k3_parser(Some("qwen3_coder"), None));
+        for request in &requests {
+            for (tool_call_parser, reasoning_parser) in [
+                (Some("kimi_k2"), None),
+                (None, Some("kimi_k2")),
+                (Some("kimi_k3"), None),
+                (None, Some("kimi-k3")),
+            ] {
+                assert_eq!(
+                    guided_tool_constraint(request, tool_call_parser, reasoning_parser, false,)
+                        .expect("native-format choice is valid"),
+                    GuidedToolConstraint::None,
+                );
+            }
+        }
     }
 
     #[test]

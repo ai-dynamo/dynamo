@@ -34,6 +34,7 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
 def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
     monkeypatch.delenv("DYN_ENABLE_STRUCTURAL_TAG", raising=False)
     monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCOPE", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
 
     config, _ = _parse_runtime_args([])
 
