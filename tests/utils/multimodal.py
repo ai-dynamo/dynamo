@@ -4,6 +4,7 @@
 import base64
 import os
 import re
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -482,6 +483,84 @@ def make_custom_encoder_payload() -> ChatPayload:
         repeat_count=1,
         expected_response=["42"],
         expected_log=["Loaded CustomEncoder", "LinearEmbedsAdapter"],
+        max_tokens=32,
+        temperature=0.0,
+    )
+
+
+class RemoteCustomEncoderChatPayload(ChatPayload):
+    """Validate generation plus the orchestrator's dummy classifier label."""
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        result = response.json()
+        nvext = result.get("nvext")
+        assert isinstance(nvext, Mapping), f"Expected nvext object, got {nvext!r}"
+        engine_data = nvext.get("engine_data")
+        assert isinstance(
+            engine_data, Mapping
+        ), f"Expected nvext.engine_data object, got {engine_data!r}"
+        classifier_label = engine_data.get("classifier_label")
+        assert classifier_label in {"class_a", "class_b"}, (
+            "Expected nvext.engine_data.classifier_label to contain a dummy class, "
+            f"got {classifier_label!r}"
+        )
+
+
+def make_remote_custom_encoder_payload() -> RemoteCustomEncoderChatPayload:
+    """Semantic check for the remote CustomEncoder topology.
+
+    Same phrase-splice contract as :func:`make_custom_encoder_payload`, but the
+    encoder runs in the orchestrator worker and the embeddings reach the stock
+    aggregated generator over the request plane. ``expected_log`` therefore
+    asserts the orchestrator's own encoder line rather than the decoder-side
+    ``Loaded CustomEncoder``, which only the in-process topology emits.
+    """
+    return RemoteCustomEncoderChatPayload(
+        body={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Based on The Hitchhiker's Guide to the Galaxy, "
+                                "The Answer to"
+                            ),
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": MULTIMODAL_IMG_URL},
+                        },
+                        {"type": "text", "text": " is?"},
+                    ],
+                }
+            ],
+            "max_tokens": 32,
+            "stream": False,
+            "logprobs": False,
+            "temperature": 0.0,
+            "nvext": {"extra_fields": ["engine_data"]},
+        },
+        repeat_count=1,
+        expected_response=["42"],
+        expected_log=[r"HitchhikersVisionEncoder\] ready"],
+    )
+
+
+def make_remote_custom_encoder_text_only_payload() -> ChatPayload:
+    """Text-only turn against the remote CustomEncoder topology.
+
+    The orchestrator must forward a request that carries no media straight to
+    the generator. Asserting a served answer here keeps a conversation's
+    non-image turns from regressing back into a request-level rejection.
+    """
+    return chat_payload(
+        "Based on The Hitchhiker's Guide to the Galaxy, The Answer to is?",
+        repeat_count=1,
+        expected_response=["42", "answer", "life", "Adams"],
         max_tokens=32,
         temperature=0.0,
     )

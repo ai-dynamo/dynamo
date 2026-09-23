@@ -11,9 +11,11 @@ from tests.serve.conftest import (
     get_multimodal_test_image_bytes,
 )
 from tests.utils.multimodal import (
+    RemoteCustomEncoderChatPayload,
     UuidPassthroughChatPayload,
     make_mixed_image_video_payload,
     make_qwen35_custom_encoder_multi_image_payload,
+    make_remote_custom_encoder_payload,
 )
 
 pytestmark = [
@@ -25,6 +27,14 @@ pytestmark = [
 
 def _image_part(body: dict) -> dict:
     return body["messages"][0]["content"][1]
+
+
+class _Response:
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    def json(self) -> dict:
+        return self._data
 
 
 def test_uuid_passthrough_payload_sends_fill_then_uuid_only() -> None:
@@ -87,6 +97,42 @@ def test_qwen35_multi_image_payload_is_order_sensitive() -> None:
         + base64.b64encode(get_multimodal_test_image_bytes(color)).decode()
         for color in ("green", "red")
     ]
+
+
+def test_remote_custom_encoder_payload_validates_classifier_label() -> None:
+    payload = make_remote_custom_encoder_payload()
+
+    assert isinstance(payload, RemoteCustomEncoderChatPayload)
+    assert payload.body["nvext"] == {"extra_fields": ["engine_data"]}
+    payload.validate(
+        _Response(
+            {
+                "nvext": {
+                    "engine_data": {
+                        "classifier_label": "class_a",
+                    }
+                }
+            }
+        ),
+        "42",
+    )
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"nvext": {}},
+        {"nvext": {"engine_data": {"classifier_label": "unexpected"}}},
+    ],
+)
+def test_remote_custom_encoder_payload_rejects_missing_or_unknown_label(
+    data: dict,
+) -> None:
+    payload = make_remote_custom_encoder_payload()
+
+    with pytest.raises(AssertionError):
+        payload.validate(_Response(data), "42")
 
 
 def test_mixed_image_video_payload_requires_video_context() -> None:
