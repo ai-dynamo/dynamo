@@ -13,6 +13,8 @@ import pytest
 import yaml
 
 try:
+    from PIL import Image
+
     from dynamo.vllm.omni.stage_worker import (
         OmniStageWorker,
         _create_engine,
@@ -864,6 +866,7 @@ def test_create_engine_omits_env_when_stage_declares_none():
     [
         ("qwen3_tts", 1, "code2wav", {"temperature": 0.0, "max_tokens": 8}),
         ("wan2_2_ti2v", 0, "dit", {"num_inference_steps": 3}),
+        ("glm_image", 1, "dit", {"num_inference_steps": 3}),
     ],
 )
 def test_create_engine_preserves_resolved_stage_config(
@@ -916,6 +919,23 @@ def test_create_engine_preserves_resolved_stage_config(
     params = _build_sampling_params(stage, None)[0]
     for name, value in sampling.items():
         assert getattr(params, name) == value
+
+    if pipeline == "glm_image":
+        source_image = Image.new("RGB", (32, 32))
+        worker = _make_worker(stage_config=stage, stage_id=stage_id)
+        upstream = _Proxy(
+            engine_outputs=[
+                SimpleNamespace(outputs=[SimpleNamespace(cumulative_token_ids=[1])])
+            ]
+        )
+        prompt = {
+            "prompt": "Turn the image blue",
+            "height": 32,
+            "width": 32,
+            "multi_modal_data": {"image": source_image},
+        }
+        result = worker._process_stage_inputs([upstream], prompt)
+        assert result["pil_image"] is source_image
 
     resolved = []
 

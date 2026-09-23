@@ -66,6 +66,7 @@ def _dynamo_stage_config(stage: Any) -> Any:
                 "engine_input_source": stage.input_sources,
                 "default_sampling_params": stage.model_config.default_sampling_params,
                 "custom_process_input_func": stage.custom_process_input_func,
+                "requires_multimodal_data": stage.requires_multimodal_data,
                 "final_output": stage.final_output,
                 "final_output_type": stage.final_output_type,
                 "is_comprehension": stage.is_comprehension,

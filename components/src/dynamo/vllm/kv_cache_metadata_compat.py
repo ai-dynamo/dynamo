@@ -31,6 +31,7 @@ def enable_kv_cache_metadata_compat() -> None:
 
 def register() -> None:
     """Install the missing method only for an opted-in vLLM 0.30.0 process."""
+    # TODO: Reassess next vLLM bump; remove once native metadata replaces this.
     if os.environ.get(_ACTIVATION_ENV) != "1":
         return
     if Version(version("vllm")).public != "0.30.0":

@@ -364,7 +364,8 @@ class TestVllmRendererApi:
         and reads EngineCoreRequest fields by name, but the request still
         crosses vLLM boundaries using array-like serialization.
         """
-        base_request_fields = (
+        # vLLM 0.29 and 0.30 share the same core request and output schemas.
+        expected_request_fields = (
             "request_id",
             "prompt_token_ids",
             "mm_features",
@@ -383,64 +384,11 @@ class TestVllmRendererApi:
             "resumable",
             "external_req_id",
             "reasoning_ended",
+            "reasoning_parser_kwargs",
+            "abort_immediately",
+            "session_id",
         )
-        reasoning_request_fields = (*base_request_fields, "reasoning_parser_kwargs")
-        abort_request_fields = (*reasoning_request_fields, "abort_immediately")
-        core_request_fields = (
-            base_request_fields,
-            reasoning_request_fields,
-            abort_request_fields,
-        )
-        # vLLM 0.28 adds a trailing optional session_id field. Dynamo does not
-        # expose sessions through its preprocessed-request protocol yet, so the
-        # input processor leaves this field at its backward-compatible default.
-        # It is declared by vLLM itself, so it precedes the vllm-omni extension
-        # below rather than trailing it.
-        core_request_fields = core_request_fields + tuple(
-            (*fields, "session_id") for fields in core_request_fields
-        )
-        # vllm-omni monkey-patches EngineCoreRequest with an extra field, which
-        # lands after every field vLLM declares.
-        valid_request_fields = core_request_fields + tuple(
-            (*fields, "additional_information") for fields in core_request_fields
-        )
-        # vLLM 0.26 adds a trailing model_intermediate_buffer field. Dynamo
-        # reads EngineCoreRequest fields by name, so the append is compatible
-        # with every known request-shape variant above.
-        valid_request_fields = valid_request_fields + tuple(
-            (*fields, "model_intermediate_buffer") for fields in valid_request_fields
-        )
-        valid_request_fields += (
-            (
-                *abort_request_fields,
-                "session_id",
-                "additional_information",
-                "model_intermediate_buffer",
-                "payload_sender_info",
-            ),
-        )
-        actual_request_fields = EngineCoreRequest.__struct_fields__
-        assert actual_request_fields in valid_request_fields, (
-            "EngineCoreRequest fields changed!\n"
-            f"Expected variants: {valid_request_fields}\n"
-            f"Actual:          {actual_request_fields}\n"
-            "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
-        )
-        if "session_id" in actual_request_fields:
-            request_defaults = dict(
-                zip(
-                    actual_request_fields[
-                        -len(EngineCoreRequest.__struct_defaults__) :
-                    ],
-                    EngineCoreRequest.__struct_defaults__,
-                    strict=True,
-                )
-            )
-            assert request_defaults["session_id"] is None
-            if "payload_sender_info" in actual_request_fields:
-                assert request_defaults["payload_sender_info"] is None
-
-        base_output_fields = (
+        expected_output_fields = (
             "request_id",
             "new_token_ids",
             "new_logprobs",
@@ -455,61 +403,62 @@ class TestVllmRendererApi:
             "prefill_stats",
             "routed_experts",
             "num_nans_in_logits",
+            "mm_cache_miss_hashes",
+            "new_sampling_mask",
+            "spec_decode_metrics",
         )
-        cached_token_output_fields = (
-            "request_id",
-            "new_token_ids",
-            "new_logprobs",
-            "new_prompt_logprobs_tensors",
-            "pooling_output",
-            "finish_reason",
-            "stop_reason",
-            "events",
-            "kv_transfer_params",
-            "ec_transfer_params",
-            "trace_headers",
-            "num_cached_tokens",
-            "num_external_computed_tokens",
-            "routed_experts",
-            "num_nans_in_logits",
-        )
-        # vllm-omni extends EngineCoreOutput with a multimodal output channel
-        # and streaming segment metadata (only installed on amd64, not arm64).
-        # Declaration order in OmniEngineCoreOutput determines wire position.
-        omni_output_extra_fields = (
-            "multimodal_output",
-            "is_segment_finished",
-            "new_prompt_len_snapshot",
-        )
-        core_output_fields = (
-            base_output_fields,
-            cached_token_output_fields,
-        )
-        core_output_fields += (
-            base_output_fields
-            + ("mm_cache_miss_hashes", "new_sampling_mask", "spec_decode_metrics"),
-        )
-        valid_output_fields = core_output_fields + tuple(
-            fields + omni_output_extra_fields for fields in core_output_fields
-        )
-        valid_output_fields += tuple(
-            fields
-            + (
-                "multimodal_output",
-                "pooling_output_payload",
-                "is_segment_finished",
-                "new_prompt_len_snapshot",
-                "num_generation_tokens",
-            )
-            for fields in core_output_fields
+
+        if EngineCoreRequest.__module__ == "vllm_omni.engine":
+            omni = importlib.import_module("vllm_omni")
+            omni_version = Version(omni.__version__).release[:2]
+            expected_request_fields += {
+                (0, 29): ("additional_information", "model_intermediate_buffer"),
+                (0, 30): (
+                    "additional_information",
+                    "model_intermediate_buffer",
+                    "payload_sender_info",
+                ),
+            }[omni_version]
+            expected_output_fields += {
+                (0, 29): (
+                    "multimodal_output",
+                    "is_segment_finished",
+                    "new_prompt_len_snapshot",
+                ),
+                (0, 30): (
+                    "multimodal_output",
+                    "pooling_output_payload",
+                    "is_segment_finished",
+                    "new_prompt_len_snapshot",
+                    "num_generation_tokens",
+                ),
+            }[omni_version]
+
+        actual_request_fields = EngineCoreRequest.__struct_fields__
+        assert actual_request_fields == expected_request_fields, (
+            "EngineCoreRequest fields changed!\n"
+            f"Expected: {expected_request_fields}\n"
+            f"Actual:   {actual_request_fields}\n"
+            "Update request construction in components/src/dynamo/frontend/vllm_processor.py"
         )
         actual_output_fields = EngineCoreOutput.__struct_fields__
-        assert actual_output_fields in valid_output_fields, (
+        assert actual_output_fields == expected_output_fields, (
             "EngineCoreOutput fields changed!\n"
-            f"Expected variants: {valid_output_fields}\n"
-            f"Actual:          {actual_output_fields}\n"
+            f"Expected: {expected_output_fields}\n"
+            f"Actual:   {actual_output_fields}\n"
             "Update output mapping in components/src/dynamo/frontend/vllm_processor.py"
         )
+
+        request_defaults = dict(
+            zip(
+                actual_request_fields[-len(EngineCoreRequest.__struct_defaults__) :],
+                EngineCoreRequest.__struct_defaults__,
+                strict=True,
+            )
+        )
+        assert request_defaults["session_id"] is None
+        if "payload_sender_info" in actual_request_fields:
+            assert request_defaults["payload_sender_info"] is None
 
         req_config = getattr(EngineCoreRequest, "__struct_config__", None)
         out_config = getattr(EngineCoreOutput, "__struct_config__", None)

@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock
 import msgspec
 import pytest
 import pytest_asyncio
-import torch
 import zmq
 import zmq.asyncio
 from packaging.version import Version
 
-from dynamo.llm import (
+torch = pytest.importorskip("torch")
+pytest.importorskip("vllm.v1.core.kv_cache_manager")
+
+from dynamo.llm import (  # noqa: E402
     KvEventPublisher,
     KvRouter,
     KvRouterConfig,
@@ -24,9 +26,9 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
-from dynamo.runtime import DistributedRuntime
-from dynamo.vllm import kv_cache_metadata_compat
-from dynamo.vllm.cache_info import configure_kv_event_block_size
+from dynamo.runtime import DistributedRuntime  # noqa: E402
+from dynamo.vllm import kv_cache_metadata_compat  # noqa: E402
+from dynamo.vllm.cache_info import configure_kv_event_block_size  # noqa: E402
 
 pytestmark = [
     pytest.mark.integration,
