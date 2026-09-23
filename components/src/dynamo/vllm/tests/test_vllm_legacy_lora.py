@@ -345,6 +345,45 @@ async def test_legacy_lora_request_admission_serializes_with_unload(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
+async def test_legacy_lora_request_closes_engine_generator_before_drain():
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    engine_generator_closed = asyncio.Event()
+
+    async def _generate(_lora_request):
+        try:
+            yield SimpleNamespace()
+        finally:
+            cleanup_started.set()
+            await allow_cleanup.wait()
+            engine_generator_closed.set()
+
+    admission = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterA"),
+        _generate,
+    )
+
+    await anext(admission)
+    assert handler._lora_state.active_requests == {"adapterA": 1}
+
+    close_task = asyncio.create_task(admission.aclose())
+    await cleanup_started.wait()
+
+    assert handler._lora_state.active_requests == {"adapterA": 1}
+    assert not close_task.done()
+
+    allow_cleanup.set()
+    await close_task
+    assert engine_generator_closed.is_set()
+    assert handler._lora_state.active_requests == {}
+
+
+@pytest.mark.asyncio
 async def test_legacy_lora_request_drain_preserves_concurrent_generation():
     handler = _make_prefill_handler()
     handler.config.disaggregation_mode = DisaggregationMode.AGGREGATED

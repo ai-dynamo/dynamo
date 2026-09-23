@@ -91,7 +91,7 @@ from dynamo.vllm.kv_connector_protocols import (
     KvConnectorProtocol,
     make_kv_connector_protocol,
 )
-from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
+from dynamo.vllm.kv_hints import _apply_kv_hint, publish_kv_hint_capabilities
 
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
@@ -904,27 +904,6 @@ def build_sampling_params(
     sampling_params.output_kind = _DELTA_REQUEST_OUTPUT_KIND
 
     return sampling_params
-
-
-def _apply_kv_hint(sampling_params: SamplingParams, kv_hint: Any) -> None:
-    """Attach the complete Dynamo KV hint message to vLLM's private input."""
-    if not isinstance(kv_hint, Mapping):
-        return
-
-    extra_args = (
-        dict(sampling_params.extra_args)
-        if isinstance(sampling_params.extra_args, dict)
-        else {}
-    )
-    existing_kv_transfer_params = extra_args.get(_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY)
-    kv_transfer_params = (
-        dict(existing_kv_transfer_params)
-        if isinstance(existing_kv_transfer_params, dict)
-        else {}
-    )
-    kv_transfer_params[_KV_HINT_EXTRA_ARGS_KEY] = dict(kv_hint)
-    extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = kv_transfer_params
-    sampling_params.extra_args = extra_args
 
 
 def _update_kv_transfer_params(
@@ -2648,11 +2627,17 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             self._track_lora_request_activation(admitted_lora_request)
             self._lora_state.begin_request(admitted_lora_request.lora_name)
 
+        engine_generator = create_generator(admitted_lora_request)
         try:
-            async for result in create_generator(admitted_lora_request):
+            async for result in engine_generator:
                 yield result
         finally:
-            self._lora_state.end_request(admitted_lora_request.lora_name)
+            try:
+                close = getattr(engine_generator, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                self._lora_state.end_request(admitted_lora_request.lora_name)
 
     def _preload_lora_into_engine(self) -> bool:
         """Whether lifecycle registration should eagerly activate the adapter.
@@ -3447,6 +3432,11 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             _attach_prompt_logprobs_engine_data(
                                 out, prompt_logprobs_payload
                             )
+                        kv_transfer_params = getattr(res, "kv_transfer_params", None)
+                        if kv_transfer_params is not None:
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data["kv_transfer_params"] = kv_transfer_params
                         # Emit the EFFECTIVE trim offset: clamp the requested
                         # routed_experts_prompt_start to the prompt length. vLLM
                         # clamps the returned routing rows the same way, so an

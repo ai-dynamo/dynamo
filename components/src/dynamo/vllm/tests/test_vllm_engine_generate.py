@@ -84,14 +84,13 @@ def test_tito_adapter_uses_outer_tokens_and_rl_sampling_defaults():
 def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
+    request = _request(
+        sampling_params={"max_tokens": 5, "extra_args": {"existing": "value"}},
+        kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
+    )
+    request["kv_hint"] = {"source": "worker-a"}
     adapted = adapt_engine_generate_request(
-        _request(
-            sampling_params={
-                "max_tokens": 5,
-                "extra_args": {"existing": "value"},
-            },
-            kv_transfer_params={"connector_data": {"block_ids": [1, 2]}},
-        ),
+        request,
         enable_multimodal=False,
         aggregated=True,
         vllm_config=_vllm_config(),
@@ -101,8 +100,75 @@ def test_tito_adapter_preserves_kv_transfer_params_in_sampling_extra_args():
     assert adapted is not None
     assert adapted.sampling_params.extra_args == {
         "existing": "value",
-        "kv_transfer_params": {"connector_data": {"block_ids": [1, 2]}},
+        "kv_transfer_params": {
+            "connector_data": {"block_ids": [1, 2]},
+            "kv_hint": {"source": "worker-a"},
+        },
     }
+
+
+@pytest.mark.parametrize("prompt_start", [True, 1.0, -1, 3])
+def test_tito_adapter_rejects_invalid_routed_experts_prompt_start(prompt_start):
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(ValueError, match="routed_experts_prompt_start"):
+        adapt_engine_generate_request(
+            _request(
+                sampling_params={
+                    "max_tokens": 1,
+                    "routed_experts_prompt_start": prompt_start,
+                }
+            ),
+            enable_multimodal=False,
+            aggregated=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+
+def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    schema = {
+        "$defs": {"A": {"allOf": [{"$ref": "#/$defs/A"}]}},
+        "$ref": "#/$defs/A",
+    }
+    with pytest.raises(ValueError, match=r"non-progressing local \$ref cycle"):
+        adapt_engine_generate_request(
+            _request(
+                sampling_params={
+                    "max_tokens": 1,
+                    "structured_outputs": {"json": schema},
+                }
+            ),
+            enable_multimodal=False,
+            aggregated=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+
+def test_tito_adapter_rejects_stop_strings_but_preserves_stop_token_ids():
+    from dynamo.vllm.engine_generate import adapt_engine_generate_request
+
+    with pytest.raises(ValueError, match="stop strings"):
+        adapt_engine_generate_request(
+            _request(sampling_params={"max_tokens": 1, "stop": ["END"]}),
+            enable_multimodal=False,
+            aggregated=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
+
+    adapted = adapt_engine_generate_request(
+        _request(sampling_params={"max_tokens": 1, "stop_token_ids": [42]}),
+        enable_multimodal=False,
+        aggregated=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+    assert adapted is not None
+    assert adapted.sampling_params.stop_token_ids == [42]
 
 
 def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
@@ -179,6 +245,7 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
+
 
 @pytest.mark.parametrize(
     "features",

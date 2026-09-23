@@ -7,19 +7,16 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import msgspec
-import torch
-from vllm.inputs import TokensPrompt, mm_input
-from vllm.multimodal.inputs import (
-    MultiModalKwargsItem,
-    MultiModalKwargsItems,
-    PlaceholderRange,
-)
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+    from vllm.sampling_params import SamplingParams
 
-from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+from dynamo.common.utils.guided_json import reject_nonprogressing_guided_json_ref_cycles
+from dynamo.llm import HttpError, ModelInput, ModelRuntimeConfig, ModelType, WorkerType
+
+from .kv_hints import _apply_kv_hint
 
 VLLM_GENERATE_CAPABILITY = "vllm_inference_v1_generate"
 VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY = "vllm_enable_tower_connector_lora"
@@ -84,6 +81,13 @@ def _image_features(
     MultiModalKwargsItems,
     dict[str, list[PlaceholderRange]],
 ]:
+    import torch
+    from vllm.multimodal.inputs import (
+        MultiModalKwargsItem,
+        MultiModalKwargsItems,
+        PlaceholderRange,
+    )
+
     mm_hashes = features.get("mm_hashes")
     mm_placeholders = features.get("mm_placeholders")
     kwargs_data = features.get("kwargs_data")
@@ -184,6 +188,10 @@ def adapt_engine_generate_request(
     default_sampling_params: dict[str, Any],
 ) -> EngineGenerateInput | None:
     """Adapt one Rust-frontend TITO envelope at the Python engine boundary."""
+    import msgspec
+    from vllm.inputs import TokensPrompt, mm_input
+    from vllm.sampling_params import RequestOutputKind, SamplingParams
+
     extra_args = request.get("extra_args")
     if not isinstance(extra_args, dict) or "vllm_tito" not in extra_args:
         return None
@@ -204,6 +212,16 @@ def adapt_engine_generate_request(
         if kwargs_data is not None and not isinstance(kwargs_data, dict):
             raise TypeError("TITO features kwargs_data must be an object or null")
     token_ids = list(request.get("token_ids") or [])
+    raw_prompt_start = raw_sampling_params.get("routed_experts_prompt_start", 0)
+    if (
+        isinstance(raw_prompt_start, bool)
+        or not isinstance(raw_prompt_start, int)
+        or not 0 <= raw_prompt_start < len(token_ids)
+    ):
+        raise ValueError(
+            "sampling_params.routed_experts_prompt_start must be a non-negative "
+            "integer smaller than the prompt length"
+        )
     reconstructed = {**envelope, "token_ids": token_ids}
     _, generate_request_type = _native_generate_api()
     native_request = generate_request_type.model_validate(reconstructed)
@@ -212,11 +230,25 @@ def adapt_engine_generate_request(
         sampling_params = msgspec.convert(sampling_params, type=SamplingParams)
     if not isinstance(sampling_params, SamplingParams):
         raise TypeError("vLLM GenerateRequest returned invalid sampling_params")
+
+    structured_outputs = sampling_params.structured_outputs
+    if structured_outputs is not None and structured_outputs.json is not None:
+        try:
+            reject_nonprogressing_guided_json_ref_cycles(structured_outputs.json)
+        except HttpError as exc:
+            raise ValueError(str(exc)) from exc
+
+    if sampling_params.stop:
+        raise ValueError(
+            "sampling_params.stop strings are not supported by token-only generation"
+        )
+
     if native_request.kv_transfer_params is not None:
         sampling_params.extra_args = {
             **(sampling_params.extra_args or {}),
             "kv_transfer_params": native_request.kv_transfer_params,
         }
+    _apply_kv_hint(sampling_params, request.get("kv_hint"))
     sampling_params.detokenize = False
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     if sampling_params.n > max_num_seqs:

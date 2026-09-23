@@ -536,6 +536,42 @@ class TestReasoningParserForwarding:
         assert chunks[1]["engine_data"]["sampling_mask"] == [[11, 21], [12, 22]]
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_emits_final_kv_transfer_params(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        handler._extract_logprobs = MagicMock(return_value=(None, None))
+
+        async def fake_generate(*args, **kwargs):
+            yield SimpleNamespace(
+                outputs=[
+                    SimpleNamespace(
+                        index=0,
+                        token_ids=[11],
+                        finish_reason="stop",
+                        stop_reason=None,
+                    )
+                ],
+                prompt_token_ids=[1, 2],
+                prompt_logprobs=None,
+                kv_transfer_params={"connector": "nixl"},
+            )
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = [
+            chunk
+            async for chunk in handler.generate_tokens(
+                PatchedTokensPrompt(prompt_token_ids=[1]),
+                SamplingParams(max_tokens=1),
+                "req-kv",
+            )
+        ]
+
+        assert chunks[-1]["engine_data"]["kv_transfer_params"] == {"connector": "nixl"}
+
+    @pytest.mark.asyncio
     async def test_generate_tokens_rejects_sampling_mask_length_mismatch(self):
         from vllm.sampling_params import SamplingParams
 
