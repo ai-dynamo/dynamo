@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shell-level checks for examples/common/launch_utils.sh process reporting."""
-
+import os
+import shlex
+import signal
 import subprocess
 from pathlib import Path
 
@@ -52,16 +53,33 @@ def _run_script(body: str) -> subprocess.CompletedProcess:
     """Run a bash snippet in its own process group.
 
     wait_any_exit signals the whole process group on the way out, so the
-    snippet must not share one with pytest.
+    snippet must not share one with pytest. A snippet that hangs never
+    reaches that signal, so the timeout path has to take the group down
+    here or the workers it backgrounded outlive the test run.
     """
-    return subprocess.run(
-        ["bash", "-c", f"set -e\nsource {LAUNCH_UTILS}\n{body}"],
-        capture_output=True,
+    process = subprocess.Popen(
+        ["bash", "-c", f"set -e\nsource {shlex.quote(str(LAUNCH_UTILS))}\n{body}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         start_new_session=True,
-        timeout=60,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except (subprocess.TimeoutExpired, KeyboardInterrupt):
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                process.communicate(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        raise
+
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 def test_wait_any_exit_names_the_labelled_worker_that_left() -> None:
@@ -131,11 +149,19 @@ def test_disagg_multimodal_labels_every_background_process(
     """
     lines = (LAUNCH_DIR / script_name).read_text().splitlines()
     backgrounded = [
-        line
-        for line in lines
+        index
+        for index, line in enumerate(lines)
         if line.rstrip().endswith("&") and not line.rstrip().endswith("&&")
     ]
-    labels = [line.split()[1] for line in lines if line.startswith("dyn_track_worker ")]
+    labelled = [
+        (index, line.split()[1])
+        for index, line in enumerate(lines)
+        if line.startswith("dyn_track_worker ")
+    ]
 
     assert len(backgrounded) == len(expected_labels), backgrounded
-    assert labels == expected_labels
+    # dyn_track_worker reads $!, so it has to sit on the line directly after
+    # the command it names. A call moved anywhere else keeps both the count
+    # and the order below while labelling some other process.
+    assert [index for index, _ in labelled] == [index + 1 for index in backgrounded]
+    assert [label for _, label in labelled] == expected_labels
