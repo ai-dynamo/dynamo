@@ -306,7 +306,6 @@ def test_the_offline_variables_are_read_as_huggingface_reads_them(
 
 @pytest.mark.parametrize("value", ["0", "", "false", "no", "off"])
 def test_a_non_true_offline_value_still_probes_the_hub(tmp_path, monkeypatch, value):
-    """huggingface_hub treats only 1/ON/YES/TRUE as offline, so neither may this."""
     repo = _repo(_hub(tmp_path, monkeypatch))
     (repo / "refs" / "main").write_text("")
     _snapshot(repo, COMMIT)
