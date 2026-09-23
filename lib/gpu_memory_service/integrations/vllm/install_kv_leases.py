@@ -522,6 +522,54 @@ def _drop_directory_hashes(directory, entries) -> None:
             raise
 
 
+def _restore_directory_hashes(directory, entries) -> None:
+    """Restore exact predecessor entries after a retryable ring conflict."""
+    items = []
+    for content_hash, entry in entries:
+        if entry is None:
+            continue
+        slots = [int(value) for value in (entry.get("slot_ids") or [])]
+        generations = [int(value) for value in (entry.get("generations") or [])]
+        if not slots or len(slots) != len(generations):
+            raise RuntimeError("cannot restore malformed HBM directory entry")
+        item = {
+            "content_hash": content_hash,
+            "engine_id": entry.get("engine_id") or _directory_pool_id(),
+            "slot_ids": slots,
+            "generations": generations,
+            "tier": "hbm",
+            "sealed": True,
+            "active": False,
+        }
+        if entry.get("local_key") is not None:
+            item["local_key"] = entry["local_key"]
+        items.append(item)
+    if not items:
+        return
+    if directory.publish(items) != len(items):
+        raise RuntimeError("predecessor HBM directory restoration was incomplete")
+
+
+def _exact_leases_remain_readable(client, leases) -> bool:
+    """Distinguish a live read-pin conflict from a stale directory record.
+
+    Native adoption is deliberately all-or-nothing and returns no reason when
+    it loses to a reader. An exact temporary read pin proves that the old
+    SEALED generation is still valid. Release it immediately and leave the
+    directory record retryable; stale generations remain invalidated.
+    """
+    if not leases:
+        return False
+    recoverable = getattr(client, "exact_recoverable", None)
+    if callable(recoverable) and recoverable(leases):
+        return True
+    claim = client.pin_read(leases)
+    if claim is None:
+        return False
+    client.unpin_read(claim)
+    return True
+
+
 def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
     """Adopt a bounded recovery batch on vLLM's scheduler thread."""
     if not getattr(self, "_gms_hydrate_hbm", False):
@@ -613,6 +661,7 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
         pending = [(selected, token)]
         token = None
         adopted_pairs = []
+        retryable = []
         stale = []
         while pending:
             group, group_token = pending.pop()
@@ -650,20 +699,29 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
                 if group_leases != expected:
                     raise RuntimeError("bulk HBM adoption returned unexpected leases")
                 adopted_pairs.extend(zip(group, group_leases))
+                acquired.extend(group_leases)
             elif len(group) == 1:
-                stale.extend(group)
+                old = [group[0][3]]
+                if _exact_leases_remain_readable(client, old):
+                    retryable.extend(group)
+                    _restore_directory_hashes(
+                        directory,
+                        [(group[0][0], group[0][2])],
+                    )
+                else:
+                    stale.extend(group)
             else:
                 middle = len(group) // 2
                 pending.extend(((group[middle:], None), (group[:middle], None)))
 
         if not adopted_pairs:
-            _drop_directory_hashes(
-                directory,
-                [(key, entry) for key, _native_key, entry, _old in stale],
-            )
+            if stale:
+                _drop_directory_hashes(
+                    directory,
+                    [(key, entry) for key, _native_key, entry, _old in stale],
+                )
             return 0
 
-        acquired = [lease for _selected, lease in adopted_pairs]
         if stale:
             _drop_directory_hashes(
                 directory,
@@ -695,8 +753,10 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
         directory.mark_hbm_dormant(
             [selected_item[0] for selected_item, _lease in adopted_pairs]
         )
-        if len(candidates) < limit and getattr(
-            directory, "read_view_is_current_writer", False
+        if (
+            not retryable
+            and len(candidates) < limit
+            and getattr(directory, "read_view_is_current_writer", False)
         ):
             self._gms_hydrate_hbm = False
         log_hydration = (
@@ -716,7 +776,12 @@ def _hydrate_hbm_directory(self, exclude: set[bytes]) -> int:
             self._maybe_evict_cached_block(block)
             _forget_directory_slot(self, key, lease)
         if claimed_entries:
-            _drop_directory_hashes(directory, claimed_entries)
+            retryable_keys = {key for key, _native, _entry, _old in retryable}
+            invalid = [
+                item for item in claimed_entries if item[0] not in retryable_keys
+            ]
+            if invalid:
+                _drop_directory_hashes(directory, invalid)
         if acquired:
             client.release(acquired)
         logger.warning(
@@ -814,6 +879,8 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
     entries = []
     acquired = []
     installed = []
+    old_leases = []
+    restored = False
     try:
         shadow_read = not directory.authoritative
         if shadow_read:
@@ -830,7 +897,6 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
                 token = None
             return borrowed
         slot_ids = []
-        old_leases = []
         for entry in entries:
             assert entry is not None
             slots = entry.get("slot_ids") or []
@@ -865,6 +931,10 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
 
         acquired = client.adopt(old_leases)
         if acquired != expected:
+            if not acquired and _exact_leases_remain_readable(client, old_leases):
+                _restore_directory_hashes(directory, list(zip(keys, entries)))
+                restored = True
+                self._gms_hydrate_hbm = True
             raise RuntimeError("GMS HBM adoption returned unexpected leases")
 
         out = []
@@ -890,7 +960,7 @@ def _get_cached_block(self, native_get_cached_block, block_hash, kv_cache_group_
             lease = self._gms_kv_leases_by_block.pop(int(block.block_id), None)
             self._maybe_evict_cached_block(block)
             _forget_directory_slot(self, key, lease)
-        if entries:
+        if entries and not restored:
             _drop_directory_hashes(directory, list(zip(keys, entries)))
         if acquired:
             client.release(acquired)
