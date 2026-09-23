@@ -140,6 +140,9 @@ For the full shared configuration surface and tuning guidance, see
 
 ## EPP Replication and Routing Accuracy
 
+Set `DYN_ROUTER_REPLICA_SYNC` to `true` when running more than one EPP replica. Without it, each
+replica sees only the load it routed itself, and load balancing across workers suffers.
+
 The EPP embeds the same KV router as the Frontend and reads the same `DYN_ROUTER_*` settings, so
 replicated EPPs keep prefix-cache and active-load state the same way replicated Frontends do. See
 [Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md)
