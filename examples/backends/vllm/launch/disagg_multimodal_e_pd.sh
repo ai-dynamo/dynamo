@@ -138,21 +138,45 @@ KV_PORT_ENCODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-2008
 KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
 
 # vLLM keeps only the last --kv-events-config it is given, so a passthrough copy
-# and the generated one cannot both apply. Standalone the caller's wins, as it
-# did before this script generated one; under DYN_MANAGED_PORTS it would replace
-# the reserved endpoint, so refuse rather than move the worker off its port.
+# and the generated one cannot both apply. The caller's copy wins, as it did
+# before this script generated one, which keeps options the generated config
+# does not set (enable_kv_cache_events among them) reachable. Under
+# DYN_MANAGED_PORTS that copy must still name the port reserved for this worker;
+# any other endpoint would move the worker off it, so refuse the launch.
 KV_EVENTS_ARGS_PD=(--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}")
-for arg in "${EXTRA_PD_ARGS[@]}"; do
-    if [[ "$arg" == "--kv-events-config" || "$arg" == --kv-events-config=* ]]; then
-        if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+KV_EVENTS_PD_OVERRIDE=""
+KV_EVENTS_PD_FOUND=false
+# Last occurrence wins, matching what vLLM itself keeps.
+for i in "${!EXTRA_PD_ARGS[@]}"; do
+    case "${EXTRA_PD_ARGS[$i]}" in
+        --kv-events-config)
+            KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$((i + 1))]:-}"
+            KV_EVENTS_PD_FOUND=true
+            ;;
+        --kv-events-config=*)
+            KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$i]#--kv-events-config=}"
+            KV_EVENTS_PD_FOUND=true
+            ;;
+    esac
+done
+if [[ "$KV_EVENTS_PD_FOUND" == true ]]; then
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        # The endpoint is matched, not parsed: a config that does not spell it as
+        # a plain "endpoint": "..." pair reads as unset here and is refused.
+        KV_EVENTS_PD_ENDPOINT=""
+        if [[ "$KV_EVENTS_PD_OVERRIDE" =~ \"endpoint\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]]; then
+            KV_EVENTS_PD_ENDPOINT="${BASH_REMATCH[1]}"
+        fi
+        if [[ "$KV_EVENTS_PD_ENDPOINT" != "tcp://*:${KV_PORT_PD}" ]]; then
             echo "Refusing a passthrough --kv-events-config under DYN_MANAGED_PORTS:" \
-                 "it would replace the endpoint reserved on DYN_VLLM_KV_EVENT_PORT2" >&2
+                 "its endpoint reads as ${KV_EVENTS_PD_ENDPOINT:-unset}, not the" \
+                 "tcp://*:${KV_PORT_PD} reserved on DYN_VLLM_KV_EVENT_PORT2." \
+                 "Set that endpoint to keep the rest of the config." >&2
             exit 1
         fi
-        KV_EVENTS_ARGS_PD=()
-        break
     fi
-done
+    KV_EVENTS_ARGS_PD=()
+fi
 
 # Start encode worker.
 #
