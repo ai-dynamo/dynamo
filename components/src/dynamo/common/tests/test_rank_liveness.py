@@ -599,7 +599,6 @@ def test_gpu_crash_marker_bypasses_heartbeat_timeout(tmp_path):
 
 def test_direct_gpu_crash_notification_bypasses_heartbeat_timeout(tmp_path):
     import zmq
-
     from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
 
     cohort = tmp_path / "cohort"
@@ -649,7 +648,6 @@ def test_direct_gpu_crash_notification_bypasses_heartbeat_timeout(tmp_path):
 
 def test_direct_gpu_crash_notification_accepts_registered_remote_rank(tmp_path):
     import zmq
-
     from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
 
     leader_cohort = tmp_path / "rank-0-cohort"
