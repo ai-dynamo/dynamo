@@ -51,6 +51,30 @@ def _shadow_mode_enabled() -> bool:
     return env_bool("DYN_GMS_FAILOVER_SHADOW_MODE")
 
 
+def _scope_failover_lock_to_node_rank(server_args) -> None:
+    """Give every TP rank an independent primary/shadow ownership domain."""
+
+    if not _shadow_mode_enabled():
+        return
+    nnodes = int(getattr(server_args, "nnodes", 1) or 1)
+    if nnodes <= 1:
+        return
+    node_rank = int(getattr(server_args, "node_rank", 0) or 0)
+    base_env = "DYN_SGLANG_GMS_FAILOVER_BASE_LOCK_PATH"
+    base_path = os.environ.get(base_env)
+    if base_path is None:
+        base_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        os.environ[base_env] = base_path
+    os.environ["FAILOVER_LOCK_PATH"] = (
+        base_path if node_rank == 0 else f"{base_path}.rank-{node_rank}"
+    )
+    logging.info(
+        "[GMS failover] SGLang rank %d ownership lock: %s",
+        node_rank,
+        os.environ["FAILOVER_LOCK_PATH"],
+    )
+
+
 def _enable_gms_nccl_prewarm(server_args) -> None:
     """Pay lazy TP communicator setup at startup, before standby quiesce."""
 
@@ -145,6 +169,10 @@ async def _prepare_non_leader_failover(
     engine: sgl.Engine,
     runtime: DistributedRuntime,
     early_failover_activation,
+    *,
+    node_rank: int | None = None,
+    leader_host: str | None = None,
+    cohort_identity: str | None = None,
 ) -> _NonLeaderFailoverOwner | None:
     owner = _NonLeaderFailoverOwner(engine)
     if early_failover_activation is not None and early_failover_activation.enabled:
@@ -152,12 +180,43 @@ async def _prepare_non_leader_failover(
         maybe_start_gms_failover_child_watchdog(owner, engine)
         return owner
 
+    activation_barrier = None
+    if node_rank is not None and node_rank >= 1 and leader_host:
+
+        async def activation_barrier() -> None:
+            from dynamo.common import rank_liveness
+
+            client = maybe_start_rank_liveness(
+                owner,
+                engine,
+                node_rank=node_rank,
+                leader_host=leader_host,
+                cohort_identity=cohort_identity,
+            )
+            if client is None:
+                return
+            armed = await asyncio.to_thread(
+                client.wait_for_runtime_arm,
+                rank_liveness.startup_grace_ms() / 1000.0,
+            )
+            if not armed:
+                raise RuntimeError(
+                    "SGLang TP failover activation timed out waiting for the "
+                    "leader to arm serving runtime"
+                )
+            logging.info("[GMS failover] sglang rank %d armed for serving", node_rank)
+
+    failover_kwargs = {
+        "backend_name": "sglang",
+        "tags": ["kv_cache"],
+        "promotion_warmup": None,
+    }
+    if activation_barrier is not None:
+        failover_kwargs["activation_barrier"] = activation_barrier
     failover_activation = await prepare_gms_failover(
         owner,
         runtime,
-        backend_name="sglang",
-        tags=["kv_cache"],
-        promotion_warmup=None,
+        **failover_kwargs,
     )
     if not failover_activation.enabled:
         return None
@@ -205,6 +264,7 @@ async def init_decode(
     attached_engine: Optional[object] = None,
 ) -> None:
     server_args, dynamo_args = config.server_args, config.dynamo_args
+    _scope_failover_lock_to_node_rank(server_args)
     _validate_gms_tp_topology(server_args)
     _enable_gms_nccl_prewarm(server_args)
 
@@ -221,6 +281,16 @@ async def init_decode(
     early_failover_activation = None
     lock_before_init = os.environ.get("DYN_SGLANG_GMS_LOCK_BEFORE_INIT", "1").lower()
     if lock_before_init not in {"0", "false", "no", "off"}:
+        if _shadow_mode_enabled():
+            from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+                prepare_writer_cohort,
+            )
+
+            # Establish this boot's writer identity before taking ownership.
+            # Besides creating the shared namespace, this ensures that every
+            # scheduler spawned after lock acquisition belongs to the cohort a
+            # successor will fence. vLLM follows the same ordering.
+            prepare_writer_cohort()
         early_failover_activation = await acquire_gms_failover_lock_before_init(
             backend_name="sglang"
         )
@@ -298,17 +368,23 @@ async def init_decode(
 
     if server_args.node_rank >= 1:
         non_leader_failover_owner = await _prepare_non_leader_failover(
-            engine, runtime, early_failover_activation
-        )
-        # Heartbeat the leader over ZMQ so a crash of this worker node is detected
-        # in ~one heartbeat-timeout instead of via the NCCL collective timeout.
-        maybe_start_rank_liveness(
-            non_leader_failover_owner,
             engine,
+            runtime,
+            early_failover_activation,
             node_rank=server_args.node_rank,
             leader_host=_rank_liveness_leader_host(server_args),
             cohort_identity=getattr(server_args, "dist_init_addr", None),
         )
+        # Heartbeat the leader over ZMQ so a crash of this worker node is detected
+        # in ~one heartbeat-timeout instead of via the NCCL collective timeout.
+        if not getattr(non_leader_failover_owner, "_gms_rank_liveness_client", None):
+            maybe_start_rank_liveness(
+                non_leader_failover_owner,
+                engine,
+                node_rank=server_args.node_rank,
+                leader_host=_rank_liveness_leader_host(server_args),
+                cohort_identity=getattr(server_args, "dist_init_addr", None),
+            )
         # Keep the owner alive for the non-leader loop. Its attached lock fd is
         # the local primary/shadow fencing token.
         _ = non_leader_failover_owner
@@ -379,6 +455,7 @@ async def init_decode(
                 leader_host=None,
                 cohort_identity=getattr(server_args, "dist_init_addr", None),
                 expected_ranks=None,
+                runtime_armed=False,
             )
             if rank_liveness_monitor is not None:
                 expected_ranks = frozenset(range(1, server_args.nnodes))
@@ -396,8 +473,10 @@ async def init_decode(
                             "SGLang TP failover activation timed out waiting for "
                             f"locally fenced ranks {sorted(expected_ranks)}"
                         )
+                    rank_liveness_monitor.arm_runtime()
                     logging.info(
-                        "[GMS failover] sglang all non-leader ranks fenced and ready"
+                        "[GMS failover] sglang all non-leader ranks fenced; "
+                        "serving runtime armed"
                     )
 
         failover_activation = await prepare_gms_failover(

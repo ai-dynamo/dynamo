@@ -354,6 +354,72 @@ def test_exclusive_steady_state_exposes_only_owned_writable_pages(monkeypatch):
     assert list(state["cpu_free_pages"]) == [1, 3]
 
 
+def test_exclusive_steady_state_reconciles_different_standby_deltas(monkeypatch):
+    """Promotion agrees final ownership, not rank-local warmup history."""
+    votes = _Votes()
+    allocators = []
+    parked = [[], []]
+    for rank, initially_owned in enumerate((1, 2)):
+        cohort = TPConsistency(world_size=2)
+        cohort._rank = lambda rank=rank: rank
+        cohort._gather = lambda value, rank=rank: votes.gather(rank, value)
+        owned = {initially_owned: KVLease(initially_owned, 10 + rank)}
+
+        def acquire(
+            count,
+            *,
+            preferred_blocks,
+            allow_partial,
+            strict_preferred,
+            owned=owned,
+            rank=rank,
+        ):
+            assert allow_partial is True
+            assert strict_preferred is True
+            leases = [KVLease(page, 20 + rank) for page in preferred_blocks[:count]]
+            owned.update({lease.block_id: lease for lease in leases})
+            return leases
+
+        allocator = SimpleNamespace(
+            free_pages=torch.tensor([1, 2, 3, 4]),
+            need_sort=False,
+            _gms_tp_consistency=cohort,
+        )
+        state = {
+            "client": SimpleNamespace(
+                acquire=acquire,
+                release=lambda _leases: None,
+                park_idle=lambda leases, rank=rank: parked[rank].extend(leases),
+            ),
+            "leases_by_page": owned,
+            "retained_pages": set(),
+            "tp_reserved_pages": [],
+            "tp_reservation_aligned": True,
+            "steady_state": False,
+            "exclusive_steady_state": False,
+        }
+        monkeypatch.setitem(hooks._STATE, id(allocator), state)
+        allocators.append(allocator)
+
+    monkeypatch.setattr(hooks, "torch", torch)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(hooks.enter_exclusive_steady_state, allocators))
+
+    assert results == [4, 4]
+    assert [allocator.free_pages.tolist() for allocator in allocators] == [
+        [1, 2, 3, 4],
+        [1, 2, 3, 4],
+    ]
+    assert [set(hooks._STATE[id(a)]["leases_by_page"]) for a in allocators] == [
+        {1, 2, 3, 4},
+        {1, 2, 3, 4},
+    ]
+    assert [[lease.block_id for lease in batch] for batch in parked] == [
+        [2, 3, 4],
+        [2, 3, 4],
+    ]
+
+
 def test_exclusive_steady_state_parks_tail_and_refills_bounded_window(monkeypatch):
     monkeypatch.setenv("GMS_SGLANG_ACTIVE_LEASE_WINDOW_PAGES", "1")
     leases = {

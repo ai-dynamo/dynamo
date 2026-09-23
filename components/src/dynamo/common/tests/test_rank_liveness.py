@@ -109,6 +109,70 @@ def test_running_monitor_applies_tightened_timeout_promptly():
         monitor.stop()
 
 
+def test_client_uses_startup_deadline_until_monitor_arms_runtime():
+    endpoint = _endpoint()
+    fired = threading.Event()
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: None,
+        bind_addr=endpoint,
+        timeout_ms_override=500,
+        expected_ranks={1},
+        startup_grace_ms_override=1_000,
+        runtime_armed=False,
+    )
+    client = rl.RankLivenessClient(
+        "unused",
+        1,
+        interval_ms=10,
+        connect_addr=endpoint,
+        on_leader_lost=lambda _rank, _reason: fired.set(),
+        timeout_ms_override=40,
+        startup_grace_ms_override=1_000,
+        startup_timeout_ms_override=300,
+    )
+
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=1.0)
+        # Stay beyond the 40ms runtime deadline while startup acknowledgements
+        # are flowing. The client must neither arm nor fence itself yet.
+        time.sleep(0.1)
+        assert client._runtime_armed is False
+        assert fired.is_set() is False
+
+        monitor.set_timeout_ms(40)
+        assert client.wait_for_runtime_arm(timeout=1.0) is True
+
+        monitor.stop()
+        assert fired.wait(0.4)
+    finally:
+        client.stop()
+        monitor.stop()
+
+
+def test_client_runtime_barrier_is_bounded_when_leader_never_arms():
+    endpoint = _endpoint()
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: None,
+        bind_addr=endpoint,
+        expected_ranks={1},
+        runtime_armed=False,
+    )
+    client = rl.RankLivenessClient("unused", 1, interval_ms=10, connect_addr=endpoint)
+
+    monitor.start()
+    client.start()
+    try:
+        assert monitor.wait_for_ranks({1}, timeout=1.0)
+        assert client.wait_for_runtime_arm(timeout=0.05) is False
+        monitor.arm_runtime()
+        assert client.wait_for_runtime_arm(timeout=1.0) is True
+    finally:
+        client.stop()
+        monitor.stop()
+
+
 def test_expected_rank_that_never_registers_fires_startup_timeout():
     endpoint = _endpoint()
     fired = threading.Event()
@@ -274,6 +338,93 @@ def test_worker_detects_leader_loss_after_acknowledgement():
         monitor.stop()
 
 
+def test_lost_rank_does_not_force_terminate_healthy_survivors():
+    endpoint = _endpoint()
+    leader_fired = threading.Event()
+    survivor_fired = threading.Event()
+    survivor_calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: leader_fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=80,
+        expected_ranks={1, 2},
+        startup_grace_ms_override=1_000,
+    )
+    survivor = rl.RankLivenessClient(
+        "unused",
+        1,
+        interval_ms=20,
+        connect_addr=endpoint,
+        on_leader_lost=lambda rank, reason: (
+            survivor_calls.append((rank, reason)),
+            survivor_fired.set(),
+        ),
+        timeout_ms_override=1_000,
+        startup_grace_ms_override=1_000,
+    )
+    failed = rl.RankLivenessClient("unused", 2, interval_ms=20, connect_addr=endpoint)
+
+    monitor.start()
+    survivor.start()
+    failed.start()
+    try:
+        assert monitor.wait_for_ranks({1, 2}, timeout=1.0)
+        failed.stop()
+        _wait(leader_fired)
+        # A healthy survivor may share an MPS fault domain with an already
+        # initialized shadow. Eagerly fencing it can propagate a sticky CUDA
+        # fault into that shadow. It must instead observe leader loss through
+        # its own bounded heartbeat timeout.
+        assert not survivor_fired.wait(0.15)
+        assert survivor_calls == []
+    finally:
+        failed.stop()
+        survivor.stop()
+        monitor.stop()
+
+
+def test_opt_in_fence_broadcast_fail_stops_healthy_survivors():
+    endpoint = _endpoint()
+    leader_fired = threading.Event()
+    survivor_fired = threading.Event()
+    survivor_calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda _rank, _reason: leader_fired.set(),
+        bind_addr=endpoint,
+        timeout_ms_override=80,
+        expected_ranks={1, 2},
+        startup_grace_ms_override=1_000,
+        broadcast_fence=True,
+    )
+    survivor = rl.RankLivenessClient(
+        "unused",
+        1,
+        interval_ms=20,
+        connect_addr=endpoint,
+        on_leader_lost=lambda rank, reason: (
+            survivor_calls.append((rank, reason)),
+            survivor_fired.set(),
+        ),
+        timeout_ms_override=1_000,
+        startup_grace_ms_override=1_000,
+    )
+    failed = rl.RankLivenessClient("unused", 2, interval_ms=20, connect_addr=endpoint)
+
+    monitor.start()
+    survivor.start()
+    failed.start()
+    try:
+        assert monitor.wait_for_ranks({1, 2}, timeout=1.0)
+        failed.stop()
+        _wait(leader_fired)
+        assert survivor_fired.wait(0.15)
+        assert survivor_calls == [(0, "peer-rank-lost")]
+    finally:
+        failed.stop()
+        survivor.stop()
+        monitor.stop()
+
+
 def test_worker_detects_leader_that_never_appears():
     fired = threading.Event()
     calls: list[tuple[int, str]] = []
@@ -416,3 +567,80 @@ def test_noisy_ack_socket_cannot_starve_leader_timeout(monkeypatch, caplog):
     assert sock.closed
     assert "local scheduling gap" in caplog.text
     assert "writer fencing still required" in caplog.text
+
+
+def test_gpu_crash_marker_bypasses_heartbeat_timeout(tmp_path):
+    from gpu_memory_service.common.gpu_failure_marker import (
+        gpu_failure_marker_path,
+        publish_gpu_failure_marker,
+    )
+
+    cohort = tmp_path / "cohort"
+    cohort.touch(mode=0o600)
+    marker = gpu_failure_marker_path(cohort)
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=_endpoint(),
+        timeout_ms_override=5_000,
+        failure_marker_path=str(marker),
+    )
+
+    monitor.start()
+    try:
+        publish_gpu_failure_marker(cohort, rank=7, pid=1234, source="signal-11")
+        assert fired.wait(0.5), "monitor waited for the heartbeat deadline"
+        assert calls == [(7, "gpu-crash-interlock")]
+    finally:
+        monitor.stop()
+
+
+def test_direct_gpu_crash_notification_bypasses_heartbeat_timeout(tmp_path):
+    import zmq
+
+    from gpu_memory_service.common.gpu_failure_marker import gpu_failure_marker_path
+
+    cohort = tmp_path / "cohort"
+    cohort.touch(mode=0o600)
+    marker = gpu_failure_marker_path(cohort)
+    endpoint = _endpoint()
+    fired = threading.Event()
+    calls: list[tuple[int, str]] = []
+    monitor = rl.RankLivenessMonitor(
+        lambda rank, reason: (calls.append((rank, reason)), fired.set()),
+        bind_addr=endpoint,
+        timeout_ms_override=5_000,
+        failure_marker_path=str(marker),
+    )
+
+    sender = zmq.Context.instance().socket(zmq.DEALER)
+    sender.setsockopt(zmq.LINGER, 0)
+    sender.connect(endpoint)
+    monitor.start()
+    try:
+        sender.send_multipart(
+            [
+                b"gpu-failed-v1",
+                str(tmp_path / "other-cohort").encode(),
+                b"7",
+                b"1234",
+                b"signal-11",
+            ]
+        )
+        assert not fired.wait(0.1), "another cohort must not trigger takeover"
+
+        sender.send_multipart(
+            [
+                b"gpu-failed-v1",
+                str(cohort).encode(),
+                b"7",
+                b"1234",
+                b"signal-11",
+            ]
+        )
+        assert fired.wait(0.5), "monitor waited for the heartbeat deadline"
+        assert calls == [(7, "gpu-crash-interlock-zmq")]
+    finally:
+        sender.close(0)
+        monitor.stop()

@@ -2621,10 +2621,19 @@ async def test_gms_preinit_liveness_keeps_lock_until_exit_and_is_reused(monkeypa
     timeout_updates = []
 
     class Monitor:
-        def __init__(self, callback, expected_ranks, timeout_ms_override):
+        def __init__(
+            self,
+            callback,
+            expected_ranks,
+            timeout_ms_override,
+            runtime_armed,
+            broadcast_fence,
+        ):
             callbacks.append(callback)
             assert list(expected_ranks) == [1]
-            assert timeout_ms_override == rank_liveness.DEFAULT_TIMEOUT_MS
+            assert timeout_ms_override == rank_liveness.startup_timeout_ms()
+            assert runtime_armed is False
+            assert broadcast_fence is False
 
         def start(self):
             pass
@@ -2717,9 +2726,10 @@ async def test_gms_rank_loss_fences_engine_core_before_owner_exit(monkeypatch):
     callbacks = []
 
     class Monitor:
-        def __init__(self, callback, expected_ranks):
+        def __init__(self, callback, expected_ranks, broadcast_fence):
             callbacks.append(callback)
             assert list(expected_ranks) == [1]
+            assert broadcast_fence is False
 
         def start(self):
             pass

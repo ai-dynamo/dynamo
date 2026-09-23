@@ -300,6 +300,7 @@ class _GMSClientSession:
         client_pid: int,
         process_start_time: str,
         rank: int = 0,
+        failure_notify_addr: str = "",
     ) -> bool:
         response, fd = self._transport.request_with_fd(
             RegisterGPUClientRequest(
@@ -308,6 +309,7 @@ class _GMSClientSession:
                 client_pid=client_pid,
                 process_start_time=process_start_time,
                 rank=rank,
+                failure_notify_addr=failure_notify_addr,
                 crash_interlock=False,
             ),
             RegisterGPUClientResponse,
@@ -327,6 +329,7 @@ class _GMSClientSession:
         client_pid: int,
         process_start_time: str,
         rank: int = 0,
+        failure_notify_addr: str = "",
     ) -> int:
         """Register a CUDA client and return its one-shot crash notification FD.
 
@@ -340,6 +343,7 @@ class _GMSClientSession:
                 client_pid=client_pid,
                 process_start_time=process_start_time,
                 rank=rank,
+                failure_notify_addr=failure_notify_addr,
                 crash_interlock=True,
             ),
             RegisterGPUClientResponse,
