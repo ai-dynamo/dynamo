@@ -1,0 +1,77 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Audio Generation"
+subtitle: "Qwen3-TTS deployments and a local vLLM-Omni launch script."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Generate speech with `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`. See
+[Text-to-Audio](../../use-cases/diffusion/workflows/text-to-audio.md) for requests, or
+[Audio and Realtime Serving](audio.mdx) for transcription and speech-to-speech.
+
+<Warning>
+**Experimental.** Both Kubernetes configurations were validated on September 18, 2026 with one H100
+GPU and the existing Dynamo 1.4.2 operator, but different matched nightly serving-image pairs.
+Keep each frontend/worker pair together and set `runtimeVersionOverride` to the serving images’
+Dynamo version, not the operator version. Stock 1.4.2 serving images returned only an initial silent
+chunk; neither these results nor a newer nightly imply general mixed-version compatibility.
+
+Prepare `hf-token-secret` with `HF_TOKEN`, review the model’s remote code before using
+`--trust-remote-code`, and adapt storage and GPU placement before deployment. The tests checked
+non-silent waveform delivery and WAV framing, not listening quality or performance.
+For `response_format: "wav"` with `data_source: "b64_json"`, save the raw response bytes as a WAV;
+the response is not a JSON/base64 envelope.
+</Warning>
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-omni-audio-yaml", "target": "kubernetes:vllm", "label": "Audio (validated template)", "description": "Qwen3-TTS · matched August 26 nightly images"},
+    {"id": "kubernetes-vllm-audio-experimental-yaml", "target": "kubernetes:vllm", "label": "Audio (September 18 nightly)", "description": "Qwen3-TTS · pinned experimental Dynamo 1.6.0 nightly"},
+    {"id": "local-vllm-agg-omni-audio-sh", "target": "local:vllm", "label": "agg_omni_audio.sh", "description": "Local audio generation · requires a build containing the audio fix"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-omni-audio-yaml">
+
+Replace both image placeholders with the `20260826-27f09d5` frontend/worker pair documented in the
+manifest. These contain Dynamo `1.5.0.dev20260826`, vLLM `0.27.1`, and vLLM-Omni `0.27.0rc1`.
+Keep `runtimeVersionOverride: "1.5.0"` on both components. This template does not require an existing
+model-cache PVC.
+
+[Source: `agg_omni_audio.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_omni_audio.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_omni_audio.yaml" title="agg_omni_audio.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-audio-experimental-yaml">
+
+The pinned `20260918-a9792db` frontend/worker pair contains Dynamo `1.6.0.dev20260918`, vLLM `0.29.0`,
+and vLLM-Omni `0.29.0rc1`. Keep `runtimeVersionOverride: "1.6.0"` on both components. Replace
+`model-cache-pvc` and `subPath: model-cache` with your writable cache and set your GPU node selectors.
+Namespace/node-pool bindings and cache names were generalized from the tested demo; revalidate after adapting them.
+
+[Source: `experimental/agg_omni_audio.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_audio.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_audio.yaml" title="experimental/agg_omni_audio.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-audio-sh">
+
+Run from the repository root in a runtime containing the audio fix; the script does not select an image.
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_audio.sh)
+```
+
+[Source: `agg_omni_audio.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_audio.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_audio.sh" title="agg_omni_audio.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

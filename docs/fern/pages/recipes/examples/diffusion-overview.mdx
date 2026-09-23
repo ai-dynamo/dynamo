@@ -1,0 +1,237 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Diffusion Overview
+sidebar-title: Overview
+subtitle: Explore image, video, audio, and text generation by model
+hide-toc: true
+---
+
+import { DiffusionCatalog } from "@/components/DiffusionCatalog";
+
+Choose a model to open its deployment examples. Experimental entries require the builds and setup
+notes documented on their example pages.
+
+<DiffusionCatalog>
+
+<article className="dynamo-diffusion-card" data-model="black-forest-labs/FLUX.1-schnell" data-source="examples/backends/sglang/deploy/agg_image_diffusion.yaml" data-case="text-to-image" data-backend="sglang" data-size-gb="33.7" data-experimental="false">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/black-forest-labs.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Black Forest Labs</p>
+<h3 className="dynamo-diffusion-name">FLUX.1-schnell</h3>
+</div>
+</div>
+
+<p className="dynamo-diffusion-model">black-forest-labs/FLUX.1-schnell</p>
+<p className="dynamo-diffusion-description">Distilled FLUX image generation with SGLang.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Image</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">SGLang</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">33.7 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="image-generation.mdx" aria-label="Open FLUX.1-schnell with SGLang">Open FLUX.1-schnell example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="black-forest-labs/FLUX.2-klein-4B" data-source="examples/backends/trtllm/deploy/agg_image_diffusion.yaml" data-case="text-to-image" data-backend="trtllm" data-size-gb="16.0" data-experimental="false">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/black-forest-labs.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Black Forest Labs</p>
+<h3 className="dynamo-diffusion-name">FLUX.2-klein-4B</h3>
+</div>
+</div>
+
+<p className="dynamo-diffusion-model">black-forest-labs/FLUX.2-klein-4B</p>
+<p className="dynamo-diffusion-description">FLUX.2 image generation with TensorRT-LLM.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Image</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">TensorRT-LLM</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">16.0 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="image-generation.mdx" aria-label="Open FLUX.2-klein-4B with TensorRT-LLM">Open FLUX.2-klein-4B example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="Qwen/Qwen-Image" data-source="examples/backends/vllm/deploy/agg_omni_image.yaml" data-case="text-to-image" data-backend="vllm" data-size-gb="57.7" data-experimental="false">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Qwen</p>
+<h3 className="dynamo-diffusion-name">Qwen-Image</h3>
+</div>
+</div>
+
+<p className="dynamo-diffusion-model">Qwen/Qwen-Image</p>
+<p className="dynamo-diffusion-description">Image generation through the vLLM-Omni pipeline.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Image</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">57.7 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="image-generation.mdx" aria-label="Open Qwen-Image with vLLM-Omni">Open Qwen-Image example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="inclusionAI/LLaDA2.0-mini-preview" data-source="examples/backends/sglang/deploy/agg_llm_diffusion.yaml" data-case="text-to-text" data-backend="sglang" data-size-gb="32.5" data-experimental="false">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/inclusionai.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">inclusionAI</p>
+<h3 className="dynamo-diffusion-name">LLaDA 2.0 mini</h3>
+</div>
+</div>
+
+<p className="dynamo-diffusion-model">inclusionAI/LLaDA2.0-mini-preview</p>
+<p className="dynamo-diffusion-description">Diffusion language modeling with iterative text refinement.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Text</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">SGLang</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">32.5 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="text-diffusion.mdx" aria-label="Open LLaDA 2.0 mini with SGLang">Open LLaDA 2.0 mini example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" data-source="examples/backends/vllm/deploy/agg_omni_audio.yaml" data-case="text-to-audio" data-backend="vllm" data-size-gb="4.5" data-experimental="true">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Qwen</p>
+<h3 className="dynamo-diffusion-name">Qwen3-TTS</h3>
+</div>
+<span className="dynamo-diffusion-experimental">Experimental</span>
+</div>
+
+<p className="dynamo-diffusion-model">Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice</p>
+<p className="dynamo-diffusion-description">Custom-voice speech without a model-cache PVC.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Audio</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">4.5 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="audio-generation.mdx" aria-label="Open Qwen3-TTS with vLLM-Omni">Open Qwen3-TTS example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" data-source="examples/backends/vllm/deploy/experimental/agg_omni_audio.yaml" data-case="text-to-audio" data-backend="vllm" data-size-gb="4.5" data-experimental="true">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Qwen</p>
+<h3 className="dynamo-diffusion-name">Qwen3-TTS · Cached</h3>
+</div>
+<span className="dynamo-diffusion-experimental">Experimental</span>
+</div>
+
+<p className="dynamo-diffusion-model">Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice</p>
+<p className="dynamo-diffusion-description">Custom-voice speech with a persistent model cache.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Audio</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">4.5 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="audio-generation.mdx" aria-label="Open Qwen3-TTS · Cached with vLLM-Omni">Open Qwen3-TTS · Cached example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="Wan-AI/Wan2.1-T2V-1.3B-Diffusers" data-source="examples/backends/vllm/deploy/experimental/agg_omni_video.yaml" data-case="text-to-video" data-backend="vllm" data-size-gb="28.9" data-experimental="true">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/wan-ai.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Wan</p>
+<h3 className="dynamo-diffusion-name">Wan2.1 T2V 1.3B</h3>
+</div>
+<span className="dynamo-diffusion-experimental">Experimental</span>
+</div>
+
+<p className="dynamo-diffusion-model">Wan-AI/Wan2.1-T2V-1.3B-Diffusers</p>
+<p className="dynamo-diffusion-description">Turn text prompts into generated video clips.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Text → Video</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">28.9 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="video-generation.mdx" aria-label="Open Wan2.1 T2V 1.3B with vLLM-Omni">Open Wan2.1 T2V 1.3B example</a>
+
+</article>
+
+<article className="dynamo-diffusion-card" data-model="Wan-AI/Wan2.2-TI2V-5B-Diffusers" data-source="examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml" data-case="image-to-video" data-backend="vllm" data-size-gb="34.2" data-experimental="true">
+
+<div className="dynamo-diffusion-card-top">
+<img className="dynamo-diffusion-logo" src="../../../assets/img/recipes/providers/wan-ai.webp" alt="" width="48" height="48" />
+<div className="dynamo-diffusion-card-heading">
+<p className="dynamo-diffusion-provider">Wan</p>
+<h3 className="dynamo-diffusion-name">Wan2.2 TI2V 5B</h3>
+</div>
+<span className="dynamo-diffusion-experimental">Experimental</span>
+</div>
+
+<p className="dynamo-diffusion-model">Wan-AI/Wan2.2-TI2V-5B-Diffusers</p>
+<p className="dynamo-diffusion-description">Animate an input image with a text prompt.</p>
+
+<div className="dynamo-diffusion-chips">
+<span className="dynamo-diffusion-chip dynamo-diffusion-modality">Image → Video</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-backend">vLLM-Omni</span>
+<span className="dynamo-diffusion-chip dynamo-diffusion-size" title="Approximate checkpoint weights, including pipeline components. Not GPU memory.">34.2 GB weights</span>
+</div>
+
+<div className="dynamo-diffusion-card-footer" aria-hidden="true"><span>↗</span></div>
+<a className="dynamo-diffusion-card-link" href="video-generation.mdx" aria-label="Open Wan2.2 TI2V 5B with vLLM-Omni">Open Wan2.2 TI2V 5B example</a>
+
+</article>
+
+</DiffusionCatalog>
+
+Model sizes are approximate checkpoint weights in decimal GB, including text encoders, VAE, or
+speech tokenizer where applicable. They are **not GPU memory requirements**; precision, quantization,
+and backend loading choices change the runtime footprint. Duplicate single-file exports are excluded.
+
+## Other Existing Examples
+
+Additional local launch scripts and FastVideo deployments are available on the same topic pages.
+
+| Case | Backend | Model | Available Examples |
+|------|---------|-------|--------------------|
+| Text-to-video | FastVideo | `FastVideo/FastWan2.1-T2V-1.3B-Diffusers` | [Local script and two existing DGDs](fastvideo.mdx); experimental custom worker |
+| Text-to-video | SGLang | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` or `Wan-AI/Wan2.1-T2V-14B-Diffusers` | [Video Generation](video-generation.mdx): `text-to-video-diffusion.sh`; local only |
+| Text-to-video | TensorRT-LLM | `Wan-AI/Wan2.1-T2V-1.3B-Diffusers` | [Video Generation](video-generation.mdx): `agg_video_diffusion.sh`; local only |
+| Two-stage image generation | vLLM-Omni | `zai-org/GLM-Image` | [Image Generation](image-generation.mdx): `disagg_omni_glm_image.sh`; local only |
+| Cross-node image generation with NIXL | vLLM-Omni | `zai-org/GLM-Image` | [Image Generation](image-generation.mdx): `disagg_omni_glm_image_nixl.sh`; local only |
+
+The SGLang `image_diffusion.sh` defaults to `black-forest-labs/FLUX.1-dev`; the image DGD
+above instead uses `black-forest-labs/FLUX.1-schnell`. A shared workload does not imply identical
+model defaults or runtime requirements.
+
+Realtime speech and transcription remain under [Audio and Realtime Serving](audio.mdx).
+The CPU-only sample diffusion backend (`agg_diffusion.sh`) remains under
+[Custom Backends and Testing](custom-backends.mdx); it does not load a real model.

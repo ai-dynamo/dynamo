@@ -1,0 +1,138 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Experimental image-to-video serving. Adapted from the configuration validated
+# on September 22, 2026; namespace/node-pool bindings and cache names are portable.
+# The worker is a custom Dynamo 1.4.2 image, not an official release image. It
+# contains the video response_format forwarding fix and the FFmpeg RGB-to-YUV
+# color-conversion fix. Stock 1.4.2 and arbitrary nightlies are not substitutes.
+# Keep both image digests and runtimeVersionOverride: 1.4.2 as tested; the version
+# override lets the operator identify the version of digest-pinned images.
+#
+# Before applying, create the hf-token-secret Secret containing HF_TOKEN, replace
+# model-cache-pvc and subPath: model-cache, and select an amd64 H100 80 GB node.
+# HF_HUB_OFFLINE=1 requires a complete model snapshot under model-cache/hub in
+# the existing PVC. The model cache is read-only. Each DGD requests one GPU;
+# run T2V and I2V sequentially if only one GPU is available.
+# Request response_format=b64_json: file:// media URLs are local to the worker.
+# Qualified video requests used 832x480, 50 steps, 33 frames, 16 fps, and seed 42.
+# Four-step requests were plumbing checks, not quality demonstrations.
+# Supply a valid input_reference image; the I2V request also used guidance_scale
+# 1.0, boundary_ratio 0.875 and guidance_scale_2 1.0. The output retained the
+# subject but distorted its proportions; general image fidelity is not validated.
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-omni-i2v-experimental
+  labels:
+    video-mode: i2v
+    example: vllm-omni-experimental
+spec:
+  backendFramework: vllm
+  components:
+  - name: Frontend
+    type: frontend
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend@sha256:4d6435ad3893487e7e5a8751eb2381199464f80248284bb98c5e0998f09a91c0
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+        nodeSelector:
+          kubernetes.io/arch: amd64
+      metadata:
+        labels:
+          video-mode: i2v
+          video-role: frontend
+          example: vllm-omni-experimental
+    runtimeVersionOverride: 1.4.2
+  - name: OmniImageToVideoWorker
+    type: worker
+    replicas: 1
+    sharedMemorySize: 16Gi
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: docker.io/jont828/dynamo-ffmpeg-color@sha256:1b72cc6dfbbf610ba6e1135832c9cb702f7e6ddca2d57ddfc01e7e67e066980c
+          command:
+          - python3
+          - -m
+          - dynamo.vllm.omni
+          args:
+          - --model
+          - Wan-AI/Wan2.2-TI2V-5B-Diffusers
+          - --output-modalities
+          - video
+          - --media-output-fs-url
+          - file:///tmp/dynamo_media
+          - --enforce-eager
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+              cpu: '8'
+              memory: 96Gi
+            requests:
+              nvidia.com/gpu: '1'
+              cpu: '4'
+              memory: 32Gi
+          volumeMounts:
+          - name: media-output
+            mountPath: /tmp/dynamo_media
+          - name: run-hf
+            mountPath: /run-hf
+          - name: shared-model-cache
+            mountPath: /shared-cache
+            subPath: model-cache
+            readOnly: true
+          env:
+          - name: HF_HOME
+            value: /run-hf
+          - name: HF_HUB_DISABLE_TELEMETRY
+            value: '1'
+          - name: HF_HUB_CACHE
+            value: /shared-cache/hub
+          - name: HF_HUB_OFFLINE
+            value: '1'
+        volumes:
+        - name: media-output
+          emptyDir:
+            sizeLimit: 40Gi
+        - name: run-hf
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: model-cache-pvc
+            readOnly: true
+        nodeSelector:
+          kubernetes.io/arch: amd64
+      metadata:
+        labels:
+          video-mode: i2v
+          video-role: worker
+          example: vllm-omni-experimental
+    runtimeVersionOverride: 1.4.2

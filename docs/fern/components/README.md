@@ -34,10 +34,14 @@ root and is rewritten to a relative path at publish time.
 
 ### DiffusionCatalog
 
-The diffusion overview's responsive card grid. Keep card markup, provider images, and its single
-native sidebar-page link in MDX so Fern can rewrite them. The component injects scoped styles on
-the server, including dark mode, keyboard focus, and reduced-motion support; it does not filter or
-fetch model metadata in the browser.
+The diffusion overview's searchable, filterable card grid. Keep card markup, provider images, and
+the single native sidebar-page link per card in MDX so Fern can rewrite them. The component injects
+scoped styles on the server, including dark mode, keyboard focus, and reduced-motion support.
+`DiffusionCatalogControls` reads the rendered card metadata and chip labels for type, backend,
+provider, weight size, and experimental-status filters. Search includes card text, model IDs, and
+source paths; sorting supports names, chip values, and numeric weight sizes. It reorders the native
+cards so keyboard and screen-reader order follow the visual order. All cards remain readable
+without JavaScript, and no model metadata is fetched in the browser.
 
 ```mdx
 import { DiffusionCatalog } from "@/components/DiffusionCatalog";
