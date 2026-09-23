@@ -1322,7 +1322,10 @@ impl<
         let lifecycle_span = tracing::Span::none();
         let queue_depth_in = self.pending_count.load(AtomicOrdering::Relaxed);
         lifecycle_span.record("dynamo.router.queue.class", class.name.as_str());
-        lifecycle_span.record("dynamo.router.queue.policy", class.queue_policy.to_string());
+        lifecycle_span.record(
+            "dynamo.router.queue.policy",
+            tracing::field::display(class.queue_policy),
+        );
         lifecycle_span.record("dynamo.router.queue.depth.in", queue_depth_in as u64);
         // Policy-queue membership alone does not mean capacity deferred the
         // request: ordinary arrivals can drain in the same actor turn.
@@ -1697,7 +1700,7 @@ impl<
             finish_queue_span(
                 queued.lifecycle_span,
                 self.pending_count.load(AtomicOrdering::Relaxed),
-                "admitted",
+                "dequeued",
                 None,
             );
             tracing::trace!(
@@ -3653,7 +3656,7 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
 
         for (id, outcome) in [
-            ("admitted", "admitted"),
+            ("admitted", "dequeued"),
             ("cancelled", "cancelled"),
             ("expired", "timed_out"),
         ] {

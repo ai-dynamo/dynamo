@@ -322,7 +322,8 @@ impl RouterSelectionTelemetry {
                     let load = input
                         .filter(|input| input.inputs.contains(WorkerInputs::LOAD))
                         .map(|input| &input.load)
-                        .or_else(|| state.load_inputs.get(row));
+                        .or_else(|| state.load_inputs.get(row))
+                        .filter(|load| load.available);
                     if let Some(load) = load {
                         detail["active_prefill_tokens"] =
                             serde_json::json!(load.active_prefill_tokens);
@@ -592,7 +593,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     block_size: u32,
 ) -> Result<WorkerSelectionResult, KvSchedulerError> {
     let telemetry = current_router_selection_telemetry(workers, eligibility);
-    if let Some(telemetry) = &telemetry {
+    if let Some(telemetry) = &telemetry
+        && telemetry.filters.eligible == 0
+    {
         telemetry.record_candidate_envelope(telemetry.filters.eligible);
     }
     let result = select_worker_with_policy_inner(
