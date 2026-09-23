@@ -159,14 +159,6 @@ Counters for requests that end early: [cancellations](../../developer-guide/know
   Active prefill tokens queued per worker.
 </ParamField>
 
-<ParamField path="dynamo_frontend_worker_remote_kv_waiting_requests" type="gauge">
-  Requests whose external KV transfer has not completed, per worker. This is transfer pressure, not prefill compute.
-</ParamField>
-
-<ParamField path="dynamo_frontend_worker_remote_kv_waiting_tokens" type="gauge">
-  KV context tokens belonging to requests whose external KV transfer has not completed, per worker.
-</ParamField>
-
 <ParamField path="dynamo_frontend_worker_last_time_to_first_token_seconds" type="gauge">
   Last observed time to first token per worker, in seconds.
 </ParamField>

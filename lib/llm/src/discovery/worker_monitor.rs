@@ -41,8 +41,6 @@ fn cleanup_worker_metrics(worker_id: u64, dp_ranks: &[u32], worker_type: &str) {
         let labels = &[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type];
         let _ = m.active_decode_blocks.remove_label_values(labels);
         let _ = m.active_prefill_tokens.remove_label_values(labels);
-        let _ = m.remote_kv_waiting_requests.remove_label_values(labels);
-        let _ = m.remote_kv_waiting_tokens.remove_label_values(labels);
         let _ = WORKER_LAST_TIME_TO_FIRST_TOKEN_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INPUT_SEQUENCE_TOKENS_GAUGE.remove_label_values(labels);
         let _ = WORKER_LAST_INTER_TOKEN_LATENCY_GAUGE.remove_label_values(labels);
@@ -112,11 +110,6 @@ pub struct LoadThresholdConfig {
     /// Worker is overloaded when `active_prefill_tokens > frac * max_num_batched_tokens`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_prefill_tokens_threshold_frac: Option<f64>,
-
-    /// Absolute external-KV transfer backlog threshold. A worker is busy when
-    /// tokens in `WAITING_FOR_REMOTE_KVS` exceed this value.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub remote_kv_waiting_tokens_threshold: Option<u64>,
 }
 
 impl LoadThresholdConfig {
@@ -125,7 +118,6 @@ impl LoadThresholdConfig {
         self.active_decode_blocks_threshold.is_some()
             || self.active_prefill_tokens_threshold.is_some()
             || self.active_prefill_tokens_threshold_frac.is_some()
-            || self.remote_kv_waiting_tokens_threshold.is_some()
     }
 
     /// Validate threshold values shared by startup and dynamic configuration.
@@ -174,9 +166,6 @@ impl LoadThresholdHandle {
         if let Some(value) = config.active_prefill_tokens_threshold_frac {
             current.active_prefill_tokens_threshold_frac = Some(value);
         }
-        if let Some(value) = config.remote_kv_waiting_tokens_threshold {
-            current.remote_kv_waiting_tokens_threshold = Some(value);
-        }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -208,8 +197,6 @@ struct RemoteActiveLoadSnapshot {
     active_decode_blocks: Option<u64>,
     active_prefill_tokens: Option<u64>,
     kv_used_blocks: Option<u64>,
-    remote_kv_waiting_requests: Option<u64>,
-    remote_kv_waiting_tokens: Option<u64>,
 }
 
 impl From<ActiveLoad> for RemoteActiveLoadSnapshot {
@@ -222,8 +209,6 @@ impl From<ActiveLoad> for RemoteActiveLoadSnapshot {
             active_decode_blocks: load.active_decode_blocks,
             active_prefill_tokens: load.active_prefill_tokens,
             kv_used_blocks: load.kv_used_blocks,
-            remote_kv_waiting_requests: load.remote_kv_waiting_requests,
-            remote_kv_waiting_tokens: load.remote_kv_waiting_tokens,
         }
     }
 }
@@ -242,8 +227,6 @@ impl LoadObservation {
         Option<u64>,
         Option<u64>,
         Option<u64>,
-        Option<u64>,
-        Option<u64>,
     ) {
         match self {
             Self::Scheduler(snapshot) => (
@@ -251,16 +234,12 @@ impl LoadObservation {
                 Some(snapshot.active_decode_blocks),
                 Some(snapshot.active_prefill_tokens),
                 None,
-                None,
-                None,
             ),
             Self::Remote(snapshot) => (
                 snapshot.worker,
                 snapshot.active_decode_blocks,
                 snapshot.active_prefill_tokens,
                 snapshot.kv_used_blocks,
-                snapshot.remote_kv_waiting_requests,
-                snapshot.remote_kv_waiting_tokens,
             ),
         }
     }
@@ -272,7 +251,6 @@ pub struct WorkerLoadState {
     pub kv_used_blocks: HashMap<u32, u64>,
     pub kv_total_blocks: HashMap<u32, u64>,
     pub active_prefill_tokens: HashMap<u32, u64>,
-    pub remote_kv_waiting_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
     /// The current router-visible ranks declared by this worker's runtime config.
@@ -297,8 +275,6 @@ impl WorkerLoadState {
         self.kv_used_blocks
             .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
         self.active_prefill_tokens
-            .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
-        self.remote_kv_waiting_tokens
             .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
 
         self.kv_total_blocks.clear();
@@ -432,14 +408,8 @@ impl WorkerLoadState {
         observation: LoadObservation,
         active_decode_blocks_threshold: Option<f64>,
     ) -> bool {
-        let (
-            worker,
-            active_decode_blocks,
-            active_prefill_tokens,
-            kv_used_blocks,
-            _,
-            remote_kv_waiting_tokens,
-        ) = observation.parts();
+        let (worker, active_decode_blocks, active_prefill_tokens, kv_used_blocks) =
+            observation.parts();
         let dp_rank = worker.dp_rank;
         if !self.accepts_dp_rank(dp_rank) {
             return false;
@@ -453,10 +423,6 @@ impl WorkerLoadState {
         }
         if let Some(active_tokens) = active_prefill_tokens {
             self.active_prefill_tokens.insert(dp_rank, active_tokens);
-        }
-        if let Some(waiting_tokens) = remote_kv_waiting_tokens {
-            self.remote_kv_waiting_tokens
-                .insert(dp_rank, waiting_tokens);
         }
         if let Some(threshold) = active_decode_blocks_threshold {
             self.update_decode_overload_latch(
@@ -485,42 +451,24 @@ impl WorkerLoadState {
     ///
     /// Each threshold is `Option<T>`. A `None` threshold means that check is
     /// skipped entirely — it cannot contribute to a dp_rank being overloaded. If all
-    /// four thresholds are `None`, no dp_rank is ever overloaded.
+    /// three thresholds are `None`, no dp_rank is ever overloaded.
     ///
     /// For each dp_rank, a dp_rank is overloaded if ANY of these conditions is met (OR logic):
     /// 1. `active_prefill_tokens > active_prefill_tokens_threshold` (absolute, if set)
     /// 2. `active_prefill_tokens > frac * max_num_batched_tokens` (fractional, if set)
     /// 3. decode overload latch set by either `kv_used_blocks` or `active_decode_blocks` (if set)
-    /// 4. `remote_kv_waiting_tokens > remote_kv_waiting_tokens_threshold` (if set)
     ///
     /// The worker is overloaded only if ALL dp_ranks are overloaded.
-    #[cfg(test)]
     pub fn is_overloaded(
         &self,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         active_prefill_tokens_threshold_frac: Option<f64>,
     ) -> bool {
-        self.is_overloaded_with_remote(
-            active_decode_blocks_threshold,
-            active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac,
-            None,
-        )
-    }
-
-    fn is_overloaded_with_remote(
-        &self,
-        active_decode_blocks_threshold: Option<f64>,
-        active_prefill_tokens_threshold: Option<u64>,
-        active_prefill_tokens_threshold_frac: Option<f64>,
-        remote_kv_waiting_tokens_threshold: Option<u64>,
-    ) -> bool {
         // Short-circuit if all thresholds are unset (i.e. no overload check can fire)
         if active_decode_blocks_threshold.is_none()
             && active_prefill_tokens_threshold.is_none()
             && active_prefill_tokens_threshold_frac.is_none()
-            && remote_kv_waiting_tokens_threshold.is_none()
         {
             return false;
         }
@@ -538,7 +486,6 @@ impl WorkerLoadState {
                     .chain(self.kv_used_blocks.keys())
                     .chain(self.decode_overload_latches.keys())
                     .chain(self.active_prefill_tokens.keys())
-                    .chain(self.remote_kv_waiting_tokens.keys())
                     .copied()
                     .collect();
                 &fallback_dp_ranks
@@ -586,29 +533,16 @@ impl WorkerLoadState {
                 }
             }
 
-            // Check 4: external-KV transfer backlog. This is intentionally
-            // independent of prefill compute pressure: prefix affinity keeps
-            // winning until the transfer queue crosses an explicit limit.
-            if let Some(threshold) = remote_kv_waiting_tokens_threshold
-                && self
-                    .remote_kv_waiting_tokens
-                    .get(&dp_rank)
-                    .is_some_and(|&tokens| tokens > threshold)
-            {
-                return true;
-            }
-
             // If we can't perform any check or no threshold exceeded, this dp_rank is free
             false
         })
     }
 
     fn is_overloaded_for_config(&self, config: &LoadThresholdConfig) -> bool {
-        self.is_overloaded_with_remote(
+        self.is_overloaded(
             config.active_decode_blocks_threshold,
             config.active_prefill_tokens_threshold,
             config.active_prefill_tokens_threshold_frac,
-            config.remote_kv_waiting_tokens_threshold,
         )
     }
 }
@@ -1003,8 +937,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                         let observation =
                             LoadObservation::Remote(RemoteActiveLoadSnapshot::from(active_load));
-                        let (worker, _, _, _, remote_waiting_requests, remote_waiting_tokens) =
-                            observation.parts();
+                        let (worker, _, _, _) = observation.parts();
                         if !known_workers.contains(&worker.worker_id) {
                             tracing::debug!(
                                 worker_id = worker.worker_id,
@@ -1033,14 +966,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             .or_default()
                             .insert(worker.dp_rank);
 
-                        WORKER_LOAD_METRICS.observe_remote_kv_wait(
-                            worker.worker_id,
-                            worker.dp_rank,
-                            source.metric_label(),
-                            remote_waiting_requests,
-                            remote_waiting_tokens,
-                        );
-
                         // Snapshot thresholds once per event — rare writes (HTTP endpoint)
                         // mean RwLock contention is effectively zero.
                         let cfg = thresholds.get();
@@ -1068,7 +993,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 active_decode_blocks_threshold = ?cfg.active_decode_blocks_threshold,
                                 active_prefill_tokens_threshold = ?cfg.active_prefill_tokens_threshold,
                                 active_prefill_tokens_threshold_frac = ?cfg.active_prefill_tokens_threshold_frac,
-                                remote_kv_waiting_tokens_threshold = ?cfg.remote_kv_waiting_tokens_threshold,
                                 worker_overloaded,
                                 "processed active load update"
                             );
@@ -1248,8 +1172,6 @@ mod tests {
             active_decode_blocks: Some(10),
             active_prefill_tokens: Some(100),
             kv_used_blocks: None,
-            remote_kv_waiting_requests: None,
-            remote_kv_waiting_tokens: None,
         });
 
         let mut local_then_remote = WorkerLoadState::default();
@@ -1275,8 +1197,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(8),
-                remote_kv_waiting_requests: None,
-                remote_kv_waiting_tokens: None,
             }),
             None,
         );
@@ -1288,8 +1208,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: Some(0),
                 kv_used_blocks: None,
-                remote_kv_waiting_requests: None,
-                remote_kv_waiting_tokens: None,
             }),
             None,
         );
@@ -1402,7 +1320,6 @@ mod tests {
             active_decode_blocks_threshold: Some(0.85),
             active_prefill_tokens_threshold: Some(10_000),
             active_prefill_tokens_threshold_frac: Some(0.9),
-            remote_kv_waiting_tokens_threshold: Some(100_000),
         };
         assert!(config.is_configured());
     }
@@ -1447,7 +1364,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1460,7 +1376,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1480,7 +1395,6 @@ mod tests {
                     active_decode_blocks: Some(90),
                     active_prefill_tokens: Some(900),
                     kv_used_blocks: Some(90),
-                    ..Default::default()
                 },
                 Some(0.6),
             );
@@ -1503,8 +1417,6 @@ mod tests {
                 active_decode_blocks: Some(100),
                 active_prefill_tokens: Some(1_000),
                 kv_used_blocks: Some(100),
-                remote_kv_waiting_requests: None,
-                remote_kv_waiting_tokens: None,
             }),
             Some(0.6),
         ));
@@ -1528,7 +1440,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1548,7 +1459,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1561,7 +1471,6 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1574,7 +1483,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1593,7 +1501,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1606,7 +1513,6 @@ mod tests {
                 active_decode_blocks: None,
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1625,7 +1531,6 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1638,7 +1543,6 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1657,7 +1561,6 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: None,
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1670,7 +1573,6 @@ mod tests {
                 active_decode_blocks: Some(10),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(10),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1709,7 +1611,6 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1728,7 +1629,6 @@ mod tests {
                 active_decode_blocks: Some(90),
                 active_prefill_tokens: None,
                 kv_used_blocks: Some(90),
-                ..Default::default()
             },
             Some(0.6),
         );
@@ -1751,16 +1651,6 @@ mod tests {
         state.active_prefill_tokens.insert(0, 2_500);
 
         assert!(state.is_overloaded(None, None, Some(2.0)));
-    }
-
-    #[test]
-    fn remote_kv_wait_keeps_affinity_until_explicit_threshold_is_exceeded() {
-        let mut state = WorkerLoadState::default();
-        state.remote_kv_waiting_tokens.insert(0, 8_192);
-
-        assert!(!state.is_overloaded_with_remote(None, None, None, Some(8_192)));
-        assert!(state.is_overloaded_with_remote(None, None, None, Some(8_191)));
-        assert!(!state.is_overloaded(None, None, None));
     }
 
     #[test]

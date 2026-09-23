@@ -2153,14 +2153,12 @@ class InstrumentedScheduler(AsyncScheduler):
         """
         prefill = WelfordAccumulator()
         decode_kv = WelfordAccumulator()
-        remote_kv = WelfordAccumulator()
 
         for request in self.waiting:
             if request.status == RequestStatus.PREEMPTED:
                 decode_kv.add(request.num_computed_tokens)
             elif request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 decode_kv.add(request.num_computed_tokens)
-                remote_kv.add(request.num_computed_tokens)
             else:
                 prefill.add(request.num_tokens)
 
@@ -2170,11 +2168,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 # engine and being transferred. Next schedule() step will
                 # start generating -- count as queued decode.
                 decode_kv.add(request.num_computed_tokens)
-                # Keep transfer backlog distinct from compute backlog. The
-                # router consumes this exact status-derived signal when
-                # deciding whether an affinity-hot worker's transfer queue is
-                # saturated.
-                remote_kv.add(request.num_computed_tokens)
             else:
                 # Structured-output waits / WAITING_FOR_STREAMING_REQ:
                 # no KV yet, essentially a queued prefill awaiting a
@@ -2188,8 +2181,6 @@ class InstrumentedScheduler(AsyncScheduler):
             num_decode_requests=decode_kv.n,
             sum_decode_kv_tokens=decode_kv.s,
             var_decode_kv_tokens=decode_kv.variance(),
-            num_remote_kv_waiting_requests=remote_kv.n,
-            sum_remote_kv_waiting_tokens=remote_kv.s,
         )
 
     # ------------------------------------------------------------------

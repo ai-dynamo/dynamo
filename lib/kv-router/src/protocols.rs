@@ -1107,13 +1107,6 @@ pub struct ActiveLoad {
     pub active_decode_blocks: Option<u64>,
     /// Number of active prefill tokens (from scheduler's view).
     pub active_prefill_tokens: Option<u64>,
-    /// Number of requests whose external KV transfer is still in flight.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_kv_waiting_requests: Option<u64>,
-    /// Tokens currently waiting for external KV transfer completion.
-    /// This is transfer backlog and must not be interpreted as prefill compute.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_kv_waiting_tokens: Option<u64>,
     /// Total KV blocks currently in use on the worker.
     ///
     /// This is published by workers only and is the authoritative signal for

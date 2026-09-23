@@ -25,7 +25,6 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ACTIVE_DECODE_BLOCKS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD",
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
-        "DYN_REMOTE_KV_WAITING_TOKENS_THRESHOLD",
         "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
         "DYN_ROUTER_SESSION_AFFINITY_MODE",
@@ -585,13 +584,11 @@ def test_frontend_rejection_thresholds_default_to_none(
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.remote_kv_waiting_tokens_threshold is None
     assert config.router_queue_threshold is None
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": None,
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
-        "remote_kv_waiting_tokens_threshold": None,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
     }
@@ -619,12 +616,6 @@ def test_frontend_rejection_thresholds_default_to_none(
             "active_prefill_tokens_threshold_frac",
             2.0,
         ),
-        (
-            "--remote-kv-waiting-tokens-threshold",
-            "8192",
-            "remote_kv_waiting_tokens_threshold",
-            8192,
-        ),
     ],
 )
 def test_each_cli_rejection_threshold_is_independently_opt_in(
@@ -647,7 +638,6 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
         "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
-        "remote_kv_waiting_tokens_threshold": config.remote_kv_waiting_tokens_threshold,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
@@ -672,11 +662,6 @@ def test_each_cli_rejection_threshold_is_independently_opt_in(
             "active_prefill_tokens_threshold_frac",
             3.0,
         ),
-        (
-            "DYN_REMOTE_KV_WAITING_TOKENS_THRESHOLD",
-            "remote_kv_waiting_tokens_threshold",
-            16384,
-        ),
     ],
 )
 def test_each_environment_rejection_threshold_is_independently_opt_in(
@@ -697,7 +682,6 @@ def test_each_environment_rejection_threshold_is_independently_opt_in(
         "active_decode_blocks_threshold": config.active_decode_blocks_threshold,
         "active_prefill_tokens_threshold": config.active_prefill_tokens_threshold,
         "active_prefill_tokens_threshold_frac": config.active_prefill_tokens_threshold_frac,
-        "remote_kv_waiting_tokens_threshold": config.remote_kv_waiting_tokens_threshold,
     }
     assert thresholds[field] == expected
     assert all(value is None for name, value in thresholds.items() if name != field)
@@ -719,8 +703,6 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
                 "1000",
                 "--active-prefill-tokens-threshold-frac",
                 "2.0",
-                "--remote-kv-waiting-tokens-threshold",
-                "8192",
                 "--router-queue-threshold",
                 "32.0",
             ]
@@ -731,13 +713,11 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
     assert config.active_decode_blocks_threshold == 0.5
     assert config.active_prefill_tokens_threshold == 1000
     assert config.active_prefill_tokens_threshold_frac == 2.0
-    assert config.remote_kv_waiting_tokens_threshold == 8192
     assert config.router_queue_threshold == 32.0
     assert config.router_kwargs() == {
         "active_decode_blocks_threshold": 0.5,
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
-        "remote_kv_waiting_tokens_threshold": 8192,
         "session_affinity_ttl_secs": None,
         "session_affinity_mode": "hard",
     }
@@ -808,7 +788,6 @@ def test_admission_control_cli_flag_warns_and_is_ignored(
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.remote_kv_waiting_tokens_threshold is None
     assert "--admission-control is no longer supported and is ignored" in caplog.text
 
     with pytest.raises(SystemExit):
@@ -831,7 +810,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.remote_kv_waiting_tokens_threshold is None
     assert "DYN_ADMISSION_CONTROL is no longer supported and is ignored" in caplog.text
 
 
@@ -841,7 +819,6 @@ def test_removed_admission_control_environment_warns_and_is_ignored(
         "--active-decode-blocks-threshold",
         "--active-prefill-tokens-threshold",
         "--active-prefill-tokens-threshold-frac",
-        "--remote-kv-waiting-tokens-threshold",
     ],
 )
 def test_explicit_none_keeps_rejection_threshold_disabled(
@@ -858,7 +835,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
     assert config.active_decode_blocks_threshold is None
     assert config.active_prefill_tokens_threshold is None
     assert config.active_prefill_tokens_threshold_frac is None
-    assert config.remote_kv_waiting_tokens_threshold is None
 
 
 @pytest.mark.parametrize(
@@ -870,7 +846,6 @@ def test_explicit_none_keeps_rejection_threshold_disabled(
         ("--active-prefill-tokens-threshold", "-1"),
         ("--active-prefill-tokens-threshold-frac", "-0.1"),
         ("--active-prefill-tokens-threshold-frac", "inf"),
-        ("--remote-kv-waiting-tokens-threshold", "-1"),
     ],
 )
 def test_rejection_threshold_validation_rejects_invalid_values(

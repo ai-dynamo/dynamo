@@ -184,7 +184,6 @@ impl WorkerMetricsPublisher {
                                 active_decode_blocks: metrics.active_decode_blocks,
                                 active_prefill_tokens: None,
                                 kv_used_blocks: metrics.kv_used_blocks,
-                                ..ActiveLoad::default()
                             };
 
                             if let Err(e) = sink.publish(active_load).await {

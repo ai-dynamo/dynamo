@@ -280,20 +280,11 @@ def _unsupported_fpm_trace_role(dynamo_config: Config) -> Optional[str]:
     return None
 
 
-def _has_kv_transfer_connector(engine_config: object | None) -> bool:
-    """Whether an engine may enter WAITING_FOR_REMOTE_KVS."""
-    if engine_config is None:
-        return False
-    return getattr(engine_config, "kv_transfer_config", None) is not None
-
-
-def _forward_pass_metrics_enabled(
-    dynamo_config: Config, engine_config: object | None = None
-) -> bool:
+def _forward_pass_metrics_enabled(dynamo_config: Config) -> bool:
     """Resolve FPM activation without changing the legacy explicit-port path."""
     if envs.is_set("DYN_FORWARDPASS_METRIC_PORT"):
         return True
-    if not dynamo_config.fpm_trace and not _has_kv_transfer_connector(engine_config):
+    if not dynamo_config.fpm_trace:
         return False
 
     unsupported_role = _unsupported_fpm_trace_role(dynamo_config)
@@ -362,7 +353,7 @@ def update_engine_config_with_dynamo(
         f"(use_kv_events={dynamo_config.use_kv_events})"
     )
 
-    fpm_enabled = _forward_pass_metrics_enabled(dynamo_config, engine_config)
+    fpm_enabled = _forward_pass_metrics_enabled(dynamo_config)
     if fpm_enabled:
         existing_cls = getattr(engine_config, "scheduler_cls", None)
         if existing_cls is None:
@@ -377,11 +368,7 @@ def update_engine_config_with_dynamo(
             fpm_source = (
                 "DYN_FORWARDPASS_METRIC_PORT is set"
                 if envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
-                else (
-                    "--fpm-trace/DYN_FPM_TRACE is enabled"
-                    if dynamo_config.fpm_trace
-                    else "a KV transfer connector requires remote-wait telemetry"
-                )
+                else "--fpm-trace/DYN_FPM_TRACE is enabled"
             )
             logger.warning(
                 f"{fpm_source} but scheduler_cls "

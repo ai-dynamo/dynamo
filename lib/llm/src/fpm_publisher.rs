@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -24,10 +24,6 @@ use dynamo_mocker::common::protocols::{ForwardPassSnapshot, FpmPublisher, FpmSin
 use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
-
-use dynamo_kv_router::protocols::ActiveLoad;
-
-use crate::kv_router::KV_METRICS_SUBJECT;
 
 use crate::utils::zmq::{connect_sub_socket, multipart_message};
 
@@ -121,12 +117,9 @@ impl FpmEventRelay {
 
         let publisher =
             rt.block_on(async { EventPublisher::for_endpoint(&endpoint, FPM_TOPIC).await })?;
-        let load_publisher = rt.block_on(async {
-            EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await
-        })?;
 
         rt.spawn(async move {
-            Self::relay_loop(zmq_endpoint, publisher, load_publisher, cancel_clone, trace).await;
+            Self::relay_loop(zmq_endpoint, publisher, cancel_clone, trace).await;
         });
 
         Ok(Self { cancel })
@@ -140,7 +133,6 @@ impl FpmEventRelay {
     async fn relay_loop(
         zmq_endpoint: String,
         publisher: EventPublisher,
-        load_publisher: EventPublisher,
         cancel: CancellationToken,
         trace: Option<crate::fpm_trace::FpmTrace>,
     ) {
@@ -153,7 +145,6 @@ impl FpmEventRelay {
         };
         let mut socket = socket;
         tracing::info!("FPM relay: connected to {zmq_endpoint}");
-        let mut last_remote_kv_load = None;
 
         loop {
             tokio::select! {
@@ -170,26 +161,6 @@ impl FpmEventRelay {
                             if frames.len() == 3 {
                                 let payload = bytes::Bytes::from(frames.swap_remove(2));
                                 tap_relay_fpm(&payload, trace.as_ref());
-                                match remote_kv_active_load(&payload) {
-                                    Ok(Some(load)) => {
-                                        let snapshot = (
-                                            load.remote_kv_waiting_requests.unwrap_or_default(),
-                                            load.remote_kv_waiting_tokens.unwrap_or_default(),
-                                        );
-                                        if last_remote_kv_load != Some(snapshot) {
-                                            match load_publisher.publish(&load).await {
-                                                Ok(()) => last_remote_kv_load = Some(snapshot),
-                                                Err(error) => {
-                                                    tracing::warn!(%error, "FPM relay: remote KV load publish failed");
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Ok(None) => {}
-                                    Err(error) => {
-                                        tracing::warn!(%error, "FPM relay: failed to decode remote KV load telemetry");
-                                    }
-                                }
                                 if let Err(e) = publisher.publish_bytes_ref(&payload).await {
                                     tracing::warn!("FPM relay: event plane publish failed: {e}");
                                 }
@@ -213,43 +184,6 @@ impl FpmEventRelay {
             }
         }
     }
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct QueuedRemoteKvTelemetry {
-    #[serde(default)]
-    num_remote_kv_waiting_requests: u64,
-    #[serde(default)]
-    sum_remote_kv_waiting_tokens: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ForwardPassRemoteKvTelemetry {
-    worker_id: String,
-    dp_rank: u32,
-    #[serde(default)]
-    queued_requests: QueuedRemoteKvTelemetry,
-}
-
-fn remote_kv_active_load(payload: &[u8]) -> Result<Option<ActiveLoad>> {
-    let telemetry: ForwardPassRemoteKvTelemetry = rmp_serde::from_slice(payload)?;
-    let worker_id = match telemetry.worker_id.parse::<u64>() {
-        Ok(worker_id) => worker_id,
-        Err(_) if telemetry.worker_id.is_empty() => return Ok(None),
-        Err(error) => {
-            return Err(anyhow::anyhow!(
-                "invalid worker_id {:?}: {error}",
-                telemetry.worker_id
-            ));
-        }
-    };
-    Ok(Some(ActiveLoad {
-        worker_id,
-        dp_rank: telemetry.dp_rank,
-        remote_kv_waiting_requests: Some(telemetry.queued_requests.num_remote_kv_waiting_requests),
-        remote_kv_waiting_tokens: Some(telemetry.queued_requests.sum_remote_kv_waiting_tokens),
-        ..ActiveLoad::default()
-    }))
 }
 
 impl Drop for FpmEventRelay {
@@ -286,8 +220,6 @@ struct QueuedRequestMetricsSer {
     num_decode_requests: i32,
     sum_decode_kv_tokens: i64,
     var_decode_kv_tokens: f64,
-    num_remote_kv_waiting_requests: i32,
-    sum_remote_kv_waiting_tokens: i64,
 }
 
 /// Top-level serialization struct matching Python `ForwardPassMetrics`.
@@ -332,8 +264,6 @@ fn serialize_fpm_into(
             num_decode_requests: snapshot.num_queued_decode as i32,
             sum_decode_kv_tokens: snapshot.sum_queued_decode_kv_tokens as i64,
             var_decode_kv_tokens: snapshot.var_queued_decode_kv_tokens,
-            num_remote_kv_waiting_requests: 0,
-            sum_remote_kv_waiting_tokens: 0,
         },
     };
     metrics
@@ -584,8 +514,6 @@ mod tests {
             num_decode_requests: i32,
             sum_decode_kv_tokens: i64,
             var_decode_kv_tokens: f64,
-            num_remote_kv_waiting_requests: i32,
-            sum_remote_kv_waiting_tokens: i64,
         }
         #[derive(Deserialize, Debug)]
         #[allow(dead_code)]
@@ -617,8 +545,6 @@ mod tests {
         assert_eq!(decoded.queued_requests.num_prefill_requests, 1);
         assert_eq!(decoded.queued_requests.sum_prefill_tokens, 128);
         assert_eq!(decoded.queued_requests.num_decode_requests, 0);
-        assert_eq!(decoded.queued_requests.num_remote_kv_waiting_requests, 0);
-        assert_eq!(decoded.queued_requests.sum_remote_kv_waiting_tokens, 0);
     }
 
     #[test]
@@ -682,7 +608,7 @@ mod tests {
     }
 
     /// Verify all 7 expected field names appear in scheduled_requests and
-    /// 8 in queued_requests — matching the Python schema exactly.
+    /// 6 in queued_requests — matching the Python schema exactly.
     #[test]
     fn test_serialize_fpm_field_names() {
         let snapshot = ForwardPassSnapshot::default();
@@ -724,8 +650,6 @@ mod tests {
             "num_decode_requests",
             "sum_decode_kv_tokens",
             "var_decode_kv_tokens",
-            "num_remote_kv_waiting_requests",
-            "sum_remote_kv_waiting_tokens",
         ];
         for key in &expected_queued {
             assert!(
@@ -738,39 +662,5 @@ mod tests {
             expected_queued.len(),
             "queued_requests has unexpected extra fields"
         );
-    }
-
-    #[test]
-    fn remote_kv_active_load_decodes_transfer_backlog() {
-        let payload = rmp_serde::to_vec_named(&serde_json::json!({
-            "worker_id": "17",
-            "dp_rank": 2,
-            "queued_requests": {
-                "num_remote_kv_waiting_requests": 3,
-                "sum_remote_kv_waiting_tokens": 24_576
-            }
-        }))
-        .unwrap();
-
-        let load = remote_kv_active_load(&payload).unwrap().unwrap();
-        assert_eq!(load.worker_id, 17);
-        assert_eq!(load.dp_rank, 2);
-        assert_eq!(load.remote_kv_waiting_requests, Some(3));
-        assert_eq!(load.remote_kv_waiting_tokens, Some(24_576));
-        assert_eq!(load.active_prefill_tokens, None);
-    }
-
-    #[test]
-    fn remote_kv_active_load_defaults_legacy_fpm_to_zero() {
-        let payload = rmp_serde::to_vec_named(&serde_json::json!({
-            "worker_id": "17",
-            "dp_rank": 0,
-            "queued_requests": {}
-        }))
-        .unwrap();
-
-        let load = remote_kv_active_load(&payload).unwrap().unwrap();
-        assert_eq!(load.remote_kv_waiting_requests, Some(0));
-        assert_eq!(load.remote_kv_waiting_tokens, Some(0));
     }
 }
