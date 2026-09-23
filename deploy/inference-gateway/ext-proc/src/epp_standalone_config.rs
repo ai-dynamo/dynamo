@@ -557,10 +557,7 @@ mod tests {
                     assert_eq!(replication.service_name, "dynamo-epp", "{name}");
                     assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
                     assert_eq!(replication.sync_port, port, "{name}");
-                    assert_eq!(
-                        replication.selection_http_port, selection_http_port,
-                        "{name}"
-                    );
+                    assert_eq!(replication.selection_http_port, selection_http_port, "{name}");
                     assert_eq!(cfg.selector_threads, selector_threads, "{name}");
                 }
                 Err(expected_error) => {

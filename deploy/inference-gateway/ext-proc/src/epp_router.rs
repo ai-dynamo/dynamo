@@ -43,7 +43,7 @@ use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
 use crate::selector::{SelectRequest, Selector};
 use crate::sglang_renderer_client::SglangRendererClient;
-use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
+use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter, worker_request};
 use crate::vllm_render_client::VllmRenderClient;
 
 /// Resolve the request's scheduling policy class from the Dynamo metadata
@@ -128,33 +128,28 @@ impl EppRouter {
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
         let peer_ready = selector.peer_ready();
-        let recovery_required = selector.peer_recovery_required();
-
-        if recovery_required {
-            reflector.wait_until_ready().await?;
-        }
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let mut adapter =
-            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        if recovery_required {
-            // The reflector is synchronized before the adapter starts, so this
-            // barrier represents the authoritative initial topology, including
-            // a valid empty pool. Each registered listener connects and enters
-            // Buffering before the peer dump is requested.
-            adapter.wait_initial_reconcile().await?;
-            selector.start_peer_recovery().await?;
+        if peer_ready.is_some() {
+            reflector.wait_until_ready().await?;
+            for worker in reflector.ready_workers() {
+                if let Err(e) = selector.service.upsert_worker(worker_request(worker, &defaults)).await {
+                    tracing::warn!(error = %e, "failed to pre-register worker for bootstrap");
+                }
+            }
         }
 
-        // Readiness requires a synchronized worker view and, in replicated mode,
-        // completed peer discovery plus KV-index recovery/bootstrap. It does not
-        // require a schedulable worker: a valid empty pool returns 503 per request
-        // until capacity appears.
+        let _adapter = TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
+
+        if peer_ready.is_some() {
+            selector.run_bootstrap_recovery().await?;
+        }
+
         Ok(Self {
             renderer,
             reflector,
             selector,
-            _adapter: adapter,
+            _adapter,
             reflector_ready,
             peer_ready,
             model_name: cfg.model_name,
