@@ -353,6 +353,8 @@ sidecar:
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - 'tests/serve/test_sidecar.py'
+  - 'tests/utils/gpu_args.py'
+  - 'tests/utils/payloads.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.

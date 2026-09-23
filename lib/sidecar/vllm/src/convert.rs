@@ -352,6 +352,13 @@ fn consume_redundant_nvext(
                 "extra_args.nvext.token_in must be true when present",
             ));
         }
+        // Worker attribution and timing are produced by the frontend.
+        if let Some(serde_json::Value::Array(fields)) = nvext.get_mut("extra_fields") {
+            fields.retain(|field| !matches!(field.as_str(), Some("worker_id" | "timing")));
+            if fields.is_empty() {
+                nvext.remove("extra_fields");
+            }
+        }
         nvext.is_empty()
     };
     if remove_nvext {
