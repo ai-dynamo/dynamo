@@ -5,11 +5,16 @@ package v1beta1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-// LPXConfig identifies the component's compiled model.
+// LPXConfig identifies the component's compiled model and configures scheduling.
 type LPXConfig struct {
 	// buildId references the immutable model build.
 	// +kubebuilder:validation:MinLength=1
 	BuildID string `json:"buildId"`
+
+	// scheduling configures this component's LPX scheduling attempts.
+	// Omission means no deadline.
+	// +optional
+	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
 }
 
 // SchedulingSpec configures LPX scheduling attempts.

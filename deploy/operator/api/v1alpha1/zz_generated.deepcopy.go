@@ -460,7 +460,7 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	if in.LPX != nil {
 		in, out := &in.LPX, &out.LPX
 		*out = new(v1beta1.LPXConfig)
-		**out = **in
+		(*in).DeepCopyInto(*out)
 	}
 	if in.Checkpoint != nil {
 		in, out := &in.Checkpoint, &out.Checkpoint
@@ -855,11 +855,6 @@ func (in *DynamoGraphDeploymentSpec) DeepCopyInto(out *DynamoGraphDeploymentSpec
 	if in.ProviderOverride != nil {
 		in, out := &in.ProviderOverride, &out.ProviderOverride
 		*out = new(ProviderOverride)
-		(*in).DeepCopyInto(*out)
-	}
-	if in.Scheduling != nil {
-		in, out := &in.Scheduling, &out.Scheduling
-		*out = new(v1beta1.SchedulingSpec)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Annotations != nil {

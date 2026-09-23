@@ -398,18 +398,6 @@ spec:
                   required:
                     - id
                   type: object
-                scheduling:
-                  description: Scheduling configures attempts for LPX components. Omission means no deadline.
-                  properties:
-                    attemptDeadlineSeconds:
-                      description: |-
-                        attemptDeadlineSeconds limits how long each LPR may remain pending.
-                        Omission means unlimited; the value is not a solver budget.
-                      format: int64
-                      maximum: 9223372036
-                      minimum: 1
-                      type: integer
-                  type: object
                 services:
                   additionalProperties:
                     properties:
@@ -11529,6 +11517,20 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          scheduling:
+                            description: |-
+                              scheduling configures this component's LPX scheduling attempts.
+                              Omission means no deadline.
+                            properties:
+                              attemptDeadlineSeconds:
+                                description: |-
+                                  attemptDeadlineSeconds limits how long each LPR may remain pending.
+                                  Omission means unlimited; the value is not a solver budget.
+                                format: int64
+                                maximum: 9223372036
+                                minimum: 1
+                                type: integer
+                            type: object
                         required:
                           - buildId
                         type: object
@@ -21024,6 +21026,20 @@ spec:
                             description: buildId references the immutable model build.
                             minLength: 1
                             type: string
+                          scheduling:
+                            description: |-
+                              scheduling configures this component's LPX scheduling attempts.
+                              Omission means no deadline.
+                            properties:
+                              attemptDeadlineSeconds:
+                                description: |-
+                                  attemptDeadlineSeconds limits how long each LPR may remain pending.
+                                  Omission means unlimited; the value is not a solver budget.
+                                format: int64
+                                maximum: 9223372036
+                                minimum: 1
+                                type: integer
+                            type: object
                         required:
                           - buildId
                         type: object
@@ -37844,18 +37860,6 @@ spec:
                       type: object
                   required:
                     - id
-                  type: object
-                scheduling:
-                  description: scheduling configures attempts for LPX components. Omission means no deadline.
-                  properties:
-                    attemptDeadlineSeconds:
-                      description: |-
-                        attemptDeadlineSeconds limits how long each LPR may remain pending.
-                        Omission means unlimited; the value is not a solver budget.
-                      format: int64
-                      maximum: 9223372036
-                      minimum: 1
-                      type: integer
                   type: object
                 topologyConstraint:
                   description: |-

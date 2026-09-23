@@ -85,22 +85,6 @@ spec:
   Name of the `PriorityClass` to use for Grove `PodCliqueSet`s. Requires the Grove pathway. See [Multinode Orchestration](../../kubernetes/installation/multinode-orchestration.md).
 </ParamField>
 
-<ParamField path="scheduling" type="SchedulingSpec">
-  Configures scheduling attempts for `type: lpx` components. Omit this object for attempts without a deadline.
-</ParamField>
-
-<Indent>
-  <ParamField path="attemptDeadlineSeconds" type="int64">
-    Best-effort deadline for each LPU pipeline request to leave Pending, including waiting for the scheduler to start. The timer uses a nonzero `status.schedulingStartedAt` when available; otherwise it uses `metadata.creationTimestamp`. A scheduler-provided timestamp for a later scheduling cycle takes precedence over the request's original creation time. Valid values are `1` through `9,223,372,036`; omission means unlimited. This field is not a solver budget or an overall deployment readiness timeout.
-
-    Current-generation `Bound`, `NoFit`, and `Unsupported` receipts are exempt. `Degraded`, `Releasing`, and `Released` receipts are also exempt when their committed execution was accepted for the current request generation. `NoFit` can therefore leave the deployment Pending indefinitely, and a `Bound` request can still wait indefinitely for runtime readiness.
-
-    Deadline handling runs after download checks, compiler-registry resolution, and desired-state validation. An outage or invalid desired configuration can delay failure reporting and cleanup indefinitely, even after the deadline has elapsed. The timer does not bound asynchronous cleanup or finalization.
-
-    Expiry records `LPXSchedulingDeadlineExceeded` before cleanup. Cleanup removes complete engine replicas only from a trailing suffix: an expired interior replica blocks deadline cleanup to preserve healthy higher ordinals. Explicit `replicas` authorizes lowering the Grove replica count to the surviving prefix; externally managed capacity remains unchanged. Grove scaling and owner garbage collection handle pod cleanup; the LPX graph controller does not delete pods directly. A later LPX input revision authorizes republication after cleanup. An existing failure remains cleanup authority for cycles that started before it, so retiring those cycles does not consume the retry edit.
-  </ParamField>
-</Indent>
-
 <ParamField path="restart" type="Restart">
   Restart policy for the graph. Must be unset on creation; set or change `restart.id` on an existing DGD to trigger a restart.
 </ParamField>

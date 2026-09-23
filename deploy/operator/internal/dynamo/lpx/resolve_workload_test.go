@@ -136,7 +136,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	require.NotEqual(t, plan.Agents[0].CliqueName, replica.Agents[0].CliqueName)
 
 	t.Log("A scheduling deadline and annotation do not change hybrid launch")
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
 	dgd.Annotations = map[string]string{commonconsts.KubeAnnotationLPXSchedulerBackend: commonconsts.LPXSchedulerBackend}
 	scheduled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)

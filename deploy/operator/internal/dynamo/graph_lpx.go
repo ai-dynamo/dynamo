@@ -128,7 +128,6 @@ var ErrLPXSourcePending = errors.New("LPXGraphDeployment is waiting for the curr
 // settings cannot silently fall out of the revision.
 type lpxInputRevisionPayload struct {
 	Components            []v1beta1.DynamoComponentDeploymentSharedSpec
-	Scheduling            *v1beta1.SchedulingSpec
 	Labels                map[string]string
 	Annotations           map[string]string
 	PropagatedAnnotations map[string]string
@@ -179,7 +178,6 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 	}
 	input := lpxInputRevisionPayload{
 		Components:            canonical,
-		Scheduling:            dgd.Spec.Scheduling,
 		Labels:                dgd.Spec.Labels,
 		Annotations:           dgd.Spec.Annotations,
 		PropagatedAnnotations: annotations,

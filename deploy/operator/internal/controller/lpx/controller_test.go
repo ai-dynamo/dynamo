@@ -335,7 +335,7 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			child.Generation, child.Status.ObservedGeneration = 2, 1
 			if tc.deadline {
-				dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](60)}
+				dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](60)}
 			}
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -406,11 +406,67 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 	}
 }
 
+func TestLPXSharedWorkloadComponentDeadlines(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		target, draft *int64
+		wantSeconds   int64
+		wantFailed    bool
+	}{
+		{name: "target wakes first", target: ptr.To(int64(120)), draft: ptr.To(int64(300)), wantSeconds: 120},
+		{name: "expanded drafts wake first", target: ptr.To(int64(300)), draft: ptr.To(int64(120)), wantSeconds: 120},
+		{name: "unlimited target", draft: ptr.To(int64(120)), wantSeconds: 120},
+		{name: "unlimited drafts", target: ptr.To(int64(120)), wantSeconds: 120},
+		{name: "all unlimited"},
+		{name: "only target expired", target: ptr.To(int64(30)), draft: ptr.To(int64(300)), wantFailed: true},
+		{name: "only drafts expired", target: ptr.To(int64(300)), draft: ptr.To(int64(30)), wantFailed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Publish target and two draft requests with the same scheduling start")
+			child, dgd, registry := newLPXSpecDecodeTestDGD(t)
+			r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
+			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
+			createLPXTestObjects(t, t.Context(), r.Client, objects...)
+			publishSelectedLPXForTest(t, t.Context(), r, child, selected)
+			pcs := findLPXTestPodCliqueSet(t, objects)
+			started := time.Now().UTC().Truncate(time.Second).Add(-time.Minute)
+			requests, err := r.getPipelineRequests(t.Context(), pcs)
+			require.NoError(t, err)
+			require.Len(t, requests, 3)
+			for _, request := range requests {
+				request.Status = newTestPipelineRequest(child, pcs, request.Name, started, lpxv1alpha1.RequestPhasePending).Status
+				require.NoError(t, r.Update(t.Context(), request))
+			}
+
+			t.Log("Edit component policies without replacing requests or resetting their clocks")
+			dgd.GetComponentByName("lpx").LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: tc.target}
+			dgd.GetComponentByName("draft").LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: tc.draft}
+			dgd.Spec.Components[0], dgd.Spec.Components[1] = dgd.Spec.Components[1], dgd.Spec.Components[0]
+			updateTestDGD(t, r, child, dgd)
+			key := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)}
+			result, err := r.Reconcile(t.Context(), key)
+			require.NoError(t, err)
+			require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
+			require.Equal(t, tc.wantFailed, meta.IsStatusConditionTrue(child.Status.Conditions, schedulingFailedCondition))
+			if tc.wantFailed {
+				require.Positive(t, result.RequeueAfter)
+			} else if tc.wantSeconds != 0 {
+				require.WithinDuration(t, started.Add(time.Duration(tc.wantSeconds)*time.Second), time.Now().Add(result.RequeueAfter), time.Second)
+			} else {
+				require.Zero(t, result.RequeueAfter)
+			}
+			after, err := r.getPipelineRequests(t.Context(), pcs)
+			require.NoError(t, err)
+			require.True(t, apiequality.Semantic.DeepEqual(requests, after), "deadline edits must preserve requests and their scheduling clocks")
+		})
+	}
+}
+
 func TestPipelineRequestDeadlineContinuesDuringRequestDeletion(t *testing.T) {
 	t.Log("Publish two pending replicas and expire the tail first")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -447,7 +503,7 @@ func TestPipelineRequestDeadlineFailureMustPersistBeforeCleanup(t *testing.T) {
 	t.Log("Publish an expired request without a persisted deadline failure")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -526,7 +582,7 @@ func TestLPXDeadlineWaitsForScalingGroup(t *testing.T) {
 	t.Log("Publish an expired request and hide its scaling group from the cache")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -578,7 +634,7 @@ func TestPipelineRequestDeadlineHoleWaitsForSchedulingChange(t *testing.T) {
 	t.Log("Expire an interior workload while a higher ordinal is still Bound")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 	r, desired := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
@@ -738,7 +794,7 @@ func TestLPXEditBeforeDeadlineFailureDoesNotAuthorizeRetry(t *testing.T) {
 	t.Log("Publish a request, then advance the deployment before that request expires")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -915,7 +971,7 @@ func TestLPXFailedScaleOutPreservesServingWorkloads(t *testing.T) {
 		t.Log("Observe a completed workload and a newer pending request in their shared PCS")
 		ctx := t.Context()
 		child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-		dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+		dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 		dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 		r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 		objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -1025,7 +1081,7 @@ func TestLPXExplicitScaleInDuringSchedulingFailure(t *testing.T) {
 	t.Log("Publish four replicas with an expired interior request and a finalizer on the healthy tail")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(4))
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
@@ -1124,7 +1180,7 @@ func TestLPXExternalScaleInAfterSchedulingFailure(t *testing.T) {
 			t.Log("Publish four externally managed replicas with one expired request")
 			ctx := t.Context()
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-			dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+			dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 			dgd.GetComponentByName("lpx").Replicas = nil
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			selected.plan.Replicas = 4
@@ -1329,7 +1385,7 @@ func TestLPXMissingRequestGetsANewIndependentDeadline(t *testing.T) {
 	t.Log("Publish two requests and remove one without a terminal deadline decision")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	dgd.GetComponentByName("lpx").Replicas = ptr.To(int32(2))
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	createLPXTestObjects(t, ctx, r.Client, lpxMaterializedObjects(t, r, child, dgd, selected)...)
@@ -1663,7 +1719,7 @@ func TestLPXReconcileWaitsForMatchingDGDRevision(t *testing.T) {
 func TestLPXRequestListFailureUsesControllerBackoff(t *testing.T) {
 	t.Log("A request-list failure prevents deriving any active deadline")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	createLPXTestObjects(t, t.Context(), r.Client, lpxMaterializedObjects(t, r, child, dgd, desired)...)
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
@@ -2066,7 +2122,7 @@ func TestLPXTerminatingGroveResourcesBlockPublication(t *testing.T) {
 	t.Log("Publish a workload whose PCS and scaling group are both terminating")
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -2395,7 +2451,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
 			ctx := t.Context()
 			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 			dgd.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
-			dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+			dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 			createLPXTestObjects(t, ctx, r.Client, lpxMaterializedObjects(t, r, child, dgd, selected)...)
 			key := client.ObjectKeyFromObject(child)
@@ -2834,7 +2890,7 @@ func observedLPXTestPodCliqueSet(
 func TestLPXEditBetweenFailureAndCleanupPreservesRetry(t *testing.T) {
 	t.Log("Persist a deadline failure before the user edits the input to retry")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, selected := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, t.Context(), r.Client, objects...)
@@ -2851,7 +2907,7 @@ func TestLPXEditBetweenFailureAndCleanupPreservesRetry(t *testing.T) {
 	require.True(t, isSchedulingFailedConditionCurrent(child))
 
 	t.Log("The edited generation uses the old failure to retire the already-expired cycle")
-	dgd.Spec.Scheduling.AttemptDeadlineSeconds = ptr.To[int64](31)
+	dgd.Spec.Components[0].LPX.Scheduling.AttemptDeadlineSeconds = ptr.To[int64](31)
 	updateTestDGD(t, r, child, dgd)
 	_, err = r.Reconcile(t.Context(), req)
 	require.NoError(t, err)
@@ -2874,7 +2930,7 @@ func TestLPXCommittedDeadlineCleanupPreservesExternalCapacity(t *testing.T) {
 	ctx := t.Context()
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 	dgd.Spec.Components[0].Replicas = nil
-	dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
+	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](30)}
 	r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, selected)
 	createLPXTestObjects(t, ctx, r.Client, objects...)
@@ -3225,16 +3281,19 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		firstExpired   int64
+		secondDeadline *int64
 		secondExternal bool
 		secondHealthy  bool
 		wantFirst      int32
 		wantSecond     int32
 		wantRequests   int
 	}{
-		{name: "interior failure leaves the other engine's suffix removable", firstExpired: 0, wantFirst: 3, wantSecond: 1, wantRequests: 4},
-		{name: "healthy neighbor survives failure cleanup", firstExpired: 2, secondHealthy: true, wantFirst: 2, wantSecond: 2, wantRequests: 4},
-		{name: "independent expired suffixes", firstExpired: 2, wantFirst: 2, wantSecond: 1, wantRequests: 3},
-		{name: "external engine retains capacity ownership", firstExpired: 2, secondExternal: true, wantFirst: 2, wantSecond: 2, wantRequests: 3},
+		{name: "interior failure leaves the other engine's suffix removable", firstExpired: 0, secondDeadline: ptr.To(int64(60)), wantFirst: 3, wantSecond: 1, wantRequests: 4},
+		{name: "healthy neighbor survives failure cleanup", firstExpired: 2, secondHealthy: true, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 2, wantRequests: 4},
+		{name: "independent expired suffixes", firstExpired: 2, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 1, wantRequests: 3},
+		{name: "external engine retains capacity ownership", firstExpired: 2, secondExternal: true, secondDeadline: ptr.To(int64(60)), wantFirst: 2, wantSecond: 2, wantRequests: 3},
+		{name: "pending neighbor has a longer deadline", firstExpired: 2, secondDeadline: ptr.To(int64(300)), wantFirst: 2, wantSecond: 2, wantRequests: 4},
+		{name: "pending neighbor has no deadline", firstExpired: 2, wantFirst: 2, wantSecond: 2, wantRequests: 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Publish two workloads with different replica axes and active scheduling clocks")
@@ -3242,11 +3301,12 @@ func TestIndependentLPXDeadlineCleanup(t *testing.T) {
 			dgd.Spec.Components[0].Replicas = ptr.To(int32(3))
 			second := dgd.Spec.Components[0].DeepCopy()
 			second.ComponentName, second.Replicas = "timeout-engine", ptr.To(int32(2))
+			second.LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: tc.secondDeadline}
 			if tc.secondExternal {
 				second.Replicas = nil
 			}
 			dgd.Spec.Components = append(dgd.Spec.Components, *second)
-			dgd.Spec.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(60))}
+			dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(60))}
 			r := newLPXTestReconciler(t, registry, child, dgd)
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)

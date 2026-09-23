@@ -79,6 +79,11 @@ func (p *ModelProjection) Model() string {
 	return p.model
 }
 
+// ComponentName returns the DGD component that supplies this model.
+func (p *ModelProjection) ComponentName() string {
+	return p.stage
+}
+
 // RequestSpec returns a fresh node-local request for one Grove scaling-group
 // replica. The receiver and plan must be non-nil; neither input is mutated.
 func (p *ModelProjection) RequestSpec(

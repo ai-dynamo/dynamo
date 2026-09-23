@@ -988,12 +988,6 @@ See [ProviderOverride](#provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="scheduling" type="SchedulingSpec">
-Scheduling configures attempts for LPX components. Omission means no deadline.
-See [SchedulingSpec](#schedulingspec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="annotations" type="object (keys:string, values:string)">
 Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates). Service-level annotations take precedence over these values.
 **Validation:** Optional: \&#123;\&#125;
@@ -3188,12 +3182,6 @@ See [ProviderOverride](#v1beta1-provideroverride).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
-<ParamField path="scheduling" type="SchedulingSpec">
-scheduling configures attempts for LPX components. Omission means no deadline.
-See [SchedulingSpec](#schedulingspec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
 <ParamField path="annotations" type="object (keys:string, values:string)">
 annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates). Component-level (`podTemplate`) values take precedence on conflict.
 **Validation:** Optional: \&#123;\&#125;
@@ -3634,7 +3622,7 @@ preferredWeight is required and used only when enforcement is "preferred". Highe
 </Accordion>
 
 <Accordion id="lpxconfig" title="LPXConfig">
-LPXConfig identifies the component's compiled model.
+LPXConfig identifies the component's compiled model and configures scheduling.
 
 
 **Kind:** `type`
@@ -3643,6 +3631,12 @@ LPXConfig identifies the component's compiled model.
 <ParamField path="buildId" type="string">
 buildId references the immutable model build.
 **Validation:** MinLength: 1
+</ParamField>
+
+<ParamField path="scheduling" type="SchedulingSpec">
+scheduling configures this component's LPX scheduling attempts. Omission means no deadline.
+See [SchedulingSpec](#schedulingspec).
+**Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
@@ -4082,7 +4076,7 @@ SchedulingSpec configures LPX scheduling attempts.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoGraphDeploymentSpec](#dynamographdeploymentspec), [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
+**Appears in:** [LPXConfig](#lpxconfig)
 
 <ParamField path="attemptDeadlineSeconds" type="integer">
 attemptDeadlineSeconds limits how long each LPR may remain pending. Omission means unlimited; the value is not a solver budget.

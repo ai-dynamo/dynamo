@@ -54,7 +54,6 @@ func TestLPXSchedulerSelectionUsesComponents(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Annotations: test.annotations},
 				Spec: dynamov1beta1.DynamoGraphDeploymentSpec{
 					Components: test.components,
-					Scheduling: &dynamov1beta1.SchedulingSpec{},
 				},
 			}
 

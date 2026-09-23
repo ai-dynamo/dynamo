@@ -22,6 +22,9 @@ const editedThroughAlphaBuildID = "model/edited-through-alpha"
 func testCanonicalLPXConfig() *v1beta1.LPXConfig {
 	return &v1beta1.LPXConfig{
 		BuildID: "model/build",
+		Scheduling: &v1beta1.SchedulingSpec{
+			AttemptDeadlineSeconds: ptr.To[int64](900),
+		},
 	}
 }
 
@@ -96,9 +99,6 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "lpx", Namespace: "ns"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
-			Scheduling: &v1beta1.SchedulingSpec{
-				AttemptDeadlineSeconds: ptr.To[int64](900),
-			},
 			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 				ComponentName: "lpx",
 				ComponentType: v1beta1.ComponentTypeLPX,
@@ -137,13 +137,11 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	if diff := cmp.Diff(wantAlphaRoles, service.Roles); diff != "" {
 		t.Fatalf("LPX role order or optional fields changed in alpha (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(src.Spec.Scheduling, alpha.Spec.Scheduling); diff != "" {
-		t.Fatalf("LPX scheduling conversion mismatch (-want +got):\n%s", diff)
-	}
 
 	t.Log("Edit the alpha configuration and round-trip the complete LPX payload")
 	service.LPX = service.LPX.DeepCopy()
 	service.LPX.BuildID = editedThroughAlphaBuildID
+	*service.LPX.Scheduling.AttemptDeadlineSeconds = 600
 	service.Roles = []ComponentRoleSpec{
 		*service.Roles[1].DeepCopy(),
 		{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: ptr.To(testLPXRoleTemplate("conductor"))},
@@ -167,7 +165,7 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	if diff := cmp.Diff(original, src); diff != "" {
 		t.Fatalf("alpha edit mutated the source LPX deployment (-want +got):\n%s", diff)
 	}
-	if diff := cmp.Diff(src.Spec.Scheduling, got.Spec.Scheduling); diff != "" {
+	if diff := cmp.Diff(&v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](600)}, component.LPX.Scheduling); diff != "" {
 		t.Fatalf("LPX scheduling round-trip mismatch (-want +got):\n%s", diff)
 	}
 	if diff := cmp.Diff(src.Status, got.Status); diff != "" {
@@ -178,5 +176,34 @@ func TestDynamoGraphDeploymentLPXRoundTrip(t *testing.T) {
 	}
 	if _, exists := got.Annotations[annDGDStatus]; exists {
 		t.Fatalf("canonical LPX status must not use sparse conversion annotations: %v", got.Annotations)
+	}
+}
+
+func TestDynamoGraphDeploymentLPXComponentSchedulingRoundTrip(t *testing.T) {
+	t.Log("Give target and draft different deadlines and preserve unlimited component settings")
+	src := &v1beta1.DynamoGraphDeployment{}
+	for _, component := range []struct {
+		name       string
+		scheduling *v1beta1.SchedulingSpec
+	}{
+		{name: "draft", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](300)}},
+		{name: "empty", scheduling: &v1beta1.SchedulingSpec{}},
+		{name: "target", scheduling: &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To[int64](900)}},
+		{name: "unlimited"},
+	} {
+		src.Spec.Components = append(src.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: component.name,
+			ComponentType: v1beta1.ComponentTypeLPX,
+			LPX: &v1beta1.LPXConfig{
+				BuildID:    "model/" + component.name,
+				Scheduling: component.scheduling,
+			},
+		})
+	}
+
+	t.Log("Round-trip each component's deadline without imposing a shared value or default")
+	got := roundTripFromV1beta1(t, src)
+	if diff := cmp.Diff(src.Spec, got.Spec); diff != "" {
+		t.Fatalf("LPX component scheduling round-trip mismatch (-want +got):\n%s", diff)
 	}
 }

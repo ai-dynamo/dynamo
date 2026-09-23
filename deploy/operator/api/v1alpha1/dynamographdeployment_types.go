@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
@@ -92,10 +91,6 @@ type DynamoGraphDeploymentSpec struct {
 	// `spec.template.topologyConstraint`. It cannot select or change the provider.
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
-
-	// Scheduling configures attempts for LPX components. Omission means no deadline.
-	// +optional
-	Scheduling *v1beta1.SchedulingSpec `json:"scheduling,omitempty"`
 
 	// Annotations to propagate to all child resources (PCS, DCD, Deployments, and pod templates).
 	// Service-level annotations take precedence over these values.

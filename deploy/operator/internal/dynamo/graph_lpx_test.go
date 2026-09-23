@@ -245,7 +245,7 @@ func TestLPXInputRevision(t *testing.T) {
 	require.Equal(t, pcsName, PCSNameForLPX(deployment))
 
 	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
-	source.Spec.Scheduling = &v1beta1.SchedulingSpec{}
+	source.GetComponentByName("decode").LPX.Scheduling = &v1beta1.SchedulingSpec{}
 	want, err = LPXInputRevision(source, "")
 	require.NoError(t, err)
 	for _, test := range []struct {
@@ -298,7 +298,7 @@ func TestLPXInputRevision(t *testing.T) {
 			d.GetComponentByName("decode").ComponentRole(v1beta1.ComponentRoleLPXConductor).PodTemplate.Annotations = map[string]string{"role": "new"}
 		}},
 		{"scheduling/deadline", true, func(d *v1beta1.DynamoGraphDeployment) {
-			d.Spec.Scheduling.AttemptDeadlineSeconds = ptr.To(int64(60))
+			d.GetComponentByName("decode").LPX.Scheduling.AttemptDeadlineSeconds = ptr.To(int64(60))
 		}},
 		{"shared/labels", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Labels = map[string]string{"workload": "new"} }},
 		{"shared/annotations", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Annotations = map[string]string{"workload": "new"} }},

@@ -223,6 +223,8 @@ func (r *graphReconciler) reconcileWorkloads(
 		desiredRequests  = make(map[string]*lpxv1alpha1.LPUPipelineRequest)
 		explicitReplicas = make(map[string]*int32, len(plans))
 		missingRequests  []*lpxv1alpha1.LPUPipelineRequest
+		expiredRequests  []*lpxv1alpha1.LPUPipelineRequest
+		deadlineAt       time.Time
 	)
 
 	// Resolve each workload in the same order used for request publication.
@@ -249,10 +251,20 @@ func (r *graphReconciler) reconcileWorkloads(
 
 		maps.Copy(desiredRequests, desired)
 		missingRequests = append(missingRequests, missing...)
+
+		// Expanded models use their source component's policy, not the conductor's.
+		secondsByModel := make(map[string]*int64)
+		for _, projection := range workload.ModelProjections() {
+			if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
+				secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+			}
+		}
+		expired, next := pipelineRequestDeadlines(desired, secondsByModel, deadlineAt)
+		expiredRequests = append(expiredRequests, expired...)
+		deadlineAt = next
 	}
 
-	// One graph-wide deadline observation preserves the earliest wakeup on every return.
-	expiredRequests, deadlineAt := pipelineRequestDeadlines(desiredRequests, pipelineRequestDeadlineSeconds(dgd))
+	// Preserve the earliest deadline across workloads on every subsequent return.
 	defer func() {
 		result = requeueForPipelineRequestDeadline(deadlineAt, result, err)
 	}()

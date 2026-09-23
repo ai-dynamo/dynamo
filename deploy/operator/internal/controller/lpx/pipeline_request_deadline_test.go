@@ -42,6 +42,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		lastPlanRevision int64
 		wantExpired      []string
 		wantWake         time.Time
+		previousWake     time.Time
 	}{
 		{name: "disabled deadline", starts: []*metav1.Time{oldStart}},
 		{name: "no requests", seconds: ptr.To(int64(30))},
@@ -55,6 +56,9 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		{name: "independent starts", starts: []*metav1.Time{laterStart, newStart}, seconds: ptr.To(int64(30)), wantWake: newStart.Add(30 * time.Second)},
 		{name: "expired and active cycles", starts: []*metav1.Time{oldStart, newStart}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}, wantWake: newStart.Add(30 * time.Second)},
 		{name: "surviving request starts again", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), lastPlanRevision: 1, wantWake: newStart.Add(30 * time.Second)},
+		{name: "preserve earlier workload deadline", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), previousWake: now, wantWake: now},
+		{name: "replace later workload deadline", starts: []*metav1.Time{newStart}, seconds: ptr.To(int64(30)), previousWake: laterStart.Time, wantWake: newStart.Add(30 * time.Second)},
+		{name: "unlimited workload preserves prior deadline", starts: []*metav1.Time{oldStart}, previousWake: now, wantWake: now},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Log("Use creation time until the scheduler supplies a scheduling-cycle start")
@@ -67,6 +71,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 						SchedulingStartedAt: start, LastPlanRevision: tc.lastPlanRevision,
 					},
 				}
+				request.Annotations = map[string]string{pipelineRequestModelAnnotation: "default"}
 				if tc.created != nil {
 					request.CreationTimestamp = *tc.created
 				}
@@ -80,7 +85,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 			}
 
 			t.Log("Return only expired requests and the earliest still-active deadline")
-			expired, wake := pipelineRequestDeadlines(requests, tc.seconds)
+			expired, wake := pipelineRequestDeadlines(requests, map[string]*int64{"default": tc.seconds}, tc.previousWake)
 			var names []string
 			for _, request := range expired {
 				names = append(names, request.Name)

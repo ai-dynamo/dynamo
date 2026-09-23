@@ -33,10 +33,6 @@ type DynamoGraphDeploymentSpec struct {
 	// +optional
 	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
-	// scheduling configures attempts for LPX components. Omission means no deadline.
-	// +optional
-	Scheduling *SchedulingSpec `json:"scheduling,omitempty"`
-
 	// annotations to propagate to all child resources (PCS, DCD, Deployments,
 	// and pod templates). Component-level (`podTemplate`) values take precedence
 	// on conflict.

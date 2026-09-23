@@ -14,7 +14,6 @@ import (
 	"time"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -23,24 +22,17 @@ import (
 // Keep transient errors from delaying an active scheduling deadline indefinitely.
 const pipelineRequestDeadlineRetryInterval = 5 * time.Second
 
-// pipelineRequestDeadlineSeconds reads the optional scheduling timeout from a non-nil DGD.
-func pipelineRequestDeadlineSeconds(dgd *v1beta1.DynamoGraphDeployment) *int64 {
-	if dgd.Spec.Scheduling == nil {
-		return nil
-	}
-	return dgd.Spec.Scheduling.AttemptDeadlineSeconds
-}
-
-// pipelineRequestDeadlines examines already-selected, owned requests without I/O.
+// pipelineRequestDeadlines examines one workload's selected, owned requests without I/O.
+// secondsByModel supplies each model's component deadline; nil means unlimited.
+// next carries the earliest deadline from any previously examined workloads.
 // Creation time bounds the initial wait for the scheduler. On reused requests,
 // the scheduler-supplied start takes precedence for later scheduling cycles.
-func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineRequest, seconds *int64) (expired []*lpxv1alpha1.LPUPipelineRequest, next time.Time) {
-	if seconds == nil {
-		return nil, time.Time{}
-	}
+func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineRequest, secondsByModel map[string]*int64, next time.Time) ([]*lpxv1alpha1.LPUPipelineRequest, time.Time) {
+	var expired []*lpxv1alpha1.LPUPipelineRequest
 	now := time.Now()
 	for _, request := range requests {
-		if !request.DeletionTimestamp.IsZero() || isPipelineRequestDeadlineExempt(request) {
+		seconds := secondsByModel[request.Annotations[pipelineRequestModelAnnotation]]
+		if seconds == nil || !request.DeletionTimestamp.IsZero() || isPipelineRequestDeadlineExempt(request) {
 			continue
 		}
 

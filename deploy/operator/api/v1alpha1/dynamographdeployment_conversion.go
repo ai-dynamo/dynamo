@@ -107,7 +107,6 @@ func (src *DynamoGraphDeployment) ConvertTo(dstRaw conversion.Hub) error {
 // v1beta1.
 func ConvertFromDynamoGraphDeploymentSpec(src *DynamoGraphDeploymentSpec, dst *v1beta1.DynamoGraphDeploymentSpec, restored *v1beta1.DynamoGraphDeploymentSpec, save *DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
-	dst.Scheduling = src.Scheduling
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName
@@ -421,7 +420,6 @@ func (dst *DynamoGraphDeployment) ConvertFrom(srcRaw conversion.Hub) error {
 // v1alpha1.
 func ConvertToDynamoGraphDeploymentSpec(src *v1beta1.DynamoGraphDeploymentSpec, dst *DynamoGraphDeploymentSpec, restored *DynamoGraphDeploymentSpec, save *v1beta1.DynamoGraphDeploymentSpec, ctx DynamoGraphDeploymentConversionContext) error {
 	// Convert fields represented by both versions from the live source.
-	dst.Scheduling = src.Scheduling
 	dst.Annotations = src.Annotations
 	dst.Labels = src.Labels
 	dst.PriorityClassName = src.PriorityClassName

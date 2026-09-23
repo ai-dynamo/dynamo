@@ -96,6 +96,36 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(10))
 			}),
 		},
+		// Scheduling deadlines belong to each component, including shared draft and target pairs.
+		{
+			name: "shared LPX components admit distinct scheduling deadlines at both bounds",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(1))}
+				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(9223372036))}
+			}),
+		},
+		{
+			name: "shared LPX components admit an omitted scheduling deadline beside a finite deadline",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaLPXSpecDec(dgd, nil)
+				dgd.Spec.Components[1].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(120))}
+			}),
+		},
+		{
+			name: "LPX component scheduling deadline rejects zero",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(0))}
+			}),
+			wantSchemaErr: "spec.components[0].lpx.scheduling.attemptDeadlineSeconds: Invalid value: 0: spec.components[0].lpx.scheduling.attemptDeadlineSeconds in body should be greater than or equal to 1",
+		},
+		{
+			name: "LPX component scheduling deadline rejects duration overflow",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].LPX.Scheduling = &nvidiacomv1beta1.SchedulingSpec{AttemptDeadlineSeconds: k8sptr.To(int64(9223372037))}
+			}),
+			wantSchemaErr: "spec.components[0].lpx.scheduling.attemptDeadlineSeconds: Invalid value: 9223372037: spec.components[0].lpx.scheduling.attemptDeadlineSeconds in body should be less than or equal to 9223372036",
+		},
 		{
 			name: "LPX autoscaling is rejected by the schema",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
