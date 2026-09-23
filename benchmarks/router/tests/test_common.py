@@ -31,11 +31,16 @@ def test_expected_osl_uses_mooncake_output_length_and_preserves_hints():
         },
     }
 
-    add_expected_osl(request)
+    request["extra"]["nvext"]["extra_fields"] = ["routing_state"]
+
+    add_expected_osl(request, capture_worker_participation=True)
 
     assert request["extra"] == {
         "metadata": "preserved",
-        "nvext": {"agent_hints": {"priority": 7, "osl": 32}},
+        "nvext": {
+            "agent_hints": {"priority": 7, "osl": 32},
+            "extra_fields": ["routing_state", "worker_id"],
+        },
     }
     assert "nvext" not in request
 
@@ -58,11 +63,18 @@ def test_priority_tagging_does_not_mutate_source_request():
         }
     }
 
-    tagged_request = tag_requests_with_priority([request], priority=7)[0]
+    tagged_request = tag_requests_with_priority(
+        [request],
+        priority=7,
+        capture_worker_participation=True,
+    )[0]
 
     assert request["extra"]["nvext"]["agent_hints"] == {"osl": 32}
     assert tagged_request["extra"] == {
         "metadata": {"request_id": "request-1"},
-        "nvext": {"agent_hints": {"osl": 32, "priority": 7}},
+        "nvext": {
+            "agent_hints": {"osl": 32, "priority": 7},
+            "extra_fields": ["worker_id"],
+        },
     }
     assert tagged_request["extra"] is not request["extra"]

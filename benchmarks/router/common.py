@@ -5,10 +5,13 @@
 
 """Common utilities shared across router benchmark scripts."""
 
+import argparse
 import copy
 import json
 import logging
 import os
+from pathlib import Path
+from typing import Any
 
 # Default values
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
@@ -62,6 +65,23 @@ def add_common_args(parser):
         "--use-expected-osl",
         action="store_true",
         help="Pass agent_hints.osl through extra.nvext for router output block tracking",
+    )
+    parser.add_argument(
+        "--verify-worker-participation",
+        action="store_true",
+        help="Capture worker IDs from measured responses and write a participation report",
+    )
+    parser.add_argument(
+        "--minimum-prefill-workers",
+        type=_non_negative_int,
+        default=0,
+        help="Fail unless at least this many prefill workers are observed (default: 0)",
+    )
+    parser.add_argument(
+        "--minimum-decode-workers",
+        type=_non_negative_int,
+        default=0,
+        help="Fail unless at least this many decode workers are observed (default: 0)",
     )
 
 
@@ -159,9 +179,29 @@ def resolve_tokenizer(args):
         args.tokenizer = args.model
 
 
-def get_common_aiperf_flags():
+def _non_negative_int(value: str) -> int:
+    """Reject negative minima before they make threshold checks vacuously pass."""
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def worker_participation_requested(args: Any) -> bool:
+    """Treat a positive worker minimum as implicit participation opt-in."""
+    return (
+        args.verify_worker_participation
+        or args.minimum_prefill_workers > 0
+        or args.minimum_decode_workers > 0
+    )
+
+
+def get_common_aiperf_flags(
+    capture_worker_participation: bool = False,
+    nvext: dict[str, Any] | None = None,
+) -> list[str]:
     """Return common aiperf flags used across benchmarks."""
-    return [
+    flags = [
         "--endpoint-type",
         "chat",
         "--streaming",
@@ -174,6 +214,18 @@ def get_common_aiperf_flags():
         "Accept: text/event-stream",
     ]
 
+    # AIPerf converts repeated top-level extra-input keys to a dict, so emit
+    # nvext once to preserve caller-provided router hints.
+    nvext = copy.deepcopy(nvext) if nvext else {}
+    if capture_worker_participation:
+        extra_fields = nvext.setdefault("extra_fields", [])
+        if "worker_id" not in extra_fields:
+            extra_fields.append("worker_id")
+        flags.extend(["--export-level", "raw"])
+    if nvext:
+        flags.extend(["--extra-inputs", json.dumps({"nvext": nvext})])
+    return flags
+
 
 def get_aiperf_cmd_for_trace(
     model,
@@ -183,6 +235,7 @@ def get_aiperf_cmd_for_trace(
     seed,
     block_size,
     url="http://localhost:8888",
+    capture_worker_participation=False,
 ):
     """Build the aiperf CLI command for a mooncake trace run."""
     cmd = [
@@ -205,11 +258,188 @@ def get_aiperf_cmd_for_trace(
         "--artifact-dir",
         artifact_dir,
     ]
-    cmd.extend(get_common_aiperf_flags())
+    cmd.extend(get_common_aiperf_flags(capture_worker_participation))
     return cmd
 
 
-def set_trace_agent_hint(request, name, value):
+def _response_payloads(response: dict[str, Any]) -> list[dict[str, Any]]:
+    """Decode JSON payloads from one raw AIPerf text or SSE response."""
+    encoded_payloads = []
+    text = response.get("text")
+    if isinstance(text, str):
+        encoded_payloads.append(text)
+
+    packets = response.get("packets")
+    if isinstance(packets, list):
+        encoded_payloads.extend(
+            packet["value"]
+            for packet in packets
+            if isinstance(packet, dict)
+            and packet.get("name") == "data"
+            and isinstance(packet.get("value"), str)
+        )
+
+    payloads = []
+    for encoded_payload in encoded_payloads:
+        if encoded_payload == "[DONE]":
+            continue
+        try:
+            payload = json.loads(encoded_payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _add_worker_id(worker_ids: set[int | str], value: Any) -> bool:
+    """Reject bool because JSON booleans deserialize as Python int subclasses."""
+    if isinstance(value, (int, str)) and not isinstance(value, bool):
+        worker_ids.add(value)
+        return True
+    return False
+
+
+def collect_worker_participation(artifact_root: str | Path) -> dict[str, Any]:
+    """Collect worker IDs from profiling requests in AIPerf raw exports."""
+    root = Path(artifact_root)
+    raw_exports = sorted(root.rglob("profile_export_raw.jsonl"))
+    if not raw_exports:
+        raise FileNotFoundError(
+            f"No profile_export_raw.jsonl found under {artifact_root}"
+        )
+
+    profiling_requests = 0
+    requests_with_worker_id = 0
+    prefill_worker_ids: set[int | str] = set()
+    decode_worker_ids: set[int | str] = set()
+
+    for raw_export in raw_exports:
+        with raw_export.open() as raw_records:
+            for line_number, line in enumerate(raw_records, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(
+                        f"Invalid JSON in {raw_export}:{line_number}"
+                    ) from error
+
+                metadata = record.get("metadata") or {}
+                if metadata.get("benchmark_phase") not in (None, "profiling"):
+                    continue
+
+                profiling_requests += 1
+                request_has_worker_id = False
+                for response in record.get("responses") or []:
+                    if not isinstance(response, dict):
+                        continue
+                    for payload in _response_payloads(response):
+                        nvext = payload.get("nvext")
+                        if not isinstance(nvext, dict):
+                            continue
+                        worker_id = nvext.get("worker_id")
+                        if not isinstance(worker_id, dict):
+                            continue
+
+                        found_prefill = _add_worker_id(
+                            prefill_worker_ids,
+                            worker_id.get("prefill_worker_id"),
+                        )
+                        found_decode = _add_worker_id(
+                            decode_worker_ids,
+                            worker_id.get("decode_worker_id"),
+                        )
+                        request_has_worker_id |= found_prefill or found_decode
+
+                requests_with_worker_id += int(request_has_worker_id)
+
+    return {
+        "profiling_requests": profiling_requests,
+        "requests_with_worker_id": requests_with_worker_id,
+        "observed_prefill_worker_ids": sorted(prefill_worker_ids, key=str),
+        "observed_decode_worker_ids": sorted(decode_worker_ids, key=str),
+        "raw_export_files": [str(path.relative_to(root)) for path in raw_exports],
+    }
+
+
+def validate_worker_participation(
+    artifact_root: str | Path,
+    minimum_prefill_workers: int,
+    minimum_decode_workers: int,
+    logger: logging.Logger,
+) -> dict[str, Any]:
+    """Write and validate worker participation from measured AIPerf responses."""
+    report = collect_worker_participation(artifact_root)
+    report["minimum_prefill_workers"] = minimum_prefill_workers
+    report["minimum_decode_workers"] = minimum_decode_workers
+
+    report_path = Path(artifact_root) / "worker_participation.json"
+    with report_path.open("w") as report_file:
+        json.dump(report, report_file, indent=2)
+        report_file.write("\n")
+
+    prefill_count = len(report["observed_prefill_worker_ids"])
+    decode_count = len(report["observed_decode_worker_ids"])
+    logger.info(
+        "Worker participation: %d/%d profiling requests exposed worker IDs; "
+        "prefill=%d, decode=%d",
+        report["requests_with_worker_id"],
+        report["profiling_requests"],
+        prefill_count,
+        decode_count,
+    )
+    logger.info("Worker participation report: %s", report_path)
+
+    failures = []
+    if prefill_count == 0 and decode_count == 0:
+        failures.append("no worker IDs were returned")
+    if prefill_count < minimum_prefill_workers:
+        failures.append(
+            f"observed {prefill_count} prefill workers, required {minimum_prefill_workers}"
+        )
+    if decode_count < minimum_decode_workers:
+        failures.append(
+            f"observed {decode_count} decode workers, required {minimum_decode_workers}"
+        )
+    if failures:
+        raise RuntimeError(
+            "Worker participation validation failed: " + "; ".join(failures)
+        )
+
+    return report
+
+
+def add_worker_id_extra_field(request):
+    """Request worker attribution without replacing per-turn Dynamo fields."""
+    extra = request.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+        request["extra"] = extra
+
+    nvext = extra.get("nvext")
+    if not isinstance(nvext, dict):
+        nvext = {}
+        extra["nvext"] = nvext
+
+    extra_fields = nvext.get("extra_fields")
+    if extra_fields is None:
+        extra_fields = []
+        nvext["extra_fields"] = extra_fields
+    elif not isinstance(extra_fields, list):
+        raise ValueError("extra.nvext.extra_fields must be a list")
+
+    if "worker_id" not in extra_fields:
+        extra_fields.append("worker_id")
+
+
+def set_trace_agent_hint(
+    request,
+    name,
+    value,
+    capture_worker_participation=False,
+):
     """Set an agent hint in the trace envelope forwarded by AIPerf."""
     extra = request.get("extra")
     if not isinstance(extra, dict):
@@ -227,20 +457,31 @@ def set_trace_agent_hint(request, name, value):
         nvext["agent_hints"] = agent_hints
 
     agent_hints[name] = value
+    if capture_worker_participation:
+        add_worker_id_extra_field(request)
 
 
-def add_expected_osl(request):
+def add_expected_osl(request, capture_worker_participation=False):
     """Add the trace output length as the router's expected OSL hint."""
     osl = request.get("output_length", request.get("output_tokens", 0))
-    set_trace_agent_hint(request, "osl", osl)
+    set_trace_agent_hint(request, "osl", osl, capture_worker_participation)
 
 
-def tag_requests_with_priority(requests, priority):
+def tag_requests_with_priority(
+    requests,
+    priority,
+    capture_worker_participation=False,
+):
     """Return request copies with extra.nvext.agent_hints.priority merged in."""
     tagged_requests = []
     for request in requests:
         tagged_request = copy.deepcopy(request)
-        set_trace_agent_hint(tagged_request, "priority", priority)
+        set_trace_agent_hint(
+            tagged_request,
+            "priority",
+            priority,
+            capture_worker_participation,
+        )
         tagged_requests.append(tagged_request)
     return tagged_requests
 
@@ -250,7 +491,7 @@ def prepare_trace_dataset(args, output_dir, logger):
 
     Handles three paths:
     1. No synthesis needed: use the original dataset as-is
-    2. Expected OSL injection only: inject agent_hints.osl into extra.nvext
+    2. Metadata injection only: add expected OSL and/or worker attribution
     3. Full synthesis: generate synthetic data from the input dataset
 
     Returns:
@@ -269,7 +510,13 @@ def prepare_trace_dataset(args, output_dir, logger):
         or args.max_osl is not None
     )
 
-    if not needs_synthesis and not args.use_expected_osl:
+    capture_worker_participation = worker_participation_requested(args)
+
+    if (
+        not needs_synthesis
+        and not args.use_expected_osl
+        and not capture_worker_participation
+    ):
         # No synthesis or modification needed, use original dataset
         trace_dataset_path = args.input_dataset
         logger.info(
@@ -281,9 +528,12 @@ def prepare_trace_dataset(args, output_dir, logger):
                 requests.append(json.loads(line.strip()))
         return requests, trace_dataset_path
 
-    if not needs_synthesis and args.use_expected_osl:
-        # Only inject agent_hints.osl into extra.nvext, no other synthesis
-        logger.info("Injecting agent_hints.osl into original trace dataset...")
+    if not needs_synthesis:
+        # Apply request metadata without changing the trace's timing or shape.
+        if args.use_expected_osl:
+            logger.info("Injecting agent_hints.osl into original trace dataset...")
+        if capture_worker_participation:
+            logger.info("Requesting worker attribution in original trace dataset...")
 
         requests = []
         with open(args.input_dataset, "r") as f:
@@ -291,9 +541,17 @@ def prepare_trace_dataset(args, output_dir, logger):
                 requests.append(json.loads(line.strip()))
 
         for request in requests:
-            add_expected_osl(request)
+            if args.use_expected_osl:
+                add_expected_osl(request, capture_worker_participation)
+            elif capture_worker_participation:
+                add_worker_id_extra_field(request)
 
-        trace_dataset_path = os.path.join(output_dir, "trace_with_expected_osl.jsonl")
+        trace_name = (
+            "trace_with_expected_osl.jsonl"
+            if args.use_expected_osl
+            else "trace_with_worker_participation.jsonl"
+        )
+        trace_dataset_path = os.path.join(output_dir, trace_name)
         with open(trace_dataset_path, "w") as f:
             for request in requests:
                 f.write(json.dumps(request) + "\n")
@@ -358,10 +616,17 @@ def prepare_trace_dataset(args, output_dir, logger):
 
     trace_dataset_path = os.path.join(output_dir, "synthetic_trace.jsonl")
 
-    if args.use_expected_osl:
+    if args.use_expected_osl or capture_worker_participation:
         for request in requests:
-            add_expected_osl(request)
+            if args.use_expected_osl:
+                add_expected_osl(request, capture_worker_participation)
+            else:
+                add_worker_id_extra_field(request)
+
+    if args.use_expected_osl:
         logger.info("Injected agent_hints.osl into extra.nvext for each request")
+    if capture_worker_participation:
+        logger.info("Requested worker attribution in extra.nvext for each request")
 
     with open(trace_dataset_path, "w") as f:
         for request in requests:

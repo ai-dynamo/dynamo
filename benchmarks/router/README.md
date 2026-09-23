@@ -132,9 +132,9 @@ python -m dynamo.frontend --namespace "$NAMESPACE" \
 
 Verify it works:
 ```bash
-# Send a request (should show prefill_worker_id and decode_worker_id in nvext)
+# Send a request and request worker attribution in the response.
 curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" \
-    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10}' | python3 -m json.tool
+    -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":10,"nvext":{"extra_fields":["worker_id"]}}' | python3 -m json.tool
 
 # Check router metrics
 curl -s localhost:8000/metrics | grep "^# HELP dynamo_component_router"
@@ -231,6 +231,34 @@ python prefix_ratio_benchmark.py --url http://localhost:8001
 # Specify output directory
 python prefix_ratio_benchmark.py --output-dir results/experiment1
 ```
+
+#### Verify worker participation
+
+Router benchmark success only proves that the endpoint served the workload. To
+also prove that the measured requests exercised the expected number of workers,
+enable worker participation validation:
+
+```bash
+# Aggregated deployment with at least two workers.
+python prefix_ratio_benchmark.py \
+    --verify-worker-participation \
+    --minimum-decode-workers 2
+
+# Disaggregated deployment with two prefill and two decode workers.
+python real_data_benchmark.py \
+    --input-dataset trace.jsonl \
+    --verify-worker-participation \
+    --minimum-prefill-workers 2 \
+    --minimum-decode-workers 2
+```
+
+The opt-in check requests `nvext.worker_id` on every measured request, enables
+AIPerf raw export, and writes `worker_participation.json` under the run artifact
+directory. The benchmark fails if no worker attribution is returned or either
+configured minimum is not observed. Supplying either minimum also enables the
+check, so `--verify-worker-participation` can be omitted when a minimum is set.
+Raw exports contain benchmark request and response bodies; handle these
+artifacts as workload data.
 
 ### Step 5 (Alternative): Run Benchmarks with Real Trace Data
 

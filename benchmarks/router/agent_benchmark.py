@@ -30,9 +30,12 @@ import subprocess
 from common import (
     DEFAULT_BLOCK_SIZE,
     add_common_args,
+    add_worker_id_extra_field,
     get_common_aiperf_flags,
     resolve_tokenizer,
     setup_logger,
+    validate_worker_participation,
+    worker_participation_requested,
 )
 
 logger = setup_logger(__name__)
@@ -58,6 +61,7 @@ def get_aiperf_cmd(
     block_size,
     request_count,
     url="http://localhost:8000",
+    capture_worker_participation=False,
 ):
     """Build aiperf command for concurrency-based trace benchmarking."""
     cmd = [
@@ -82,11 +86,16 @@ def get_aiperf_cmd(
         "--artifact-dir",
         artifact_dir,
     ]
-    cmd.extend(get_common_aiperf_flags())
+    cmd.extend(get_common_aiperf_flags(capture_worker_participation))
     return cmd
 
 
-def prepare_dataset(input_dataset, output_path, delay_override=None):
+def prepare_dataset(
+    input_dataset,
+    output_path,
+    delay_override=None,
+    capture_worker_participation=False,
+):
     """
     Prepare the dataset, optionally overriding delay values.
 
@@ -95,14 +104,16 @@ def prepare_dataset(input_dataset, output_path, delay_override=None):
         output_path: Path to write modified dataset
         delay_override: If set, override all delay values with this value (in ms).
                        Use 0 to remove delays entirely.
+        capture_worker_participation: Add worker attribution to each trace row.
 
     Returns:
         Path to the dataset to use (original or modified)
     """
-    if delay_override is None:
+    if delay_override is None and not capture_worker_participation:
         return input_dataset
 
-    logger.info(f"Overriding delay values with: {delay_override}ms")
+    if delay_override is not None:
+        logger.info(f"Overriding delay values with: {delay_override}ms")
 
     requests = []
     with open(input_dataset, "r") as f:
@@ -111,22 +122,27 @@ def prepare_dataset(input_dataset, output_path, delay_override=None):
             if line:
                 requests.append(json.loads(line))
 
-    # Track sessions to know which entries are first turns (no delay on first turn)
-    session_first_seen = set()
+    if delay_override is not None:
+        # Track sessions to know which entries are first turns (no delay on first turn)
+        session_first_seen = set()
 
-    for request in requests:
-        session_id = request.get("session_id")
+        for request in requests:
+            session_id = request.get("session_id")
 
-        if session_id is not None and session_id not in session_first_seen:
-            # First turn of a session - remove delay if present
-            session_first_seen.add(session_id)
-            request.pop("delay", None)
-        elif delay_override == 0:
-            # Remove delay entirely
-            request.pop("delay", None)
-        else:
-            # Override delay for subsequent turns
-            request["delay"] = delay_override
+            if session_id is not None and session_id not in session_first_seen:
+                # First turn of a session - remove delay if present
+                session_first_seen.add(session_id)
+                request.pop("delay", None)
+            elif delay_override == 0:
+                # Remove delay entirely
+                request.pop("delay", None)
+            else:
+                # Override delay for subsequent turns
+                request["delay"] = delay_override
+
+    if capture_worker_participation:
+        for request in requests:
+            add_worker_id_extra_field(request)
 
     with open(output_path, "w") as f:
         for request in requests:
@@ -146,6 +162,9 @@ def run_benchmark(
     concurrency,
     block_size,
     request_count,
+    verify_worker_participation=False,
+    minimum_prefill_workers=0,
+    minimum_decode_workers=0,
 ):
     """Run aiperf benchmark with concurrency mode."""
     aiperf_cmd = get_aiperf_cmd(
@@ -158,6 +177,7 @@ def run_benchmark(
         block_size,
         request_count,
         url,
+        verify_worker_participation,
     )
 
     logger.info(
@@ -169,6 +189,13 @@ def run_benchmark(
     try:
         subprocess.run(aiperf_cmd, check=True)
         logger.info("AIPerf profiling completed successfully")
+        if verify_worker_participation:
+            validate_worker_participation(
+                artifact_dir,
+                minimum_prefill_workers,
+                minimum_decode_workers,
+                logger,
+            )
     except subprocess.CalledProcessError as e:
         logger.error(f"AIPerf failed with error code: {e.returncode}")
         raise
@@ -227,6 +254,7 @@ def main():
 
     args = parser.parse_args()
     resolve_tokenizer(args)
+    verify_worker_participation = worker_participation_requested(args)
 
     # Default request_count to dataset entry count if not specified
     if args.request_count is None:
@@ -239,10 +267,13 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Prepare dataset (apply delay override if specified)
-    if args.delay is not None:
+    if args.delay is not None or verify_worker_participation:
         modified_dataset_path = os.path.join(args.output_dir, "modified_trace.jsonl")
         trace_dataset_path = prepare_dataset(
-            args.input_dataset, modified_dataset_path, args.delay
+            args.input_dataset,
+            modified_dataset_path,
+            args.delay,
+            verify_worker_participation,
         )
     else:
         trace_dataset_path = args.input_dataset
@@ -262,6 +293,9 @@ def main():
         args.concurrency,
         args.block_size,
         args.request_count,
+        verify_worker_participation,
+        args.minimum_prefill_workers,
+        args.minimum_decode_workers,
     )
 
     logger.info(f"Results saved to: {artifact_dir}")
