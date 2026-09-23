@@ -37,7 +37,7 @@ func TestLPXStatusUsesOneCurrentChild(t *testing.T) {
 			checkedAt := metav1.Unix(1, 0)
 			child.Status = v1alpha1.LPXGraphDeploymentStatus{
 				ObservedGeneration: 2,
-				ModelDownload: &v1beta1.ModelDownloadStatus{
+				ModelDownload: &v1alpha1.ModelDownloadStatus{
 					Builds: []string{"gs://models/first", "gs://models/second"}, LastCheckedAt: &checkedAt,
 				},
 				Components: map[string]v1alpha1.LPXComponentStatus{},

@@ -25,7 +25,7 @@ import (
 )
 
 func TestBackendDetectionSkipsNonWorkers(t *testing.T) {
-	for _, componentType := range []string{commonconsts.ComponentTypeLPX, commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner} {
+	for _, componentType := range []string{string(v1beta1.ComponentTypeLPX), commonconsts.ComponentTypeFrontend, commonconsts.ComponentTypePlanner} {
 		t.Run(componentType, func(t *testing.T) {
 			t.Log("Ignore ambiguous GPU commands and explicit backends for non-workers")
 			backend, err := determineBackendFramework(componentType, nil,
@@ -346,7 +346,7 @@ func TestLPXInputRevision(t *testing.T) {
 	for _, key := range []string{
 		commonconsts.KubeAnnotationEnableMetrics, commonconsts.KubeAnnotationDynamoDiscoveryBackend,
 		commonconsts.KubeAnnotationDynamoKubeDiscoveryMode, commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
-		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend, commonconsts.KubeAnnotationLPXSchedulerBackend,
+		commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 		commonconsts.KubeAnnotationWorkloadProvider, commonconsts.KubeAnnotationGroveUpdateStrategy,
 		commonconsts.KubeAnnotationKaiSchedulerQueue, commonconsts.KubeAnnotationVolcanoQueue,
 		"kai.scheduler/topology", "priorityClassName", "project", "user",

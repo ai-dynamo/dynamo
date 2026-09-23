@@ -95,7 +95,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			got, extraResources, err := r.renderPodCliqueSet(t.Context(), child, &dynamoDeployment, workloads, plans)
 			require.NoError(t, err)
 			for _, clique := range got.Spec.Template.Cliques {
-				require.Equal(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName)
+				require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				component := dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent])
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
@@ -114,7 +114,7 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 			require.NoError(t, err)
 			require.NotEqual(t, normal.Name, got.Name)
 			for _, clique := range normal.Spec.Template.Cliques {
-				require.NotEqual(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName)
+				require.NotEqual(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				require.False(t, dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent]).IsLPX())
 			}
 			podCliqueSets := []*grovev1alpha1.PodCliqueSet{got}
@@ -627,7 +627,7 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 			if clique.Name == plan.ConductorTemplate {
 				require.Equal(t, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)}, clique.Spec.PodSpec.Containers[0].Env[0])
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
-				hash = clique.Annotations[consts.AnnotationExtraResourcesHash]
+				hash = clique.Annotations[v1alpha1.AnnotationExtraResourcesHash]
 			}
 		}
 		require.NotEmpty(t, hash)
@@ -1105,7 +1105,7 @@ func TestHybridWorkloadUsesLPXSchedulerWithKaiEnabled(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, rendered.Cliques)
 	for _, clique := range rendered.Cliques {
-		require.Equal(t, lpx.SchedulerName, clique.Spec.PodSpec.SchedulerName)
+		require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 		require.NotContains(t, clique.Labels, consts.KubeLabelKaiSchedulerQueue, "clique %s", clique.Name)
 	}
 }

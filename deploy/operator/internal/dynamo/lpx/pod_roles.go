@@ -8,6 +8,7 @@ package lpx
 import (
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
@@ -15,9 +16,6 @@ import (
 )
 
 const (
-	// SchedulerName selects Grove's LPX backend for the complete PodCliqueSet.
-	SchedulerName = "lpx-scheduler"
-
 	v2LPUResourceName corev1.ResourceName = "lpu.nvidia.com/lpu"
 	v3LPUResourceName corev1.ResourceName = "nvidia.com/lpu"
 
@@ -32,7 +30,7 @@ func configureAgentScheduling(
 ) {
 	// Preserve Agent placement while replacing authored LPU resources with the selected device.
 	stripLPUResources(agent)
-	agent.SchedulerName = SchedulerName
+	agent.SchedulerName = v1alpha1.LPXSchedulerName
 	container := common.FindContainerByName(agent.Containers, commonconsts.MainContainerName)
 	// Model projection has already restricted the target family to XT or HX.
 	name, amount := v2LPUResourceName, resource.MustParse("8")

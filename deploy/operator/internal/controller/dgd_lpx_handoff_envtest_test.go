@@ -162,9 +162,9 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 					Containers: []corev1.Container{{
 						Name: consts.MainContainerName, Image: "example/conductor:1.4.0",
 						Command: []string{"/custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
-						VolumeMounts: []corev1.VolumeMount{{Name: consts.ModelStorageVolumeName, MountPath: "/models"}},
+						VolumeMounts: []corev1.VolumeMount{{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models"}},
 					}},
-					Volumes: []corev1.Volume{{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+					Volumes: []corev1.Volume{{Name: v1alpha1.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 				}},
 			}, {
 				Name: v1beta1.ComponentRoleLPXAgent,
@@ -172,7 +172,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 					Containers: []corev1.Container{{
 						Name: consts.MainContainerName, Image: "example/lpu-runtime:1.4.0",
 						VolumeMounts: []corev1.VolumeMount{
-							{Name: consts.ModelStorageVolumeName, MountPath: "/models"},
+							{Name: v1alpha1.ModelStorageVolumeName, MountPath: "/models"},
 							{Name: "config", MountPath: "/configs"},
 							{Name: "host-dev", MountPath: "/dev"},
 							{Name: "host-sys", MountPath: "/sys"},
@@ -182,7 +182,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 						},
 					}},
 					Volumes: []corev1.Volume{
-						{Name: consts.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: v1alpha1.ModelStorageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 						{Name: "host-dev", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
 						{Name: "host-sys", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys"}}},
 						{Name: "hugepages", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumHugePages}}},
@@ -272,7 +272,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
 			return
 		}
-		configMap.Name = dynamolpx.LPUConfigMapName(pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash])
+		configMap.Name = dynamolpx.LPUConfigMapName(pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		for _, resource := range []client.Object{pcs, configMap, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))
@@ -313,7 +313,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 
 	t.Log("Persist the child's download payload and project its actionable failure")
 	child.Status.ObservedGeneration = child.Generation
-	child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
+	child.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{Builds: []string{"downloaded-build"}}
 	child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,
 		LastTransitionTime: metav1.Now(), Reason: v1alpha1.LPXReadyReasonFailed, Message: "Check the namespace quota"}}
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{

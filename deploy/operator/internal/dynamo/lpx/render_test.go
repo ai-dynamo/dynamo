@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	manifestcapnp "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -150,7 +151,7 @@ func TestRenderResolvesAuthoredMetadataAndMounts(t *testing.T) {
 			require.Same(t, pcs, rendered)
 			require.Equal(t, projection.Digest().String(), rendered.Spec.Template.PodCliqueScalingGroupConfigs[0].Annotations[WorkloadDigestAnnotation])
 			for _, clique := range rendered.Spec.Template.Cliques {
-				require.Equal(t, SchedulerName, clique.Spec.PodSpec.SchedulerName)
+				require.Equal(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				if clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleAgent {
 					require.Equal(t, projection.CompilerSnapshotDigest(), clique.Annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation])
 				} else {

@@ -23,7 +23,6 @@ import (
 func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
 	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
-	dgd.Annotations = nil
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "ordinary-decode", ComponentType: v1beta1.ComponentTypeDecode,
 		Replicas:    ptr.To(int32(0)),
@@ -135,9 +134,8 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	replica := plan.ForReplica(1)
 	require.NotEqual(t, plan.Agents[0].CliqueName, replica.Agents[0].CliqueName)
 
-	t.Log("A scheduling deadline and annotation do not change hybrid launch")
+	t.Log("A scheduling deadline does not change hybrid launch")
 	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}
-	dgd.Annotations = map[string]string{commonconsts.KubeAnnotationLPXSchedulerBackend: commonconsts.LPXSchedulerBackend}
 	scheduled, err := ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), source)
 	require.NoError(t, err)
 	require.Equal(t, xt, scheduled)

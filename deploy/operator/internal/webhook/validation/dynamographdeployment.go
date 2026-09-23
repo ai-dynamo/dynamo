@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	semver "github.com/Masterminds/semver/v3"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -381,7 +382,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 		// Ordinary components cannot select the scheduler reserved for LPX-managed Pods.
 		if !component.ManagedByExternalController() && component.PodTemplate != nil &&
-			component.PodTemplate.Spec.SchedulerName == consts.LPXSchedulerBackend {
+			component.PodTemplate.Spec.SchedulerName == nvidiacomv1alpha1.LPXSchedulerName {
 			allErrs = append(allErrs, field.Forbidden(
 				componentPath.Child("podTemplate", "spec", "schedulerName"),
 				"LPX schedulerName is controller-owned; declare an LPX component instead",

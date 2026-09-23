@@ -170,7 +170,7 @@ func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 			t.Log("Refresh a running workload while preserving its downloaded builds")
 			dgd := newModelDownloadDGD(modelDownloadTestBuildID)
 			child := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Generation: 1}}
-			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
+			child.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{
 				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &metav1.Time{Time: tt.checkedAt},
 			}
 			child.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
@@ -249,7 +249,7 @@ func TestModelDownloadCacheAcrossRevisions(t *testing.T) {
 				setReadyCondition(child, v1beta1.DGDStateSuccessful, "Previous input is ready")
 			}
 			checkedAt := metav1.NewTime(time.Now().Add(-tc.cacheAge))
-			child.Status.ModelDownload = &v1beta1.ModelDownloadStatus{
+			child.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{
 				Builds: []string{modelDownloadTestBuildID}, LastCheckedAt: &checkedAt,
 			}
 			registry := newModelDownloadRegistry(t, nil, map[string]error{tc.build: fmt.Errorf("ModelExpress unavailable")})

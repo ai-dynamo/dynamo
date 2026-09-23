@@ -3,8 +3,6 @@
 
 package v1beta1
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 // LPXConfig identifies the component's compiled model and configures scheduling.
 type LPXConfig struct {
 	// buildId references the immutable model build.
@@ -25,18 +23,6 @@ type SchedulingSpec struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=9223372036
 	AttemptDeadlineSeconds *int64 `json:"attemptDeadlineSeconds,omitempty"`
-}
-
-// ModelDownloadStatus contains the status of remote LPU model downloads.
-type ModelDownloadStatus struct {
-	// builds is the sorted set of resolved remote LPU build URLs whose artifacts
-	// were successfully downloaded into model-storage.
-	// +optional
-	Builds []string `json:"builds,omitempty"`
-
-	// lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
-	// +optional
-	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }
 
 // HasLPXComponent returns true if any component uses the LPX integration.

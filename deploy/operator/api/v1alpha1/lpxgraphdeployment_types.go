@@ -9,6 +9,22 @@ import (
 )
 
 const (
+	// LPXSchedulerName selects Grove's LPX backend in generated role PodSpecs.
+	// The operator sets schedulerName to this value for every LPX role, including
+	// Cyborg. Non-LPX component Pod templates may not select this scheduler.
+	LPXSchedulerName = "lpx-scheduler"
+
+	// ModelStorageVolumeName identifies the model-storage volume and its mount in
+	// each LPX role's main container. The operator uses the mountPath from the
+	// role's podTemplate as the root for compiled model artifacts.
+	ModelStorageVolumeName = "model-storage"
+
+	// AnnotationExtraResourcesHash records an opaque content hash of the role's
+	// generated immutable runtime ConfigMap on PodClique templates
+	// (PodCliqueSet.spec.template.cliques[].annotations). Grove propagates it to
+	// PodClique and Pod metadata.
+	AnnotationExtraResourcesHash = "nvidia.com/extra-resources-hash"
+
 	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
 	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
 	// Please use object specific variants of this condition which provides more details for each context where
@@ -63,7 +79,19 @@ type LPXGraphDeploymentStatus struct {
 	Components map[string]LPXComponentStatus `json:"components,omitempty"`
 	// modelDownload retains the existing remote-build download progress.
 	// +optional
-	ModelDownload *v1beta1.ModelDownloadStatus `json:"modelDownload,omitempty"`
+	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
+}
+
+// ModelDownloadStatus contains the status of remote LPU model downloads.
+type ModelDownloadStatus struct {
+	// builds is the sorted set of resolved remote LPU build URLs whose artifacts
+	// were successfully downloaded into model-storage.
+	// +optional
+	Builds []string `json:"builds,omitempty"`
+
+	// lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+	// +optional
+	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
 }
 
 // +kubebuilder:object:root=true

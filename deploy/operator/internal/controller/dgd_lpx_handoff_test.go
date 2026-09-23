@@ -42,7 +42,7 @@ func newLPXHandoffSource(t *testing.T, fixture string) *v1beta1.DynamoGraphDeplo
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("../dynamo/lpx/testdata/from_dgd_yaml", fixture+".input.yaml"))
 	require.NoError(t, err)
-	source := &v1beta1.DynamoGraphDeployment{}
+	source := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
 	require.NoError(t, yaml.Unmarshal(data, source))
 	source.GetComponentByName("lpu").ComponentName = "lpx"
 	source.Generation = 3

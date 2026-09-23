@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -73,11 +72,9 @@ func TestGetPipelineRequests(t *testing.T) {
 }
 
 func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
-	t.Log("Publish the implicit hybrid runtime without interpreting stale selector annotations")
+	t.Log("Publish the implicit hybrid runtime")
 	ctx := t.Context()
 	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
-	dgd.Annotations[consts.KubeAnnotationLPXSchedulerBackend] = "unknown-scheduler"
-	dgd.Annotations[consts.KubeAnnotationLPXExecutionBackend] = "unknown-execution"
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Empty(t, desired.plan.ConductorTemplate)
 	require.Empty(t, desired.plan.ConductorClique)
@@ -91,7 +88,7 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	require.NotContains(t, pcsg.Spec.CliqueNames, "")
 	cyborg := getResource[*grovev1alpha1.PodClique](t, objects, desired.plan.CyborgClique)
 	require.NotContains(t, cyborg.Spec.StartsAfter, "")
-	require.Equal(t, lpx.SchedulerName, cyborg.Spec.PodSpec.SchedulerName)
+	require.Equal(t, v1alpha1.LPXSchedulerName, cyborg.Spec.PodSpec.SchedulerName)
 	createLPXTestObjects(t, ctx, reconciler.Client, objects...)
 
 	condition := publishSelectedLPXForTest(t, ctx, reconciler, deployment, desired)

@@ -1386,7 +1386,7 @@ func TestLPXMaterializationUsesDGDAndChildIdentity(t *testing.T) {
 	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: lpx.LPUConfigMapName(root, pcs.Spec.Template.Cliques[0].Annotations[consts.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: lpx.LPUConfigMapName(root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-serve", Namespace: child.Namespace}},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
@@ -2419,7 +2419,7 @@ func TestLPXPublishedWorkloadCleanupAfterFailure(t *testing.T) {
 				conductor := dgd.Spec.Components[0].ComponentRole(v1beta1.ComponentRoleLPXConductor)
 				for index := range conductor.PodTemplate.Spec.Containers[0].VolumeMounts {
 					mount := &conductor.PodTemplate.Spec.Containers[0].VolumeMounts[index]
-					if mount.Name == consts.ModelStorageVolumeName {
+					if mount.Name == v1alpha1.ModelStorageVolumeName {
 						mount.MountPath = "/different-model-storage"
 					}
 				}
@@ -2664,7 +2664,7 @@ func loadTestDGD(t testing.TB, pipeline lpx.Pipeline, buildID string) *v1beta1.D
 	t.Helper()
 	payload, err := os.ReadFile("testdata/dgd.yaml")
 	require.NoError(t, err)
-	dgd := &v1beta1.DynamoGraphDeployment{}
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
 	require.NoError(t, yaml.UnmarshalStrict(payload, dgd))
 	dgd.Spec.Components[0].LPX.BuildID = buildID
 

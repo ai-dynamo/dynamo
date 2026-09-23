@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
@@ -126,7 +127,7 @@ func RenderNodeLocal(
 			return nil, err
 		}
 		annotations := roleAnnotations(conductorTemplate.Annotations, lpxv1alpha1.PodRoleConductor, workloadDigest)
-		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
+		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        conductorTemplateName,
 			Labels:      maps.Clone(conductorTemplate.Labels),
@@ -177,7 +178,7 @@ func RenderNodeLocal(
 		}
 
 		annotations := roleAnnotations(template.Annotations, lpxv1alpha1.PodRoleAgent, projection.Digest().String())
-		annotations[commonconsts.AnnotationExtraResourcesHash] = configHash
+		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
 		annotations[WorkloadModeAnnotation] = string(projection.schedulerWorkloadMode())
@@ -244,7 +245,7 @@ func RenderNodeLocal(
 
 	// Keep every LPX role in one backend gang, including the KAI fallback roles.
 	for _, clique := range rendered.Cliques {
-		clique.Spec.PodSpec.SchedulerName = SchedulerName
+		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
 	}
 
 	rendered.Resources = extraResources

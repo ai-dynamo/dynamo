@@ -170,7 +170,7 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 	})
 
 	annotations := lpxSchedulingMetadata(dgd.Annotations)
-	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationLPXSchedulerBackend, commonconsts.KubeAnnotationWorkloadProvider,
+	for _, key := range append(slices.Clone(dgdPropagatedAnnotationKeys), commonconsts.KubeAnnotationWorkloadProvider,
 		commonconsts.KubeAnnotationGroveUpdateStrategy, commonconsts.KubeAnnotationKaiSchedulerQueue, commonconsts.KubeAnnotationVolcanoQueue) {
 		if value, exists := dgd.Annotations[key]; exists {
 			annotations[key] = value
@@ -324,7 +324,7 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		// Select LPX before applying Grove defaults; the PCS already owns the KAI queue.
-		gpuTemplate.Spec.SchedulerName = dynamolpx.SchedulerName
+		gpuTemplate.Spec.SchedulerName = v1alpha1.LPXSchedulerName
 		clique, err := buildCliqueFromTemplate(gpu, *gpuTemplate)
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.conductor: %w", component.ComponentName, err)

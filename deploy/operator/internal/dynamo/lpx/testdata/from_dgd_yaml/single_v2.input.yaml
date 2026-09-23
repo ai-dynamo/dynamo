@@ -4,8 +4,6 @@
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  annotations:
-    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
   generation: 1
   name: dgd-single-v2
   namespace: inference-engine

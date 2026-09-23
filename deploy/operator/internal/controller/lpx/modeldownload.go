@@ -87,7 +87,7 @@ func (r *graphReconciler) reconcileModelDownloads(
 			return ctrl.Result{}, nil
 		}
 
-		deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: downloaded}
+		deployment.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{Builds: downloaded}
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -100,7 +100,7 @@ func (r *graphReconciler) reconcileModelDownloads(
 		lastCheckedAt = new(metav1.Now())
 	}
 
-	deployment.Status.ModelDownload = &v1beta1.ModelDownloadStatus{Builds: downloaded, LastCheckedAt: lastCheckedAt}
+	deployment.Status.ModelDownload = &v1alpha1.ModelDownloadStatus{Builds: downloaded, LastCheckedAt: lastCheckedAt}
 	return ctrl.Result{}, nil
 }
 

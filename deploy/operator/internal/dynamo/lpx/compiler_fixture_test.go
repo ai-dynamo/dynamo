@@ -51,9 +51,6 @@ func newSelectedTestDGD(t *testing.T, name string, components ...v1beta1.DynamoC
 	return &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "test", UID: "uid", Generation: 1,
-			Annotations: map[string]string{
-				commonconsts.KubeAnnotationLPXSchedulerBackend: commonconsts.LPXSchedulerBackend,
-			},
 		},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
 			Components: components,

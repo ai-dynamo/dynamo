@@ -8,8 +8,6 @@ metadata:
   namespace: test
   uid: 44444444-4444-4444-8444-444444444444
   generation: 1
-  annotations:
-    scheduling.lpu.nvidia.com/scheduler-backend: lpx-scheduler
 spec:
   components:
     - name: lpu

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
@@ -67,12 +68,12 @@ func LPUConfigMapHash(configMap *corev1.ConfigMap) string {
 func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 	container := common.FindContainerByName(spec.Containers, commonconsts.MainContainerName)
 	mountIndex := slices.IndexFunc(container.VolumeMounts, func(mount corev1.VolumeMount) bool {
-		return mount.Name == commonconsts.ModelStorageVolumeName
+		return mount.Name == v1alpha1.ModelStorageVolumeName
 	})
 	if mountIndex < 0 {
 		return "", fmt.Errorf(
 			"selected LPX main container requires model storage volume mount %q",
-			commonconsts.ModelStorageVolumeName,
+			v1alpha1.ModelStorageVolumeName,
 		)
 	}
 	mount := container.VolumeMounts[mountIndex]

@@ -616,10 +616,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "selected v1beta1 LPX derives SpecDecode from two models",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				dgd.Annotations = map[string]string{
-					consts.KubeAnnotationLPXSchedulerBackend: "ignored-scheduler",
-					consts.KubeAnnotationLPXExecutionBackend: "ignored-execution",
-				}
 				component := &dgd.Spec.Components[0]
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
@@ -775,7 +771,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		{
 			name: "ordinary graph rejects manual LPX scheduler selection",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				betaWorkerComponent(dgd).PodTemplate.Spec.SchedulerName = consts.LPXSchedulerBackend
+				betaWorkerComponent(dgd).PodTemplate.Spec.SchedulerName = nvidiacomv1alpha1.LPXSchedulerName
 			}),
 			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.schedulerName: Forbidden: LPX schedulerName is controller-owned; declare an LPX component instead"},
 		},
@@ -783,7 +779,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			name: "mixed graph rejects manual LPX scheduler selection on an ordinary component",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := *betaWorkerComponent(betaDGDForAdmission(nil))
-				worker.PodTemplate.Spec.SchedulerName = consts.LPXSchedulerBackend
+				worker.PodTemplate.Spec.SchedulerName = nvidiacomv1alpha1.LPXSchedulerName
 				dgd.Spec.Components = append(dgd.Spec.Components, worker)
 			}),
 			wantWebhookErrs: []string{"spec.components[1].podTemplate.spec.schedulerName: Forbidden: LPX schedulerName is controller-owned; declare an LPX component instead"},
@@ -835,7 +831,7 @@ func alphaLPXDGDForAdmission(
 	dgd := alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 		dgd.Spec.Services = map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"lpx": {
-				ComponentType: consts.ComponentTypeLPX,
+				ComponentType: string(nvidiacomv1beta1.ComponentTypeLPX),
 				Replicas:      k8sptr.To(int32(1)),
 				LPX:           &nvidiacomv1beta1.LPXConfig{BuildID: "test/build"},
 				Roles: []nvidiacomv1alpha1.ComponentRoleSpec{
