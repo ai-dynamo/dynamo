@@ -825,13 +825,20 @@ func needsDataParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) 
 func getFlagValue(expandedArgs []string, flag string) (int64, error) {
 	var flagValue int64 = 1
 	for i, arg := range expandedArgs {
-		if arg == flag && (i+1 < len(expandedArgs)) {
-			parsed, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
-			if err != nil {
-				return 0, fmt.Errorf("%s %q: %w", flag, expandedArgs[i+1], err)
-			}
-			flagValue = parsed
+		if arg != flag {
+			continue
 		}
+		// A trailing occurrence with nothing after it has no value at all.
+		// vLLM rejects the command line outright, so the operator must not
+		// fall back to an earlier occurrence or to the default of 1.
+		if i+1 >= len(expandedArgs) {
+			return 0, fmt.Errorf("%s: missing value", flag)
+		}
+		parsed, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s %q: %w", flag, expandedArgs[i+1], err)
+		}
+		flagValue = parsed
 	}
 	return flagValue, nil
 }

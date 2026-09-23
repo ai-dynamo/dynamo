@@ -190,6 +190,11 @@ func TestValidateParallelismSizes_RejectsNonPositive(t *testing.T) {
 		"negative data-parallel-size": {dataParallelSizeFlag, "-1"},
 		"unparseable value":           {tensorParallelSizeFlag, "not-a-number"},
 		"valid then unparseable":      {tensorParallelSizeFlag, "4", tensorParallelSizeFlag, "nope"},
+		// A trailing occurrence with no value at all: vLLM rejects the command
+		// line, so falling back to the earlier 4 -- or to the default of 1 --
+		// would size a topology the engine never uses.
+		"valid then no value": {tensorParallelSizeFlag, "4", tensorParallelSizeFlag},
+		"lone flag no value":  {tensorParallelSizeFlag},
 	} {
 		t.Run(name, func(t *testing.T) {
 			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmContainer(rawArgs...)))
