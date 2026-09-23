@@ -21,6 +21,23 @@ def prom(text):
         if m:out[m[1]+(m[2] or '')]=float(m[3])
     return out
 def total(m,name):return sum(v for k,v in m.items() if k.split('{')[0]==name)
+def rdma_lanes(run,config):
+    if config['runtime']['response_plane']!='velo' or config['runtime']['velo_response_transport']!='ucx':
+        return None
+    devices=config['network']['ucx_numa_devices']
+    logs={f'frontend-numa{node}.log':device for node,device in devices.items()}
+    for node in config['topology']['mocker_nodes']:
+        for process in node['processes']:
+            logs[process['name']+'.log']=devices[process['memory'].removeprefix('bind:')]
+    evidence={}
+    for name,device in logs.items():
+        lanes=[]
+        with (run/name).open(errors='replace') as f:
+            for line in f:
+                lanes.extend(re.findall(r'\bam\(([^)]*)\)',line))
+        verified=bool(lanes) and all('rc_mlx5/'+device in lane and 'tcp/' not in lane for lane in lanes)
+        evidence[name]={'expected_device':device,'active_message_lanes':sorted(set(lanes)),'verified':verified}
+    return evidence
 def read_telemetry(path,start=None,end=None):
     out=[]
     for r in rows(path):
@@ -108,6 +125,7 @@ def analyze(label):
     error_count=counts.get('measured_errors',0)+counts.get('outside_window_errors',0)
     error_fraction=error_count/counts['profiling_records']
     expected=config['runtime']['num_mockers']
+    result['rdma_lanes']=rdma_lanes(run,config)
     result['quality']={
         'complete':(run/'COMPLETE').exists(),
         'harness_accepted':campaign['accepted'],
@@ -116,8 +134,9 @@ def analyze(label):
         'error_fraction':error_fraction,
         'small_error_count_accepted':error_fraction<=config['workload']['allowed_error_fraction'],
         'kv_sources_complete':all(result['telemetry'][n]['kv_sources']['min']==expected for n in names),
+        'rdma_lanes_verified':result['rdma_lanes'] is None or all(x['verified'] for x in result['rdma_lanes'].values()),
     }
-    result['quality']['accepted']=all((result['quality']['complete'],result['quality']['harness_accepted'],not bad_counts,result['quality']['kv_sources_complete'],result['quality']['small_error_count_accepted']))
+    result['quality']['accepted']=all((result['quality']['complete'],result['quality']['harness_accepted'],not bad_counts,result['quality']['kv_sources_complete'],result['quality']['small_error_count_accepted'],result['quality']['rdma_lanes_verified']))
     if (run/'profile-window-start.json').exists():
         p=json.loads((run/'profile-window-start.json').read_text());a=p['epoch'];b=a+15
         result['profile_launch_window']={'start':a,'end':b,'clock':'monotonic','note':'Controller launch window; actual perf sample windows are in frontend-profile-summary.json.','telemetry':{n:window(d,a,b) for n,d in datasets.items()}}
