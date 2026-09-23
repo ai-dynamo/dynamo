@@ -95,6 +95,28 @@ def test_freeze_gc_after_init_is_opt_in(monkeypatch):
     ).freeze_gc_after_init
 
 
+@pytest.mark.parametrize(
+    "mode, role_flags, supported",
+    [
+        ("null", {}, True),
+        ("decode", {}, True),
+        ("prefill", {}, False),
+        ("null", {"embedding_worker": True}, False),
+    ],
+)
+def test_freeze_gc_after_init_requires_decode_or_aggregated_mode(
+    mode, role_flags, supported
+):
+    server_args = SimpleNamespace(disaggregation_mode=mode)
+    dynamo_args = SimpleNamespace(freeze_gc_after_init=True, **role_flags)
+
+    if supported:
+        sglang_args.Config(server_args, dynamo_args)
+    else:
+        with pytest.raises(ValueError, match="--freeze-gc-after-init"):
+            sglang_args.Config(server_args, dynamo_args)
+
+
 def test_diffusion_generator_kwargs_maps_nccl_port_to_master_port():
     kwargs = _diffusion_generator_kwargs(
         SimpleNamespace(
