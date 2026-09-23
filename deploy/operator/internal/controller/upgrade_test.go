@@ -806,7 +806,7 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					renderedPCS, err := renderer.Render(ctx, dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 					require.NoError(t, err)
 					pcs := renderedPCS.desired
 					renderDGD := renderedPCS.renderDeployment
@@ -932,7 +932,7 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	require.NoError(t, err)
 	desired := renderedPCS.desired
 	renderDGD := renderedPCS.renderDeployment

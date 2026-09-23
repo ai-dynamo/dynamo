@@ -485,14 +485,14 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	)
 
 	t.Log("Verify the renderer initially publishes the full multinode shape")
-	rendered, err := renderer.Render(t.Context(), dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+	rendered, err := renderer.Render(t.Context(), dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerEngine)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerReplica)
 
 	t.Log("Delete the dependency without changing DGD generation and render again")
 	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
-	_, err = renderer.Render(t.Context(), dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+	_, err = renderer.Render(t.Context(), dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	require.ErrorContains(t, err, "ResourceClaimTemplate default/gpu-template")
 }
 

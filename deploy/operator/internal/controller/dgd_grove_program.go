@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -106,7 +107,7 @@ func (p *groveProgram) Reconcile(
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
 		if ordinaryDGD == nil {
-			ordinaryDGD = projectOrdinaryGroveDeployment(req.DGD)
+			ordinaryDGD = projectWithoutExternallyManagedComponents(req.DGD)
 		}
 		p.topology.Reconcile(ctx, ordinaryDGD, &programResult)
 	}()
@@ -143,7 +144,7 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, err
 	}
-	ordinaryDGD = projectOrdinaryGroveDeployment(req.DGD)
+	ordinaryDGD = projectWithoutExternallyManagedComponents(req.DGD)
 
 	previousRestart := programResult.Status.Restart
 	restart := p.restart.Resolve(
@@ -208,4 +209,17 @@ func (p *groveProgram) Reconcile(
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
+}
+
+// projectWithoutExternallyManagedComponents copies source without externally managed components.
+// The source must be non-nil and is not mutated.
+func projectWithoutExternallyManagedComponents(source *nvidiacomv1beta1.DynamoGraphDeployment) *nvidiacomv1beta1.DynamoGraphDeployment {
+	projected := source.DeepCopy()
+	projected.Spec.Components = slices.DeleteFunc(
+		projected.Spec.Components,
+		func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+			return component.ManagedByExternalController()
+		},
+	)
+	return projected
 }

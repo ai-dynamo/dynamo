@@ -1161,7 +1161,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			result, err := reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
 				dgd,
-				projectOrdinaryGroveDeployment(dgd),
+				projectWithoutExternallyManagedComponents(dgd),
 				nil,
 				nil,
 			)
@@ -1203,7 +1203,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			result, err = reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
 				dgd,
-				projectOrdinaryGroveDeployment(dgd),
+				projectWithoutExternallyManagedComponents(dgd),
 				nil,
 				nil,
 			)
@@ -1300,7 +1300,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 	_, err := reconciler.newGroveProgram().workloads.Reconcile(
 		ctx,
 		dgd,
-		projectOrdinaryGroveDeployment(dgd),
+		projectWithoutExternallyManagedComponents(dgd),
 		nil,
 		nil,
 	)
@@ -1387,7 +1387,7 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	renderedPCS, err := renderer.Render(ctx, dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	generatedPCS := renderedPCS.desired
 	renderDGD := renderedPCS.renderDeployment
@@ -1685,7 +1685,7 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, projectOrdinaryGroveDeployment(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	renderDGD := renderedPCS.renderDeployment
 	prefill := renderDGD.GetComponentByName("prefill")
