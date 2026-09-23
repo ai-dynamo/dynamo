@@ -1,0 +1,280 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Pod readiness reflects cap enforcement (DEP #14767).
+
+A PowerAgent pod used to have no readiness probe, so it was Ready from the
+moment its container started and stayed Ready while every reconcile cycle
+failed — `kubectl get pods` showed `1/1 Running` for an agent that had enforced
+nothing since startup. The agent now serves a fixed `GET /readyz` on port 8081
+whose claim is narrow and self-reported:
+
+    The agent's last reconcile cycle completed every enforcement action it was
+    required to take with no reported failure, and completed recently.
+
+The state behind it is ONE monotonic float, `_last_good_cycle`, assigned exactly
+once per cycle in `run()`. `0.0` covers both "no cycle has ever succeeded" and
+"the last one failed"; the age covers "the last one hung". Because it is a
+single assignment computed after the `try`, a reader on the server thread can
+never see a torn mix and no lock is required.
+"""
+
+from __future__ import annotations
+
+import io
+import socket
+import threading
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
+import power_agent
+from power_agent import PowerAgent
+
+
+def _bare_agent() -> PowerAgent:
+    """A PowerAgent without `__init__`'s NVML / K8s dependencies."""
+    agent = object.__new__(PowerAgent)
+    agent._actuator = MagicMock()
+    agent.node_name = "node-under-test"
+    agent.safe_default_watts = 500
+    agent.metrics = MagicMock()
+    agent._last_good_cycle = 0.0
+    return agent
+
+
+def _get_readyz(agent: PowerAgent, path: str = "/readyz") -> tuple[str, str]:
+    """Drive the WSGI app directly. Returns (status, body).
+
+    Calling the app rather than issuing a socket request keeps these tests off
+    the network for everything except the bind-collision case, which is
+    inherently about the socket.
+    """
+    captured: dict[str, str] = {}
+
+    def start_response(status, headers):
+        captured["status"] = status
+        captured["headers"] = headers
+
+    chunks = agent._readyz_app({"PATH_INFO": path}, start_response)
+    return captured["status"], b"".join(chunks).decode("utf-8")
+
+
+class TestReadinessEndpoint(unittest.TestCase):
+    def test_not_ready_before_the_first_successful_cycle(self):
+        agent = _bare_agent()
+
+        status, body = _get_readyz(agent)
+
+        self.assertTrue(status.startswith("503"))
+        # The age in the body is what makes a 503 diagnosable with
+        # `kubectl exec ... curl` and no log access.
+        self.assertEqual(body, "not-ready last_good_cycle_age_s=none\n")
+
+    def test_ready_immediately_after_a_successful_cycle(self):
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        status, body = _get_readyz(agent)
+
+        self.assertTrue(status.startswith("200"))
+        self.assertTrue(body.startswith("ok last_good_cycle_age_s="))
+
+    def test_not_ready_once_the_staleness_bound_elapses(self):
+        """The bound is what catches a HUNG cycle, which nothing else can: the
+        probe's failureThreshold cannot see it, because nothing is failing —
+        the timestamp is simply not advancing."""
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic() - power_agent.STALE_AFTER_S - 1
+
+        status, body = _get_readyz(agent)
+
+        self.assertTrue(status.startswith("503"))
+        self.assertTrue(body.startswith("not-ready last_good_cycle_age_s="))
+
+    def test_a_healthy_cycle_may_last_twice_the_reconcile_interval(self):
+        """`run()` sleeps AFTER each cycle, so the timestamp refreshes every
+        RECONCILE_INTERVAL_S plus the cycle's own duration. Asserted so the
+        budget cannot be silently changed by a future interval or bound edit.
+        """
+        agent = _bare_agent()
+        interval = power_agent.RECONCILE_INTERVAL_S
+
+        # A cycle taking just under 2x the interval still leaves the agent
+        # Ready at the moment the next one would publish...
+        agent._last_good_cycle = time.monotonic() - (interval + 2 * interval - 1)
+        self.assertTrue(_get_readyz(agent)[0].startswith("200"))
+
+        # ...and one exceeding it exposes a 503.
+        agent._last_good_cycle = time.monotonic() - (interval + 2 * interval + 1)
+        self.assertTrue(_get_readyz(agent)[0].startswith("503"))
+
+    def test_non_readyz_paths_are_404(self):
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        status, body = _get_readyz(agent, path="/metrics")
+
+        self.assertTrue(status.startswith("404"))
+        self.assertEqual(body, "")
+
+    def test_wall_clock_steps_do_not_extend_or_expire_readiness(self):
+        """Readiness is measured on CLOCK_MONOTONIC. An NTP step or a
+        container-start clock jump must not make a stale agent look fresh (or
+        the reverse)."""
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        with patch.object(power_agent.time, "time", return_value=time.time() + 86400):
+            self.assertTrue(_get_readyz(agent)[0].startswith("200"))
+
+
+class TestReadinessTimestamp(unittest.TestCase):
+    """`run()` assigns `_last_good_cycle` exactly once per cycle."""
+
+    def setUp(self):
+        power_agent._shutdown.clear()
+
+    def tearDown(self):
+        power_agent._shutdown.clear()
+
+    def _run_one_cycle(self, reconcile):
+        agent = _bare_agent()
+        agent.reconcile_once = reconcile
+        agent._start_readyz_server = MagicMock()
+        with patch.object(power_agent.signal, "signal"), patch.object(
+            power_agent, "_shutdown_cleanup"
+        ):
+            agent.run()
+        return agent
+
+    def test_successful_cycle_publishes_a_fresh_timestamp(self):
+        def reconcile():
+            power_agent._shutdown.set()
+            return True
+
+        agent = self._run_one_cycle(reconcile)
+
+        self.assertNotEqual(agent._last_good_cycle, 0.0)
+        self.assertTrue(_get_readyz(agent)[0].startswith("200"))
+
+    def test_failed_cycle_resets_the_timestamp(self):
+        def reconcile():
+            power_agent._shutdown.set()
+            return False
+
+        agent = self._run_one_cycle(reconcile)
+
+        self.assertEqual(agent._last_good_cycle, 0.0)
+        self.assertTrue(_get_readyz(agent)[0].startswith("503"))
+
+    def test_raising_cycle_resets_the_timestamp_and_does_not_exit(self):
+        """An unexpected exception must take the pod NotReady on the NEXT poll
+        rather than after the staleness bound — and must NOT terminate the
+        process: a NotReady agent that keeps reconciling can recover, while a
+        restart drops in-memory GPU ownership."""
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()  # a previously good cycle
+        agent._start_readyz_server = MagicMock()
+
+        def reconcile():
+            power_agent._shutdown.set()
+            raise RuntimeError("NVML exploded")
+
+        agent.reconcile_once = reconcile
+        with patch.object(power_agent.signal, "signal"), patch.object(
+            power_agent, "_shutdown_cleanup"
+        ) as cleanup:
+            agent.run()  # must not raise
+
+        self.assertEqual(agent._last_good_cycle, 0.0)
+        self.assertTrue(_get_readyz(agent)[0].startswith("503"))
+        cleanup.assert_called_once()
+
+
+class TestReadinessServer(unittest.TestCase):
+    def setUp(self):
+        power_agent._shutdown.clear()
+
+    def tearDown(self):
+        power_agent._shutdown.clear()
+
+    def test_serves_with_prometheus_disabled(self):
+        """Readiness must not be optional, so it is deliberately NOT served
+        from the Prometheus server, which `--prometheus-port=0` disables."""
+        agent = _bare_agent()
+        # prometheus_port=0 → PowerAgentMetrics starts no HTTP server at all.
+        agent.metrics = power_agent.PowerAgentMetrics(0)
+
+        self.assertTrue(_get_readyz(agent)[0].startswith("503"))
+        agent._last_good_cycle = time.monotonic()
+        self.assertTrue(_get_readyz(agent)[0].startswith("200"))
+
+    def test_bind_collision_is_fatal_at_startup(self):
+        """A bind failure must propagate out of `run()` uncaught so the process
+        exits and the pod enters CrashLoopBackOff. Starting the server inside
+        `run()`'s `try` would instead send a never-enforcing agent through the
+        full `_shutdown_cleanup` restore sweep on the way out.
+
+        The pre-bind uses the WILDCARD address, not loopback: a loopback-only
+        collision with a wildcard bind is kernel-dependent.
+        """
+        agent = _bare_agent()
+        agent.reconcile_once = MagicMock(return_value=True)
+
+        occupier = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupier.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            occupier.bind(("", power_agent.READYZ_PORT))
+            occupier.listen(1)
+
+            with patch.object(power_agent.signal, "signal"), patch.object(
+                power_agent, "_shutdown_cleanup"
+            ) as cleanup:
+                with self.assertRaises(OSError):
+                    agent.run()
+
+            cleanup.assert_not_called()
+        finally:
+            occupier.close()
+
+    def test_probe_traffic_emits_no_per_request_log_line(self):
+        """`WSGIRequestHandler` inherits `BaseHTTPRequestHandler.log_message`,
+        which writes one stderr line per request — ~8,600 lines per node per day
+        at the probe's `periodSeconds: 10`."""
+        handler = object.__new__(power_agent._QuietWSGIHandler)
+        captured = io.StringIO()
+
+        with patch("sys.stderr", captured):
+            for _ in range(5):
+                handler.log_message('"%s" %s %s', "GET /readyz HTTP/1.1", "200", "-")
+
+        self.assertEqual(captured.getvalue(), "")
+
+    def test_server_thread_is_a_daemon(self):
+        """So it does not hold the process open during shutdown. Readiness keeps
+        serving through the termination grace period, which is what
+        `reconcile_once`'s shutdown-fold rule is for."""
+        agent = _bare_agent()
+        started: list[threading.Thread] = []
+        real_thread = threading.Thread
+
+        def capture(*args, **kwargs):
+            t = real_thread(*args, **kwargs)
+            started.append(t)
+            return t
+
+        with patch.object(power_agent, "make_server") as make_server:
+            with patch.object(power_agent.threading, "Thread", side_effect=capture):
+                agent._start_readyz_server()
+
+        make_server.assert_called_once()
+        args, kwargs = make_server.call_args
+        self.assertEqual(args[1], power_agent.READYZ_PORT)
+        self.assertIs(kwargs["handler_class"], power_agent._QuietWSGIHandler)
+        self.assertEqual(len(started), 1)
+        self.assertTrue(started[0].daemon)
+
+
+if __name__ == "__main__":
+    unittest.main()

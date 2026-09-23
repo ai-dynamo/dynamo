@@ -191,7 +191,9 @@ def probe(
                 write_skipped_reason = f"busy ({len(pids)} compute pid(s))"
 
             if write_skipped_reason is None:
-                eff = actuator.apply_cap(i, test_watts)
+                # `.effective_w` — apply_cap returns a CapWriteResult; the
+                # parity comparison subtracts these, so it needs the int.
+                eff = actuator.apply_cap(i, test_watts).effective_w
                 time.sleep(sleep_s)
                 ns_applied = nvidia_smi_power_limit(uuid)
                 actuator.restore_default(i)

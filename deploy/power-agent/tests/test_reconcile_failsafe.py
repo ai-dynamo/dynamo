@@ -20,7 +20,10 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
+from actuator import _GpuIdentityMismatch
 from power_agent import PowerAgent
+
+from tests.actuator_double import actuator_double
 
 
 def _make_agent(core_v1, device_count: int = 2) -> PowerAgent:
@@ -306,6 +309,284 @@ class TestReconcileDeviceCountRefresh(unittest.TestCase):
 
         self.assertEqual(agent._reconcile_gpu.call_count, 5)
         self.assertEqual(agent.device_count, 5)
+
+
+class _DcgmStyleActuator:
+    """Minimal actuator exposing `managed_uuid_for_idx` on its TYPE.
+
+    `_release_managed_gpu` gates the DCGM index-projection branches on
+    `hasattr(type(actuator), "managed_uuid_for_idx")`. A `MagicMock` fails that
+    check — its type is `MagicMock` — so those branches are unreachable with a
+    plain double and a test using one would silently exercise the NVML path.
+    """
+
+    name = "dcgm"
+
+    def __init__(self, current_uuid, managed_uuid):
+        self._current_uuid = current_uuid
+        self._managed_uuid = managed_uuid
+        self.restore_default_by_uuid = MagicMock(return_value=True)
+
+    def get_uuid(self, gpu_idx):
+        return self._current_uuid
+
+    def managed_uuid_for_idx(self, gpu_idx):
+        if isinstance(self._managed_uuid, Exception):
+            raise self._managed_uuid
+        return self._managed_uuid
+
+
+class TestCycleEnforcementBoolean(unittest.TestCase):
+    """`reconcile_once` returns the whole-cycle enforcement boolean (DEP #14767).
+
+    True iff every enforcement action the cycle was REQUIRED to take completed
+    and the inputs it depended on were obtained. This is what `/readyz`
+    publishes, so every path that swallows a failure to keep the loop running
+    must drive it false — the agent's failure handling is deliberately
+    non-fatal, and without this fold none of it is observable as state.
+    """
+
+    def setUp(self):
+        power_agent._shutdown.clear()
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def tearDown(self):
+        power_agent._shutdown.clear()
+        power_agent._managed_gpu_indices.clear()
+        power_agent._previously_managed.clear()
+
+    def _agent(self, device_count=2):
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.return_value = MagicMock(items=[])
+        agent = _make_agent(core_v1, device_count=device_count)
+        agent.safe_default_watts = 500
+        return agent
+
+    def _gpu_agent(self, actuator, device_count=1):
+        """An agent whose `_reconcile_gpu` runs for real against `actuator`."""
+        agent = self._agent(device_count=device_count)
+        actuator.device_count.return_value = device_count
+        agent._actuator = actuator
+        return agent
+
+    # --- the happy path -------------------------------------------------
+
+    def test_clean_cycle_returns_true(self):
+        agent = self._agent(device_count=3)
+        agent._reconcile_gpu = MagicMock(return_value=True)
+
+        self.assertIs(agent.reconcile_once(), True)
+
+    # --- inputs the cycle depended on -----------------------------------
+
+    def test_pod_list_failure_returns_false_and_skips_the_gpu_loop(self):
+        core_v1 = MagicMock()
+        core_v1.list_pod_for_all_namespaces.side_effect = RuntimeError("boom")
+        agent = _make_agent(core_v1, device_count=4)
+        agent._reconcile_gpu = MagicMock(return_value=True)
+
+        self.assertIs(agent.reconcile_once(), False)
+        agent._reconcile_gpu.assert_not_called()
+
+    def test_device_count_refresh_failure_returns_false(self):
+        """The cycle still reconciles against the last-known count, but it ran
+        on a possibly-stale topology, so it does not count as enforcing."""
+        agent = self._agent(device_count=5)
+        agent._reconcile_gpu = MagicMock(return_value=True)
+        agent._actuator.device_count.side_effect = RuntimeError("hostengine down")
+
+        self.assertIs(agent.reconcile_once(), False)
+        self.assertEqual(agent._reconcile_gpu.call_count, 5)
+
+    # --- the fold must not short-circuit --------------------------------
+
+    def test_failure_on_gpu_zero_still_reconciles_every_later_gpu(self):
+        """Regression test for `ok and _reconcile_gpu(...)`, which would stop
+        enforcing GPUs 1..N the moment GPU 0 failed."""
+        agent = self._agent(device_count=4)
+        visited = []
+
+        def fake(gpu_idx, _uid_to_annotation):
+            visited.append(gpu_idx)
+            return gpu_idx != 0
+
+        agent._reconcile_gpu = fake
+
+        self.assertIs(agent.reconcile_once(), False)
+        self.assertEqual(visited, [0, 1, 2, 3])
+
+    def test_raising_gpu_marks_the_cycle_false_without_aborting_it(self):
+        agent = self._agent(device_count=3)
+        visited = []
+
+        def fake(gpu_idx, _uid_to_annotation):
+            visited.append(gpu_idx)
+            if gpu_idx == 1:
+                raise RuntimeError("NVML exploded")
+            return True
+
+        agent._reconcile_gpu = fake
+
+        self.assertIs(agent.reconcile_once(), False)
+        self.assertEqual(visited, [0, 1, 2])
+
+    # --- per-GPU enforcement outcomes -----------------------------------
+
+    def test_failed_cap_write_marks_the_cycle_false(self):
+        """The core of the DEP: `apply_cap` returning normally is NOT success.
+        Both actuators absorb their write errors and still return a plausible
+        post-clamp wattage, so only `.ok` can tell the loop what happened."""
+        actuator = actuator_double(effective_w=350, ok=False)
+        actuator.list_running_pids.return_value = [1234]
+        agent = self._gpu_agent(actuator)
+
+        with patch(
+            "power_agent._extract_pod_uid_from_cgroup", return_value="pod-uid-1"
+        ):
+            result = agent._reconcile_gpu(0, {"pod-uid-1": "350"})
+
+        self.assertIs(result, False)
+
+    def test_successful_cap_write_marks_the_gpu_enforced(self):
+        actuator = actuator_double(effective_w=350, ok=True)
+        actuator.list_running_pids.return_value = [1234]
+        agent = self._gpu_agent(actuator)
+
+        with patch(
+            "power_agent._extract_pod_uid_from_cgroup", return_value="pod-uid-1"
+        ):
+            result = agent._reconcile_gpu(0, {"pod-uid-1": "350"})
+
+        self.assertIs(result, True)
+
+    def test_safe_default_fallback_is_not_a_failure(self):
+        """An unparseable annotation falls back to `safe_default_watts`.
+        Readiness tracks the cap the agent RESOLVED, not the one the user asked
+        for, so writing that default is a successful cycle."""
+        actuator = actuator_double(effective_w=500, ok=True)
+        actuator.list_running_pids.return_value = [1234]
+        agent = self._gpu_agent(actuator)
+
+        with patch(
+            "power_agent._extract_pod_uid_from_cgroup", return_value="pod-uid-1"
+        ):
+            result = agent._reconcile_gpu(0, {"pod-uid-1": "not-a-number"})
+
+        self.assertIs(result, True)
+        actuator.apply_cap.assert_called_once_with(
+            0, 500, expected_uuid=actuator.get_uuid.return_value
+        )
+
+    def test_unconfirmed_gpu_identity_marks_the_cycle_false(self):
+        actuator = actuator_double()
+        actuator.get_uuid.side_effect = RuntimeError("identity unreadable")
+        agent = self._gpu_agent(actuator)
+
+        self.assertIs(agent._reconcile_gpu(0, {}), False)
+        actuator.apply_cap.assert_not_called()
+
+    def test_identity_mismatch_on_pid_snapshot_marks_the_cycle_false(self):
+        actuator = actuator_double()
+        actuator.list_running_pids.side_effect = _GpuIdentityMismatch("re-enumerated")
+        agent = self._gpu_agent(actuator)
+
+        self.assertIs(agent._reconcile_gpu(0, {}), False)
+        actuator.apply_cap.assert_not_called()
+
+    def test_idle_gpu_is_never_written_and_does_not_affect_the_boolean(self):
+        """A GPU with no running workload is intentionally skipped: the claim
+        covers the actions the cycle was REQUIRED to take, not the live state of
+        every GPU on the node."""
+        actuator = actuator_double()
+        actuator.list_running_pids.return_value = []
+        agent = self._gpu_agent(actuator)
+
+        self.assertIs(agent._reconcile_gpu(0, {}), True)
+        actuator.apply_cap.assert_not_called()
+
+    # --- release outcomes ------------------------------------------------
+
+    def test_release_failure_propagates_through_reconcile_gpu(self):
+        """No opted-in pod owns the GPU, so the cycle must release our cap; a
+        release that could not be confirmed leaves a cap possibly stranded."""
+        actuator = actuator_double()
+        actuator.name = "nvml"
+        actuator.get_uuid.return_value = "GPU-A"
+        actuator.list_running_pids.return_value = [1234]
+        actuator.restore_default_by_uuid.return_value = False
+        del actuator.managed_uuid_for_idx  # NVML-style: index-stable
+        power_agent._previously_managed.add("GPU-A")
+        agent = self._gpu_agent(actuator)
+
+        with patch("power_agent._extract_pod_uid_from_cgroup", return_value=None):
+            result = agent._reconcile_gpu(0, {})
+
+        self.assertIs(result, False)
+
+    def test_failed_uuid_read_during_release_returns_false(self):
+        actuator = MagicMock()
+        actuator.get_uuid.side_effect = RuntimeError("identity unreadable")
+
+        self.assertIs(power_agent._release_managed_gpu(actuator, 0), False)
+
+    def test_gpu_we_never_capped_is_a_successful_no_op(self):
+        actuator = MagicMock()
+        actuator.get_uuid.return_value = "GPU-NOT-OURS"
+
+        self.assertIs(power_agent._release_managed_gpu(actuator, 0), True)
+
+    def test_failed_managed_uuid_lookup_returns_false(self):
+        actuator = _DcgmStyleActuator(
+            current_uuid="GPU-A", managed_uuid=RuntimeError("lookup failed")
+        )
+        power_agent._managed_gpu_indices.add(0)
+
+        self.assertIs(power_agent._release_managed_gpu(actuator, 0), False)
+        actuator.restore_default_by_uuid.assert_not_called()
+
+    def test_raising_restore_returns_false(self):
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.return_value = "GPU-A"
+        actuator.managed_uuid_for_idx.return_value = "GPU-A"
+        actuator.restore_default_by_uuid.side_effect = RuntimeError("restore failed")
+        power_agent._previously_managed.add("GPU-A")
+
+        self.assertIs(power_agent._release_managed_gpu(actuator, 0), False)
+
+    def test_completed_release_returns_true(self):
+        actuator = MagicMock()
+        actuator.name = "nvml"
+        actuator.get_uuid.return_value = "GPU-A"
+        actuator.managed_uuid_for_idx.return_value = "GPU-A"
+        actuator.restore_default_by_uuid.return_value = True
+        power_agent._previously_managed.add("GPU-A")
+
+        with patch.object(power_agent, "_commit_release"):
+            self.assertIs(power_agent._release_managed_gpu(actuator, 0), True)
+
+    def test_stale_projection_skip_returns_false(self):
+        """A dcgm re-enumeration moved the GPU we capped off this index and put
+        an unrelated GPU here. The displaced GPU is left unassessed, and the
+        GPU loop only moves forward — so a cycle that skipped a managed GPU must
+        not publish a fresh successful timestamp.
+
+        Precondition matters: the occupant must be a GPU we have NEVER capped.
+        An occupant already in `_previously_managed` takes the UUID-addressed
+        release instead, and an index that is neither managed nor carrying a
+        managed UUID returns at the "not ours" guard.
+        """
+        actuator = _DcgmStyleActuator(
+            current_uuid="GPU-OCCUPANT",  # never capped by us
+            managed_uuid="GPU-DISPLACED",
+        )
+        power_agent._managed_gpu_indices.add(0)
+
+        self.assertIs(power_agent._release_managed_gpu(actuator, 0), False)
+        # Skipped WITHOUT restoring or pruning — the displaced GPU is assessed
+        # at its current index.
+        actuator.restore_default_by_uuid.assert_not_called()
 
 
 if __name__ == "__main__":
