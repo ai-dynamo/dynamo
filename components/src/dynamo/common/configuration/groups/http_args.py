@@ -146,7 +146,7 @@ class HttpArgGroup(ArgGroup):
             default=100,
             arg_type=int,
             dest="max_connections",
-            help="Total pool size cap (httpx Limits.max_connections / aiohttp TCPConnector.limit).",
+            help="Pool size cap per connect-time policy (aiohttp TCPConnector.limit). The aiohttp client keeps one pool per connect-time policy outcome, at most two, so a deployment that sets DYN_MM_ALLOW_INTERNAL=1 and also issues stricter per-request policies can reach twice this value in total.",
         )
         add_argument(
             g,

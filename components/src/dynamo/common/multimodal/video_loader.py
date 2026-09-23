@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from dynamo.common.http import HttpStatusError, fetch_bytes
+from dynamo.common.http import HttpConfigurationError, HttpStatusError, fetch_bytes
 from dynamo.common.http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -43,6 +43,8 @@ from dynamo.common.multimodal.nvdec_decoder import (
     should_use_nvdec,
 )
 from dynamo.common.utils.runtime import run_async
+
+from dynamo.common.http.media_reference import max_media_bytes  # isort: skip
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +173,10 @@ class VideoLoader:
         # data: and file:// never touch the network, so vLLM can handle them.
         if urlparse(normalized_url).scheme in ("http", "https"):
             content = await fetch_bytes(
-                normalized_url, self._http_timeout, policy=self._url_policy
+                normalized_url,
+                self._http_timeout,
+                policy=self._url_policy,
+                max_bytes=max_media_bytes(),
             )
             return await self._decode_video_bytes(content, media_io)
 
@@ -271,7 +276,7 @@ class VideoLoader:
             return np.ascontiguousarray(frames), metadata
         except FileNotFoundError:
             raise
-        except (UrlValidationError, HttpStatusError):
+        except (UrlValidationError, HttpStatusError, HttpConfigurationError):
             # Preserve deliberate client-error verdicts. UrlValidationError is
             # a ValueError, so the generic handler below would otherwise erase
             # its type and prevent the frontend from returning a 4xx.

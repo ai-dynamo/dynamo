@@ -10,6 +10,7 @@ use std::{
 
 use dynamo_kv_router::{
     protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    scheduling::{AbortCause, KvSchedulerError},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -35,11 +36,12 @@ use crate::{
         FinishReason,
         extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
+        preprocessor::owned_abort_error,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
     session_affinity::{
         AffinityCoordinator, AffinityTarget, Hold, SessionAffinityMode, affinity_id,
-        explicit_target, from_table, invalid_argument,
+        explicit_target, from_table, invalid_argument, subagent_group_affinity_id,
     },
 };
 
@@ -65,6 +67,57 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn is_cancelled(error: &Error) -> bool {
     match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[])
+}
+
+fn classification_failure(error: &Error) -> Option<&KvSchedulerError> {
+    error.chain().find_map(|cause| {
+        let error = cause.downcast_ref::<KvSchedulerError>()?;
+        matches!(
+            error,
+            KvSchedulerError::RequestClassifierPanicked(_)
+                | KvSchedulerError::RequestClassifierFailed(_)
+                | KvSchedulerError::InvalidClassificationMetadata(_)
+        )
+        .then_some(error)
+    })
+}
+
+fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
+    match error {
+        KvSchedulerError::RequestClassifierFailed(source) => Arc::clone(source),
+        _ => owned_abort_error(error),
+    }
+}
+
+/// The client-facing error for a classifier failure. A typed [`DynamoError`]
+/// returned by the plugin is an intentional, client-visible decision (flow
+/// control) and passes through with its status; everything else is sanitized
+/// to hide classifier internals from the client and logged for the operator.
+fn classifier_failure_response(request_id: &str, error: &KvSchedulerError) -> Error {
+    if let KvSchedulerError::RequestClassifierFailed(source) = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
+        while let Some(current) = cause {
+            if let Some(typed) = current.downcast_ref::<DynamoError>() {
+                // A load-shedding classifier rejects by design, one request at
+                // a time; that is not an operator error.
+                tracing::debug!(
+                    request_id = %request_id,
+                    error = %typed,
+                    "request classifier rejected request"
+                );
+                return crate::migration::ClassifierRejection(typed.clone()).into();
+            }
+            cause = current.source();
+        }
+    }
+    // The client only sees the sanitized error below, so this log is the
+    // operator's sole copy of the original failure.
+    tracing::error!(request_id = %request_id, error = %error, "request classifier failed");
+    DynamoError::builder()
+        .error_type(ErrorType::Unknown)
+        .message("request classifier failed")
+        .build()
+        .into()
 }
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
@@ -117,8 +170,19 @@ fn monitor_response_stream(
                             guard.record_migration_failure(item.error.clone());
                             // Release the failed attempt before Migration can observe
                             // the item and start another one. This keeps serialized
-                            // retries free of stale-cleanup ABA races.
-                            guard.abort().await;
+                            // retries free of stale-cleanup ABA races. A migratable
+                            // failure hands the classifier lifecycle to the retry,
+                            // exactly like a dispatch-time failure; anything else is
+                            // terminal for the logical request and aborts it here.
+                            let migratable = item
+                                .error
+                                .as_ref()
+                                .is_some_and(|error| crate::migration::is_migratable(error));
+                            if !migratable || !guard.release_for_retry().await {
+                                guard
+                                    .abort_with_error(item.error.as_ref().map(|e| e as &AbortCause))
+                                    .await;
+                            }
                             yield item;
                             break false;
                         }
@@ -519,6 +583,28 @@ impl RoutingHost {
         }
     }
 
+    /// The group key for a subagent: a request that carries a parent session id binds under the
+    /// parent's group instead of its own session, so siblings share a worker while the parent
+    /// keeps its own binding. An explicit per-request target stays on the request's own session so
+    /// it cannot be rejected against, or rebind, the group.
+    fn group_binding_id(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        explicit: Option<AffinityTarget>,
+    ) -> Option<Arc<SessionAffinityId>> {
+        if explicit.is_some() {
+            return None;
+        }
+        let parent_session_id = request
+            .content()
+            .agent_context
+            .as_ref()
+            .and_then(|context| context.parent_session_id.as_deref())?;
+        Some(Arc::new(SessionAffinityId::new(
+            subagent_group_affinity_id(parent_session_id),
+        )))
+    }
+
     /// Commit a held session to the dispatched worker; a request without a
     /// session passes its stream through.
     fn bind_affinity(
@@ -645,6 +731,9 @@ impl RoutingHost {
             return Ok((select(None).await?, None));
         };
         let explicit = explicit_target(request.content(), phase)?;
+        let session_id = self
+            .group_binding_id(request, explicit)
+            .unwrap_or(session_id);
         if is_query_only {
             let target = affinity.query_target(&session_id, explicit)?;
             return Ok((select(target).await?, None));

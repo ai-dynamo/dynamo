@@ -58,6 +58,7 @@ enum ExpectedError {
     Validation,
     NotImplemented,
     UnsupportedContent,
+    DeadlineExceeded,
 }
 
 impl ExpectedError {
@@ -66,6 +67,7 @@ impl ExpectedError {
             Self::Validation => reqwest::StatusCode::BAD_REQUEST,
             Self::NotImplemented => reqwest::StatusCode::NOT_IMPLEMENTED,
             Self::UnsupportedContent => reqwest::StatusCode::BAD_REQUEST,
+            Self::DeadlineExceeded => reqwest::StatusCode::TOO_MANY_REQUESTS,
         }
     }
 
@@ -74,6 +76,7 @@ impl ExpectedError {
             Self::Validation => "invalid_request_error",
             Self::NotImplemented => "api_error",
             Self::UnsupportedContent => "invalid_request_error",
+            Self::DeadlineExceeded => "rate_limit_error",
         }
     }
 }
@@ -201,6 +204,54 @@ fn assert_error_metrics_for_model(
             "unexpected {error_type:?} count for {endpoint}/{request_type}"
         );
     }
+}
+
+/// A router deadline rejection reaches the Anthropic surface as HTTP 429
+/// `rate_limit_error` with the `Cancelled` metric label, the same contract as
+/// the OpenAI surface, rather than falling through to a 500 `api_error`.
+#[tokio::test]
+#[serial]
+async fn anthropic_deadline_exceeded_maps_to_rate_limit_error_with_cancelled_metric() {
+    temp_env::async_with_vars(BASE_ENV, async {
+        let error = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded").unwrap(),
+            )
+            .message("internal deadline detail")
+            .build();
+        let svc = HarnessService::start_with_generate_error(error).await;
+
+        let response = post_json(
+            &svc,
+            "/v1/messages",
+            json!({
+                "model": MODEL,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await;
+
+        assert_anthropic_error(
+            response,
+            ExpectedError::DeadlineExceeded,
+            "request deadline exceeded",
+        )
+        .await;
+        assert_error_metrics(
+            &svc,
+            &Endpoint::AnthropicMessages,
+            &RequestType::Unary,
+            &[
+                (ErrorType::Cancelled, 1),
+                (ErrorType::Overload, 0),
+                (ErrorType::Internal, 0),
+            ],
+        );
+        svc.shutdown().await;
+    })
+    .await;
 }
 
 fn tool_name_requests(name: &str) -> [(&'static str, Value, bool); 3] {

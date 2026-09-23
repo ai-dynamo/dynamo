@@ -10,8 +10,6 @@ import json
 import logging
 import os
 
-from prefix_data_generator.synthesizer import Synthesizer
-
 # Default values
 DEFAULT_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 DEFAULT_URL = "http://localhost:8000"
@@ -325,6 +323,10 @@ def prepare_trace_dataset(args, output_dir, logger):
         f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
     )
     logger.info(f"  Random seed: {args.seed}")
+
+    # Synthetic generation has optional dependencies absent from slim CPU test images.
+    # Keep the request helpers and trace-file path usable without those dependencies.
+    from prefix_data_generator.synthesizer import Synthesizer
 
     synthesizer = Synthesizer(
         args.input_dataset,
