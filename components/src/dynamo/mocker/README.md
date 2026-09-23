@@ -20,6 +20,10 @@ Useful adjacent references:
 
 ## CPU state-cache regression recipe
 
+For a complete frontend + Mocker launch and two 24300-token HTTP requests, follow
+the [state-cache example](../../../../examples/backends/mocker/state-cache/README.md).
+It explicitly enables `state_cache` and checks retained and discarded checkpoints.
+
 Both the Rust and Python AISimulate dependencies are pinned to immutable commit
 `c59a00a3fb7d531eea6bea9887235e92b535ec38` (`feat: add vLLM prefix_match_unit
 (partial prefix hit) support (#314)`). From this Dynamo checkout, run:
@@ -36,6 +40,9 @@ per request. The test checks actual output tokens and forward-pass work:
 | State cache | Shared prefix | Restored prefix | Total committed prefill tokens | Output tokens |
 |---|---:|---:|---:|---:|
 | Enabled | 24192 | 24192 | 24408 | 4 |
+| Enabled | 23040 | 23040 | 25560 | 4 |
+| Enabled | 7680 / 15360 | 0 | 48600 | 4 |
+| Enabled | 21504 (interior physical block boundary) | 0 | 48600 | 4 |
 | Enabled | 23700 | 23040 | 25560 | 4 |
 | Enabled | 24191 | 23040 | 25560 | 4 |
 | Enabled | 0 | 0 | 48600 | 4 |
@@ -43,6 +50,9 @@ per request. The test checks actual output tokens and forward-pass work:
 
 With state cache, cold prefill steps end at `7680 / 15360 / 23040 / 24192 / 24300`;
 the completed request retains reusable state checkpoints at `23040` and `24192`.
+The final 108 tokens execute without creating another reusable checkpoint.
+Earlier chunk-end states at `7680` and `15360` have been released; an interior
+1536-token boundary such as `21504` has no state snapshot to restore.
 The legacy path retains its unaligned batch budget: `8192 / 16384 / 24300`.
 
 ## Manual state-cache and partial prefix matching

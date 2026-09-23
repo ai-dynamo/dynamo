@@ -163,6 +163,10 @@ async fn run_serial_pair(
 
 #[rstest]
 #[case::partial_checkpoint_hit(24_192, 24_192, 24_408)]
+#[case::last_full_chunk_checkpoint(23_040, 23_040, 25_560)]
+#[case::first_chunk_checkpoint_was_released(7_680, 0, 48_600)]
+#[case::second_chunk_checkpoint_was_released(15_360, 0, 48_600)]
+#[case::interior_physical_boundary_has_no_state(21_504, 0, 48_600)]
 #[case::between_checkpoints(23_700, 23_040, 25_560)]
 #[case::one_token_before_checkpoint(24_191, 23_040, 25_560)]
 #[case::no_shared_prefix(0, 0, 48_600)]
