@@ -84,7 +84,7 @@ pub(crate) fn tool_call_response_chunk_to_protocol(
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone, Default)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     #[schema(value_type = Object)]
@@ -111,6 +111,12 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
+    /// OpenAI-style thinking token budget: bounds the number of thinking
+    /// tokens generated per request. Forwarded to the backend's
+    /// `thinking_token_budget` sampling parameter when supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_token_budget: Option<u32>,
+
     /// Runtime media decoding parameters, forwarded verbatim to the worker when the
     /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
     /// Kept opaque so options the frontend does not own pass through untouched.
@@ -124,7 +130,12 @@ pub struct NvCreateChatCompletionRequest {
     pub return_tokens_as_token_ids: Option<bool>,
 
     /// Catch-all for unsupported fields - checked during validation
-    #[serde(flatten, default, skip_serializing)]
+    #[serde(
+        flatten,
+        default,
+        skip_serializing,
+        deserialize_with = "validate::deserialize_extra_fields"
+    )]
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
@@ -281,7 +292,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub nvext: Option<serde_json::Value>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
@@ -554,6 +565,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     fn get_ignore_eos(&self) -> Option<bool> {
         self.common.ignore_eos
     }
+
+    /// Returns the root-level thinking token budget if set.
+    fn get_thinking_token_budget(&self) -> Option<u32> {
+        self.thinking_token_budget
+    }
 }
 
 impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
@@ -624,8 +640,8 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for stream_options
         validate::validate_temperature(self.inner.temperature)?;
         validate::validate_top_p(self.inner.top_p)?;
-        validate::validate_tools(&self.inner.tools.as_deref())?;
-        validate::validate_tool_choice(&self.inner.tool_choice, self.inner.tools.as_deref())?;
+        let effective_tools = validate::validated_effective_tools(&self.inner)?;
+        validate::validate_tool_choice(&self.inner.tool_choice, Some(effective_tools.as_ref()))?;
         // none for parallel_tool_calls
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
@@ -951,6 +967,73 @@ mod tests {
     }
 
     #[test]
+    fn test_stop_sequence_limit_enforced_consistently() {
+        use crate::protocols::openai::validate::MAX_STOP_SEQUENCES;
+
+        let max_stops: Vec<String> = (0..MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        ValidateRequest::validate(&request).expect("max stops must validate");
+        request
+            .extract_stop_conditions()
+            .expect("max stops must extract");
+
+        let over_max_stops: Vec<String> = (0..=MAX_STOP_SEQUENCES).map(|i| i.to_string()).collect();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_stops,
+        }))
+        .expect("Failed to deserialize request");
+        let err =
+            ValidateRequest::validate(&request).expect_err("over-max stops must fail validation");
+        let expected = format!(
+            "InvalidRequest: Maximum of {} stop sequences allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        assert_eq!(err.to_string(), expected);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stops must fail extraction");
+        assert_eq!(err.to_string(), expected);
+
+        let over_max_token_ids: Vec<u32> = (0..=MAX_STOP_SEQUENCES as u32).collect();
+        let expected_token_ids = format!(
+            "InvalidRequest: Maximum of {} stop token IDs allowed, got {}",
+            MAX_STOP_SEQUENCES,
+            MAX_STOP_SEQUENCES + 1
+        );
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+        let err = request
+            .extract_stop_conditions()
+            .expect_err("over-max stop token IDs must fail extraction");
+        assert_eq!(err.to_string(), expected_token_ids);
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stop_token_ids": over_max_token_ids,
+        }))
+        .expect("Failed to deserialize request");
+        let err = ValidateRequest::validate(&request)
+            .expect_err("over-max passthrough stop token IDs must fail validation");
+        assert_eq!(err.to_string(), expected_token_ids);
+    }
+
+    #[test]
     fn test_passthrough_token_constraints_validate() {
         let request_json = json!({
             "model": "test-model",
@@ -1030,6 +1113,157 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("tool named \"search\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_kimi_extensions_survive_nv_request_roundtrip() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "The answer is", "partial": true}
+            ],
+            "prompt_cache_key": "session-key"
+        }))
+        .expect("Kimi extensions must deserialize through the Dynamo wrapper");
+
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).expect("Kimi extensions must pass request validation");
+        assert!(request.inner.has_effective_tools());
+        assert!(request.inner.effective_tool_contains("lookup"));
+
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["messages"][0]["tools"][0]["name"], "lookup");
+        assert_eq!(serialized["messages"][2]["partial"], true);
+        assert_eq!(serialized["messages"][2]["content"], "The answer is");
+        assert_eq!(serialized["prompt_cache_key"], "session-key");
+    }
+
+    #[test]
+    fn test_system_message_without_content_or_tools_is_still_rejected() {
+        let request = serde_json::from_value::<NvCreateChatCompletionRequest>(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system"},
+                {"role": "user", "content": "Hello"}
+            ]
+        }));
+        assert!(request.is_err());
+    }
+
+    #[test]
+    fn test_validate_forced_tool_choice_accepts_dynamic_system_tools() {
+        for tool_choice in [
+            json!("required"),
+            json!({"type": "function", "function": {"name": "lookup"}}),
+        ] {
+            let request_json = json!({
+                "model": "test-model",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "",
+                        "tools": [{"name": "lookup", "parameters": {"type": "object"}}]
+                    },
+                    {"role": "user", "content": "Hello"}
+                ],
+                "tool_choice": tool_choice
+            });
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(request_json)
+                .expect("dynamic-tool request must deserialize");
+            ValidateRequest::validate(&request)
+                .expect("dynamic tools must satisfy forced tool_choice validation");
+        }
+    }
+
+    #[test]
+    fn test_validate_named_tool_choice_rejects_absent_dynamic_tool() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{"name": "lookup"}]
+                },
+                {"role": "user", "content": "Hello"}
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "missing"}
+            }
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("request must deserialize");
+        let error = ValidateRequest::validate(&request).expect_err("missing tool must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("tool named \"missing\" in tool_choice is not present in tools")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_dynamic_tool_names() {
+        for (name, expected_error) in [
+            ("bad name".to_string(), "has an invalid name".to_string()),
+            (
+                "x".repeat(validate::MAX_FUNCTION_NAME_LENGTH + 1),
+                format!(
+                    "exceeds {} character limit",
+                    validate::MAX_FUNCTION_NAME_LENGTH
+                ),
+            ),
+        ] {
+            let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "system", "tools": [{"name": name}]},
+                    {"role": "user", "content": "Hello"}
+                ]
+            }))
+            .expect("dynamic-tool request must deserialize");
+
+            let error = ValidateRequest::validate(&request)
+                .expect_err("invalid dynamic tool name must fail validation");
+            assert!(
+                error.to_string().contains(&expected_error),
+                "unexpected validation error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_combined_effective_tool_count_over_limit() {
+        let tools = (0..validate::MAX_TOOLS)
+            .map(|index| {
+                json!({
+                    "type": "function",
+                    "function": {"name": format!("tool_{index}")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "system", "tools": [{"name": "dynamic_tool"}]},
+                {"role": "user", "content": "Hello"}
+            ],
+            "tools": tools
+        }))
+        .expect("combined-tool request must deserialize");
+
+        let error = ValidateRequest::validate(&request)
+            .expect_err("combined effective tool count over the limit must fail validation");
+        assert!(
+            error.to_string().contains(&format!(
+                "Maximum of {} tools are supported, got {}",
+                validate::MAX_TOOLS,
+                validate::MAX_TOOLS + 1
+            )),
+            "unexpected validation error: {error}"
         );
     }
 
@@ -1829,5 +2063,70 @@ mod tests {
                 serde_json::from_value(json_str).expect("Failed to deserialize request");
             assert!(request.normalize_reasoning_template_args().is_err());
         }
+    }
+
+    #[test]
+    fn test_thinking_token_budget_reaches_stop_conditions() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect("thinking_token_budget must be valid");
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_thinking_token_budget_overrides_nvext() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking_token_budget": 32,
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(32));
+    }
+
+    #[test]
+    fn test_nvext_max_thinking_tokens_fallback() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "nvext": {"max_thinking_tokens": 16}
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, Some(16));
+    }
+
+    #[test]
+    fn test_omitted_thinking_token_budget_is_none() {
+        let request_json = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(request_json).expect("Failed to deserialize request");
+
+        let stop_conditions = request
+            .extract_stop_conditions()
+            .expect("Failed to extract stop conditions");
+        assert_eq!(stop_conditions.max_thinking_tokens, None);
     }
 }

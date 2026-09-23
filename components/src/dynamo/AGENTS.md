@@ -67,7 +67,7 @@ neither has a `__main__.py`.
 
 | Package | Role |
 |---------|------|
-| `router/` | Backend-agnostic standalone KV-aware router service. |
+| `router/` | Backend-agnostic standalone KV-aware router service. Carries local guidance in [`router/AGENTS.md`](router/AGENTS.md). |
 | `global_router/` | Hierarchical router between the frontend and local routers in different pool namespaces, in disaggregated or aggregated mode. |
 | `kv_dc_relay/` | Discovers inference pools, consumes their ordered KV events, and supervises one Cuckoo-filter producer per local pool. |
 | `kv_state_agent/` | Standalone KV state-agent host. |

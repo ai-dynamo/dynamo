@@ -105,7 +105,7 @@ impl TrackerEntry {
         replica_config: Option<&ReplicaSyncConfig>,
     ) -> Arc<Self> {
         let cancel_token = root_cancel_token.child_token();
-        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size);
+        let scoped_replica_sync = setup_scoped_replica_sync(replica_config, key, block_size, None);
         let tracker = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
             scoped_replica_sync.publisher,
             block_size as usize,
