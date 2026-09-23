@@ -59,7 +59,9 @@ Retain the resulting overlay patch and hashes with the report.
 
 Stage this worktree at `$ROOT/src/dynamo`, where `ROOT` is the path in the
 template. Copy `harness/` to `$ROOT/harness` and the template to `$ROOT/configs`.
-Run builds through `srun` in a Tyche allocation. After verifying the two RDMA
+Run builds through `srun` in a Tyche allocation. Run `verify_hardware.py` once on
+each allocated node. Analysis also checks each process's UCX active-message
+lane against its selected RDMA device. After verifying the two RDMA
 ports on the allocated nodes, the campaign sequence is:
 
 ```bash

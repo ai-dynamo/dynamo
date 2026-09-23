@@ -30,7 +30,7 @@ def analyze(label):
     for rank in range(5):
         samples = []
         clock_ticks = None
-        source = ROOT / 'artifacts' / f'network-{label}' / f'rank-{rank}' / 'samples.jsonl'
+        source = ROOT / 'artifacts' / f'network-{job}-{label}' / f'rank-{rank}' / 'samples.jsonl'
         for row in rows(source):
             clock_ticks = row['clock_ticks_per_second']
             t = epoch(row['timestamp'])

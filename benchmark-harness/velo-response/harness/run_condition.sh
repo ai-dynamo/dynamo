@@ -9,7 +9,7 @@ export SLURM_TMPDIR="/var/tmp/frontend-main-quic-$SLURM_JOB_ID-$LABEL"
 unset RAYON_NUM_THREADS RAYON_RS_NUM_THREADS TOKENIZERS_PARALLELISM FASTOKENS_BPE_THREADS
 unset DYN_ZMQ_IO_THREADS LD_PRELOAD
 export OTEL_SDK_DISABLED=true DYN_LOG=warn
-export TELEMETRY_DIR="$ROOT/artifacts/network-$LABEL"
+export TELEMETRY_DIR="$ROOT/artifacts/network-$SLURM_JOB_ID-$LABEL"
 test -f "$ROOT/control/BUILD_COMPLETE"
 python3 "$ROOT/harness/freeze.py" --root "$ROOT" --verify
 srun --jobid="$SLURM_JOB_ID" --overlap --input=none --nodes=5 --ntasks=5 --ntasks-per-node=1 --cpus-per-task=1 \
