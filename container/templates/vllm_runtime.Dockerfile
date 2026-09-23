@@ -278,6 +278,26 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
         bash /tmp/install_vllm_omni.sh; \
     fi
 
+{% if device == "cuda" %}
+# vLLM #58038: NIXL may report a transfer as DONE while its optional telemetry
+# is unavailable. The stock completion path turns that observability exception
+# into a failed KV transfer. Apply the two upstream runtime hunks against the
+# benchmark-pinned nightly and assert their behavioral postcondition.
+RUN --mount=type=bind,source=./container/deps/vllm/patches/nightly-3df4ae153eb385e27b52f26c81f8edb9e20b9984/nixl-telemetry,target=/tmp/vllm-nixl-telemetry-patches,readonly \
+    --mount=type=bind,source=./container/deps/vllm/validate_nixl_telemetry_runtime.py,target=/tmp/validate_nixl_telemetry_runtime.py,readonly \
+    set -eux; \
+    python3 -c 'import vllm; assert vllm.__commit_id__ == "g3df4ae153", vllm.__commit_id__'; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
+    site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
+    for patch_file in /tmp/vllm-nixl-telemetry-patches/*.patch; do \
+        patch --batch --forward -p1 -d "${site_parent}" < "${patch_file}"; \
+    done; \
+    python3 /tmp/validate_nixl_telemetry_runtime.py; \
+    apt-get purge -y patch; \
+    rm -rf /var/lib/apt/lists/*
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
