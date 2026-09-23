@@ -888,8 +888,14 @@ where
 
         let advertised_mode =
             ResponsePlaneMode::from_transport_name(&response_connection_info.transport)
+                .inspect_err(|_| {
+                    worker_admission.record("dynamo.worker.admission.result", "rejected");
+                })
                 .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let configured_mode = ResponsePlaneMode::configured()
+            .inspect_err(|_| {
+                worker_admission.record("dynamo.worker.admission.result", "failed");
+            })
             .map_err(|error| PipelineError::Generic(error.to_string()))?;
         let response_modes = ResponsePlaneModes {
             configured: configured_mode,
@@ -934,7 +940,9 @@ where
             ResponsePlaneMode::Quic => {
                 worker_admission.record("dynamo.worker.admission.transport", "quic");
                 tracing::trace!("creating QUIC response sender");
-                let response_pool = self.quic_response_client_pool()?;
+                let response_pool = self.quic_response_client_pool().inspect_err(|_| {
+                    worker_admission.record("dynamo.worker.admission.result", "failed");
+                })?;
                 let publisher = response_pool
                     .sender_with_cancellation_metric(
                         request.context(),
@@ -1113,6 +1121,17 @@ mod tests {
     struct AdmissionCapture {
         started: Arc<AtomicBool>,
         closed: Arc<AtomicBool>,
+        outcome: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    impl tracing::field::Visit for AdmissionCapture {
+        fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "dynamo.worker.admission.result" {
+                *self.outcome.lock().unwrap() = Some(value.to_owned());
+            }
+        }
     }
 
     impl<S> tracing_subscriber::Layer<S> for AdmissionCapture
@@ -1127,6 +1146,17 @@ mod tests {
         ) {
             if attrs.metadata().name() == "worker.admission" {
                 self.started.store(true, Ordering::SeqCst);
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if ctx.span(id).unwrap().metadata().name() == "worker.admission" {
+                values.record(&mut self.clone());
             }
         }
 
@@ -1186,9 +1216,13 @@ mod tests {
                 ("DYN_RESPONSE_PLANE", Some("tcp")),
             ],
             async {
-                for (inference, rooted) in
-                    [(true, true), (true, false), (false, true), (false, false)]
-                {
+                for (inference, rooted, invalid_transport) in [
+                    (true, true, false),
+                    (true, false, false),
+                    (false, true, false),
+                    (false, false, false),
+                    (true, true, true),
+                ] {
                     let capture = AdmissionCapture::default();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
@@ -1198,7 +1232,7 @@ mod tests {
                             let (mut socket, _) = listener.accept().await.unwrap();
                             let _ = tokio::io::copy(&mut socket, &mut tokio::io::sink()).await;
                         });
-                        let engine = Arc::new(AdmissionProbe(capture, inference && rooted));
+                        let engine = Arc::new(AdmissionProbe(capture.clone(), inference && rooted));
                         let ingress = if inference {
                             TestIngress::for_engine_with_lifecycle_role(
                                 engine,
@@ -1208,13 +1242,16 @@ mod tests {
                             TestIngress::for_engine(engine)
                         }
                         .unwrap();
-                        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+                        let mut connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
                             address,
                             subject: "admission-probe".to_string(),
                             context: "admission-probe".to_string(),
                             stream_type: crate::pipeline::network::StreamType::Response,
                         }
                         .into();
+                        if invalid_transport {
+                            connection.transport = "invalid".into();
+                        }
                         let metadata = if rooted {
                             std::collections::BTreeMap::from([(
                                 crate::telemetry::LIFECYCLE_ROOT_METADATA_KEY,
@@ -1246,7 +1283,19 @@ mod tests {
                         .await
                         .expect("local admission probe timed out")
                         .unwrap_err();
-                        assert!(error.to_string().contains("admission probe finished"));
+                        assert!(error.to_string().contains(if invalid_transport {
+                            "unsupported response transport"
+                        } else {
+                            "admission probe finished"
+                        }));
+                        assert_eq!(
+                            capture.outcome.lock().unwrap().as_deref(),
+                            (inference && rooted).then_some(if invalid_transport {
+                                "rejected"
+                            } else {
+                                "accepted"
+                            }),
+                        );
                         peer.abort();
                         let _ = peer.await;
                     }

@@ -438,14 +438,20 @@ mod tests {
                 Ok(0)
             }
         }
-        struct RejectAll;
+        struct RejectAll(bool);
         impl WorkerFilter for RejectAll {
             fn keep(
                 &mut self,
                 _: &WorkerSelectionContext<'_>,
                 _: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
-                Ok(false)
+                if self.0 {
+                    Err(WorkerSelectionPolicyError::failed(
+                        "injected filter failure",
+                    ))
+                } else {
+                    Ok(false)
+                }
             }
         }
         let policy = WorkerSelectionPolicy::new(
@@ -460,6 +466,7 @@ mod tests {
             "overloaded",
             "empty",
             "filtered",
+            "policy_error",
             "picker",
         ] {
             let mut workers = HashMap::from([(
@@ -474,6 +481,11 @@ mod tests {
                 workers.clear();
             }
             let mut request = base_request(16);
+            if case == "picker" {
+                request.worker_loads = worker_loads_with_active_decode(
+                    [(WorkerWithDpRank::new(0, 0), 7)].into_iter().collect(),
+                );
+            }
             request
                 .routing_constraints
                 .preferred_taints
@@ -492,10 +504,10 @@ mod tests {
                 eligibility = request.eligibility_with_overloaded(Some(&overloaded));
             }
             let special = match case {
-                "filtered" => Some(WorkerSelectionPolicy::new_with_filters(
+                "filtered" | "policy_error" => Some(WorkerSelectionPolicy::new_with_filters(
                     KvRouterConfig::default(),
                     "test",
-                    vec![Box::new(RejectAll)],
+                    vec![Box::new(RejectAll(case == "policy_error"))],
                     vec![],
                     Box::new(FirstPicker),
                 )),
@@ -517,14 +529,22 @@ mod tests {
                 });
             drop(span);
             let fields = capture.fields("router.selection", case);
+            assert!(!fields.contains_key("dynamo.request.attempt"));
             let expected = match case {
                 "overloaded" => "overloaded",
                 "empty" => "no_endpoints",
                 "filtered" => "filtered",
+                "policy_error" => "failed",
                 _ => "selected",
             };
             assert_eq!(fields["dynamo.router.selection.result"], expected);
             assert_eq!(result.is_ok(), expected == "selected");
+            if case == "policy_error" {
+                assert!(!fields.contains_key("dynamo.router.candidate.count"));
+                assert!(!fields.contains_key("dynamo.router.candidate.filtered.policy"));
+                assert!(!fields.contains_key("dynamo.router.candidates.top_k"));
+                continue;
+            }
             assert_eq!(
                 fields["dynamo.router.candidate.count"],
                 if result.is_ok() { "1" } else { "0" }
@@ -545,7 +565,13 @@ mod tests {
                     serde_json::from_str(&fields["dynamo.router.candidates.top_k"]).unwrap();
                 assert_eq!(detail.as_array().unwrap().len(), 1);
                 assert_eq!(detail[0]["device_overlap_blocks"], 1.0);
-                assert!(detail[0].get("active_prefill_tokens").is_some());
+                if case == "picker" {
+                    assert_eq!(detail[0]["decode_cost_blocks"], 7.0);
+                } else {
+                    assert!(detail[0].get("active_prefill_tokens").is_none());
+                    assert!(detail[0].get("decode_cost_blocks").is_none());
+                    assert!(detail[0].get("active_requests").is_none());
+                }
                 if case == "single" {
                     assert!(detail[0]["preferred_taint_multiplier"].is_number());
                     assert_eq!(detail[0]["preferred_taint_multiplier"], detail[0]["score"]);

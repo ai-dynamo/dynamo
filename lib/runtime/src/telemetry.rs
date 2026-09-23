@@ -211,7 +211,6 @@ impl LifecycleStage {
             ),
             Self::RouterQueue => common_span!(
                 "router.queue",
-                "dynamo.request.attempt" = 0_u64,
                 "dynamo.lifecycle.capture.state" = "recorded",
                 "dynamo.lifecycle.detail_schema" = "router_queue.v1",
                 "dynamo.router.queue.class" = tracing::field::Empty,
@@ -224,7 +223,6 @@ impl LifecycleStage {
             ),
             Self::RouterSelection => common_span!(
                 "router.selection",
-                "dynamo.request.attempt" = 0_u64,
                 "dynamo.lifecycle.capture.state" = "recorded",
                 "dynamo.lifecycle.detail_schema" = "router_selection.v1",
                 "dynamo.router.candidate.count" = tracing::field::Empty,
@@ -253,7 +251,6 @@ impl LifecycleStage {
             ),
             Self::WorkerAdmission => common_span!(
                 "worker.admission",
-                "dynamo.request.attempt" = 0_u64,
                 "dynamo.lifecycle.capture.state" = "recorded",
                 "dynamo.lifecycle.detail_schema" = "admission.v1",
                 "dynamo.worker.admission.transport" = tracing::field::Empty,
@@ -262,7 +259,6 @@ impl LifecycleStage {
             ),
             Self::RequestDispatch => common_span!(
                 "request.dispatch",
-                "dynamo.request.attempt" = 0_u64,
                 "dynamo.lifecycle.capture.state" = "recorded",
                 "dynamo.lifecycle.detail_schema" = "dispatch.v1",
                 "dynamo.dispatch.destination.worker.id" = tracing::field::Empty,
