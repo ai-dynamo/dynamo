@@ -1,7 +1,7 @@
 """Compare selected built registry sources with the archives pinned by Cargo.lock."""
 import hashlib,json,tarfile,tomllib
 from pathlib import Path
-ROOT=Path('/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-tyche-main-profile-20260923')
+ROOT=Path('/lustre/fsw/coreai_comparch_trtllm/jothomson/dynamo-velo-response-20260923')
 meta=json.loads((ROOT/'manifests/grace-bindings-metadata.json').read_text())
 lock=tomllib.loads((ROOT/'src/dynamo/lib/bindings/python/Cargo.lock').read_text())
 checks={(p['name'],p['version']):p.get('checksum') for p in lock['package']}
