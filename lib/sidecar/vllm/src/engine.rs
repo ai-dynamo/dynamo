@@ -1122,6 +1122,15 @@ impl LLMEngine for VllmSidecarEngine {
 }
 
 #[cfg(feature = "mm-routing")]
+const MM_ROUTING_CONFIG_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "mm-routing")]
+fn routing_config_fetch_deadline(now: Instant, startup_deadline: Instant) -> Instant {
+    now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+        .map_or(startup_deadline, |deadline| deadline.min(startup_deadline))
+}
+
+#[cfg(feature = "mm-routing")]
 async fn resolve_routing_image_token_id(
     model: &DiscoveredModel,
     startup_deadline: Instant,
@@ -1139,14 +1148,16 @@ async fn resolve_routing_image_token_id(
     let model_dir = if source_path.is_dir() {
         source_path
     } else {
-        let fetched = timeout_at(startup_deadline, LocalModel::fetch(&model.source, true))
+        let fetch_deadline = routing_config_fetch_deadline(Instant::now(), startup_deadline);
+        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, true))
             .await
-            .unwrap_or_else(|_| Err(anyhow::anyhow!("exceeded the vLLM startup deadline")));
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")));
         match fetched {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(
                     model = %model.source,
+                    fetch_timeout_secs = MM_ROUTING_CONFIG_FETCH_TIMEOUT.as_secs(),
                     %error,
                     "Unable to fetch model configuration; exact multimodal KV routing is disabled"
                 );
@@ -1176,6 +1187,32 @@ async fn resolve_routing_image_token_id(
     _startup_deadline: Instant,
 ) -> Option<u32> {
     None
+}
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod mm_routing_tests {
+    use super::*;
+
+    #[test]
+    fn config_fetch_deadline_is_capped_independently_of_startup() {
+        let now = Instant::now();
+        let long_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(30 * 60))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, long_startup_deadline),
+            now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+                .expect("test config fetch deadline")
+        );
+
+        let short_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, short_startup_deadline),
+            short_startup_deadline
+        );
+    }
 }
 
 fn zmq_connect_endpoint(endpoint: &str, grpc_endpoint: &GrpcEndpoint) -> String {
