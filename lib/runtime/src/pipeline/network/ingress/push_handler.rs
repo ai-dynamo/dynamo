@@ -478,6 +478,7 @@ trait IngressDispatch: Send + Sync {
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<Self::Request>, PipelineError>;
 }
 
@@ -494,7 +495,9 @@ where
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<SingleIn<T>>, PipelineError> {
+        let _ = failure_outcome;
         // The unary path carries the request body in the data half; a
         // header-only envelope means the sender used the bidirectional shape.
         let data = data.ok_or_else(|| {
@@ -552,6 +555,7 @@ where
         &self,
         control_msg: RequestControlMessage,
         data: Option<Bytes>,
+        failure_outcome: &mut &'static str,
     ) -> Result<ParsedRequest<ManyIn<T>>, PipelineError> {
         // Bidirectional envelopes are header-only — all request frames
         // (including the first) flow on the request-stream socket once it's
@@ -601,6 +605,7 @@ where
         // response-stream open subsequently fails, the forwarder task
         // spawned below exits cleanly when `frame_tx.send` observes the
         // dropped `frame_rx`.
+        *failure_outcome = "failed";
         let request_stream_recv = tcp::client::TcpClient::create_request_stream(
             context_arc.clone(),
             req_stream_conn_info,
@@ -862,16 +867,17 @@ where
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
         worker_admission.record("dynamo.worker.admission.payload.bytes", payload_bytes);
+        let mut failure_outcome = "rejected";
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
         } = self
-            .parse_and_build_request(control_msg, data)
+            .parse_and_build_request(control_msg, data, &mut failure_outcome)
             .await
             .inspect_err(|_| {
-                worker_admission.record("dynamo.worker.admission.result", "rejected");
+                worker_admission.record("dynamo.worker.admission.result", failure_outcome);
             })?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
@@ -1256,6 +1262,40 @@ mod tests {
     struct MismatchPublisher {
         prologue: Arc<std::sync::Mutex<Option<Option<String>>>>,
         finished: Arc<AtomicBool>,
+    }
+
+    #[tokio::test]
+    async fn lifecycle_bidirectional_admission_distinguishes_transport_failure() {
+        let ingress = Ingress::<ManyIn<TestRequest>, ManyOut<TestResponse>>::new();
+        let connection: ConnectionInfo = tcp::TcpStreamConnectionInfo {
+            address: "127.0.0.1:not-a-port".into(),
+            subject: "admission-test".into(),
+            context: "admission-test".into(),
+            stream_type: crate::pipeline::network::StreamType::Request,
+        }
+        .into();
+        for has_stream in [false, true] {
+            let control = serde_json::from_value(serde_json::json!({
+                "id": "admission-test",
+                "request_type": "many_in",
+                "response_type": "many_out",
+                "connection_info": connection,
+                "request_stream_connection_info": has_stream.then_some(&connection),
+            }))
+            .unwrap();
+            let mut outcome = "rejected";
+            let error = ingress
+                .parse_and_build_request(control, None, &mut outcome)
+                .await
+                .err()
+                .expect("invalid setup must fail");
+            assert_eq!(outcome, if has_stream { "failed" } else { "rejected" });
+            assert!(error.to_string().contains(if has_stream {
+                "Failed to create request stream"
+            } else {
+                "missing request_stream_connection_info"
+            }));
+        }
     }
 
     impl ResponsePublisher for MismatchPublisher {

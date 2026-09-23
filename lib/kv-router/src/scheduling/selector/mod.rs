@@ -140,47 +140,37 @@ struct CandidateFilterSummary {
 }
 
 impl CandidateFilterSummary {
-    fn count_worker<C: WorkerConfigLike>(
-        &mut self,
-        worker_id: WorkerId,
-        config: &C,
-        eligibility: RoutingEligibility<'_>,
-    ) {
-        let replicas = config.data_parallel_size() as usize;
-        if !eligibility.caller_allows_worker_id(worker_id) {
-            self.not_allowed += replicas;
-        } else if !eligibility.is_worker_available(worker_id) {
-            self.unavailable += replicas;
-        } else if !eligibility.allows_worker_ignoring_overload(worker_id, config) {
-            self.constraints += replicas;
-        } else if eligibility.is_worker_overloaded(worker_id) {
-            self.overloaded += replicas;
-        } else {
-            self.eligible += replicas;
-        }
-    }
-
+    #[cfg(feature = "runtime-protocols")]
     fn from_eligibility<C: WorkerConfigLike>(
         workers: &HashMap<WorkerId, C>,
         eligibility: RoutingEligibility<'_>,
     ) -> Self {
         let mut summary = Self::default();
-        if let Some(worker) = eligibility.pinned_worker() {
-            match workers.get(&worker.worker_id) {
-                Some(config) => {
-                    summary.count_worker(worker.worker_id, config, eligibility);
-                    summary.eligible = usize::from(summary.eligible > 0);
-                    summary.not_allowed = usize::from(summary.not_allowed > 0);
-                    summary.constraints = usize::from(summary.constraints > 0);
-                    summary.overloaded = usize::from(summary.overloaded > 0);
-                    summary.unavailable = usize::from(summary.unavailable > 0);
+        let mut count = |worker: WorkerWithDpRank| {
+            let bucket = if !eligibility.caller_allows_worker_id(worker.worker_id) {
+                &mut summary.not_allowed
+            } else {
+                match eligibility.validate_worker_rank(workers, worker) {
+                    Ok(_) => &mut summary.eligible,
+                    Err(WorkerEligibilityError::WorkerOverloaded { .. }) => &mut summary.overloaded,
+                    Err(
+                        WorkerEligibilityError::WorkerNotAllowed { .. }
+                        | WorkerEligibilityError::RoutingConstraintsUnsatisfied { .. },
+                    ) => &mut summary.constraints,
+                    Err(_) => &mut summary.unavailable,
                 }
-                None => summary.unavailable = 1,
+            };
+            *bucket += 1;
+        };
+        if let Some(worker) = eligibility.pinned_worker() {
+            count(worker);
+        } else {
+            for (&worker_id, config) in workers {
+                let start = config.data_parallel_start_rank();
+                for rank in start..start + config.data_parallel_size() {
+                    count(WorkerWithDpRank::new(worker_id, rank));
+                }
             }
-            return summary;
-        }
-        for (&worker_id, config) in workers {
-            summary.count_worker(worker_id, config, eligibility);
         }
         summary
     }
@@ -196,10 +186,14 @@ impl CandidateFilterSummary {
 struct RouterSelectionTelemetry {
     span: tracing::Span,
     include_candidate_details: bool,
+    filters: CandidateFilterSummary,
 }
 
 impl RouterSelectionTelemetry {
-    fn record_candidate_envelope(&self, filters: CandidateFilterSummary, candidate_count: usize) {
+    fn record_candidate_envelope(&self, candidate_count: usize) {
+        let filters = self.filters;
+        self.span
+            .record("dynamo.router.candidate.count", candidate_count as u64);
         // Composed policies can filter host-eligible workers before scoring.
         let policy_filtered = filters.eligible.saturating_sub(candidate_count);
         self.span.record(
@@ -233,16 +227,12 @@ impl RouterSelectionTelemetry {
     }
 
     fn record_custom(
-        self,
-        candidates: &[ScoredWorkerCandidate],
-        inputs: &[CandidateData],
-        filters: CandidateFilterSummary,
+        &self,
+        state: &ComposedPolicyState,
         selected: ScoredWorkerCandidate,
         pool_role: &'static str,
     ) {
-        self.span
-            .record("dynamo.router.candidate.count", candidates.len() as u64);
-        self.record_candidate_envelope(filters, candidates.len());
+        let candidates = &state.candidates;
         self.span.record("dynamo.router.algorithm.id", "composed");
         self.span.record("dynamo.router.algorithm.version", "v1");
         self.span
@@ -309,28 +299,35 @@ impl RouterSelectionTelemetry {
                         "selected": candidate.worker == selected.worker,
                         "score": candidate.cost,
                     });
-                    if let Some(multiplier) = candidate.preferred_taint_multiplier {
+                    let input = state.unscored_candidates.get(row);
+                    if let Some(multiplier) = input
+                        .and_then(|input| input.preferred_taint_multiplier)
+                        .or(candidate.preferred_taint_multiplier)
+                    {
                         detail["preferred_taint_multiplier"] = serde_json::json!(multiplier);
                     }
-                    if let Some(input) = inputs.get(row) {
-                        if input.inputs.contains(WorkerInputs::CACHE) {
-                            detail["cached_tokens"] =
-                                serde_json::json!(input.cache.estimated_cached_tokens);
-                            detail["device_overlap_blocks"] =
-                                serde_json::json!(input.cache.device_overlap_blocks);
-                            detail["host_overlap_blocks"] =
-                                serde_json::json!(input.cache.host_overlap_blocks);
-                            detail["disk_overlap_blocks"] =
-                                serde_json::json!(input.cache.disk_overlap_blocks);
-                        }
-                        if input.inputs.contains(WorkerInputs::LOAD) {
-                            detail["active_prefill_tokens"] =
-                                serde_json::json!(input.load.active_prefill_tokens);
-                            detail["decode_cost_blocks"] =
-                                serde_json::json!(input.load.decode_cost_blocks);
-                            detail["active_requests"] =
-                                serde_json::json!(input.load.active_requests);
-                        }
+                    let cache = input
+                        .filter(|input| input.inputs.contains(WorkerInputs::CACHE))
+                        .map(|input| &input.cache)
+                        .or_else(|| state.cache_inputs.get(row));
+                    if let Some(cache) = cache {
+                        detail["cached_tokens"] = serde_json::json!(cache.estimated_cached_tokens);
+                        detail["device_overlap_blocks"] =
+                            serde_json::json!(cache.device_overlap_blocks);
+                        detail["host_overlap_blocks"] =
+                            serde_json::json!(cache.host_overlap_blocks);
+                        detail["disk_overlap_blocks"] =
+                            serde_json::json!(cache.disk_overlap_blocks);
+                    }
+                    let load = input
+                        .filter(|input| input.inputs.contains(WorkerInputs::LOAD))
+                        .map(|input| &input.load)
+                        .or_else(|| state.load_inputs.get(row));
+                    if let Some(load) = load {
+                        detail["active_prefill_tokens"] =
+                            serde_json::json!(load.active_prefill_tokens);
+                        detail["decode_cost_blocks"] = serde_json::json!(load.decode_cost_blocks);
+                        detail["active_requests"] = serde_json::json!(load.active_requests);
                     }
                     detail
                 })
@@ -345,7 +342,10 @@ impl RouterSelectionTelemetry {
     }
 }
 
-fn current_router_selection_telemetry() -> Option<RouterSelectionTelemetry> {
+fn current_router_selection_telemetry<C: WorkerConfigLike>(
+    workers: &HashMap<WorkerId, C>,
+    eligibility: RoutingEligibility<'_>,
+) -> Option<RouterSelectionTelemetry> {
     #[cfg(feature = "runtime-protocols")]
     {
         use dynamo_runtime::config::{
@@ -363,6 +363,7 @@ fn current_router_selection_telemetry() -> Option<RouterSelectionTelemetry> {
         (env_is_truthy(DYN_LIFECYCLE_TRACE_ENABLED) && is_router_selection).then(|| {
             RouterSelectionTelemetry {
                 span,
+                filters: CandidateFilterSummary::from_eligibility(workers, eligibility),
                 include_candidate_details: std::env::var(DYN_LIFECYCLE_TRACE_MODE)
                     .is_ok_and(|mode| mode.trim().eq_ignore_ascii_case("investigation")),
             }
@@ -370,6 +371,7 @@ fn current_router_selection_telemetry() -> Option<RouterSelectionTelemetry> {
     }
     #[cfg(not(feature = "runtime-protocols"))]
     {
+        let _ = (workers, eligibility);
         None
     }
 }
@@ -589,6 +591,47 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
     eligibility: RoutingEligibility<'_>,
     block_size: u32,
 ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    let telemetry = current_router_selection_telemetry(workers, eligibility);
+    if let Some(telemetry) = &telemetry {
+        telemetry.record_candidate_envelope(telemetry.filters.eligible);
+    }
+    let result = select_worker_with_policy_inner(
+        worker_type,
+        state,
+        workers,
+        request,
+        eligibility,
+        block_size,
+        telemetry.as_ref(),
+    );
+    if let Some(telemetry) = telemetry {
+        let outcome = match &result {
+            Ok(_) => "selected",
+            Err(KvSchedulerError::NoEndpoints) => "no_endpoints",
+            Err(
+                KvSchedulerError::AllEligibleWorkersOverloaded
+                | KvSchedulerError::PinnedWorkerOverloaded { .. },
+            ) => "overloaded",
+            Err(KvSchedulerError::AllEligibleWorkersFiltered) => "filtered",
+            Err(KvSchedulerError::PinnedWorkerNotAllowed { .. }) => "not_allowed",
+            Err(_) => "failed",
+        };
+        telemetry
+            .span
+            .record("dynamo.router.selection.result", outcome);
+    }
+    result
+}
+
+fn select_worker_with_policy_inner<C: WorkerConfigLike>(
+    worker_type: &'static str,
+    state: WorkerSelectionPolicyStateRef<'_>,
+    workers: &HashMap<WorkerId, C>,
+    request: &SchedulingRequest,
+    eligibility: RoutingEligibility<'_>,
+    block_size: u32,
+    telemetry: Option<&RouterSelectionTelemetry>,
+) -> Result<WorkerSelectionResult, KvSchedulerError> {
     assert!(request.isl_tokens > 0);
     eligibility.validate_pinned_worker_allowed()?;
 
@@ -619,11 +662,13 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
             let mut state = state.borrow_mut();
             let has_eligible_worker =
                 collect_policy_candidates(&mut state, &input, workers, request, eligibility)?;
+            if let Some(telemetry) = telemetry {
+                telemetry.record_candidate_envelope(state.candidates.len());
+            }
             let ComposedPolicyState {
                 picker,
                 picker_inputs,
                 candidates,
-                unscored_candidates,
                 cache_inputs,
                 load_inputs,
                 ..
@@ -662,14 +707,9 @@ fn select_worker_with_policy<C: WorkerConfigLike>(
                     }
                     .into());
                 };
-                if let Some(telemetry) = current_router_selection_telemetry() {
-                    telemetry.record_custom(
-                        candidates,
-                        unscored_candidates,
-                        CandidateFilterSummary::from_eligibility(workers, eligibility),
-                        *candidate,
-                        worker_type,
-                    );
+                let candidate = *candidate;
+                if let Some(telemetry) = telemetry {
+                    telemetry.record_custom(&state, candidate, worker_type);
                 }
                 Some((candidate.worker, candidate.cost))
             }

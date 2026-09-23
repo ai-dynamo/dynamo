@@ -239,6 +239,7 @@ impl LifecycleStage {
                 "dynamo.router.algorithm.version" = tracing::field::Empty,
                 "dynamo.router.decision.schema" = tracing::field::Empty,
                 "dynamo.router.selection.policy" = tracing::field::Empty,
+                "dynamo.router.selection.result" = tracing::field::Empty,
                 "dynamo.router.pool.role" = tracing::field::Empty,
                 "dynamo.router.selected.worker.id" = tracing::field::Empty,
                 "dynamo.router.selected.dp.rank" = tracing::field::Empty,
