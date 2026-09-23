@@ -9,10 +9,13 @@ import asyncio
 
 from dynamo.llm import LLMUnaryClient, ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, dynamo_worker, serve_unary_endpoint
+from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import ExternalEncoderHandoff
 
 from .config import RemoteEncoderConfig
 from .orchestrator import ExternalEncoderOrchestrator
+
+configure_dynamo_logging()
 
 
 @dynamo_worker()
