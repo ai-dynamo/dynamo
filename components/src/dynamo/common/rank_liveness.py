@@ -46,13 +46,13 @@ import threading
 import time
 from typing import Callable, Iterable, Optional
 
-from dynamo.common.utils.env import env_bool
-from dynamo.common.utils.env import env_int as _int_env
 from gpu_memory_service.common.gpu_failure_marker import (
     gpu_failure_marker_path,
     read_gpu_failure_marker,
 )
 
+from dynamo.common.utils.env import env_bool
+from dynamo.common.utils.env import env_int as _int_env
 
 logger = logging.getLogger(__name__)
 

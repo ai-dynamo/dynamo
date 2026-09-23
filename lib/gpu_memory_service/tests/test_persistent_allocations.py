@@ -255,9 +255,9 @@ def test_reclaim_after_unclaim_returns_existing(fake_cuda):
 
     alloc2, r2 = m.claim("eng-A", "kv_pool", 4096)
     assert r2 is True, "second claim should reattach"
-    assert alloc1.allocation_id == alloc2.allocation_id, (
-        "reattach must return the SAME underlying allocation"
-    )
+    assert (
+        alloc1.allocation_id == alloc2.allocation_id
+    ), "reattach must return the SAME underlying allocation"
 
 
 def test_concurrent_claim_rejected(fake_cuda):
@@ -908,12 +908,12 @@ def test_cleanup_releases_claims_keeps_allocation(gms):
     assert gms._persistent.is_claimed("eng-X", "kv_pool") is True
 
     asyncio.run(gms.cleanup_connection(conn1))
-    assert gms._persistent.is_claimed("eng-X", "kv_pool") is False, (
-        "claim should be released on disconnect"
-    )
-    assert gms._persistent.get("eng-X", "kv_pool") is not None, (
-        "allocation must persist across disconnect"
-    )
+    assert (
+        gms._persistent.is_claimed("eng-X", "kv_pool") is False
+    ), "claim should be released on disconnect"
+    assert (
+        gms._persistent.get("eng-X", "kv_pool") is not None
+    ), "allocation must persist across disconnect"
     assert gms.allocation_count == 1
     assert gms.get_runtime_state().allocation_count == 1
 
@@ -999,9 +999,9 @@ def test_claim_records_daemon_va(fake_cuda):
     daemon-side direct access is available."""
     m = PersistentAllocationManager(device=0)
     alloc, _ = m.claim("eng-X", "kv_pool", 4096)
-    assert alloc.va_daemon != 0, (
-        "claim must record a daemon-side VA when cuMemMap succeeds"
-    )
+    assert (
+        alloc.va_daemon != 0
+    ), "claim must record a daemon-side VA when cuMemMap succeeds"
     assert m.daemon_va("eng-X", "kv_pool") == alloc.va_daemon
 
 

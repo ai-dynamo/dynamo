@@ -484,9 +484,7 @@ def make_gms_unified_cache_class():
                 # entry without physical-page evidence. This is outside the
                 # normal CPU-page fast path and is only a lifecycle fallback.
                 if indices is None:
-                    from sglang.srt.mem_cache.base_prefix_cache import (
-                        MatchPrefixParams,
-                    )
+                    from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
 
                     result = super().match_prefix(MatchPrefixParams(key=key))
                     indices = result.device_indices

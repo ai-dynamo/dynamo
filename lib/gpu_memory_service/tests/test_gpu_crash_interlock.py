@@ -41,9 +41,9 @@ def test_broken_notification_pipe_still_stops_client():
     os.close(write_fd)
     try:
         _, status = os.waitpid(child, os.WUNTRACED)
-        assert os.WIFSTOPPED(status), (
-            "broken pipe killed client before GMS could fence it"
-        )
+        assert os.WIFSTOPPED(
+            status
+        ), "broken pipe killed client before GMS could fence it"
     finally:
         try:
             os.kill(child, signal.SIGKILL)
