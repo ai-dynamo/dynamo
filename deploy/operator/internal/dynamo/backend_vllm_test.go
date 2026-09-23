@@ -516,6 +516,30 @@ func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing
 	}
 }
 
+// TestVLLMBackend_UpdateContainer_RejectsUnusableParallelismValues proves the validation
+// error reaches and halts UpdateContainer, rather than only being observable in a unit test
+// of the validator: a value vLLM would refuse must stop container construction with an error
+// naming the flag, instead of silently reaching the engine.
+func TestVLLMBackend_UpdateContainer_RejectsUnusableParallelismValues(t *testing.T) {
+	for name, args := range map[string][]string{
+		"zero":        {"-m", "dynamo.vllm", tensorParallelSizeFlag, "0"},
+		"negative":    {"-m", "dynamo.vllm", tensorParallelSizeFlag, "-4"},
+		"unparseable": {"-m", "dynamo.vllm", tensorParallelSizeFlag, "${TENSOR_PARALLEL_SIZE}"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backend := &VLLMBackend{}
+			container := &corev1.Container{Command: []string{"python3"}, Args: args}
+			err := backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(8))
+			if err == nil {
+				t.Fatalf("UpdateContainer() = nil error, want an error for %q", args)
+			}
+			if !strings.Contains(err.Error(), tensorParallelSizeFlag) {
+				t.Errorf("UpdateContainer() error = %q, want it to name the offending flag %q", err, tensorParallelSizeFlag)
+			}
+		})
+	}
+}
+
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 
@@ -965,7 +989,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
 			// Call updateVLLMMultinodeArgs with annotations
-			updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations)
+			require.NoError(t, updateVLLMMultinodeArgs(tt.initialContainer, tt.role, "test-service", tt.multinodeDeployer, tt.gpuCount, 2, tt.annotations))
 
 			if tt.expectNotModified {
 				// Args should not have changed
