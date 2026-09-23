@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Keep Dynamo on one published AISimulate release."""
+"""Keep Rust, Python, and containers on one exact AISimulate source/version."""
 
 from __future__ import annotations
 
@@ -72,31 +72,38 @@ def _requirements_file_aisimulate_requirement(path: Path) -> Requirement:
 
 
 def _exact_version(requirement: Requirement) -> Version:
-    assert requirement.url is None, "AISimulate must resolve from PyPI"
+    assert requirement.url is None, "AISimulate wheel requirements must pin a version"
     specifiers = list(requirement.specifier)
     assert (
         len(specifiers) == 1 and specifiers[0].operator == "=="
-    ), "AISimulate must use one exact PyPI version"
+    ), "AISimulate must use one exact wheel version"
     return Version(specifiers[0].version)
 
 
-def _locked_cargo_version(path: Path) -> Version:
+def _locked_cargo_version(path: Path, dependency: dict) -> Version:
     with path.open("rb") as handle:
         packages = tomllib.load(handle)["package"]
     matches = [package for package in packages if package["name"] == "aisimulate-core"]
     assert len(matches) == 1, f"expected one aisimulate-core package in {path}"
 
     package = matches[0]
-    assert package.get("source") == (
-        "registry+https://github.com/rust-lang/crates.io-index"
-    ), f"aisimulate-core must resolve from crates.io in {path}"
-    assert re.fullmatch(
-        r"[0-9a-f]{64}", str(package.get("checksum", ""))
-    ), f"aisimulate-core must have a registry checksum in {path}"
+    if "git" in dependency:
+        revision = dependency["rev"]
+        assert package.get("source") == (
+            f"git+{dependency['git']}?rev={revision}#{revision}"
+        ), f"aisimulate-core must resolve to the exact source revision in {path}"
+        assert "checksum" not in package
+    else:
+        assert package.get("source") == (
+            "registry+https://github.com/rust-lang/crates.io-index"
+        ), f"aisimulate-core must resolve from crates.io in {path}"
+        assert re.fullmatch(
+            r"[0-9a-f]{64}", str(package.get("checksum", ""))
+        ), f"aisimulate-core must have a registry checksum in {path}"
     return Version(str(package["version"]))
 
 
-def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
+def test_dynamo_pins_matching_aisimulate_sources_and_versions() -> None:
     pyproject, cargo = _root_configs()
     python_requirement = _python_requirement(pyproject)
     python_version = _exact_version(python_requirement)
@@ -120,19 +127,53 @@ def test_dynamo_pins_matching_published_aisimulate_releases() -> None:
     assert _exact_version(container_requirement) == python_version
 
     cargo_dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
-    assert not {"path", "git", "rev", "branch", "tag"} & cargo_dependency.keys()
+    assert not {"path", "branch", "tag"} & cargo_dependency.keys()
+    if "git" in cargo_dependency:
+        assert cargo_dependency["git"] == "https://github.com/ai-dynamo/aisimulate.git"
+        assert re.fullmatch(r"[0-9a-f]{40}", cargo_dependency.get("rev", ""))
+    else:
+        assert "rev" not in cargo_dependency
     cargo_requirement = str(cargo_dependency["version"])
     assert cargo_requirement.startswith(
         "="
-    ), "aisimulate-core must use one exact crates.io version"
+    ), "aisimulate-core must use one exact version even when built from source"
     cargo_version = Version(cargo_requirement.removeprefix("="))
 
     assert cargo_version == python_version
-    assert all(_locked_cargo_version(path) == cargo_version for path in LOCKFILES)
+    assert all(
+        _locked_cargo_version(path, cargo_dependency) == cargo_version
+        for path in LOCKFILES
+    )
+
+    with (ROOT / "lib/bindings/python/Cargo.toml").open("rb") as handle:
+        binding_cargo = tomllib.load(handle)
+    binding_dependency = binding_cargo["dependencies"]["aisimulate-core"]
+    assert {
+        key: value
+        for key, value in binding_dependency.items()
+        if key not in {"optional", "features"}
+    } == cargo_dependency
+    assert binding_dependency["optional"] is True
+    assert binding_dependency["features"] == ["python"]
+
+    with (ROOT / "benchmarks/pyproject.toml").open("rb") as handle:
+        benchmarks = tomllib.load(handle)
+    assert _exact_version(_python_requirement(benchmarks)) == python_version
+    for manifest in (cargo, binding_cargo):
+        assert not manifest.get(
+            "patch"
+        ), "local patches must not replace the source pin"
+        assert not manifest.get(
+            "replace"
+        ), "replacement dependencies hide the source pin"
+    for config_path in (ROOT / ".cargo/config", ROOT / ".cargo/config.toml"):
+        if config_path.is_file():
+            with config_path.open("rb") as handle:
+                assert not tomllib.load(handle).get("paths")
 
 
-def test_container_stages_the_published_aisimulate_wheel() -> None:
-    pyproject, _ = _root_configs()
+def test_container_stages_the_matching_aisimulate_wheel() -> None:
+    pyproject, cargo = _root_configs()
     python_version = _exact_version(_python_requirement(pyproject))
     container_version = _exact_version(
         _requirements_file_aisimulate_requirement(AISIMULATE_REQUIREMENTS)
@@ -143,15 +184,32 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
 
     assert container_version == python_version
     assert "requirements.aisimulate.txt" in wheel_builder
-    assert (
-        "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
-        in wheel_builder
-    )
-    assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
-    assert "--no-index" in wheel_builder
     assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisimulate/"
-    assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
+    dependency = cargo["workspace"]["dependencies"]["aisimulate-core"]
+    if "git" in dependency:
+        assert 'pathlib.Path("/opt/dynamo/Cargo.toml")' in wheel_builder
+        assert (
+            '["workspace"]["dependencies"]["aisimulate-core"]["rev"]' in wheel_builder
+        )
+        assert "python -m pip wheel" in wheel_builder
+        assert "--config-settings=build-args=--locked" in wheel_builder
+        assert (
+            "--constraint /opt/dynamo/container/deps/requirements.aisimulate.txt"
+            in wheel_builder
+        )
+        assert (
+            "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@"
+            "${AISIMULATE_REV}#subdirectory=python/aisimulate"
+        ) in wheel_builder
+    else:
+        assert (
+            "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
+            in wheel_builder
+        )
+        assert "--only-binary=:all:" in wheel_builder
+        assert "--no-index" in wheel_builder
+        assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

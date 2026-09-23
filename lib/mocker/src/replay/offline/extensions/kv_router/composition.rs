@@ -7,11 +7,15 @@ use aisimulate_core::replay::{
     AggregatedRoundRobinPlacement, NoEngineEvents, NoReplayMetadata, PoolRoundRobinPlacement,
     ReplayComposition, ReplayDeterminism, ReplayScalingPolicy, ReplaySpec, WorkerTopology,
 };
+#[cfg(feature = "python-replay")]
+use aisimulate_core::replay::{ReplayEngineConfig, ReplayRoleConfig};
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::config::{KvRouterConfig, RouterPrefillLoadModel};
+#[cfg(feature = "python-replay")]
+use std::cell::RefCell;
 use std::collections::HashSet;
 
-use super::{KvReplayMetadata, KvRouterPlacement};
+use super::{KvReplayMetadata, KvRouterPlacement, ReplayAffinityConfig, SharedRouterEvidence};
 use crate::common::protocols::MockEngineArgs;
 use crate::replay::ReplayPrefillLoadEstimator;
 use crate::replay::offline::extensions::kv_events::RouterEventObservation;
@@ -75,6 +79,10 @@ impl ReplayComposition for RoundRobinReplayComposition {
 }
 
 enum KvTopologyConfig {
+    /// The shared executor has already resolved timing and capacity before
+    /// validate_spec supplies the engine contract to this existing adapter.
+    #[cfg(feature = "python-replay")]
+    Canonical(Box<RefCell<Option<ReplayEngineConfig>>>),
     Aggregated {
         args: Box<MockEngineArgs>,
         num_workers: usize,
@@ -95,9 +103,29 @@ pub(in crate::replay) struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
+    affinity: Option<ReplayAffinityConfig>,
+    evidence: Option<SharedRouterEvidence>,
 }
 
 impl KvReplayComposition {
+    #[cfg(feature = "python-replay")]
+    pub(in crate::replay) fn canonical(
+        router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+        affinity: Option<ReplayAffinityConfig>,
+        evidence: SharedRouterEvidence,
+    ) -> Self {
+        Self {
+            topology: KvTopologyConfig::Canonical(Box::new(RefCell::new(None))),
+            router_config,
+            prefill_load_estimator,
+            affinity,
+            evidence: Some(evidence),
+            scaling_policy: None,
+            scaling_enabled: false,
+            determinism: ReplayDeterminism::Random,
+        }
+    }
     pub(in crate::replay) fn aggregated(
         args: MockEngineArgs,
         num_workers: usize,
@@ -116,6 +144,8 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            affinity: None,
+            evidence: None,
         }
     }
 
@@ -141,6 +171,8 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            affinity: None,
+            evidence: None,
         }
     }
 }
@@ -159,6 +191,26 @@ impl ReplayComposition for KvReplayComposition {
             )));
         }
         validate_adapter_descriptors(spec, "dynamo_kv_router", self.scaling_enabled)?;
+        #[cfg(feature = "python-replay")]
+        if let KvTopologyConfig::Canonical(engine) = &self.topology {
+            *engine.borrow_mut() = Some(if spec.engine.is_null() {
+                ReplayEngineConfig::default()
+            } else {
+                serde_json::from_value(spec.engine.clone()).map_err(|error| {
+                    aisimulate_core::replay::ReplayError::InvalidSpec(error.to_string())
+                })?
+            });
+        }
+        if let Some(evidence) = &self.evidence {
+            evidence
+                .lock()
+                .map_err(|_| {
+                    aisimulate_core::replay::ReplayError::InvalidSpec(
+                        "routing evidence lock poisoned".into(),
+                    )
+                })?
+                .capture_decisions = spec.record_per_request;
+        }
         Ok(())
     }
 
@@ -167,16 +219,33 @@ impl ReplayComposition for KvReplayComposition {
         dp_size: u32,
         topology: Vec<WorkerTopology>,
     ) -> Result<Self::AggregatedPlacement> {
-        let KvTopologyConfig::Aggregated { args, num_workers } = &self.topology else {
-            bail!("disaggregated Router composition used for aggregated replay");
+        #[cfg(feature = "python-replay")]
+        let canonical_args;
+        let (args, num_workers) = match &self.topology {
+            KvTopologyConfig::Aggregated { args, num_workers } => (args.as_ref(), *num_workers),
+            #[cfg(feature = "python-replay")]
+            KvTopologyConfig::Canonical(engine) => {
+                let engine = engine.borrow();
+                let engine = engine
+                    .as_ref()
+                    .context("canonical engine was not validated")?;
+                canonical_args = router_args(engine.dp_size, &engine.rank)?;
+                (&canonical_args, topology.len())
+            }
+            _ => bail!("disaggregated Router composition used for aggregated replay"),
         };
-        validate_runtime_topology("aggregated", args, *num_workers, dp_size, &topology)?;
+        validate_runtime_topology("aggregated", args, num_workers, dp_size, &topology)?;
         KvRouterPlacement::new_with_selector_seed(
             args,
             self.router_config.take(),
             self.prefill_load_estimator.take(),
             topology.len(),
             self.determinism.selector_seed(),
+        )?
+        .with_affinity_and_evidence(
+            self.affinity.clone(),
+            self.evidence.clone(),
+            "aggregated",
         )
     }
 
@@ -187,26 +256,59 @@ impl ReplayComposition for KvReplayComposition {
         decode_dp_size: u32,
         decode_topology: Vec<WorkerTopology>,
     ) -> Result<(Self::DisaggregatedPlacement, Self::DisaggregatedPlacement)> {
-        let KvTopologyConfig::Disaggregated {
-            prefill_args,
-            decode_args,
-            num_prefill_workers,
-            num_decode_workers,
-        } = &self.topology
-        else {
-            bail!("aggregated Router composition used for disaggregated replay");
-        };
+        #[cfg(feature = "python-replay")]
+        let canonical_args;
+        let (prefill_args, decode_args, num_prefill_workers, num_decode_workers) =
+            match &self.topology {
+                KvTopologyConfig::Disaggregated {
+                    prefill_args,
+                    decode_args,
+                    num_prefill_workers,
+                    num_decode_workers,
+                } => (
+                    prefill_args.as_ref(),
+                    decode_args.as_ref(),
+                    *num_prefill_workers,
+                    *num_decode_workers,
+                ),
+                #[cfg(feature = "python-replay")]
+                KvTopologyConfig::Canonical(engine) => {
+                    let engine = engine.borrow();
+                    let engine = engine
+                        .as_ref()
+                        .context("canonical engine was not validated")?;
+                    let fallback = ReplayRoleConfig {
+                        dp_size: engine.dp_size,
+                        tensor_parallel_size: engine.tensor_parallel_size,
+                        num_gpu_blocks_is_explicit: engine.num_gpu_blocks_is_explicit,
+                        rank: engine.rank.clone(),
+                    };
+                    let prefill = engine.prefill.as_ref().unwrap_or(&fallback);
+                    let decode = engine.decode.as_ref().unwrap_or(&fallback);
+                    canonical_args = (
+                        router_args(prefill.dp_size, &prefill.rank)?,
+                        router_args(decode.dp_size, &decode.rank)?,
+                    );
+                    (
+                        &canonical_args.0,
+                        &canonical_args.1,
+                        prefill_topology.len(),
+                        decode_topology.len(),
+                    )
+                }
+                _ => bail!("aggregated Router composition used for disaggregated replay"),
+            };
         validate_runtime_topology(
             "prefill",
             prefill_args,
-            *num_prefill_workers,
+            num_prefill_workers,
             prefill_dp_size,
             &prefill_topology,
         )?;
         validate_runtime_topology(
             "decode",
             decode_args,
-            *num_decode_workers,
+            num_decode_workers,
             decode_dp_size,
             &decode_topology,
         )?;
@@ -221,7 +323,12 @@ impl ReplayComposition for KvReplayComposition {
             prefill_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing prefill KV Router placement")?;
+        .context("constructing prefill KV Router placement")?
+        .with_affinity_and_evidence(
+            self.affinity.clone(),
+            self.evidence.clone(),
+            "prefill",
+        )?;
         let decode = KvRouterPlacement::new_with_selector_seed(
             decode_args,
             Some(derive_decode_router_config(decode_args, router_config)),
@@ -229,7 +336,12 @@ impl ReplayComposition for KvReplayComposition {
             decode_topology.len(),
             self.determinism.selector_seed(),
         )
-        .context("constructing decode KV Router placement")?;
+        .context("constructing decode KV Router placement")?
+        .with_affinity_and_evidence(
+            self.affinity.clone(),
+            self.evidence.clone(),
+            "decode",
+        )?;
         Ok((prefill, decode))
     }
 
@@ -250,6 +362,21 @@ impl ReplayComposition for KvReplayComposition {
         self.determinism = determinism;
         Ok(())
     }
+}
+
+/// Only the existing router's worker inventory is lowered here. The canonical
+/// executor continues to own the engine, performance model and workload.
+#[cfg(feature = "python-replay")]
+fn router_args(
+    dp_size: u32,
+    rank: &aisimulate_core::engine::EngineConfig,
+) -> Result<MockEngineArgs> {
+    Ok(MockEngineArgs::builder()
+        .dp_size(dp_size)
+        .block_size(rank.block_size)
+        .num_gpu_blocks(rank.num_gpu_blocks)
+        .max_num_batched_tokens(Some(rank.max_num_batched_tokens))
+        .build()?)
 }
 
 fn validate_adapter_descriptors(

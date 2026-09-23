@@ -635,21 +635,22 @@ COPY deploy/inference-gateway/sidecar/ /opt/dynamo/deploy/inference-gateway/side
 {% if target == "planner" or (target == "runtime" and framework in ("vllm", "sglang", "trtllm")) %}
 COPY container/deps/requirements.aisimulate.txt /opt/dynamo/container/deps/requirements.aisimulate.txt
 
-# AI Simulate is released separately as an abi3 wheel. Its public PyPI artifact
-# is a small resolver sdist because the full wheel is too large for that registry;
-# stage the actual wheel directly from NVIDIA's package index. Download only this
-# distribution; runtime images own dependency installation through their
-# requirements files and local wheels.
+# Build the existing AISimulate wheel from the same immutable source as the Rust
+# core. The matching duration/conversation release is not published yet; neither
+# an older published wheel nor a same-series nightly provides this contract.
+# Runtime images install dependencies through their existing local wheelhouse.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/registry,sharing=shared \
+    --mount=type=cache,target=/root/.cargo/git,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    python -m pip download \
-        --only-binary=:all: \
+    AISIMULATE_REV=$(python -c 'import pathlib, tomlkit; print(tomlkit.parse(pathlib.Path("/opt/dynamo/Cargo.toml").read_text())["workspace"]["dependencies"]["aisimulate-core"]["rev"])') && \
+    python -m pip wheel \
         --no-deps \
-        --no-index \
-        --find-links https://pypi.nvidia.com/aisimulate/ \
-        --dest /opt/dynamo/dist \
-        --requirement /opt/dynamo/container/deps/requirements.aisimulate.txt
+        --config-settings=build-args=--locked \
+        --wheel-dir /opt/dynamo/dist \
+        --constraint /opt/dynamo/container/deps/requirements.aisimulate.txt \
+        "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@${AISIMULATE_REV}#subdirectory=python/aisimulate"
 {% endif %}
 
 # Compliance: harvest each crate's real LICENSE files from the cargo registry

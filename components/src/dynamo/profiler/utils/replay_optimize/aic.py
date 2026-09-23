@@ -9,9 +9,9 @@ from typing import Any
 
 def _load_aiconfigurator_modules() -> tuple[Any, Any, Any]:
     try:
-        common = importlib.import_module("aiconfigurator_core.sdk.common")
-        task = importlib.import_module("aiconfigurator.sdk.task_v2")
-        utils = importlib.import_module("aiconfigurator_core.sdk.utils")
+        common = importlib.import_module("aisimulate_core.sdk.common")
+        task = importlib.import_module("aisimulate.sdk.task_v2")
+        utils = importlib.import_module("aisimulate_core.sdk.utils")
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "aiconfigurator is required to enumerate dense TP candidates for replay optimization"

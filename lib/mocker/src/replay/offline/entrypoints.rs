@@ -30,6 +30,65 @@ use crate::replay::{
 };
 use crate::scheduler::RouterEventVisibility;
 
+/// Execute the shared serialized replay contract with the existing Dynamo
+/// Router composition. Timing, Agentic preparation, duration and reporting all
+/// remain in the shared executor used by AISimulate's ordinary runtime.
+#[cfg(feature = "python-replay")]
+pub fn run_canonical_replay_json(
+    payload: &str,
+    router_config: Option<ReplayKvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    affinity: Option<super::extensions::kv_router::ReplayAffinityConfig>,
+) -> Result<String> {
+    use super::extensions::kv_router::RouterEvidence;
+    use std::sync::{Arc, Mutex};
+
+    let mut payload: serde_json::Value = serde_json::from_str(payload)?;
+    let spec = if payload.get("spec").is_some() {
+        payload.get_mut("spec").expect("checked above")
+    } else {
+        &mut payload
+    };
+    let placement = spec.pointer_mut("/adapters/placement").ok_or_else(|| {
+        anyhow::anyhow!("canonical replay requires an explicit placement descriptor")
+    })?;
+    let native_provider = provider_spec();
+    let requested_provider = placement.get("provider").and_then(|v| v.as_str());
+    anyhow::ensure!(
+        (requested_provider == Some("round_robin")
+            || requested_provider == Some(native_provider.provider.as_str()))
+            && placement
+                .get("config")
+                .is_none_or(serde_json::Value::is_null),
+        "Dynamo canonical replay cannot replace an unknown placement provider or config"
+    );
+    // The Python runner explicitly selected this adapter. Stamp its real
+    // descriptor before the existing composition's strict validation.
+    *placement = serde_json::to_value(native_provider)?;
+    let evidence = Arc::new(Mutex::new(RouterEvidence::default()));
+    let composition = KvReplayComposition::canonical(
+        router_config,
+        prefill_load_estimator,
+        affinity,
+        Arc::clone(&evidence),
+    );
+    let result = aisimulate_core::execute_replay_json_with_composition(
+        &serde_json::to_string(&payload)?,
+        false,
+        composition,
+    )?;
+    let mut result: serde_json::Value = serde_json::from_str(&result)?;
+    let mut details = serde_json::to_value(
+        &*evidence
+            .lock()
+            .map_err(|_| anyhow::anyhow!("routing evidence lock poisoned"))?,
+    )?;
+    details["routing_provider"] = "dynamo.DefaultWorkerSelector".into();
+    details["native_policy"] = true.into();
+    result["dynamo_policy"] = details;
+    Ok(serde_json::to_string(&result)?)
+}
+
 fn startup_delay_ms(args: &MockEngineArgs) -> f64 {
     args.startup_time
         .filter(|seconds| *seconds > 0.0)

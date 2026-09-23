@@ -28,7 +28,7 @@ def compare_aic_and_replay_disagg(
 
     # Deferred: aiconfigurator is optional, so the package must import without it
     # (mirrors aic._load_aiconfigurator_modules). Only this function needs AIC.
-    from aiconfigurator.sdk.task_v2 import Task
+    from aisimulate.sdk.task_v2 import Task
 
     aic_task = Task(
         serving_mode="disagg",

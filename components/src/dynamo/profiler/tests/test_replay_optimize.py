@@ -1275,7 +1275,7 @@ def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
 
 @pytest.mark.timeout(30)
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator_core.sdk.engine")
+    pytest.importorskip("aisimulate_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1302,7 +1302,7 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator_core.sdk.engine")
+    pytest.importorskip("aisimulate_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1329,7 +1329,7 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator_core.sdk.engine")
+    pytest.importorskip("aisimulate_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1355,7 +1355,7 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator_core.sdk.engine")
+    pytest.importorskip("aisimulate_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",

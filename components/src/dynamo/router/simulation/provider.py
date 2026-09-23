@@ -169,6 +169,11 @@ class DynamoRouterSweepConfigProvider:
                     config={
                         "router_mode": public.policy,
                         "router_config": router_config,
+                        **(
+                            {"affinity": public.affinity.model_dump(mode="json")}
+                            if public.affinity is not None
+                            else {}
+                        ),
                         "aic_perf_config": _aic_perf_config_from_prediction(
                             context,
                             enabled=public.prefill_load_model.type == "aic",
