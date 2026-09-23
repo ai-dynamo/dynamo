@@ -9,13 +9,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use dynamo_kv_router::DEFAULT_ROUTING_GROUP;
 use dynamo_kv_router::services::selection::{
     CatalogReconciler, WorkerCatalogSource, WorkerRequest,
 };
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
@@ -79,7 +78,6 @@ impl WorkerCatalogSource for PodReflectorSource {
 /// `Selector`/`PodDiscovery` handles.
 pub struct TopologyAdapter {
     cancel: CancellationToken,
-    initial_reconcile: Option<oneshot::Receiver<std::result::Result<(), String>>>,
 }
 
 impl TopologyAdapter {
@@ -89,47 +87,18 @@ impl TopologyAdapter {
         defaults: RegistrationDefaults,
     ) -> Self {
         let cancel = CancellationToken::new();
-        let cancel_child = cancel.child_token();
-        let (initial_tx, initial_reconcile) = oneshot::channel();
-        let mut source = PodReflectorSource {
+        let source = PodReflectorSource {
             changes: reflector.subscribe_changes(),
             reflector,
             defaults,
             primed: false,
             closed: false,
         };
-        let core = Arc::clone(selector.service.core());
-        tokio::spawn(async move {
-            let mut reconciler = CatalogReconciler::new(core);
-            let initial_result = match source.next_snapshot().await {
-                Some(snapshot) => reconciler
-                    .apply(&snapshot)
-                    .await
-                    .map_err(|error| error.to_string()),
-                None => Err("pod reflector closed before initial snapshot".to_string()),
-            };
-            if let Err(error) = &initial_result {
-                tracing::warn!(%error, "Initial selector topology reconcile failed");
-            }
-            let initial_ok = initial_result.is_ok();
-            let _ = initial_tx.send(initial_result);
-            if initial_ok {
-                reconciler.run(source, cancel_child).await;
-            }
-        });
-        Self {
-            cancel,
-            initial_reconcile: Some(initial_reconcile),
-        }
-    }
-
-    pub async fn wait_initial_reconcile(&mut self) -> Result<()> {
-        self.initial_reconcile
-            .take()
-            .ok_or_else(|| anyhow!("initial topology reconcile already awaited"))?
-            .await
-            .map_err(|_| anyhow!("topology adapter stopped before initial reconcile"))?
-            .map_err(anyhow::Error::msg)
+        tokio::spawn(
+            CatalogReconciler::new(Arc::clone(selector.service.core()))
+                .run(source, cancel.child_token()),
+        );
+        Self { cancel }
     }
 }
 
@@ -139,7 +108,7 @@ impl Drop for TopologyAdapter {
     }
 }
 
-fn worker_request(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRequest {
+pub(crate) fn worker_request(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRequest {
     WorkerRequest {
         worker_id: w.worker_id,
         model_name: defaults.model_name.clone(),
@@ -237,11 +206,7 @@ mod tests {
             .expect("selector should build"),
         );
         let (discovery, changes_tx) = PodDiscovery::for_test(vec![worker(7, "10.0.0.1")]);
-        let mut adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults());
-        adapter
-            .wait_initial_reconcile()
-            .await
-            .expect("initial topology should reconcile");
+        let adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults());
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !selector.any_ready().await {
@@ -265,18 +230,4 @@ mod tests {
         drop(adapter);
     }
 
-    #[tokio::test]
-    async fn initial_reconcile_completes_for_empty_topology() {
-        let selector = Arc::new(
-            Selector::new(&config(), WorkerSelectionPolicyRegistry::default())
-                .await
-                .expect("selector should build"),
-        );
-        let (discovery, _changes_tx) = PodDiscovery::for_test(Vec::new());
-        let mut adapter = TopologyAdapter::spawn(discovery, selector, defaults());
-        tokio::time::timeout(Duration::from_secs(1), adapter.wait_initial_reconcile())
-            .await
-            .expect("empty topology barrier should complete")
-            .expect("empty topology should reconcile successfully");
-    }
 }
