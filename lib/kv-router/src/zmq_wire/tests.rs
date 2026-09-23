@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
-    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, UNATTRIBUTED_SESSION_ID,
-    WorkerWithDpRank, compute_block_hash_for_seq,
+    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
+    compute_block_hash_for_seq,
 };
 
 use super::filter::KvCacheSpecKind;
@@ -20,6 +20,50 @@ use super::*;
 enum TestEventKind {
     BlockStored,
     BlockRemoved,
+}
+
+#[test]
+fn test_deserialize_sglang_cache_salt() {
+    for salt in [None, Some(""), Some("tenant-a")] {
+        let mut event = serde_json::json!(["BlockStored", [-123], null, [10, 11], 2, null, "GPU"]);
+        if let Some(salt) = salt {
+            event
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({"cache_salt": salt}));
+        }
+        let raw: RawKvEvent = from_slice(&to_vec(&event).unwrap()).unwrap();
+        let RawKvEvent::BlockStored {
+            cache_namespace,
+            lora_name,
+            ..
+        } = raw
+        else {
+            panic!("expected BlockStored");
+        };
+        assert_eq!(
+            cache_namespace.as_deref(),
+            salt.filter(|salt| !salt.is_empty())
+        );
+        assert_eq!(lora_name, None);
+    }
+
+    for metadata in [
+        serde_json::json!({}),
+        serde_json::json!({"cache_salt": 123}),
+    ] {
+        let event = serde_json::json!([
+            "BlockStored",
+            [-123],
+            null,
+            [10, 11],
+            2,
+            null,
+            "GPU",
+            metadata
+        ]);
+        assert!(from_slice::<RawKvEvent>(&to_vec(&event).unwrap()).is_err());
+    }
 }
 
 #[test]
@@ -177,11 +221,10 @@ fn block_stored_session_id_reaches_canonical_router_event() {
     assert_eq!(placement.session_id.as_deref(), Some("session-1"));
     let event = placement.into_router_event().unwrap();
     assert_eq!(event.session_id.as_deref(), Some("session-1"));
-    assert_eq!(event.session_id_or_unattributed(), "session-1");
 }
 
 #[test]
-fn missing_block_stored_session_id_uses_unattributed_fallback() {
+fn missing_block_stored_session_id_remains_absent() {
     let encoded = to_vec_named(&MapBlockStoredFixture::default()).unwrap();
     let raw: RawKvEvent = from_slice(&encoded).unwrap();
     let event = convert_event(
@@ -198,7 +241,6 @@ fn missing_block_stored_session_id_uses_unattributed_fallback() {
     .unwrap();
 
     assert_eq!(event.session_id, None);
-    assert_eq!(event.session_id_or_unattributed(), UNATTRIBUTED_SESSION_ID);
 }
 
 #[test]

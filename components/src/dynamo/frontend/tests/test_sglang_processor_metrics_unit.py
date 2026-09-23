@@ -5,7 +5,6 @@
 
 import asyncio
 import importlib
-import json
 import sys
 import types
 
@@ -116,6 +115,11 @@ def _install_sglang_stubs(install_module):
     _install_module(install_module, "sglang.srt.parser")
     _install_module(
         install_module,
+        "sglang.srt.parser.conversation",
+        chat_template_exists=lambda *_args, **_kwargs: False,
+    )
+    _install_module(
+        install_module,
         "sglang.srt.parser.jinja_template_utils",
         detect_jinja_template_content_format=lambda *args, **kwargs: "string",
         process_content_for_template_format=lambda content, *_args, **_kwargs: content,
@@ -150,6 +154,27 @@ def _load_processor_module(module_stubs):
     install_module, remove_module = module_stubs
     _install_sglang_stubs(install_module)
     _install_module(install_module, "dynamo._internal", ModelDeploymentCard=object)
+    _install_module(install_module, "dynamo.common.multimodal")
+    _install_module(
+        install_module,
+        "dynamo.common.multimodal.cache_uuid",
+        reject_unsupported_multimodal_uuids=lambda *_args, **_kwargs: None,
+    )
+    _install_module(
+        install_module,
+        "dynamo.frontend.sglang_prepost",
+        ReasoningParser=object,
+        SglangStreamingPostProcessor=object,
+        ToolCallParserType=object,
+        _client_wants_separate_reasoning=lambda *_args, **_kwargs: False,
+        _get_history_tool_calls_count=lambda *_args, **_kwargs: 0,
+        _guided_tool_choice_requires_reasoning=lambda *_args, **_kwargs: False,
+        convert_tools=lambda *_args, **_kwargs: None,
+        create_parsers=lambda *_args, **_kwargs: (None, None),
+        detect_force_reasoning_from_template=lambda *_args, **_kwargs: False,
+        preprocess_chat_request=lambda *_args, **_kwargs: None,
+        resolve_skip_special_tokens=lambda *_args, **_kwargs: True,
+    )
     _install_module(
         install_module,
         "dynamo.frontend.frontend_args",
@@ -165,6 +190,7 @@ def _load_processor_module(module_stubs):
     _install_module(
         install_module,
         "dynamo.llm.exceptions",
+        HttpError=type("HttpError", (Exception,), {}),
         InvalidArgument=type("InvalidArgument", (Exception,), {}),
         Unknown=type("Unknown", (Exception,), {}),
     )
@@ -172,7 +198,7 @@ def _load_processor_module(module_stubs):
     return importlib.import_module("dynamo.frontend.sglang_processor")
 
 
-def test_stream_emits_llm_metrics_annotation(module_stubs):
+def test_stream_embeds_typed_llm_metrics(module_stubs):
     module = _load_processor_module(module_stubs)
     completion_usage = {
         "prompt_tokens": 10,
@@ -209,15 +235,14 @@ def test_stream_emits_llm_metrics_annotation(module_stubs):
         ]
 
     items = asyncio.run(collect())
-    metric_items = [item for item in items if item.get("event") == "llm_metrics"]
-
-    assert len(metric_items) == 1
-    envelope = metric_items[0]
+    assert len(items) == 1
+    envelope = items[0]
     assert envelope["_dynamo_annotated"] is True
     assert envelope["data"]["usage"] == completion_usage
-    metrics = json.loads(envelope["comment"][0])
+    assert "event" not in envelope
+    assert "comment" not in envelope
     # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-    assert metrics == {
+    assert envelope["data"]["llm_metrics"] == {
         "input_tokens": 10,
         "output_tokens": 3,
         "chunk_tokens": 3,
@@ -278,9 +303,8 @@ def test_stream_emits_multimodal_counts(module_stubs):
         ]
 
     items = asyncio.run(collect())
-    metric_items = [item for item in items if item.get("event") == "llm_metrics"]
-    assert len(metric_items) == 1
-    metrics = json.loads(metric_items[0]["comment"][0])
+    assert len(items) == 1
+    metrics = items[0]["data"]["llm_metrics"]
     assert metrics["image_count"] == 2
     assert metrics["video_count"] == 1
     # audio has zero parts, so the key is omitted from the emitted metrics.

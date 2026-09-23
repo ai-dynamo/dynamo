@@ -131,6 +131,26 @@ class TestMultimodalGuard:
     def test_text_only_request_bypasses_guard(self):
         raise_if_unextracted_multimodal({"token_ids": [10, 20, 30]})
 
+    def test_stripped_extra_args_still_uses_multi_modal_data(self):
+        data_url = "data:image/png;base64,AAAA"
+        request = {
+            "token_ids": [1, 2, 3],
+            "multi_modal_data": {"image_url": [{"Url": data_url}]},
+            "extra_args": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {"type": "image_url", "image_url": {"url": ""}},
+                        ],
+                    }
+                ]
+            },
+        }
+        raise_if_unextracted_multimodal(request)
+        assert build_disagg_mm_kwargs(request)["image_data"] == [data_url]
+
 
 async def _stream(items):
     for item in items:

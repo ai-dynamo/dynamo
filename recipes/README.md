@@ -65,6 +65,8 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
 | **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing |
 | **[Qwen3.8-Flash-Next](qwen3.8-flash-next/)** | vLLM | Agg + Disagg | 4x B200 / 8x B200 / 12x B200 | ✅ | ✅ | Multimodal (text+image+video) ultra-sparse MoE (125B / 6B active) with GDN+QSA hybrid attention, 51B N-gram embedding offload to host RAM, Inferact NVFP4 weights, TP4+EP, MTP3 spec decode, KV-aware routing, reasoning + tool calling (`qwen3_coder`); agentic profile | ❌ |
+| **[K-EXAONE 2.0 750B-A37B-NVFP4](k-exaone-2.0/vllm/agg-b200-chat/)** | vLLM | Aggregated | 4x B200 | ✅ | ✅ | 764.5B MoE (37B active), hybrid attention (20 full + 58 sliding), NVFP4 W4A4 + FP8 KV, TP4, MTP spec decode, FLASHINFER_CUTLASS MoE backend required for correctness | ❌ |
+| **[K-EXAONE 2.0 750B-A37B-NVFP4](k-exaone-2.0/vllm/disagg-b200-chat/)** | vLLM | Disaggregated | 8x B200 | ✅ | ✅ | Same model, 1P1D over NIXL/UCX on InfiniBand RDMA, MTP on both roles, decode `--max-num-seqs` 256 | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
