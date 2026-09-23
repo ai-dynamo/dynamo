@@ -2683,8 +2683,8 @@ fn prepare_replay_telemetry(
     }
 
     let capture = capture_telemetry.then(ReplayTelemetryCapture::default);
-    let writer = jsonl_path
-        .map(|path| Arc::new(Mutex::new(ReplayTelemetryJsonl::new(path.to_path_buf()))));
+    let writer =
+        jsonl_path.map(|path| Arc::new(Mutex::new(ReplayTelemetryJsonl::new(path.to_path_buf()))));
     let options = Some(ReplayTelemetryOptions {
         sample_interval_ms,
         observer: Box::new(PyReplayTelemetryObserver {
