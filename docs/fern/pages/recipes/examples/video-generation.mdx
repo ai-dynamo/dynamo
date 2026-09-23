@@ -2,22 +2,67 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "Video Generation"
-subtitle: "Text-to-video and image-to-video launch scripts."
+subtitle: "Text-to-video and image-to-video deployments and launch scripts."
 hide-toc: true
 ---
 
 import { ExampleSelector } from "@/components/ExampleSelector";
 
-Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+See [Text-to-Video](../../use-cases/diffusion/workflows/text-to-video.md) and
+[Image-to-Video](../../use-cases/diffusion/workflows/image-to-video.md) for request formats.
+Run local commands from the repository root; review each script’s model and build requirements.
+
+<Warning>
+**Experimental Kubernetes examples.** T2V and I2V were validated on September 22, 2026 with one
+amd64 H100 80 GB worker each, a Dynamo 1.4.2 frontend/operator, and the digest-pinned custom worker
+image in the manifests. This is not an official release image. It includes both the video
+`response_format` forwarding fix and an FFmpeg RGB-to-YUV color-conversion fix. Do not substitute
+stock 1.4.2 or an arbitrary nightly and assume equivalent results. Keep `--enforce-eager` and
+`runtimeVersionOverride: 1.4.2` on both components as tested.
+
+Replace the cache PVC/subpath and add your cluster’s GPU node selectors before applying.
+`HF_HUB_OFFLINE=1` requires complete model snapshots in the read-only cache; prepare `hf-token-secret`
+with `HF_TOKEN`. Run the two deployments sequentially for a one-GPU budget. Request
+`response_format: "b64_json"` and decode the returned MP4 on the client: `file://` URLs are pod-local.
+These were functional checks, not performance benchmarks; changing infrastructure requires revalidation.
+</Warning>
 
 <ExampleSelector
   variants={[
+    {"id": "kubernetes-vllm-t2v-experimental-yaml", "target": "kubernetes:vllm", "label": "T2V (experimental)", "description": "Wan2.1 T2V 1.3B · patched Dynamo 1.4.2 build"},
+    {"id": "kubernetes-vllm-i2v-experimental-yaml", "target": "kubernetes:vllm", "label": "I2V (experimental)", "description": "Wan2.2 TI2V 5B · patched Dynamo 1.4.2 build"},
     {"id": "local-sglang-text-to-video-diffusion-sh", "target": "local:sglang", "label": "text-to-video-diffusion.sh", "description": "Text-to-Video Generation"},
     {"id": "local-trtllm-agg-video-diffusion-sh", "target": "local:trtllm", "label": "agg_video_diffusion.sh", "description": "Text-to-Video Generation"},
     {"id": "local-vllm-agg-omni-i2v-sh", "target": "local:vllm", "label": "agg_omni_i2v.sh", "description": "Image-to-Video Generation"},
     {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"}
   ]}
 >
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-t2v-experimental-yaml">
+
+The validated request used 832×480, 50 inference steps, 33 frames, 16 fps, and seed 42. Four-step runs tested request and output handling only.
+
+[Source: `agg_omni_video.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_video.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_video.yaml" title="agg_omni_video.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-i2v-experimental-yaml">
+
+Provide a valid image in `input_reference`. The validated request used 832×480, 50 inference steps,
+33 frames, 16 fps, seed 42, `guidance_scale: 1.0`, `boundary_ratio: 0.875`, and `guidance_scale_2: 1.0`.
+
+<Warning>
+The output retained the input subject but distorted its proportions. This validates video delivery
+and decoding, not general image fidelity or model quality.
+</Warning>
+
+[Source: `agg_omni_i2v.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/experimental/agg_omni_i2v.yaml" title="agg_omni_i2v.yaml" language="yaml" maxLines={0} />
+
+</div>
 
 <div className="dynamo-example-variant" data-example-variant="local-sglang-text-to-video-diffusion-sh">
 
