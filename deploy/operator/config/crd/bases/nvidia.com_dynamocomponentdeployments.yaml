@@ -19966,13 +19966,13 @@ spec:
                 dynamoSidecar:
                   description: |-
                     dynamoSidecar names the restartable init container that carries the Dynamo
-                    runtime in engine-primary mode, the recommended architecture for vLLM and
-                    other engine integrations. Setting this field activates engine-primary mode:
+                    runtime in Dynamo sidecar mode, the recommended architecture for vLLM and
+                    other engine integrations. Setting this field activates Dynamo sidecar mode:
                     the engine runs in main with user-provided launch configuration, and the
                     operator injects Dynamo configuration (env, identity, system port, probes)
                     into the named init container instead. The init container must declare
                     restartPolicy: Always. Multinode deployments, enabled checkpoint, GPU memory
-                    service, and failover are not yet supported in engine-primary mode. This
+                    service, and failover are not yet supported in Dynamo sidecar mode. This
                     field is preserved through v1alpha1 conversion annotations.
                   type: string
                 eppConfig:
@@ -20506,10 +20506,12 @@ spec:
                   type: string
                 podTemplate:
                   description: |-
-                    podTemplate defines the component's Pod configuration. New components must
-                    include a container named "main" with a non-empty image. Existing components
-                    created without a podTemplate may remain unchanged. The operator merges
-                    defaults into the main container.
+                    podTemplate defines the component's Pod configuration. Every component must
+                    include a container named "main" with a non-empty image. In standard mode
+                    the operator merges Dynamo defaults into main. In Dynamo sidecar mode
+                    (dynamoSidecar is set), main is the engine container and is fully
+                    user-managed — the operator injects no Dynamo defaults into it, and the
+                    named init container receives those defaults instead.
                     For DGD components whose main image tag is not a Dynamo semantic version,
                     set runtimeVersionOverride explicitly.
 
