@@ -64,7 +64,7 @@ for mode in MODES:
                            'client_counts': result['client']['counts'],
                            'client_health': {key: client.get(key) for key in
                                ('client_health_accepted', 'event_loop_warning_count')},
-                           'frontend_resident_pages_by_node': residency,
+                           'frontend_private_anonymous_pages_by_node': residency,
                            'error_examples': result['client']['error_examples']})
 
 summary = {}
