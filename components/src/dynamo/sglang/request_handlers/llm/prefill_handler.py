@@ -249,9 +249,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         }
 
         task = asyncio.create_task(
-            self._consume_results(
-                results, submitted_request_id, context, bootstrap_room=bootstrap_room
-            )
+            self._consume_results(results, submitted_request_id, context)
         )
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
@@ -263,7 +261,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         results: AsyncIterator[Any],
         submitted_request_id: str | None,
         context: Context,
-        bootstrap_room: int | None = None,
     ) -> None:
         """Consume async generator results without processing.
 
@@ -288,9 +285,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
                         logging.debug(f"New Prefill Request ID: {sglang_request_id}")
-                        self._log_engine_id_map(
-                            context, sglang_request_id, bootstrap_room
-                        )
 
                 # The shared iterator briefly drains after abort so SGLang can
                 # clean up, then closes a stream that does not terminate.

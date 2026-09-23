@@ -656,9 +656,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 submitted_request_id=submitted_request_id,
                 internal_request_id=sglang_request_id,
                 response_request_id=native_payload.get("rid") or context.id(),
-                bootstrap_room=(request.get("bootstrap_info") or {}).get(
-                    "bootstrap_room"
-                ),
             ):
                 yield output
             return
@@ -738,7 +735,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
-                    bootstrap_room=bootstrap_info["bootstrap_room"],
                 ):
                     yield out
             else:
@@ -749,7 +745,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     user_stop_token_ids=user_stop_token_ids,
                     metadata_uploader=metadata_uploader,
                     submitted_request_id=submitted_request_id,
-                    bootstrap_room=bootstrap_info["bootstrap_room"],
                 ):
                     yield out
         else:
@@ -850,12 +845,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         submitted_request_id: str | None = None,
         internal_request_id: str | None = None,
         response_request_id: str | list[str] | None = None,
-        bootstrap_room: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Forward opaque SGLang chunks while retaining engine cancellation."""
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
-        mapped_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
             request_id_future,
@@ -871,12 +864,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 meta_info = native_response.get("meta_info", {})
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
-                    # n>1 fans one Dynamo request out to several engine rids; map each.
-                    if sglang_request_id not in mapped_ids:
-                        mapped_ids.add(sglang_request_id)
-                        self._log_engine_id_map(
-                            context, sglang_request_id, bootstrap_room
-                        )
                     request_ids.add(sglang_request_id)
                     if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
@@ -923,7 +910,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
-        bootstrap_room: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
@@ -940,7 +926,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
-        mapped_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
             request_id_future,
@@ -954,12 +939,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 meta_info = res.get("meta_info", {})
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
-                    # n>1 fans one Dynamo request out to several engine rids; map each.
-                    if sglang_request_id not in mapped_ids:
-                        mapped_ids.add(sglang_request_id)
-                        self._log_engine_id_map(
-                            context, sglang_request_id, bootstrap_room
-                        )
                     request_ids.add(sglang_request_id)
                     if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
@@ -1081,7 +1060,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         user_stop_token_ids: set[int] | None = None,
         metadata_uploader: MetadataUploader | None = None,
         submitted_request_id: str | None = None,
-        bootstrap_room: int | None = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
@@ -1097,7 +1075,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
         request_ids: set[str] = set()
-        mapped_ids: set[str] = set()
         first_output_seen = False
         async with self._cancellation_monitor(
             request_id_future,
@@ -1111,12 +1088,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 meta_info = res.get("meta_info", {})
                 sglang_request_id = meta_info.get("id")
                 if sglang_request_id:
-                    # n>1 fans one Dynamo request out to several engine rids; map each.
-                    if sglang_request_id not in mapped_ids:
-                        mapped_ids.add(sglang_request_id)
-                        self._log_engine_id_map(
-                            context, sglang_request_id, bootstrap_room
-                        )
                     request_ids.add(sglang_request_id)
                     if not request_id_future.done():
                         request_id_future.set_result(sglang_request_id)
