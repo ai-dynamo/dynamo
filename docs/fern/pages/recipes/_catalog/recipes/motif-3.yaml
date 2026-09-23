@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: motif-3
+title: Motif-3 NVFP4
+page: pages/recipes/model-recipes/motif-3.mdx
+provider: motif
+model:
+  name: Motif-3-NVFP4
+  hf_id: Motif-Technologies/Motif-3-NVFP4
+  precision: NVFP4 weights with FP8 KV cache
+status: experimental
+targets:
+- id: agg-b200
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 2
+  runtime:
+    framework: vLLM
+    image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4
+  topology: aggregated
+  techniques:
+  - tp1
+  - dp2
+  - expert-parallel
+  - speculative-decoding
+  - shared-model-cache
+  workload:
+    type: chat-trace-replay
+    traffic: 8K/1K Mooncake trace at concurrency 24
+  deploy:
+    asset: recipes/motif-3/vllm/agg-b200-chat/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/motif-3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 289.09 output tok/s, 144.55 output tok/s/GPU, 62.54 output tok/s/user P50, TTFT P50 265.41 ms at concurrency 6
+related_benchmarks: []
+maintainer: null
+gaps:
+- maintainer unknown
+- image is currently staged rather than published through the standard Dynamo image path

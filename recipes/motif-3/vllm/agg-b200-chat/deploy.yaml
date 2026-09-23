@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Motif-3 NVFP4, aggregated serving on 2x NVIDIA B200 GPUs.
+# The image contains the tested Motif vLLM/Dynamo compatibility shim.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: motif3-agg-b200
+  labels:
+    app.kubernetes.io/name: motif3-agg-b200
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4@sha256:cccbc4c3382c4dbfe5dce4fbf50484f8924d68910dab04befc5d36964298645e
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args:
+                - -m
+                - dynamo.frontend
+                - --dyn-chat-processor
+                - vllm
+                - --trust-remote-code
+                - --enable-auto-tool-choice
+                - --tool-call-parser
+                - motif
+                - --reasoning-parser
+                - motif
+              resources: {}
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: Worker
+      type: worker
+      replicas: 1
+      runtimeVersionOverride: 1.5.0
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4@sha256:cccbc4c3382c4dbfe5dce4fbf50484f8924d68910dab04befc5d36964298645e
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.vllm]
+              args:
+                - --model=Motif-Technologies/Motif-3-NVFP4
+                - --served-model-name=Motif-Technologies/Motif-3-NVFP4
+                - --trust-remote-code
+                - --quantization=modelopt_nvfp4
+                - --speculative-config={"model":"Motif-Technologies/Motif-3-NVFP4","num_speculative_tokens":1}
+                - --tensor-parallel-size=1
+                - --data-parallel-size=2
+                - --data-parallel-size-local=2
+                - --enable-expert-parallel
+                - --dtype=bfloat16
+                - --gpu-memory-utilization=0.85
+                - --max-model-len=262144
+                - --block-size=128
+                - --kv-cache-dtype=fp8
+              env:
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: DYN_SELF_HOST_METADATA
+                  value: "1"
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+                  value: "1"
+                - name: VLLM_USE_V2_MODEL_RUNNER
+                  value: "1"
+              resources:
+                requests:
+                  nvidia.com/gpu: "2"
+                limits:
+                  nvidia.com/gpu: "2"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

@@ -1,0 +1,105 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Motif-3 NVFP4"
+subtitle: "Serve Motif-3 NVFP4 with Dynamo and the Motif vLLM runtime on NVIDIA B200 GPUs."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+This experimental recipe serves [Motif-Technologies/Motif-3-NVFP4](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4) on two NVIDIA B200 GPUs with vLLM data parallelism, expert parallelism, one speculative token, and a 262K-token context.
+
+<div className="dynamo-target-picker static">
+<p className="dynamo-target-picker-title">Deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked disabled />
+<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+</div>
+<div className="dynamo-target-picker-summary">
+<span><b>Hardware</b> 2x NVIDIA B200</span>
+<span><b>Runtime</b> Motif vLLM image, Dynamo 1.5.0</span>
+<span><b>Serving</b> TP1, DP2, expert parallelism</span>
+<span><b>Cache</b> Shared model cache, FP8 KV cache</span>
+</div>
+</div>
+
+## Prerequisites
+
+- A Kubernetes cluster with the Dynamo platform installed and 2xB200 GPUs available.
+- Create a namespace and an `hf-token-secret` containing access to the model. The token is used only by the model-download Job.
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace "${NAMESPACE}"
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="$HF_TOKEN" \
+  -n "${NAMESPACE}"
+```
+
+## Deploy
+
+Edit `storageClassName` in the [model-cache manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/model-cache/model-cache.yaml), then create the cache and download the checkpoint:
+
+```bash
+kubectl apply -f recipes/motif-3/model-cache/model-cache.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/motif-3/model-cache/model-download.yaml -n "${NAMESPACE}"
+kubectl wait --for=condition=Complete job/model-download -n "${NAMESPACE}" --timeout=7200s
+```
+
+Apply the [aggregated chat manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/deploy.yaml):
+
+```bash
+kubectl apply -f recipes/motif-3/vllm/agg-b200-chat/deploy.yaml -n "${NAMESPACE}"
+kubectl get dgd motif3-agg-b200 -n "${NAMESPACE}" -w
+```
+
+## Smoke Test
+
+First, forward the frontend port for your target:
+
+```bash
+kubectl port-forward svc/motif3-agg-b200-frontend 8000:8000 -n "${NAMESPACE}"
+```
+
+Send a request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Motif-Technologies/Motif-3-NVFP4",
+    "messages": [{"role": "user", "content": "Return exactly: NVIDIA Dynamo"}],
+    "max_tokens": 64,
+    "temperature": 0
+  }'
+```
+
+## Benchmark
+
+The [AIPerf manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/perf/perf.yaml) replays the [`8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl` trace](https://github.com/ai-dynamo/dynamo/blob/main/recipes/kimi-k2.6/perf/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl) at concurrency 6. Stage that trace at `/shared-model-cache/traces/8k_1k_70kv_chat_new_noschedule_short_15perc.jsonl`, then apply the Job:
+
+```bash
+kubectl apply -f recipes/motif-3/perf/perf.yaml -n "${NAMESPACE}"
+kubectl logs -f job/motif3-aiperf-job -n "${NAMESPACE}"
+```
+
+## Expected Performance
+
+The expected-performance row below meets the SLA of user output throughput P50 ≥ 50 tokens/second/user and TTFT P50 < 5 seconds. Thirty-five requests exceeded the configured 262,144-token context limit.
+
+| Workload | Recipe | GPU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+|---|---|---|---:|---:|---:|---:|
+| Chat trace | Aggregated | B200 | 6 | 144.55 | 62.54 | 265.41 |
+
+## Notes
+
+- The recipe uses a pinned digest, but the current image is a staged artifact and requires a cluster image-pull configuration.
+- The model image carries Motif-specific vLLM compatibility code. Do not replace its vLLM package with an unrelated nightly wheel.
+
+## Source
+
+- [Motif-3 recipe files](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3)
+- [Motif-3-NVFP4 model card](https://huggingface.co/Motif-Technologies/Motif-3-NVFP4)
