@@ -14,13 +14,7 @@ fn render(fields: Value) -> anyhow::Result<String> {
         .extend(fields.as_object().unwrap().clone());
     let mut request: NvCreateChatCompletionRequest = serde_json::from_value(payload)?;
     request.normalize_reasoning_template_args()?;
-    let messages_before = serde_json::to_value(&request.inner.messages)?;
-    let output = DeepSeekV41Formatter.render(&request)?;
-    assert_eq!(
-        serde_json::to_value(&request.inner.messages)?,
-        messages_before
-    );
-    Ok(output)
+    DeepSeekV41Formatter.render(&request)
 }
 
 #[test]

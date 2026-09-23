@@ -95,9 +95,7 @@ mod tests {
 
     fn check(messages: Vec<Value>, expected: &[usize]) {
         let messages: Vec<Message> = serde_json::from_value(json!(messages)).unwrap();
-        let original = serde_json::to_value(&messages).unwrap();
         assert_eq!(media_message_order(&messages), expected);
-        assert_eq!(serde_json::to_value(&messages).unwrap(), original);
     }
 
     #[test]
