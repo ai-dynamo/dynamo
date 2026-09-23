@@ -315,24 +315,17 @@ func GetWaitLeaderConfigMapName(dgdName string) string {
 
 // GenerateWaitLeaderConfigMap creates a ConfigMap containing the wait-for-leader
 // scripts. One ConfigMap is created per DGD and owned by the DGD.
-func GenerateWaitLeaderConfigMap(dgdName, namespace string, rayWorkerGCSReadinessEnabled bool) *corev1.ConfigMap {
-	// Preserve the legacy ConfigMap exactly unless the origin-version gate enables Ray readiness.
-	data := map[string]string{
-		waitLeaderScriptKey: WaitLeaderScript,
-	}
-
-	// Add the Ray script only for newly created, compatibility-gated DGDs.
-	if rayWorkerGCSReadinessEnabled {
-		data[waitRayLeaderScriptKey] = WaitRayLeaderScript
-	}
-
+func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		Name:      GetWaitLeaderConfigMapName(dgdName),
 		Namespace: namespace,
 		Labels: map[string]string{
 			commonconsts.KubeLabelDynamoGraphDeploymentName: dgdName,
 		},
-		Data: data,
+		Data: map[string]string{
+			waitLeaderScriptKey:    WaitLeaderScript,
+			waitRayLeaderScriptKey: WaitRayLeaderScript,
+		},
 	}
 }
 
