@@ -228,6 +228,100 @@ fn event_position(events: &[http_harness::JsonSseEvent], event_type: &str) -> us
         .unwrap_or_else(|| panic!("missing {event_type} event"))
 }
 
+fn assert_streamed_response_metadata(events: &[http_harness::JsonSseEvent], expected: &Value) {
+    let response_events: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            event
+                .data
+                .get("response")
+                .map(|response| (event.event.as_str(), response))
+        })
+        .collect();
+    assert!(
+        !response_events.is_empty(),
+        "stream did not contain any response objects"
+    );
+    for (event_type, response) in response_events {
+        assert_eq!(
+            &response["metadata"], expected,
+            "unexpected metadata in {event_type}"
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn request_metadata_is_preserved_for_unary_and_streaming_responses() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start(vec![script; 6]).await;
+        let metadata_cases = [
+            (
+                "populated",
+                Some(json!({
+                    "trace_id": "synthetic-123",
+                    "tenant": "test"
+                })),
+            ),
+            ("explicitly empty", Some(json!({}))),
+            ("absent", None),
+        ];
+
+        for (case, request_metadata) in &metadata_cases {
+            for stream in [false, true] {
+                let mut body = json!({
+                    "model": MODEL,
+                    "input": "Say hi.",
+                    "stream": stream,
+                    "max_output_tokens": 20,
+                });
+                if let Some(metadata) = request_metadata {
+                    body["metadata"] = metadata.clone();
+                }
+
+                let response = post_responses(&svc, &body).await;
+                assert_eq!(
+                    response.status(),
+                    reqwest::StatusCode::OK,
+                    "unexpected status for {case} metadata with stream={stream}"
+                );
+                let expected_response_metadata =
+                    request_metadata.clone().unwrap_or_else(|| json!({}));
+                if stream {
+                    let events = parse_json_sse(&response.text().await.unwrap())
+                        .await
+                        .unwrap();
+                    assert_streamed_response_metadata(&events, &expected_response_metadata);
+                } else {
+                    let response_body: Value = response.json().await.unwrap();
+                    assert_eq!(
+                        response_body["metadata"], expected_response_metadata,
+                        "unexpected metadata for {case} unary response"
+                    );
+                }
+            }
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 6);
+        for (request, (_, expected_metadata)) in requests.iter().zip(
+            metadata_cases
+                .iter()
+                .flat_map(|metadata_case| [metadata_case, metadata_case]),
+        ) {
+            assert_eq!(
+                request.inner.metadata.as_ref(),
+                expected_metadata.as_ref(),
+                "translated request did not preserve metadata presence"
+            );
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
+        svc.shutdown().await;
+    })
+    .await;
+}
+
 #[tokio::test]
 #[serial]
 async fn unary_text_baseline() {

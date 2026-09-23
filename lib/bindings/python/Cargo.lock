@@ -2106,6 +2106,8 @@ name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
  "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
  "serde",
 ]
 
@@ -2205,6 +2207,7 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dialoguer",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2308,6 +2311,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "dynamo-custom-policy-builtin",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
@@ -2655,6 +2659,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
@@ -2662,6 +2667,7 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.4",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-util",
