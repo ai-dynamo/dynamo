@@ -135,7 +135,7 @@ Dynamo supports [request migration](../../../../../kubernetes/fault-tolerance/re
 
 ## See Also
 
-- **[Examples](../../../../../recipes/cli-templates/vllm.mdx)**: Local deployment launch scripts
+- **[Examples](../../../../../recipes/examples/overview.mdx)**: Local deployment launch scripts
 - **[vLLM README](overview.md)**: Quick start and feature overview
 - **[Observability](observability.md)**: Metrics and monitoring setup
 - **[Configuration and Tuning](../../router/configuration-and-tuning.md)**: KV-aware routing configuration

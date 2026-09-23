@@ -423,6 +423,6 @@ In the current workflow, run profiling independently for each intended pool, the
 - [Planner Design](planner-design.md) — Architecture and algorithm internals
 - [Planner Examples](planner-examples.md) — Planner-specific configuration examples
 - [Simulate Planner Decisions with AISimulate](aisimulate-planner-replay.mdx) — Replay a trace through the Planner offline, including retune
-- [DGDR Templates](../../../../recipes/kubernetes-templates/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
+- [DGDR Templates](../../../../recipes/examples/dgdr.mdx) — DGDR YAML examples, sample configurations, advanced patterns
 - [Global Planner Guide](global-planner-guide.md) — Multi-DGD coordination, shared GPU budgets, single-endpoint multi-pool deployments
 - [Profiler Guide](../profiler/profiler-guide.md) — How profiling data is generated

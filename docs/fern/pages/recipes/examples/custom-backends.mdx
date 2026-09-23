@@ -1,0 +1,127 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Custom Backends and Testing"
+subtitle: "Hello World, sample backends, Mocker deployments, and Triton Server."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+These examples demonstrate different runtime and testing workflows; they are not interchangeable inference backends. Follow the [Hello World README](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/README.md) or [Triton Server README](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/README.md) for those workflows.
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-custom-hello-world-yaml", "target": "kubernetes:custom", "label": "hello_world.yaml", "description": "Custom backend development example"},
+    {"id": "kubernetes-mocker-mocker-agg-yaml", "target": "kubernetes:mocker", "label": "mocker/agg.yaml", "description": "Aggregated mock worker"},
+    {"id": "kubernetes-mocker-mocker-disagg-yaml", "target": "kubernetes:mocker", "label": "mocker/disagg.yaml", "description": "Disaggregated mock workers"},
+    {"id": "local-tritonserver-identity-sh", "target": "local:tritonserver", "label": "identity.sh", "description": "Identity model with Triton Server"},
+    {"id": "local-sample-agg-sh", "target": "local:sample", "label": "agg.sh", "description": "Aggregated Echo Backend"},
+    {"id": "local-sample-disagg-sh", "target": "local:sample", "label": "disagg.sh", "description": "Disaggregated Echo Backend"},
+    {"id": "local-sample-agg-diffusion-sh", "target": "local:sample", "label": "agg_diffusion.sh", "description": "Aggregated Sample Diffusion Backend"},
+    {"id": "local-sample-multimodal-agg-sh", "target": "local:sample", "label": "multimodal_agg.sh", "description": "Aggregated Multimodal Smoke Test"},
+    {"id": "local-sample-multimodal-disagg-sh", "target": "local:sample", "label": "multimodal_disagg.sh", "description": "Disaggregated Multimodal Smoke Test"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-custom-hello-world-yaml">
+
+Deploys a minimal Python backend and frontend without a GPU-backed model.
+
+[Source: `hello_world.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/custom_backend/hello_world/deploy/hello_world.yaml)
+
+<Code src="../../../../../examples/custom_backend/hello_world/deploy/hello_world.yaml" title="hello_world.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-mocker-mocker-agg-yaml">
+
+[Source: `agg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/agg.yaml)
+
+<Code src="../../../../../examples/backends/mocker/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-mocker-mocker-disagg-yaml">
+
+[Source: `disagg.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/mocker/deploy/disagg.yaml)
+
+<Code src="../../../../../examples/backends/mocker/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-tritonserver-identity-sh">
+
+```bash
+(cd examples/backends/tritonserver && bash launch/identity.sh)
+```
+
+[Source: `identity.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/tritonserver/launch/identity.sh)
+
+<Code src="../../../../../examples/backends/tritonserver/launch/identity.sh" title="identity.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sample-agg-sh">
+
+```bash
+(cd examples/backends/sample && bash launch/agg.sh)
+```
+
+[Source: `agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sample/launch/agg.sh)
+
+<Code src="../../../../../examples/backends/sample/launch/agg.sh" title="agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sample-disagg-sh">
+
+```bash
+(cd examples/backends/sample && bash launch/disagg.sh)
+```
+
+[Source: `disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sample/launch/disagg.sh)
+
+<Code src="../../../../../examples/backends/sample/launch/disagg.sh" title="disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sample-agg-diffusion-sh">
+
+```bash
+(cd examples/backends/sample && bash launch/agg_diffusion.sh)
+```
+
+[Source: `agg_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sample/launch/agg_diffusion.sh)
+
+<Code src="../../../../../examples/backends/sample/launch/agg_diffusion.sh" title="agg_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sample-multimodal-agg-sh">
+
+```bash
+(cd examples/backends/sample && bash launch/multimodal_agg.sh)
+```
+
+[Source: `multimodal_agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sample/launch/multimodal_agg.sh)
+
+<Code src="../../../../../examples/backends/sample/launch/multimodal_agg.sh" title="multimodal_agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sample-multimodal-disagg-sh">
+
+```bash
+(cd examples/backends/sample && bash launch/multimodal_disagg.sh)
+```
+
+[Source: `multimodal_disagg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sample/launch/multimodal_disagg.sh)
+
+<Code src="../../../../../examples/backends/sample/launch/multimodal_disagg.sh" title="multimodal_disagg.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

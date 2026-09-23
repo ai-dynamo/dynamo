@@ -1,0 +1,119 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "KV Block Manager"
+subtitle: "Aggregated and disaggregated vLLM with KVBM offloading."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-agg-kvbm-yaml", "target": "kubernetes:vllm", "label": "agg_kvbm.yaml", "description": "Aggregated with KV Block Manager offloading"},
+    {"id": "kubernetes-vllm-disagg-kvbm-yaml", "target": "kubernetes:vllm", "label": "disagg_kvbm.yaml", "description": "Disaggregated with KV Block Manager offloading"},
+    {"id": "kubernetes-vllm-disagg-kvbm-tp2-yaml", "target": "kubernetes:vllm", "label": "disagg_kvbm_tp2.yaml", "description": "Disaggregated KVBM, tensor-parallel 2"},
+    {"id": "kubernetes-vllm-disagg-kvbm-2p2d-yaml", "target": "kubernetes:vllm", "label": "disagg_kvbm_2p2d.yaml", "description": "Disaggregated KVBM, 2 prefill + 2 decode workers"},
+    {"id": "local-vllm-agg-kvbm-sh", "target": "local:vllm", "label": "agg_kvbm.sh", "description": "KV Block Manager Offloading for One Worker"},
+    {"id": "local-vllm-agg-kvbm-router-sh", "target": "local:vllm", "label": "agg_kvbm_router.sh", "description": "KV Block Manager Offloading with KV Routing"},
+    {"id": "local-vllm-disagg-kvbm-sh", "target": "local:vllm", "label": "disagg_kvbm.sh", "description": "KV Block Manager on the Prefill Worker"},
+    {"id": "local-vllm-disagg-kvbm-2p2d-sh", "target": "local:vllm", "label": "disagg_kvbm_2p2d.sh", "description": "Two Prefill and Two Decode Workers with KVBM"},
+    {"id": "local-vllm-disagg-kvbm-router-sh", "target": "local:vllm", "label": "disagg_kvbm_router.sh", "description": "KVBM with Cache-Aware Pool Routing"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-kvbm-yaml">
+
+[Source: `agg_kvbm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_kvbm.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_kvbm.yaml" title="agg_kvbm.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-kvbm-yaml">
+
+[Source: `disagg_kvbm.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_kvbm.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_kvbm.yaml" title="disagg_kvbm.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-kvbm-tp2-yaml">
+
+[Source: `disagg_kvbm_tp2.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_kvbm_tp2.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_kvbm_tp2.yaml" title="disagg_kvbm_tp2.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-kvbm-2p2d-yaml">
+
+[Source: `disagg_kvbm_2p2d.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg_kvbm_2p2d.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg_kvbm_2p2d.yaml" title="disagg_kvbm_2p2d.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-kvbm-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_kvbm.sh)
+```
+
+[Source: `agg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_kvbm.sh" title="agg_kvbm.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-kvbm-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_kvbm_router.sh)
+```
+
+[Source: `agg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_kvbm_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_kvbm_router.sh" title="agg_kvbm_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-kvbm-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_kvbm.sh)
+```
+
+[Source: `disagg_kvbm.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_kvbm.sh" title="disagg_kvbm.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-kvbm-2p2d-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_kvbm_2p2d.sh)
+```
+
+[Source: `disagg_kvbm_2p2d.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_2p2d.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_kvbm_2p2d.sh" title="disagg_kvbm_2p2d.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-kvbm-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_kvbm_router.sh)
+```
+
+[Source: `disagg_kvbm_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_kvbm_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_kvbm_router.sh" title="disagg_kvbm_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

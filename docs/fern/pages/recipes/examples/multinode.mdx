@@ -1,0 +1,45 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Multinode Disaggregation"
+subtitle: "Kubernetes deployments that distribute prefill and decode across nodes."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-disagg-multinode-yaml", "target": "kubernetes:sglang", "label": "disagg-multinode.yaml", "description": "Disaggregated across multiple nodes"},
+    {"id": "kubernetes-trtllm-disagg-multinode-yaml", "target": "kubernetes:trtllm", "label": "disagg-multinode.yaml", "description": "Disaggregated across multiple nodes (bundles a ConfigMap and PersistentVolumeClaim)"},
+    {"id": "kubernetes-vllm-disagg-multinode-yaml", "target": "kubernetes:vllm", "label": "disagg-multinode.yaml", "description": "Disaggregated across multiple nodes"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-disagg-multinode-yaml">
+
+[Source: `disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/disagg-multinode.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/disagg-multinode.yaml" title="disagg-multinode.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-disagg-multinode-yaml">
+
+[Source: `disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/disagg-multinode.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/disagg-multinode.yaml" title="disagg-multinode.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-disagg-multinode-yaml">
+
+[Source: `disagg-multinode.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/disagg-multinode.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/disagg-multinode.yaml" title="disagg-multinode.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

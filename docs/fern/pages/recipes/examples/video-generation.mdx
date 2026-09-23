@@ -1,0 +1,70 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Video Generation"
+subtitle: "Text-to-video and image-to-video launch scripts."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-text-to-video-diffusion-sh", "target": "local:sglang", "label": "text-to-video-diffusion.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-trtllm-agg-video-diffusion-sh", "target": "local:trtllm", "label": "agg_video_diffusion.sh", "description": "Text-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-i2v-sh", "target": "local:vllm", "label": "agg_omni_i2v.sh", "description": "Image-to-Video Generation"},
+    {"id": "local-vllm-agg-omni-video-sh", "target": "local:vllm", "label": "agg_omni_video.sh", "description": "Text-to-Video Generation"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-text-to-video-diffusion-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/text-to-video-diffusion.sh)
+```
+
+[Source: `text-to-video-diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/text-to-video-diffusion.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/text-to-video-diffusion.sh" title="text-to-video-diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-video-diffusion-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_video_diffusion.sh)
+```
+
+[Source: `agg_video_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_video_diffusion.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_video_diffusion.sh" title="agg_video_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-i2v-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_i2v.sh)
+```
+
+[Source: `agg_omni_i2v.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_i2v.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_i2v.sh" title="agg_omni_i2v.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-video-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_video.sh)
+```
+
+[Source: `agg_omni_video.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_video.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_video.sh" title="agg_omni_video.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

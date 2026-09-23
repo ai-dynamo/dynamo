@@ -1,0 +1,59 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Single-GPU Disaggregation"
+subtitle: "Separate prefill and decode processes sharing one GPU."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+These are functional-test configurations. Review each script’s memory limits before running it.
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-disagg-same-gpu-sh", "target": "local:sglang", "label": "disagg_same_gpu.sh", "description": "Prefill and Decode on One GPU"},
+    {"id": "local-trtllm-disagg-same-gpu-sh", "target": "local:trtllm", "label": "disagg_same_gpu.sh", "description": "Prefill and Decode on One GPU"},
+    {"id": "local-vllm-disagg-same-gpu-sh", "target": "local:vllm", "label": "disagg_same_gpu.sh", "description": "Prefill and Decode on One GPU"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-disagg-same-gpu-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/disagg_same_gpu.sh)
+```
+
+[Source: `disagg_same_gpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_same_gpu.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/disagg_same_gpu.sh" title="disagg_same_gpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-disagg-same-gpu-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/disagg_same_gpu.sh)
+```
+
+[Source: `disagg_same_gpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/disagg_same_gpu.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/disagg_same_gpu.sh" title="disagg_same_gpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-same-gpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_same_gpu.sh)
+```
+
+[Source: `disagg_same_gpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_same_gpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_same_gpu.sh" title="disagg_same_gpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

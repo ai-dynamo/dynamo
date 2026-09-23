@@ -977,39 +977,170 @@ navigation:
                 slug: beam-1-0-501b
           # recipe-nav:end
 
-      # ==================== Kubernetes Templates ====================
-      - section: Kubernetes Templates
-        icon: fa-brands fa-kubernetes
+      # ==================== Examples ====================
+      - section: Examples
+        icon: code
+        slug: examples
         contents:
-          - section: DGD
-            collapsed: open-by-default
+          - page: Overview
+            path: pages/recipes/examples/overview.mdx
+            slug: overview
+          - section: Basic Serving
+            skip-slug: true
+            collapsed: true
             contents:
-              - page: SGLang
-                path: pages/recipes/kubernetes-templates/dgd/sglang.mdx
-              - page: TensorRT-LLM
-                path: pages/recipes/kubernetes-templates/dgd/tensorrt-llm.mdx
-              - page: vLLM
-                path: pages/recipes/kubernetes-templates/dgd/vllm.mdx
-          - page: DGDR
-            path: pages/recipes/kubernetes-templates/dgdr.mdx
-          - page: Cloud Deployments
-            path: pages/recipes/kubernetes-templates/cloud-deployments.mdx
-          - page: Integration Deployments
-            path: pages/recipes/kubernetes-templates/integration-deployments.mdx
-
-      # ==================== Local Templates ====================
-      - section: Local Templates
-        slug: cli-templates
-        icon: rectangle-terminal
-        contents:
-          - page: SGLang
-            path: pages/recipes/cli-templates/sglang.mdx
-          - page: TensorRT-LLM
-            path: pages/recipes/cli-templates/tensorrt-llm.mdx
-          - page: vLLM
-            path: pages/recipes/cli-templates/vllm.mdx
-          - page: Additional Backends
-            path: pages/recipes/cli-templates/additional-backends.mdx
+              - page: Aggregated Serving
+                path: pages/recipes/examples/aggregated.mdx
+                slug: aggregated
+              - page: Disaggregated Serving
+                path: pages/recipes/examples/disaggregated.mdx
+                slug: disaggregated
+              - page: Single-GPU Disaggregation
+                path: pages/recipes/examples/single-gpu-disaggregation.mdx
+                slug: single-gpu-disaggregation
+              - page: Multinode Disaggregation
+                path: pages/recipes/examples/multinode.mdx
+                slug: multinode
+              - page: Tensor and Expert Parallelism
+                path: pages/recipes/examples/parallelism.mdx
+                slug: parallelism
+              - page: Speculative Decoding
+                path: pages/recipes/examples/speculative-decoding.mdx
+                slug: speculative-decoding
+          - section: Routing
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Aggregated KV-Aware Routing
+                path: pages/recipes/examples/aggregated-kv-routing.mdx
+                slug: aggregated-kv-routing
+              - page: Disaggregated KV-Aware Routing
+                path: pages/recipes/examples/disaggregated-kv-routing.mdx
+                slug: disaggregated-kv-routing
+              - page: Approximate Cache Tracking
+                path: pages/recipes/examples/approximate-kv-routing.mdx
+                slug: approximate-kv-routing
+              - page: Request-Plane Transports
+                path: pages/recipes/examples/request-planes.mdx
+                slug: request-planes
+              - page: Gateway API Routing
+                path: pages/recipes/examples/gateway-api.mdx
+                slug: gateway-api
+              - page: Session Affinity
+                path: pages/recipes/examples/session-affinity.mdx
+                slug: session-affinity
+          - section: KV Cache Offloading
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: KV Block Manager
+                path: pages/recipes/examples/kvbm.mdx
+                slug: kvbm
+              - page: LMCache
+                path: pages/recipes/examples/lmcache.mdx
+                slug: lmcache
+              - page: FlexKV
+                path: pages/recipes/examples/flexkv.mdx
+                slug: flexkv
+          - section: Multimodal Serving
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Aggregated Multimodal Serving
+                path: pages/recipes/examples/multimodal.mdx
+                slug: multimodal
+              - page: Multimodal KV Routing
+                path: pages/recipes/examples/multimodal-routing.mdx
+                slug: multimodal-routing
+              - page: Separate Encode and PD
+                path: pages/recipes/examples/encode-pd.mdx
+                slug: encode-pd
+              - page: Separate Encode, Prefill, and Decode
+                path: pages/recipes/examples/encode-prefill-decode.mdx
+                slug: encode-prefill-decode
+              - page: Multimodal Prefill and Decode
+                path: pages/recipes/examples/multimodal-prefill-decode.mdx
+                slug: multimodal-prefill-decode
+              - page: Custom Encoders
+                path: pages/recipes/examples/custom-encoders.mdx
+                slug: custom-encoders
+          - section: Workloads
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: LoRA Serving
+                path: pages/recipes/examples/lora.mdx
+                slug: lora
+              - page: Text Embeddings
+                path: pages/recipes/examples/embeddings.mdx
+                slug: embeddings
+              - page: Sequence Classification
+                path: pages/recipes/examples/classification.mdx
+                slug: classification
+              - page: Image Generation
+                path: pages/recipes/examples/image-generation.mdx
+                slug: image-generation
+              - page: Video Generation
+                path: pages/recipes/examples/video-generation.mdx
+                slug: video-generation
+              - page: Diffusion Language Models
+                path: pages/recipes/examples/text-diffusion.mdx
+                slug: text-diffusion
+              - page: Audio and Realtime Serving
+                path: pages/recipes/examples/audio.mdx
+                slug: audio
+              - page: FastVideo
+                path: pages/recipes/examples/fastvideo.mdx
+                slug: fastvideo
+          - section: Autoscaling and Budgets
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Planner Autoscaling
+                path: pages/recipes/examples/planner.mdx
+                slug: planner
+              - page: Deployment Requests (DGDR)
+                path: pages/recipes/examples/dgdr.mdx
+                slug: dgdr
+              - page: Global Planner
+                path: pages/recipes/examples/global-planner.mdx
+                slug: global-planner
+          - section: Observability and Recovery
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: OpenTelemetry Tracing
+                path: pages/recipes/examples/tracing.mdx
+                slug: tracing
+              - page: Logging and Metrics
+                path: pages/recipes/examples/logging-metrics.mdx
+                slug: logging-metrics
+              - page: GPU Memory Service
+                path: pages/recipes/examples/gpu-memory-service.mdx
+                slug: gpu-memory-service
+              - page: GPU Failover
+                path: pages/recipes/examples/failover.mdx
+                slug: failover
+              - page: Snapshot Restore
+                path: pages/recipes/examples/snapshot-restore.mdx
+                slug: snapshot-restore
+          - section: Cloud and Integrations
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Cloud Deployments
+                path: pages/recipes/examples/cloud-deployments.mdx
+                slug: cloud-deployments
+              - page: llm-d Batch Gateway
+                path: pages/recipes/examples/batch-gateway.mdx
+                slug: batch-gateway
+          - section: Development Examples
+            skip-slug: true
+            collapsed: true
+            contents:
+              - page: Custom Backends and Testing
+                path: pages/recipes/examples/custom-backends.mdx
+                slug: custom-backends
 
       # ==================== Feature Benchmarks ====================
       # Evidence pages behind the recipes: controlled A/B benchmarks whose

@@ -1,0 +1,83 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Image Generation"
+subtitle: "Aggregated and disaggregated image-generation launch scripts."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-image-diffusion-sh", "target": "local:sglang", "label": "image_diffusion.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-trtllm-agg-image-diffusion-sh", "target": "local:trtllm", "label": "agg_image_diffusion.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-vllm-agg-omni-image-sh", "target": "local:vllm", "label": "agg_omni_image.sh", "description": "Text-to-Image Generation"},
+    {"id": "local-vllm-disagg-omni-glm-image-sh", "target": "local:vllm", "label": "disagg_omni_glm_image.sh", "description": "Two-Stage GLM-Image Generation"},
+    {"id": "local-vllm-disagg-omni-glm-image-nixl-sh", "target": "local:vllm", "label": "disagg_omni_glm_image_nixl.sh", "description": "Cross-Node GLM-Image with NIXL"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-image-diffusion-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/image_diffusion.sh)
+```
+
+[Source: `image_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/image_diffusion.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/image_diffusion.sh" title="image_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-image-diffusion-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_image_diffusion.sh)
+```
+
+[Source: `agg_image_diffusion.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_image_diffusion.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_image_diffusion.sh" title="agg_image_diffusion.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-omni-image-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_omni_image.sh)
+```
+
+[Source: `agg_omni_image.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_image.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_omni_image.sh" title="agg_omni_image.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-omni-glm-image-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_omni_glm_image.sh)
+```
+
+[Source: `disagg_omni_glm_image.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_omni_glm_image.sh" title="disagg_omni_glm_image.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-disagg-omni-glm-image-nixl-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/disagg_omni_glm_image_nixl.sh)
+```
+
+[Source: `disagg_omni_glm_image_nixl.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh" title="disagg_omni_glm_image_nixl.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

@@ -191,7 +191,7 @@ curl http://localhost:8000/v1/images/generations \
 
 - [Text-to-Image with vLLM-Omni](text-to-image.md#vllm-omni)
 - [Text-to-Image with TensorRT-LLM](text-to-image.md#tensorrt-llm)
-- [SGLang Examples](../../../recipes/cli-templates/sglang.mdx)
+- [Deployment Examples](../../../recipes/examples/image-generation.mdx)
 - [SGLang Configuration reference](../../../reference/backends/sglang-configuration.mdx)
 
 </Tab>

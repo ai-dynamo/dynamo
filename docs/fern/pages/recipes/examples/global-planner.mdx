@@ -1,0 +1,56 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Global Planner"
+subtitle: "Multi-model GPU budgets and single-endpoint, multi-pool deployments."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Substitute the environment variables with `envsubst` before applying the GPU-budget manifest. The Mocker variant runs in `--no-operation` mode. See the [source README](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/README.md) for setup and verification.
+
+Replace image, secret, storage, and hardware settings before applying. Keep supporting resources with their deployment.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-global-planner-gpu-budget-yaml", "target": "kubernetes:vllm", "label": "global-planner-gpu-budget.yaml", "description": "Multi-model shared GPU budget"},
+    {"id": "kubernetes-vllm-global-planner-vllm-test-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "global-planner-vllm-test-xpu-dra.yaml", "description": "global-planner-vllm-test-xpu-dra.yaml"},
+    {"id": "kubernetes-vllm-global-planner-vllm-test-yaml", "target": "kubernetes:vllm", "label": "global-planner-vllm-test.yaml", "description": "global-planner-vllm-test.yaml"},
+    {"id": "kubernetes-mocker-global-planner-mocker-test-yaml", "target": "kubernetes:mocker", "label": "global-planner-mocker-test.yaml", "description": "global-planner-mocker-test.yaml"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-global-planner-gpu-budget-yaml">
+
+[Source: `global-planner-gpu-budget.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-gpu-budget.yaml)
+
+<Code src="../../../../../examples/global_planner/global-planner-gpu-budget.yaml" title="global-planner-gpu-budget.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-global-planner-vllm-test-xpu-dra-yaml">
+
+[Source: `global-planner-vllm-test-xpu-dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test-xpu-dra.yaml)
+
+<Code src="../../../../../examples/global_planner/global-planner-vllm-test-xpu-dra.yaml" title="global-planner-vllm-test-xpu-dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-global-planner-vllm-test-yaml">
+
+[Source: `global-planner-vllm-test.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-vllm-test.yaml)
+
+<Code src="../../../../../examples/global_planner/global-planner-vllm-test.yaml" title="global-planner-vllm-test.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-mocker-global-planner-mocker-test-yaml">
+
+[Source: `global-planner-mocker-test.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/global_planner/global-planner-mocker-test.yaml)
+
+<Code src="../../../../../examples/global_planner/global-planner-mocker-test.yaml" title="global-planner-mocker-test.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

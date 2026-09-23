@@ -7,7 +7,7 @@ subtitle: Deploy a model by intent — describe the model, workload, and SLA tar
 
 A **DynamoGraphDeploymentRequest (DGDR)** is Dynamo's deploy-by-intent path. Instead of hand-authoring a [DynamoGraphDeployment (DGD)](../model-deployment/deploy-with-dgd.md) with explicit parallelism, replica counts, and resource limits, you describe *what* you want to run — model, backend, workload, and optional latency targets — and Dynamo's profiler analyzes your cluster's GPUs, selects a configuration, and generates the DGD that serves traffic.
 
-This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the component relationships and guidance on choosing DGDR, see the [Auto Deployment overview](overview.mdx). For the full field table and lifecycle reference, see the [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx); for ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
+This guide walks through authoring that request, starting from the smallest possible DGDR and layering on workload targets, search strategy, hardware sizing, model caching, runtime autoscaling, and review-before-deploy as you need them. Each step builds on the previous one. For the component relationships and guidance on choosing DGDR, see the [Auto Deployment overview](overview.mdx). For the full field table and lifecycle reference, see the [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx); for ready-to-copy manifests, see [DGDR Templates](../../recipes/examples/dgdr.mdx).
 
 > [!NOTE]
 > In a release installation, when you omit `spec.image`, the DGDR webhook selects
@@ -499,7 +499,7 @@ tenancy boundary for anything stronger.
 
 | Goal | Guide |
 |---|---|
-| Copy-ready DGDR manifests | [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx), [Profiler Examples](../../developer-guide/knowledge-base/modular-components/profiler/profiler-examples.md) |
+| Copy-ready DGDR manifests | [DGDR Templates](../../recipes/examples/dgdr.mdx), [Profiler Examples](../../developer-guide/knowledge-base/modular-components/profiler/profiler-examples.md) |
 | Full field table and lifecycle | [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) |
 | Author the deployment by hand instead | [DGD Guide](../model-deployment/deploy-with-dgd.md) |
 | Profiling algorithms and modes | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |

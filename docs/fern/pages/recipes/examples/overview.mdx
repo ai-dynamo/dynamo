@@ -1,0 +1,549 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Examples"
+subtitle: "Deployment manifests and launch scripts by topic, platform, and backend."
+hide-toc: true
+---
+
+
+import { ExamplesCatalog } from "@/components/ExamplesCatalog";
+
+Choose a DGD/DGDR manifest or launch script, then select an available platform and backend. These pages expose files from
+[`examples/`](https://github.com/ai-dynamo/dynamo/tree/main/examples); they are not performance-tuned model recipes.
+
+<ExamplesCatalog>
+
+<div className="dynamo-example-card" data-example="aggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg-with-config.yaml agg.sh agg.yaml agg_xpu.sh agg_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Aggregated Serving](aggregated.mdx)
+
+Frontend and workers that each perform prefill and decode.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="disaggregated" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg.sh disagg.yaml disagg_hetero_cpu_decode.sh disagg_hetero_xpu_prefill.sh disagg_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Disaggregated Serving](disaggregated.mdx)
+
+Dedicated prefill and decode workers with KV-cache transfer.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="single-gpu-disaggregation" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_same_gpu.sh">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Single-GPU Disaggregation](single-gpu-disaggregation.mdx)
+
+Separate prefill and decode processes sharing one GPU.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="multinode" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" data-keywords="disagg-multinode.yaml">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Multinode Disaggregation](multinode.mdx)
+
+Kubernetes deployments that distribute prefill and decode across nodes.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="parallelism" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="dep.sh disagg_dp_attn.sh dsr1_dep.sh gpt_oss_disagg.sh multi_node_tp.sh">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Tensor and Expert Parallelism](parallelism.mdx)
+
+Tensor-parallel, expert-parallel, and data-parallel attention examples.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="speculative-decoding" data-topic="basic-serving" data-topic-label="Basic Serving" data-targets="local:vllm" data-keywords="agg_spec_decoding.sh">
+
+<span className="dynamo-example-eyebrow">Basic Serving · Example</span>
+### [Speculative Decoding](speculative-decoding.mdx)
+
+vLLM aggregated serving with EAGLE speculative decoding.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="aggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="agg_router.sh agg_router.yaml agg_router_replicas.sh agg_router_xpu.sh agg_router_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Aggregated KV-Aware Routing](aggregated-kv-routing.mdx)
+
+Cache-aware routing to aggregated workers.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="disaggregated-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:trtllm kubernetes:vllm local:sglang local:trtllm local:vllm" data-keywords="disagg_router.sh disagg_router.yaml disagg_router_gaudi.sh disagg_router_xpu_dra.yaml disagg_router_xpu_gdr.sh">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Disaggregated KV-Aware Routing](disaggregated-kv-routing.mdx)
+
+Cache-aware routing to separate prefill and decode workers.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: TensorRT-LLM, vLLM</span>
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="approximate-kv-routing" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm local:trtllm local:vllm" data-keywords="agg_router_approx.sh agg_router_approx_xpu.sh agg_router_kv_approx.yaml agg_router_kv_approx_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Approximate Cache Tracking](approximate-kv-routing.mdx)
+
+KV-aware routing without worker cache-event publishing.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+<span>Local / CLI: TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="request-planes" data-topic="routing" data-topic-label="Routing" data-targets="local:vllm" data-keywords="agg_request_planes.sh agg_request_planes_xpu.sh">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Request-Plane Transports](request-planes.mdx)
+
+Select the transport used for worker requests.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gateway-api" data-topic="routing" data-topic-label="Routing" data-targets="kubernetes:vllm" data-keywords="agg.yaml disagg.yaml">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Gateway API Routing](gateway-api.mdx)
+
+Aggregated and disaggregated vLLM behind an Endpoint Picker.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="session-affinity" data-topic="routing" data-topic-label="Routing" data-targets="local:sglang" data-keywords="agg_agent.sh">
+
+<span className="dynamo-example-eyebrow">Routing · Example</span>
+### [Session Affinity](session-affinity.mdx)
+
+SGLang agentic serving with sticky sessions and KV-aware routing.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="kvbm" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_kvbm.sh agg_kvbm.yaml agg_kvbm_router.sh disagg_kvbm.sh disagg_kvbm.yaml disagg_kvbm_2p2d.sh disagg_kvbm_2p2d.yaml disagg_kvbm_router.sh disagg_kvbm_tp2.yaml">
+
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [KV Block Manager](kvbm.mdx)
+
+Aggregated and disaggregated vLLM with KVBM offloading.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="lmcache" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="kubernetes:vllm local:vllm" data-keywords="agg_lmcache.sh agg_lmcache.yaml agg_lmcache_mp.sh agg_lmcache_multiproc.sh agg_lmcache_multiproc_xpu.sh agg_lmcache_xpu.sh disagg_lmcache.sh">
+
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [LMCache](lmcache.mdx)
+
+In-process and external LMCache examples for vLLM.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="flexkv" data-topic="kv-cache-offloading" data-topic-label="KV Cache Offloading" data-targets="local:vllm" data-keywords="agg_flexkv.sh agg_flexkv_router.sh disagg_flexkv.sh">
+
+<span className="dynamo-example-eyebrow">KV Cache Offloading · Example</span>
+### [FlexKV](flexkv.mdx)
+
+Local vLLM cache offloading with FlexKV.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="multimodal" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal.sh agg_multimodal_xpu.sh agg_vision.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Aggregated Multimodal Serving](multimodal.mdx)
+
+Serve image and video inputs with an aggregated language-model worker.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="multimodal-routing" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_multimodal_router.sh agg_multimodal_router_chat_processor.sh agg_multimodal_router_chat_processor_xpu.sh agg_multimodal_router_xpu.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Multimodal KV Routing](multimodal-routing.mdx)
+
+Route multimodal requests using text and media cache overlap.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="encode-pd" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_e_pd.sh disagg_multimodal_e_pd.sh multimodal_epd.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Separate Encode and PD](encode-pd.mdx)
+
+A dedicated encoder with a combined prefill/decode worker (E/PD).
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="encode-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:sglang local:trtllm local:vllm" data-keywords="disagg_multimodal_epd.sh disagg_multimodal_epd_xpu.sh epd_disagg.sh epd_multimodal_image_and_embeddings.sh multimodal_disagg.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Separate Encode, Prefill, and Decode](encode-prefill-decode.mdx)
+
+Dedicated encode, prefill, and decode workers (E/P/D).
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="multimodal-prefill-decode" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:trtllm local:vllm" data-keywords="disagg_multimodal.sh disagg_multimodal_p_d.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Multimodal Prefill and Decode](multimodal-prefill-decode.mdx)
+
+Multimodal prefill/decode separation without a dedicated encoder.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="custom-encoders" data-topic="multimodal-serving" data-topic-label="Multimodal Serving" data-targets="local:vllm" data-keywords="agg_custom.sh agg_qwen3_5_native.sh">
+
+<span className="dynamo-example-eyebrow">Multimodal Serving · Example</span>
+### [Custom Encoders](custom-encoders.mdx)
+
+Launch a language-model backend with a custom vision encoder.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="lora" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:vllm local:sglang local:vllm" data-keywords="agg_lora.sh agg_lora.yaml agg_lora_hf.sh agg_lora_hf.yaml agg_lora_router.sh agg_lora_router_xpu.sh agg_lora_xpu.sh agg_qwen_lora.yaml lora_agg.sh omni_lora_agg.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [LoRA Serving](lora.mdx)
+
+LoRA adapters for text, multimodal, and vLLM-Omni serving.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+<span>Local / CLI: SGLang, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="embeddings" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:vllm" data-keywords="agg_embed.sh agg_embed_multiworker.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Text Embeddings](embeddings.mdx)
+
+Embedding workers, load balancing, and model-name dispatch.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="classification" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_classify.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Sequence Classification](classification.mdx)
+
+vLLM sequence classification and pooling.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="image-generation" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_image_diffusion.sh agg_omni_image.sh disagg_omni_glm_image.sh disagg_omni_glm_image_nixl.sh image_diffusion.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Image Generation](image-generation.mdx)
+
+Aggregated and disaggregated image-generation launch scripts.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="video-generation" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang local:trtllm local:vllm" data-keywords="agg_omni_i2v.sh agg_omni_video.sh agg_video_diffusion.sh text-to-video-diffusion.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Video Generation](video-generation.mdx)
+
+Text-to-video and image-to-video launch scripts.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="text-diffusion" data-topic="workloads" data-topic-label="Workloads" data-targets="local:sglang" data-keywords="diffusion_llada.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Diffusion Language Models](text-diffusion.mdx)
+
+SGLang text generation through iterative refinement.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: SGLang</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="audio" data-topic="workloads" data-topic-label="Workloads" data-targets="local:vllm" data-keywords="agg_omni_audio.sh agg_omni_realtime.sh agg_realtime_transcription.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [Audio and Realtime Serving](audio.mdx)
+
+Audio generation, transcription, and realtime vLLM serving.
+
+<div className="dynamo-example-badges">
+<span>Local / CLI: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="fastvideo" data-topic="workloads" data-topic-label="Workloads" data-targets="kubernetes:fastvideo local:fastvideo" data-keywords="agg.yaml agg_user_workload.yaml run_local.sh">
+
+<span className="dynamo-example-eyebrow">Workloads · Example</span>
+### [FastVideo](fastvideo.mdx)
+
+The custom FastVideo worker on local hosts or Kubernetes.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: FastVideo</span>
+<span>Local / CLI: FastVideo</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:sglang kubernetes:trtllm kubernetes:vllm" data-keywords="disagg_planner.yaml disagg_planner_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Planner Autoscaling](planner.mdx)
+
+Disaggregated serving with Dynamo Planner autoscaling.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, TensorRT-LLM, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="dgdr" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="generated-dgd-override.yaml mocker.yaml model-cache.yaml moe-sglang.yaml planner.yaml profiling-artifacts.yaml rapid.yaml review-before-deploy.yaml thorough.yaml">
+
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Deployment Requests (DGDR)](dgdr.mdx)
+
+Generate and customize deployments with DynamoGraphDeploymentRequest.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM, SGLang</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="global-planner" data-topic="autoscaling-and-budgets" data-topic-label="Autoscaling and Budgets" data-targets="kubernetes:vllm kubernetes:mocker" data-keywords="global-planner-gpu-budget.yaml global-planner-mocker-test.yaml global-planner-vllm-test-xpu-dra.yaml global-planner-vllm-test.yaml">
+
+<span className="dynamo-example-eyebrow">Autoscaling and Budgets · Example</span>
+### [Global Planner](global-planner.mdx)
+
+Multi-model GPU budgets and single-endpoint, multi-pool deployments.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM, Mocker</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="tracing" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm local:vllm local:sglang local:trtllm" data-keywords="agg.sh agg_tracing.sh agg_tracing.yaml agg_tracing_xpu_dra.yaml disagg.sh disagg_tracing.sh disagg_tracing.yaml disagg_tracing_xpu_dra.yaml">
+
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [OpenTelemetry Tracing](tracing.mdx)
+
+Trace requests through aggregated or disaggregated workers.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+<span>Local / CLI: vLLM, SGLang, TensorRT-LLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="logging-metrics" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang local:trtllm" data-keywords="agg_logging.yaml agg_metrics.sh">
+
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [Logging and Metrics](logging-metrics.mdx)
+
+SGLang structured logging and TensorRT-LLM worker metrics.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang</span>
+<span>Local / CLI: TensorRT-LLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="gpu-memory-service" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:sglang kubernetes:vllm" data-keywords="agg_gms.yaml">
+
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [GPU Memory Service](gpu-memory-service.mdx)
+
+Aggregated workers with a GPU Memory Service sidecar.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: SGLang, vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="failover" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:vllm" data-keywords="agg_failover.yaml gms-failover.yaml">
+
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [GPU Failover](failover.mdx)
+
+Active-passive and multinode GPU Memory Service failover.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="snapshot-restore" data-topic="observability-and-recovery" data-topic-label="Observability and Recovery" data-targets="kubernetes:trtllm" data-keywords="snapshot-restore.yaml">
+
+<span className="dynamo-example-eyebrow">Observability and Recovery · Example</span>
+### [Snapshot Restore](snapshot-restore.mdx)
+
+Restore a TensorRT-LLM worker from a checkpoint.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: TensorRT-LLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="cloud-deployments" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm kubernetes:sglang" data-keywords="agg.yaml disagg-p5.yaml disagg-tcp.yaml disagg.yaml">
+
+<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
+### [Cloud Deployments](cloud-deployments.mdx)
+
+DynamoGraphDeployment manifests for Amazon EKS and Google GKE.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM, SGLang</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="batch-gateway" data-topic="cloud-and-integrations" data-topic-label="Cloud and Integrations" data-targets="kubernetes:vllm" data-keywords="dynamo.yaml">
+
+<span className="dynamo-example-eyebrow">Cloud and Integrations · Example</span>
+### [llm-d Batch Gateway](batch-gateway.mdx)
+
+Batch inference on a dedicated Dynamo worker pool.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: vLLM</span>
+</div>
+
+</div>
+
+<div className="dynamo-example-card" data-example="custom-backends" data-topic="development-examples" data-topic-label="Development Examples" data-targets="kubernetes:custom kubernetes:mocker local:tritonserver local:sample" data-keywords="agg.sh agg.yaml agg_diffusion.sh disagg.sh disagg.yaml hello_world.yaml identity.sh multimodal_agg.sh multimodal_disagg.sh">
+
+<span className="dynamo-example-eyebrow">Development Examples · Example</span>
+### [Custom Backends and Testing](custom-backends.mdx)
+
+Hello World, sample backends, Mocker deployments, and Triton Server.
+
+<div className="dynamo-example-badges">
+<span>Kubernetes: Custom, Mocker</span>
+<span>Local / CLI: Triton Server, Sample</span>
+</div>
+
+</div>
+
+</ExamplesCatalog>

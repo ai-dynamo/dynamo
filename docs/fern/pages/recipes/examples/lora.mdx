@@ -1,0 +1,151 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "LoRA Serving"
+subtitle: "LoRA adapters for text, multimodal, and vLLM-Omni serving."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Follow the [LoRA setup](https://github.com/ai-dynamo/dynamo/blob/main/examples/common/lora.md) for prerequisites and adapter resources before using these deployments.
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-lora-agg-lora-yaml", "target": "kubernetes:vllm", "label": "lora/agg_lora.yaml", "description": "LoRA adapters from object storage"},
+    {"id": "kubernetes-vllm-lora-agg-lora-hf-yaml", "target": "kubernetes:vllm", "label": "lora/agg_lora_hf.yaml", "description": "LoRA adapter from Hugging Face"},
+    {"id": "kubernetes-vllm-lora-multimodal-agg-qwen-lora-yaml", "target": "kubernetes:vllm", "label": "lora/multimodal/agg_qwen_lora.yaml", "description": "Multimodal LoRA serving"},
+    {"id": "local-sglang-lora-agg-lora-sh", "target": "local:sglang", "label": "lora/agg_lora.sh", "description": "Dynamic LoRA Adapter Serving"},
+    {"id": "local-vllm-lora-agg-lora-sh", "target": "local:vllm", "label": "lora/agg_lora.sh", "description": "Dynamic LoRA Adapter Serving"},
+    {"id": "local-vllm-lora-agg-lora-hf-sh", "target": "local:vllm", "label": "lora/agg_lora_hf.sh", "description": "LoRA Adapter from Hugging Face"},
+    {"id": "local-vllm-lora-agg-lora-router-sh", "target": "local:vllm", "label": "lora/agg_lora_router.sh", "description": "LoRA Adapters with KV-Aware Routing"},
+    {"id": "local-vllm-lora-multimodal-lora-agg-sh", "target": "local:vllm", "label": "lora/multimodal/lora_agg.sh", "description": "Multimodal LoRA Adapters"},
+    {"id": "local-vllm-lora-omni-omni-lora-agg-sh", "target": "local:vllm", "label": "lora/omni/omni_lora_agg.sh", "description": "vLLM-Omni Image Generation with LoRA"},
+    {"id": "local-vllm-lora-xpu-agg-lora-router-xpu-sh", "target": "local:vllm", "label": "lora/xpu/agg_lora_router_xpu.sh", "description": "LoRA Adapters with KV-Aware Routing"},
+    {"id": "local-vllm-lora-xpu-agg-lora-xpu-sh", "target": "local:vllm", "label": "lora/xpu/agg_lora_xpu.sh", "description": "Dynamic LoRA Adapter Serving"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-lora-agg-lora-yaml">
+
+[Source: `agg_lora.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/lora/agg_lora.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/lora/agg_lora.yaml" title="agg_lora.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-lora-agg-lora-hf-yaml">
+
+[Source: `agg_lora_hf.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/lora/agg_lora_hf.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/lora/agg_lora_hf.yaml" title="agg_lora_hf.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-lora-multimodal-agg-qwen-lora-yaml">
+
+[Source: `agg_qwen_lora.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/lora/multimodal/agg_qwen_lora.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/lora/multimodal/agg_qwen_lora.yaml" title="agg_qwen_lora.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-lora-agg-lora-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/lora/agg_lora.sh)
+```
+
+[Source: `agg_lora.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/lora/agg_lora.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/lora/agg_lora.sh" title="agg_lora.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-agg-lora-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/agg_lora.sh)
+```
+
+[Source: `agg_lora.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/agg_lora.sh" title="agg_lora.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-agg-lora-hf-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/agg_lora_hf.sh)
+```
+
+[Source: `agg_lora_hf.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_hf.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/agg_lora_hf.sh" title="agg_lora_hf.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-agg-lora-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/agg_lora_router.sh)
+```
+
+[Source: `agg_lora_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/agg_lora_router.sh" title="agg_lora_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-multimodal-lora-agg-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/multimodal/lora_agg.sh)
+```
+
+[Source: `lora_agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/multimodal/lora_agg.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/multimodal/lora_agg.sh" title="lora_agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-omni-omni-lora-agg-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/omni/omni_lora_agg.sh)
+```
+
+[Source: `omni_lora_agg.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/omni/omni_lora_agg.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/omni/omni_lora_agg.sh" title="omni_lora_agg.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-xpu-agg-lora-router-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/xpu/agg_lora_router_xpu.sh)
+```
+
+[Source: `agg_lora_router_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_router_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/xpu/agg_lora_router_xpu.sh" title="agg_lora_router_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-lora-xpu-agg-lora-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/lora/xpu/agg_lora_xpu.sh)
+```
+
+[Source: `agg_lora_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/xpu/agg_lora_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/lora/xpu/agg_lora_xpu.sh" title="agg_lora_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

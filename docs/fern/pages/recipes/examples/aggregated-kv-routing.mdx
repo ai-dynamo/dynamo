@@ -1,0 +1,119 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Aggregated KV-Aware Routing"
+subtitle: "Cache-aware routing to aggregated workers."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run local commands from the repository root. Review model and GPU requirements in the files; replace Kubernetes image, secret, storage, and hardware settings before applying.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-sglang-agg-router-yaml", "target": "kubernetes:sglang", "label": "agg_router.yaml", "description": "Aggregated with KV-aware routing"},
+    {"id": "kubernetes-trtllm-agg-router-yaml", "target": "kubernetes:trtllm", "label": "agg_router.yaml", "description": "Aggregated with KV-aware routing"},
+    {"id": "kubernetes-vllm-agg-router-yaml", "target": "kubernetes:vllm", "label": "agg_router.yaml", "description": "Aggregated with KV-aware routing"},
+    {"id": "kubernetes-vllm-agg-router-xpu-dra-yaml", "target": "kubernetes:vllm", "label": "agg_router_xpu_dra.yaml", "description": "Aggregated with KV-aware routing"},
+    {"id": "local-sglang-agg-router-sh", "target": "local:sglang", "label": "agg_router.sh", "description": "KV-Aware Load Balancing"},
+    {"id": "local-trtllm-agg-router-sh", "target": "local:trtllm", "label": "agg_router.sh", "description": "KV-Aware Load Balancing"},
+    {"id": "local-vllm-agg-router-sh", "target": "local:vllm", "label": "agg_router.sh", "description": "KV-Aware Load Balancing"},
+    {"id": "local-vllm-agg-router-replicas-sh", "target": "local:vllm", "label": "agg_router_replicas.sh", "description": "Replicated Frontends and Routers"},
+    {"id": "local-vllm-xpu-agg-router-xpu-sh", "target": "local:vllm", "label": "xpu/agg_router_xpu.sh", "description": "KV-Aware Load Balancing"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-agg-router-yaml">
+
+[Source: `agg_router.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
+
+<Code src="../../../../../examples/backends/sglang/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-trtllm-agg-router-yaml">
+
+[Source: `agg_router.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
+
+<Code src="../../../../../examples/backends/trtllm/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-router-yaml">
+
+[Source: `agg_router.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-agg-router-xpu-dra-yaml">
+
+[Source: `agg_router_xpu_dra.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/xpu/agg_router_xpu_dra.yaml)
+
+<Code src="../../../../../examples/backends/vllm/deploy/xpu/agg_router_xpu_dra.yaml" title="agg_router_xpu_dra.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-router-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_router.sh)
+```
+
+[Source: `agg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_router.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_router.sh" title="agg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-router-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_router.sh)
+```
+
+[Source: `agg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_router.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_router.sh" title="agg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-router-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_router.sh)
+```
+
+[Source: `agg_router.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_router.sh" title="agg_router.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-router-replicas-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_router_replicas.sh)
+```
+
+[Source: `agg_router_replicas.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_router_replicas.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_router_replicas.sh" title="agg_router_replicas.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-router-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_router_xpu.sh)
+```
+
+[Source: `agg_router_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_router_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_router_xpu.sh" title="agg_router_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

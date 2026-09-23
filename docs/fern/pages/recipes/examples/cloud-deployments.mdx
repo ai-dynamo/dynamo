@@ -1,0 +1,79 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Cloud Deployments"
+subtitle: "DynamoGraphDeployment manifests for Amazon EKS and Google GKE."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Use the provider setup guide linked with each deployment. Replace image tags,
+secrets, storage classes, network settings, and instance types before applying them.
+
+<ExampleSelector
+  variants={[
+    {"id": "kubernetes-vllm-eks-agg-yaml", "target": "kubernetes:vllm", "label": "EKS · agg.yaml", "description": "EKS · Aggregated vLLM on EKS"},
+    {"id": "kubernetes-vllm-eks-disagg-yaml", "target": "kubernetes:vllm", "label": "EKS · disagg.yaml", "description": "EKS · Disaggregated vLLM over EFA"},
+    {"id": "kubernetes-vllm-eks-disagg-p5-yaml", "target": "kubernetes:vllm", "label": "EKS · disagg-p5.yaml", "description": "EKS · Disaggregated vLLM on P5 instances"},
+    {"id": "kubernetes-vllm-eks-disagg-tcp-yaml", "target": "kubernetes:vllm", "label": "EKS · disagg-tcp.yaml", "description": "EKS · Disaggregated vLLM over TCP"},
+    {"id": "kubernetes-vllm-gke-disagg-yaml", "target": "kubernetes:vllm", "label": "GKE · disagg.yaml", "description": "GKE · Disaggregated serving"},
+    {"id": "kubernetes-sglang-gke-disagg-yaml", "target": "kubernetes:sglang", "label": "GKE · disagg.yaml", "description": "GKE · Disaggregated serving"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-eks-agg-yaml">
+
+See [Amazon EKS Setup](../../kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) for cluster,
+storage, Elastic Fabric Adapter (EFA), and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-eks-disagg-yaml">
+
+See [Amazon EKS Setup](../../kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) for cluster,
+storage, Elastic Fabric Adapter (EFA), and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-eks-disagg-p5-yaml">
+
+See [Amazon EKS Setup](../../kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) for cluster,
+storage, Elastic Fabric Adapter (EFA), and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg-p5.yaml" title="disagg-p5.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-eks-disagg-tcp-yaml">
+
+See [Amazon EKS Setup](../../kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) for cluster,
+storage, Elastic Fabric Adapter (EFA), and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg-tcp.yaml" title="disagg-tcp.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-vllm-gke-disagg-yaml">
+
+See [Google Kubernetes Engine Setup](../../kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx)
+for cluster and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/GKE/vllm/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="kubernetes-sglang-gke-disagg-yaml">
+
+See [Google Kubernetes Engine Setup](../../kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx)
+for cluster and Dynamo platform setup.
+
+<Code src="../../../../../examples/deployments/GKE/sglang/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

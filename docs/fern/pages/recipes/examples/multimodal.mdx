@@ -1,0 +1,70 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Aggregated Multimodal Serving"
+subtitle: "Serve image and video inputs with an aggregated language-model worker."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-sglang-agg-vision-sh", "target": "local:sglang", "label": "agg_vision.sh", "description": "Image and Video Inputs"},
+    {"id": "local-trtllm-agg-multimodal-sh", "target": "local:trtllm", "label": "agg_multimodal.sh", "description": "Image and Text Inputs"},
+    {"id": "local-vllm-agg-multimodal-sh", "target": "local:vllm", "label": "agg_multimodal.sh", "description": "Image and Video Inputs"},
+    {"id": "local-vllm-xpu-agg-multimodal-xpu-sh", "target": "local:vllm", "label": "xpu/agg_multimodal_xpu.sh", "description": "Image and Video Inputs"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-sglang-agg-vision-sh">
+
+```bash
+(cd examples/backends/sglang && bash launch/agg_vision.sh)
+```
+
+[Source: `agg_vision.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/agg_vision.sh)
+
+<Code src="../../../../../examples/backends/sglang/launch/agg_vision.sh" title="agg_vision.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-trtllm-agg-multimodal-sh">
+
+```bash
+(cd examples/backends/trtllm && bash launch/agg_multimodal.sh)
+```
+
+[Source: `agg_multimodal.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/launch/agg_multimodal.sh)
+
+<Code src="../../../../../examples/backends/trtllm/launch/agg_multimodal.sh" title="agg_multimodal.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-multimodal-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_multimodal.sh)
+```
+
+[Source: `agg_multimodal.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_multimodal.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_multimodal.sh" title="agg_multimodal.sh" language="bash" maxLines={0} />
+
+</div>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-xpu-agg-multimodal-xpu-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/xpu/agg_multimodal_xpu.sh)
+```
+
+[Source: `agg_multimodal_xpu.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/agg_multimodal_xpu.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/xpu/agg_multimodal_xpu.sh" title="agg_multimodal_xpu.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>

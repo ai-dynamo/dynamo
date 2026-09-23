@@ -1,0 +1,31 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Speculative Decoding"
+subtitle: "vLLM aggregated serving with EAGLE speculative decoding."
+hide-toc: true
+---
+
+import { ExampleSelector } from "@/components/ExampleSelector";
+
+Run commands from the repository root. Review each script’s model, GPU, and environment requirements before use.
+
+<ExampleSelector
+  variants={[
+    {"id": "local-vllm-agg-spec-decoding-sh", "target": "local:vllm", "label": "agg_spec_decoding.sh", "description": "Speculative Decoding with EAGLE"}
+  ]}
+>
+
+<div className="dynamo-example-variant" data-example-variant="local-vllm-agg-spec-decoding-sh">
+
+```bash
+(cd examples/backends/vllm && bash launch/agg_spec_decoding.sh)
+```
+
+[Source: `agg_spec_decoding.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_spec_decoding.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/agg_spec_decoding.sh" title="agg_spec_decoding.sh" language="bash" maxLines={0} />
+
+</div>
+
+</ExampleSelector>
