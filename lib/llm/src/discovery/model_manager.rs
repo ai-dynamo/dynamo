@@ -2268,6 +2268,44 @@ impl ModelManager {
         Ok(crate::kv_router::ManagedKvRouter::new(load_context, router))
     }
 
+    /// Construct and attach all configured plugins before publishing the router.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_plugins_and_client(
+        &self,
+        client: Client,
+        kv_cache_block_size: u32,
+        plugins: &crate::kv_router::plugins::RouterPluginBuilder,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+        scheduler_load: crate::kv_router::SchedulerLoadSender,
+        cancellation_token: CancellationToken,
+    ) -> anyhow::Result<Arc<KvRouter>> {
+        if let Some(config) = &kv_router_config {
+            plugins.validate_config(config)?;
+        }
+        let chooser = self
+            .kv_chooser_for_with_policy_and_client(
+                client,
+                kv_cache_block_size,
+                plugins.selection_policy(),
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                is_eagle,
+                scheduler_load,
+                cancellation_token,
+            )
+            .await?;
+        plugins.install(&chooser)?;
+        Ok(chooser)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn kv_chooser_for_with_policy_and_client(
         &self,
@@ -2345,19 +2383,12 @@ impl ModelManager {
             None
         };
 
-        let kv_event_source_requirement =
-            KvEventSourceRequirement::derive(worker_role, &effective_kv_router_config);
-        let cache_required = wants_cache
-            || effective_kv_router_config.serve_indexer
-            || effective_kv_router_config.enable_session_prefix_index
-            || matches!(
-                kv_event_source_requirement,
-                KvEventSourceRequirement::ConditionalDisaggDecodeCache
-                    | KvEventSourceRequirement::Unknown
-            );
-        let kv_source_membership = if cache_required
-            && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
-        {
+        let kv_event_source_requirement = KvEventSourceRequirement::derive(
+            worker_role,
+            &effective_kv_router_config,
+            policy.inputs(),
+        );
+        let kv_source_membership = if kv_event_source_requirement.should_subscribe() {
             Some(
                 self.get_or_create_kv_source_membership_watch(&endpoint)
                     .await?,

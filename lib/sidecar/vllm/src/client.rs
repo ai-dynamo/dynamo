@@ -30,14 +30,18 @@ pub(crate) struct VllmClient {
 }
 
 impl VllmClient {
+    /// `bootstrap`: see `GrpcChannelPool::connect`. True from the
+    /// `bootstrap_discover` call site (before the tracing subscriber is
+    /// installed), false from `LLMEngine::start` (after it).
     pub(crate) async fn connect(
         endpoint: &GrpcEndpoint,
         transport: GrpcTransportConfig,
         startup_deadline: Instant,
+        bootstrap: bool,
     ) -> Result<Self, DynamoError> {
         let pool = timeout_at(
             startup_deadline,
-            GrpcChannelPool::connect("vLLM", endpoint, transport),
+            GrpcChannelPool::connect("vLLM", endpoint, transport, bootstrap),
         )
         .await
         .map_err(|_| {

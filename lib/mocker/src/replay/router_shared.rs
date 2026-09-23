@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -11,9 +12,7 @@ use dynamo_kv_router::protocols::{
 };
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
-use dynamo_kv_router::{
-    ActiveSequencesMultiWorker, DefaultWorkerSelector, LocalScheduler, SequencePublisher,
-};
+use dynamo_kv_router::{ActiveSequencesMultiWorker, LocalScheduler, SequencePublisher};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct ReplayNoopPublisher;
@@ -115,6 +114,9 @@ pub(super) fn replay_selector_with_seed(
     config: &KvRouterConfig,
     selector_seed: Option<u64>,
 ) -> anyhow::Result<DefaultWorkerSelector> {
+    if config.request_classifier_config()?.is_some() {
+        anyhow::bail!("offline replay does not support request_classifier plugins");
+    }
     if let Some(instance) = config
         .selected_worker_selection_policy_instance()
         .map_err(anyhow::Error::from)?
@@ -145,6 +147,24 @@ pub(crate) fn replay_router_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_selector_rejects_request_classifier() {
+        let policy = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(policy.path(), "request_classifier: {type: test}").unwrap();
+        let config = KvRouterConfig {
+            router_policy_config: Some(policy.path().display().to_string()),
+            ..Default::default()
+        };
+        let Err(error) = replay_selector(&config) else {
+            panic!("classifier ignored")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("offline replay does not support request_classifier")
+        );
+    }
 
     #[test]
     fn replay_selector_rejects_custom_worker_selection() {
