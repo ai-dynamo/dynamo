@@ -49,4 +49,35 @@ Report packet load separately from throughput and tail latency. The provisional
 limits versus Dynamo TCP are 5% throughput or p99 latency regression and 10%
 serving CPU per request regression. Also compare every metric with QUIC.
 
-No performance result is available yet. No default change is part of this work.
+The scripts use the existing Tyche cache, model, dataset, AIPerf and Python
+environment paths in `configs/template.json`. `prepare_remote.py` installs the
+established ZMQ capacity overlay and the Python launcher once, before building.
+It requires the prior `dynamo-tyche-hf-runtime-m2048-20260917` source directory.
+Retain the resulting overlay patch and hashes with the report.
+
+Stage this worktree at `$ROOT/src/dynamo`, where `ROOT` is the path in the
+template. Copy `harness/` to `$ROOT/harness` and the template to `$ROOT/configs`.
+Run builds through `srun` in a Tyche allocation. After verifying the two RDMA
+ports on the allocated nodes, the campaign sequence is:
+
+```bash
+python3 "$ROOT/harness/make_configs.py" --root "$ROOT" \
+  --dynamo "$DYNAMO_REV" --velo "$VELO_REV" \
+  --rdma-device mlx5_0:1 --rdma-device-numa1 mlx5_4:1
+bash "$ROOT/harness/build_grace.sh"
+python3 "$ROOT/harness/freeze.py" --root "$ROOT" \
+  --main "$MAIN_REV" --velo "$VELO_REV"
+bash "$ROOT/harness/run_condition.sh" smoke-velo-tcp
+bash "$ROOT/harness/run_condition.sh" smoke-velo-rdma
+bash "$ROOT/harness/run_condition.sh" preflight-velo-rdma
+bash "$ROOT/harness/controller.sh"
+python3 "$ROOT/harness/report.py"
+```
+
+The allocation keeper writes `$ROOT/control/job-id`. `freeze.py --verify`
+checks the source revision, overlay, lockfiles and binary before every run.
+Use new run labels after a failed attempt; do not replace its artifacts.
+The saturation preflight uses concurrency 8,192 and per-process worker metrics.
+It is separate from the four-way timing matrix.
+
+No default change is part of this work.

@@ -24,6 +24,8 @@ def analyze(label):
     duration = end - start
     requests = result['headline']['requests']
     tokens = result['headline']['output_tokens']
+    config = json.loads((ROOT / 'configs' / (label + '.json')).read_text())
+    rdma_ports = {tuple(value.split(':')) for value in config['network']['ucx_numa_devices'].values()}
     network = {}
     for rank in range(5):
         samples = []
@@ -45,7 +47,10 @@ def analyze(label):
         keys = set.intersection(*(set(row['values']) for row in samples))
         delta = {key: scalar(samples, end, lambda r: r['values'][key]) - scalar(samples, start, lambda r: r['values'][key]) for key in keys}
         hardware = {key: value for key, value in delta.items() if key.startswith(('/ethtool/', '/rdma/')) and ('packet' in key or 'pkts' in key or 'port_rcv_data' in key or 'port_xmit_data' in key)}
-        wire = {key: value for key, value in delta.items() if key.endswith(('/rx_packets_phy', '/tx_packets_phy', '/counters/port_rcv_packets', '/counters/port_xmit_packets'))}
+        wire = {key: value for key, value in delta.items() if
+                key.endswith(('/rx_packets_phy', '/tx_packets_phy')) or
+                (key.endswith(('/counters/port_rcv_packets', '/counters/port_xmit_packets')) and
+                 any(key.startswith(f'/rdma/{device}/ports/{port}/') for device, port in rdma_ports))}
         if not wire or any(value < 0 for value in wire.values()):
             raise ValueError(f'{source}: missing or reset hardware packet counters')
         network[str(rank)] = {
