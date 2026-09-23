@@ -1195,7 +1195,9 @@ async fn process_server_frame(
             };
             let _ = monitor_response.send(response_tx.clone());
             if pending_connection
-                .send(Ok(StreamReceiver { rx: response_rx.into() }))
+                .send(Ok(StreamReceiver {
+                    rx: response_rx.into(),
+                }))
                 .is_err()
             {
                 remove_registration(state, frame.registration_id);
