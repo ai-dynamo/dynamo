@@ -421,9 +421,7 @@ def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
 
 @pytest.mark.parametrize(
     "name,parent",
-    (
-        ("LPXConfig", "DynamoComponentDeploymentSharedSpec"),
-    ),
+    (("LPXConfig", "DynamoComponentDeploymentSharedSpec"),),
 )
 def test_shared_lpx_type_links_across_api_versions(
     source_text: str,
