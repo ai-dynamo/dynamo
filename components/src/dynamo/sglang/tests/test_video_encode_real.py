@@ -6,7 +6,9 @@
 Drives VideoGenerationWorkerHandler._frames_to_video through the ACTUAL ffmpeg
 baked into the shipped runtime image. This is the pre_merge guard for the gap
 that let SGLang ship with no ffmpeg at all (video generation would fail at the
-encode step) go green through the PR pipeline. Runs on the CUDA image only
+encode step) go green through the PR pipeline. It also decodes the output and
+checks its colors, which a codec-name check cannot see: the in-tree FFmpeg 8.1.2
+turned red magenta (ai-dynamo/dynamo#15198). Runs on the CUDA image only
 (gpu_0, no xpu) because the in-tree VP9 ffmpeg is copied into the CUDA runtime;
 encoding VP9 (libvpx-vp9) is CPU-only, so no GPU is used.
 """
@@ -14,9 +16,11 @@ encoding VP9 (libvpx-vp9) is CPU-only, so no GPU is used.
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
-import numpy as np
 import pytest
+
+from tests.utils.video_color import assert_quadrant_colors, quadrant_frames
 
 try:
     from PIL import Image
@@ -38,11 +42,8 @@ pytestmark = [
 ]
 
 
-def _synthetic_pil_frames(n: int = 8, size: int = 64) -> list:
-    return [
-        Image.fromarray(np.full((size, size, 3), (i * 24) % 256, dtype=np.uint8))
-        for i in range(n)
-    ]
+def _synthetic_pil_frames() -> list:
+    return [Image.fromarray(frame) for frame in quadrant_frames()]
 
 
 def _probe_video_codec(video_bytes: bytes) -> str:
@@ -70,7 +71,7 @@ def _probe_video_codec(video_bytes: bytes) -> str:
 
 
 @pytest.mark.asyncio
-async def test_sglang_video_output_is_vp9_in_shipped_image():
+async def test_sglang_video_output_is_vp9_in_shipped_image(tmp_path: Path):
     # _frames_to_video uses no instance state, so bypass the engine-bound
     # constructor and call it directly.
     handler = VideoGenerationWorkerHandler.__new__(VideoGenerationWorkerHandler)
@@ -78,3 +79,4 @@ async def test_sglang_video_output_is_vp9_in_shipped_image():
     assert video_bytes, "encoder produced no bytes"
     codec = _probe_video_codec(video_bytes)
     assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+    assert_quadrant_colors(video_bytes, tmp_path)

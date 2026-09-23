@@ -382,12 +382,12 @@ RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.p
 # at or above the floor deny_components sets for ffmpeg in codec_policy.yaml.
 # 2.1.0 sits below it.
 #
-# The 2.2.3 SONAME bump is worth stating because it removes a hazard rather than
-# adding one. The in-tree FFmpeg is 8.1.2, so through 2.2.2 the vendored
-# libavformat.so.62 / libavutil.so.60 collided with it by SONAME while being
-# built with different configure flags -- whichever loaded first served the whole
-# process. 9.0.1's .so.63 / .so.61 cannot collide with .so.62 / .so.60, so each
-# consumer now resolves its own copy regardless of import order.
+# The SONAMEs are why the in-tree build carries --build-suffix=_dynamo. Through
+# 2.2.2 the vendored libavformat.so.62 / libavutil.so.60 collided by SONAME with
+# the in-tree FFmpeg 8.1.2, built with different configure flags -- whichever
+# loaded first served the whole process. 2.2.3's .so.63 / .so.61 would collide
+# the same way with an unsuffixed in-tree 9.x; libavformat_dynamo.so.63 cannot,
+# so each consumer resolves its own copy regardless of import order.
 #
 # Note that the gate did not tell us this. deny_components is evaluated against
 # SBOM components (scan_codecs.scan_sbom), and the SBOM does not enumerate

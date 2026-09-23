@@ -5,16 +5,20 @@
 
 Drives encode_to_video_bytes (the exact call TRT-LLM's VideoGenerationHandler
 makes) through the ACTUAL ffmpeg baked into the shipped runtime image, and
-asserts the produced stream is VP9. pre_merge guard for the shipped-image codec
-gap. Encoding VP9 (libvpx-vp9) is CPU-only, so no GPU is used (gpu_0).
+asserts the produced stream is VP9 and keeps its colors -- the in-tree FFmpeg
+8.1.2 turned red magenta (ai-dynamo/dynamo#15198). pre_merge guard for the
+shipped-image codec gap. Encoding VP9 (libvpx-vp9) is CPU-only, so no GPU is
+used (gpu_0).
 """
 
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
-import numpy as np
 import pytest
+
+from tests.utils.video_color import assert_quadrant_colors, quadrant_frames
 
 try:
     from dynamo.common.utils.video_utils import encode_to_video_bytes
@@ -28,12 +32,6 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.timeout(120),
 ]
-
-
-def _synthetic_frames(n: int = 8, size: int = 64) -> np.ndarray:
-    return np.stack(
-        [np.full((size, size, 3), (i * 24) % 256, dtype=np.uint8) for i in range(n)]
-    )
 
 
 def _probe_video_codec(video_bytes: bytes) -> str:
@@ -60,8 +58,9 @@ def _probe_video_codec(video_bytes: bytes) -> str:
     return "?"
 
 
-def test_trtllm_video_output_is_vp9_in_shipped_image():
-    video_bytes = encode_to_video_bytes(_synthetic_frames(), fps=8, output_format="mp4")
+def test_trtllm_video_output_is_vp9_in_shipped_image(tmp_path: Path):
+    video_bytes = encode_to_video_bytes(quadrant_frames(), fps=8, output_format="mp4")
     assert video_bytes, "encoder produced no bytes"
     codec = _probe_video_codec(video_bytes)
     assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+    assert_quadrant_colors(video_bytes, tmp_path)

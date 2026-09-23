@@ -69,7 +69,7 @@ deny_globs:
 # ffmpeg maintenance releases.
 deny_components:
   - name: ffmpeg
-    min_fixed_version: "9.0.1"
+    min_fixed_version: "9.0.2"
   - name: x264
   - name: x265
   - name: fdk-aac

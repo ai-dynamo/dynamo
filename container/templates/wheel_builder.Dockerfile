@@ -328,10 +328,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
 # are pure fd/stream I/O and carry no codec implementation.
 #
-# Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
-# this also trims the decoder surface to what we ship.
+# The release is pinned by version and tarball SHA256 in container/context.yaml;
+# read the note there before moving it.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
+ARG FFMPEG_SHA256
 ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -372,6 +373,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         sleep 10; \
     done && \
     test -s ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    echo "${FFMPEG_SHA256:?FFMPEG_SHA256 must be set alongside FFMPEG_VERSION}  ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+        | sha256sum -c - && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
@@ -432,12 +435,26 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # implementation is built) and not -bsfs: bitstream filters (e.g.
     # aac_adtstoasc, h264_mp4toannexb) only reframe an already-encoded stream, are
     # pulled in as mov/mp4 muxer dependencies, and carry no codec implementation.
+    #
+    # Each listing must name vp9 before its absence test counts, so one that
+    # failed or came back empty fails the build instead of passing it. The CLI has
+    # no -parsers option (it exits "Unrecognized option" with no listing), so
+    # parsers come from the registry configure generated for libavcodec.
     for surface in encoders decoders parsers; do \
-        if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
-             | grep -qiE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-            echo "ERROR: in-tree ffmpeg exposes a disallowed codec via -${surface}" >&2; \
-            /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
-             | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; \
+        if [ "$surface" = parsers ]; then \
+            listing="$(sed -n 's/^ *&ff_\([a-z0-9_]*\)_parser,$/\1/p' \
+                /tmp/ffmpeg-${FFMPEG_VERSION}/libavcodec/parser_list.c)"; \
+        else \
+            listing="$(/usr/local/bin/ffmpeg -hide_banner "-${surface}")"; \
+        fi; \
+        printf '%s\n' "$listing" | grep -qi 'vp9' \
+          || { echo "ERROR: the in-tree ffmpeg ${surface} listing names no vp9; it is" >&2; \
+               echo "       broken or unreadable, and the absence check below would" >&2; \
+               echo "       pass without checking anything." >&2; \
+               exit 1; }; \
+        if printf '%s\n' "$listing" \
+             | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; then \
+            echo "ERROR: in-tree ffmpeg exposes a disallowed codec via ${surface}" >&2; \
             exit 1; \
         fi; \
     done && \

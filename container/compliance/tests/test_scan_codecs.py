@@ -132,15 +132,15 @@ def test_sbom_flags_ffmpeg_below_cve_floor(tmp_path: Path):
         json.dumps(
             {
                 "components": [
-                    {"name": "ffmpeg", "version": "8.1.2"},  # < 9.0.1 -> flagged
-                    {"name": "ffmpeg", "version": "9.0.1"},  # == floor -> ok
+                    {"name": "ffmpeg", "version": "9.0.1"},  # < 9.0.2 -> flagged
+                    {"name": "ffmpeg", "version": "9.0.2"},  # == floor -> ok
                     {"name": "libvpx", "version": "1.14.1"},  # not denied
                 ]
             }
         )
     )
     hits = scan_sbom(sbom, _POLICY)
-    assert [h["path"] for h in hits] == ["sbom:ffmpeg@8.1.2"]
+    assert [h["path"] for h in hits] == ["sbom:ffmpeg@9.0.1"]
 
 
 def test_codec_under_tmp_is_scanned(tmp_path: Path):
