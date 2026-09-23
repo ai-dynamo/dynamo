@@ -3201,9 +3201,9 @@ impl OpenAIPreprocessor {
                 request.chat_template_args(),
             ) == Some(false)
                 && request.should_add_generation_prompt()
-                && !request
+                && request
                     .nvext()
-                    .is_some_and(|ext| ext.use_raw_prompt == Some(true))
+                    .is_none_or(|ext| ext.use_raw_prompt != Some(true))
                 && request.tool_choice().is_some_and(|choice| {
                     choice
                         .get_attr("type")
