@@ -16,7 +16,25 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: hand `token_ids` to the Python handler as a packed
+/// little-endian int32 `bytes` instead of a `list[int]`, so a 100k-token prompt
+/// does not allocate 100k Python ints on ingress. Only the TRT-LLM handler
+/// understands the form; leave unset for other backends.
+static TOKEN_IDS_AS_BYTES: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("DYN_TOKEN_IDS_AS_BYTES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
+
+fn token_ids_le_bytes(ids: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ids.len() * 4);
+    for id in ids {
+        out.extend_from_slice(&id.to_le_bytes());
+    }
+    out
+}
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -37,7 +55,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_c
 use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 
@@ -756,6 +774,7 @@ impl PyEngineCore {
     async fn dispatch_generate<T: serde::Serialize + Send + 'static>(
         &self,
         request: T,
+        token_bytes: Option<Vec<u8>>,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<(BoxStream<'static, PyResult<PyObject>>, RequestStateGuard), DynamoError> {
         let engine = self.engine.clone();
@@ -805,6 +824,12 @@ impl PyEngineCore {
         let stream = tokio::task::spawn_blocking(move || -> PyResult<_> {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
+                if let Some(bytes) = token_bytes.as_deref() {
+                    py_request
+                        .downcast::<PyDict>()
+                        .map_err(PyErr::from)?
+                        .set_item("token_ids", PyBytes::new(py, bytes))?;
+                }
                 let py_ctx = Py::new(
                     py,
                     PyContext::new(
@@ -1334,10 +1359,19 @@ impl LLMEngine for PyLLMEngine {
 
     async fn generate(
         &self,
-        request: PreprocessedRequest,
+        mut request: PreprocessedRequest,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+        let token_bytes = if *TOKEN_IDS_AS_BYTES {
+            let ids = std::mem::replace(&mut request.token_ids, Arc::new(Vec::new()));
+            Some(token_ids_le_bytes(&ids))
+        } else {
+            None
+        };
+        let (stream, request_state_guard) = self
+            .core
+            .dispatch_generate(request, token_bytes, ctx)
+            .await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
@@ -1493,7 +1527,7 @@ impl RawEngine for PyRawEngine {
         request: serde_json::Value,
         ctx: dynamo_backend_common::GenerateContext,
     ) -> Result<BoxStream<'static, Result<serde_json::Value, DynamoError>>, DynamoError> {
-        let (stream, request_state_guard) = self.core.dispatch_generate(request, ctx).await?;
+        let (stream, request_state_guard) = self.core.dispatch_generate(request, None, ctx).await?;
 
         let mapped = async_stream::stream! {
             let _request_state_guard = request_state_guard;
