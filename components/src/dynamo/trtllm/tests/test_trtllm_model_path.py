@@ -1,17 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model-argument resolution for the TensorRT-LLM worker.
-
-The fake caches below reproduce the shapes seen in the failing CI job: a repo
-whose ``refs/main`` is empty, which made ``snapshot_download`` hand the engine
-``<repo>/snapshots`` and crash the worker with "Unrecognized model".
-"""
-
 import json
 
 import pytest
-from huggingface_hub.errors import GatedRepoError
+from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
 
 from dynamo.trtllm.utils import model_path as model_path_module
 from dynamo.trtllm.utils.model_path import resolve_model_path
@@ -228,7 +221,6 @@ def test_a_hub_that_cannot_answer_falls_back_to_the_cached_snapshot(
 
 
 def test_a_connection_failure_falls_back_to_the_cached_snapshot(tmp_path, monkeypatch):
-    """The shape a real outage takes: the HTTP client's own transport error."""
     httpx = pytest.importorskip("httpx")
     repo = _repo(_hub(tmp_path, monkeypatch))
     (repo / "refs" / "main").write_text("")
@@ -273,6 +265,27 @@ def test_an_unexpected_probe_error_is_not_read_as_an_outage(tmp_path, monkeypatc
 
     with pytest.raises(TypeError):
         resolve_model_path(MODEL)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 408, 429, 500, 503])
+def test_generic_http_errors_distinguish_refusals_from_outages(
+    tmp_path, monkeypatch, status
+):
+    httpx = pytest.importorskip("httpx")
+    repo = _repo(_hub(tmp_path, monkeypatch))
+    (repo / "refs" / "main").write_text("")
+    snapshot = _snapshot(repo, COMMIT)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    error = HfHubHTTPError(
+        "lookup failed",
+        response=httpx.Response(
+            status, request=httpx.Request("GET", "https://huggingface.co")
+        ),
+    )
+    monkeypatch.setattr(model_path_module, "HfApi", _hub_raising(error))
+
+    expected = str(snapshot) if status in (408, 429, 500, 503) else MODEL
+    assert resolve_model_path(MODEL) == expected
 
 
 @pytest.mark.parametrize("variable", ["HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"])

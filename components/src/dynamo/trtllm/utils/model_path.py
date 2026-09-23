@@ -31,6 +31,7 @@ from huggingface_hub.constants import (
 from huggingface_hub.errors import (
     DisabledRepoError,
     GatedRepoError,
+    HfHubHTTPError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
@@ -168,6 +169,10 @@ def _hub_is_unreachable(model: str) -> bool:
     except _HUB_ANSWERED_ERRORS:
         return False
     except _UNREACHABLE_ERRORS as error:
+        if isinstance(error, HfHubHTTPError):
+            status = error.response.status_code
+            if 400 <= status < 500 and status not in (408, 429):
+                return False
         logging.info("Hub lookup for %s failed: %s", model, error)
         return True
     return False
