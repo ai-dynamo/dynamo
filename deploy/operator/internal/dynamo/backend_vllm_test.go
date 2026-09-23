@@ -511,6 +511,30 @@ func TestVLLMBackend_UpdateContainer_RejectsNonPositiveParallelismSizes(t *testi
 	}
 }
 
+// TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand proves
+// updateVLLMMultinodeArgs parses Command + Args, not Args alone: Kubernetes
+// permits a flag in either field, and IsElasticEPRayLaunch /
+// shouldInjectVLLMMpWaitLeaderInit already parse both. A
+// "--tensor-parallel-size 16" that lives entirely in Command, with an empty
+// Args, must still be read as 16 -- not silently fall back to the default of
+// 1 and skip the multinode injection this topology requires.
+func TestVLLMBackend_UpdateContainer_ReadsParallelismFlagsFromCommand(t *testing.T) {
+	backend := &VLLMBackend{}
+	container := &corev1.Container{
+		Command: []string{"python3", "-m", "dynamo.vllm", tensorParallelSizeFlag, "16"},
+		Args:    []string{},
+	}
+	err := backend.UpdateContainer(container, 2, RoleLeader, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(4))
+	require.NoError(t, err)
+
+	// TP=16 across 4 GPUs per node needs the mp/ray distributed launch path,
+	// which rewrites Args. If TP had been silently read as the default of 1,
+	// Args would still be empty here.
+	if len(container.Args) == 0 {
+		t.Fatal("Args were not rewritten -- --tensor-parallel-size in Command was not read, so no multinode launch was injected")
+	}
+}
+
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	backend := &VLLMBackend{}
 

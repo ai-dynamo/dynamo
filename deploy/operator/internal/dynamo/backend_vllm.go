@@ -1,6 +1,7 @@
 package dynamo
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -313,7 +314,12 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
 // parallelism strategy (TP/PP distributed vs data-parallel) and executor backend (mp vs ray).
 func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64, numberOfNodes int32, annotations map[string]string) error {
-	args := parseVLLMLaunchArgs(getExpandedArgs(container))
+	// getExpandedCommandLine, not getExpandedArgs: Kubernetes allows a flag in
+	// either Command or Args, and IsElasticEPRayLaunch / shouldInjectVLLMMpWaitLeaderInit
+	// already parse both -- parsing Args alone here would read a Command-only
+	// "--tensor-parallel-size 16" as the default of 1 and skip a multinode
+	// launch the manifest actually needs.
+	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
 	if err := args.ValidateParallelismSizes(); err != nil {
 		return fmt.Errorf("invalid vLLM launch flags: %w", err)
 	}
@@ -342,16 +348,6 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		logger.Info("No need to inject tensor or data parallel flags for multinode deployments", "args", strings.Join(container.Args, " "))
 	}
 	return nil
-}
-
-// getExpandedArgs will expand the containers args in the case where
-// the args are joined together with spaces as an individual string (i.e. "python3 -m dynamo.vllm")
-func getExpandedArgs(container *corev1.Container) []string {
-	expandedArgs := []string{}
-	for _, arg := range container.Args {
-		expandedArgs = append(expandedArgs, strings.Fields(arg)...)
-	}
-	return normalizeVLLMFlags(expandedArgs)
 }
 
 // shouldUseMpBackend determines whether to use multiprocessing (mp) or Ray for vLLM
@@ -660,6 +656,23 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
+// getFlagStringValue returns the value of the last occurrence of flag in
+// expandedArgs, matching vLLM's FlexibleArgumentParser last-value-wins
+// precedence (the same rule getFlagValue applies to integers). ok is false
+// when flag never appears. Using hasArg's first-match semantics for an
+// enum-style flag like --data-parallel-backend would be wrong: with
+// "--data-parallel-backend ray --data-parallel-backend mp", vLLM resolves to
+// "mp", but a first-match check would report "ray" instead.
+func getFlagStringValue(expandedArgs []string, flag string) (value string, ok bool) {
+	for i, arg := range expandedArgs {
+		if arg == flag && i+1 < len(expandedArgs) {
+			value = expandedArgs[i+1]
+			ok = true
+		}
+	}
+	return value, ok
+}
+
 // vllmLaunchArgs is the result of parsing a container's launch command line
 // exactly once. Every function in this package that needs to know a vLLM
 // launch flag reads a field here instead of re-scanning the command line
@@ -682,6 +695,13 @@ type vllmLaunchArgs struct {
 	// DistributedExecutorBackendIsMp is true when --distributed-executor-backend
 	// is set to "mp".
 	DistributedExecutorBackendIsMp bool
+	// parseErr collects any integer parallelism flag (tensor/pipeline/data-parallel
+	// size) whose last occurrence failed to parse -- vLLM's engine would refuse to
+	// start on the same input, so ValidateParallelismSizes surfaces it. Readers
+	// that only consume the boolean fields above (IsElasticEPRayLaunch,
+	// shouldInjectVLLMMpWaitLeaderInit) never look at this, since a malformed
+	// numeric flag is not their concern.
+	parseErr error
 }
 
 // WorldSize is the number of ranks one engine occupies: tensor-parallel size
@@ -701,6 +721,9 @@ func (a vllmLaunchArgs) WorldSize() int64 {
 // with no operator-side error. Absent flags are not an error here --
 // getFlagValue already returns vLLM's default of 1 for those.
 func (a vllmLaunchArgs) ValidateParallelismSizes() error {
+	if a.parseErr != nil {
+		return a.parseErr
+	}
 	if a.TensorParallelSize <= 0 {
 		return fmt.Errorf("%s must be positive, got %d", tensorParallelSizeFlag, a.TensorParallelSize)
 	}
@@ -714,16 +737,28 @@ func (a vllmLaunchArgs) ValidateParallelismSizes() error {
 }
 
 // parseVLLMLaunchArgs parses an already-expanded, normalized command line
-// (see getExpandedArgs / getExpandedCommandLine) into a vllmLaunchArgs value.
+// (see getExpandedCommandLine) into a vllmLaunchArgs value.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
+	tensorParallelSize, tpErr := getFlagValue(expandedArgs, tensorParallelSizeFlag)
+	pipelineParallelSize, ppErr := getFlagValue(expandedArgs, pipelineParallelSizeFlag)
+	dataParallelSize, dpErr := getFlagValue(expandedArgs, dataParallelSizeFlag)
+
+	// Enum-style flags read the last occurrence's value directly rather than
+	// hasArg's first-match semantics: with "--data-parallel-backend ray
+	// --data-parallel-backend mp", vLLM resolves to "mp", and a first-match
+	// check would wrongly report "ray".
+	dataParallelBackend, _ := getFlagStringValue(expandedArgs, dataParallelBackendFlag)
+	distributedExecutorBackend, _ := getFlagStringValue(expandedArgs, distributedExecutorFlag)
+
 	return vllmLaunchArgs{
-		TensorParallelSize:             getFlagValue(expandedArgs, tensorParallelSizeFlag),
-		PipelineParallelSize:           getFlagValue(expandedArgs, pipelineParallelSizeFlag),
-		DataParallelSize:               getFlagValue(expandedArgs, dataParallelSizeFlag),
+		TensorParallelSize:             tensorParallelSize,
+		PipelineParallelSize:           pipelineParallelSize,
+		DataParallelSize:               dataParallelSize,
 		HasDataParallelSize:            hasFlag(expandedArgs, dataParallelSizeFlag),
-		DataParallelBackendIsRay:       hasArg(expandedArgs, dataParallelBackendFlag, dataParallelBackendRay),
+		DataParallelBackendIsRay:       dataParallelBackend == dataParallelBackendRay,
 		EnableElasticEP:                hasFlag(expandedArgs, enableElasticEPFlag),
-		DistributedExecutorBackendIsMp: hasArg(expandedArgs, distributedExecutorFlag, "mp"),
+		DistributedExecutorBackendIsMp: distributedExecutorBackend == "mp",
+		parseErr:                       errors.Join(tpErr, ppErr, dpErr),
 	}
 }
 
@@ -800,17 +835,21 @@ func needsDataParallelMultinodeLaunch(args vllmLaunchArgs, containerGPUs int64) 
 
 // getFlagValue returns the value of the last occurrence of flag in expandedArgs,
 // matching vLLM's FlexibleArgumentParser precedence: when a flag (or one of its
-// canonicalized aliases) is repeated, the final occurrence wins.
-func getFlagValue(expandedArgs []string, flag string) int64 {
+// canonicalized aliases) is repeated, the final occurrence wins. Returns an
+// error the moment any occurrence's value fails to parse as an integer --
+// vLLM's own argparse fails at that point too, so neither an earlier nor a
+// later valid occurrence must be silently substituted for a value the engine
+// itself would reject.
+func getFlagValue(expandedArgs []string, flag string) (int64, error) {
 	var flagValue int64 = 1
 	for i, arg := range expandedArgs {
 		if arg == flag && (i+1 < len(expandedArgs)) {
 			parsed, err := strconv.ParseInt(expandedArgs[i+1], 10, 64)
 			if err != nil {
-				continue
+				return 0, fmt.Errorf("%s %q: %w", flag, expandedArgs[i+1], err)
 			}
 			flagValue = parsed
 		}
 	}
-	return flagValue
+	return flagValue, nil
 }
