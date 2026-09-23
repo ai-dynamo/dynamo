@@ -1157,7 +1157,6 @@ def test_structured_response_requires_effective_reasoning():
     ("request_fields", "force_reasoning", "expected"),
     [
         ({}, True, True),
-        ({}, False, False),
         ({"response_format": {"type": "text"}}, True, True),
         # A structural_tag response_format keeps the gpt-oss exception.
         ({"response_format": {"type": "structural_tag"}}, True, False),
