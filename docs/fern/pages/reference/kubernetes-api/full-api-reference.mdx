@@ -2609,9 +2609,9 @@ v1alpha1 (resources, envs, envFromSecret, livenessProbe, readinessProbe,
 volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 replaced with a single `podTemplate` field holding a native
 `corev1.PodTemplateSpec`. The operator injects its defaults into the
-container named `"main"` and merges user overrides. Users can add sidecars,
-init containers, and pod-level configuration directly in `podTemplate`
-without any `extraPodSpec`-style escape hatch.
+container named `"main"` and merges user overrides using strategic-merge-by-name
+semantics. Users can add sidecars, init containers, and pod-level configuration
+directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 
 
 **Kind:** `type`

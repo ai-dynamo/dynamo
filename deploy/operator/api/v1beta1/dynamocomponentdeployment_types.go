@@ -66,9 +66,9 @@ type DynamoComponentDeploymentSpec struct {
 // volumeMounts, annotations, labels, extraPodMetadata, extraPodSpec) are
 // replaced with a single `podTemplate` field holding a native
 // `corev1.PodTemplateSpec`. The operator injects its defaults into the
-// container named `"main"` and merges user overrides. Users can add sidecars,
-// init containers, and pod-level configuration directly in `podTemplate`
-// without any `extraPodSpec`-style escape hatch.
+// container named `"main"` and merges user overrides using strategic-merge-by-name
+// semantics. Users can add sidecars, init containers, and pod-level configuration
+// directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 // +kubebuilder:validation:XValidation:rule="!has(self.eppConfig) || (has(self.type) && self.type == 'epp')",message="eppConfig may only be set when type is epp"
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"

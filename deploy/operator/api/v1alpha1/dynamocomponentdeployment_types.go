@@ -403,6 +403,11 @@ func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
 }
 
+// IsLPX reports whether this shared spec uses the LPX integration.
+func (s *DynamoComponentDeploymentSharedSpec) IsLPX() bool {
+	return s.ComponentType == commonconsts.ComponentTypeLPX
+}
+
 func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
 	return s.GetNumberOfNodes() > 1
 }
