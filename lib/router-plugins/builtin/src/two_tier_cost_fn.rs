@@ -110,6 +110,12 @@ fn select_row_where(
         return None;
     }
 
+    let device_overlap = |row| {
+        cache
+            .get(row)
+            .expect("cache and load lengths were checked")
+            .device_overlap_blocks()
+    };
     let rows = || (0..load.len()).filter(|&row| include(row));
     let min_load = rows().map(|row| load[row].active_requests()).min()?;
     let max_load = rows().map(|row| load[row].active_requests()).max()?;
@@ -119,9 +125,7 @@ fn select_row_where(
         return least_loaded(load, rows());
     }
 
-    let max_overlap = rows()
-        .map(|row| cache[row].device_overlap_blocks())
-        .max_by(f64::total_cmp)?;
+    let max_overlap = rows().map(device_overlap).max_by(f64::total_cmp)?;
     let cache_ratio = if request_blocks == 0 {
         0.0
     } else {
@@ -130,7 +134,7 @@ fn select_row_where(
     if cache_ratio > parameters.cache_threshold {
         return least_loaded(
             load,
-            rows().filter(|&row| cache[row].device_overlap_blocks() == max_overlap),
+            rows().filter(|&row| device_overlap(row) == max_overlap),
         );
     }
 
@@ -139,7 +143,7 @@ fn select_row_where(
 
 fn select_row(
     parameters: &Parameters,
-    cache: &[WorkerCacheInput],
+    cache: WorkerCacheInputs<'_>,
     load: &[WorkerLoadInput],
     request_blocks: u64,
 ) -> Option<usize> {
