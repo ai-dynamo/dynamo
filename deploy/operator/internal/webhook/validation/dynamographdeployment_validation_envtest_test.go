@@ -1927,6 +1927,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				)
 			}),
 			wantWebhookErrs: []string{`spec.providerOverride.value: Invalid value: null: does not match the registered PodCliqueSet schema: json: cannot unmarshal string into Go struct field .spec.template.topologyConstraint.pack of type v1alpha1.TopologyPackConstraint`},
+			notWantErr:      "rack",
 		},
 		{
 			name: "typed and provider-native Grove topology cannot be combined",
