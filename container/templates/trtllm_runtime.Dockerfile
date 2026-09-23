@@ -105,11 +105,21 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 # So apply the same two edits to whichever Open MPI is selected, and fail the
 # build if either setting survives. The edits are idempotent: on a file that
 # already has them, sed changes nothing and the guards pass.
-# tests/dependencies/test_mpi_init_keeps_cpu_affinity.py checks the binding in
-# the built image.
 #
-# Transitional. Delete this and the ENV entries when upstream's ompi5 can spawn,
-# and re-measure rather than assume.
+# tests/dependencies/test_trtllm_mpi.py checks all of this in the built image:
+# the link's target per architecture, the library mpi4py loads, a
+# MPI.COMM_SELF.Spawn, a two-rank ob1 launch, and the CPU affinity after
+# MPI_Init. container/dev/50-framework-paths.sh prefers the same link in login
+# shells.
+#
+# Transitional. Delete this, the ENV entries and the test's per-architecture
+# expectation when upstream's ompi5 can spawn, and re-measure rather than assume.
+# On the amd64 GPU host above, the ompi5 failure depends on the network: UCX
+# tries an address of another host interface (10.42.0.0, a k3s flannel address)
+# and fails with the host's interfaces visible, while in a bridge network (eth0
+# and lo only), or with OMPI_MCA_pml=ob1, ompi5 spawns. On CI's amd64 GPU
+# runners the worker did not start on ompi5 either; the logs that would show
+# the mechanism there did not survive.
 RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
     test -d "$t" && \
     conf="$t/etc/openmpi-mca-params.conf" && \
