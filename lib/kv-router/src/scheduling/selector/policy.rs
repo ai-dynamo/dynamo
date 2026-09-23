@@ -4,59 +4,67 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(any(test, feature = "bench"))]
+use super::DefaultWorkerPicker;
 use super::{
-    DefaultWorkerPicker, MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector,
-    select_worker_with_policy,
+    MaterializedSelectionInput, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
+
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult};
 use crate::scheduling::config::KvRouterConfig;
 use crate::scheduling::filter::RoutingEligibility;
 use crate::scheduling::types::{KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError};
 
 use crate::plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputs,
-    WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
+    CacheSnapshot, CandidateData, ScoredWorkerCandidate, WorkerCacheData, WorkerCandidate,
+    WorkerCandidates, WorkerFilter, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext,
 };
 
 #[cfg_attr(not(feature = "standalone-selection"), allow(dead_code))]
 pub(super) enum WorkerSelectionPolicyState {
-    Default(DefaultWorkerPicker),
+    #[cfg(any(test, feature = "bench"))]
+    Reference(Box<KvRouterConfig>, DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
-    Custom(RefCell<CustomWorkerSelectionState>),
+    Composed(RefCell<ComposedPolicyState>),
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
-    Default(&'a DefaultWorkerPicker),
-    Custom(&'a RefCell<CustomWorkerSelectionState>),
+    #[cfg(any(test, feature = "bench"))]
+    Reference(&'a KvRouterConfig, &'a DefaultWorkerPicker),
+    Composed(&'a RefCell<ComposedPolicyState>),
 }
 
-pub(super) struct CustomWorkerSelectionState {
-    pub(super) filters: Vec<Box<dyn WorkerFilter>>,
-    pub(super) scorers: Vec<Box<dyn WorkerScorer>>,
+pub(super) struct ComposedPolicyState {
+    pub(super) filters: Vec<(WorkerInputs, Box<dyn WorkerFilter>)>,
+    pub(super) scorers: Vec<(WorkerInputs, Box<dyn WorkerScorer>)>,
     pub(super) picker: Box<dyn WorkerPicker>,
     pub(super) filter_inputs: WorkerInputs,
     pub(super) scorer_picker_inputs: WorkerInputs,
     pub(super) picker_inputs: WorkerInputs,
+    unscored_candidates: Vec<CandidateData>,
+    score_contributions: Vec<f64>,
     pub(super) candidates: Vec<ScoredWorkerCandidate>,
-    pub(super) cache_inputs: Vec<WorkerCacheInput>,
+    pub(super) cache_inputs: Vec<WorkerCacheData>,
     pub(super) load_inputs: Vec<WorkerLoadInput>,
 }
 
 /// Native scorer/picker composition for [`WorkerSelector`].
 ///
-/// SelectionService constructs the concrete default state unless a caller explicitly supplies
-/// custom scorer and picker implementations through [`Self::new`].
+/// Routing hosts supply a policy factory. Both builtin and external policies compose
+/// scorers and a picker through [`Self::new`], with optional filters through [`Self::new_with_filters`].
 pub struct WorkerSelectionPolicy {
-    kv_router_config: KvRouterConfig,
     worker_label: &'static str,
     state: WorkerSelectionPolicyState,
+    exclusive_affinity: bool,
 }
 
 impl WorkerSelectionPolicy {
-    /// Build a custom policy with no filters.
+    /// Build a policy with no filters.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`crate::WorkerType::as_str`].
+    /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
+    /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new(
         kv_router_config: KvRouterConfig,
         worker_label: &'static str,
@@ -66,34 +74,48 @@ impl WorkerSelectionPolicy {
         Self::new_with_filters(kv_router_config, worker_label, Vec::new(), scorers, picker)
     }
 
-    /// Build a custom policy from ordered filters, additive scorers, and one picker.
+    /// Build a policy from ordered filters, additive scorers, and one picker.
     ///
     /// `worker_label` identifies the worker pool in routing logs. A typed policy factory normally
-    /// passes [`crate::WorkerType::as_str`].
+    /// passes [`crate::WorkerType::as_str`]. The config argument is retained for API compatibility;
+    /// policy parameters belong to the supplied scorers and picker and are not retained here.
     pub fn new_with_filters(
-        kv_router_config: KvRouterConfig,
+        _kv_router_config: KvRouterConfig,
         worker_label: &'static str,
         filters: Vec<Box<dyn WorkerFilter>>,
         scorers: Vec<Box<dyn WorkerScorer>>,
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
         let picker_inputs = picker.required_worker_inputs();
-        let filter_inputs = filters.iter().fold(WorkerInputs::NONE, |inputs, filter| {
-            inputs | filter.required_worker_inputs()
-        });
-        let scorer_picker_inputs = scorers.iter().fold(picker_inputs, |inputs, scorer| {
-            inputs | scorer.required_worker_inputs()
-        });
+        // Freeze each declaration once; callbacks must not inherit another component's access.
+        let filters: Vec<_> = filters
+            .into_iter()
+            .map(|filter| (filter.required_worker_inputs(), filter))
+            .collect();
+        let scorers: Vec<_> = scorers
+            .into_iter()
+            .map(|scorer| (scorer.required_worker_inputs(), scorer))
+            .collect();
+        let filter_inputs = filters
+            .iter()
+            .fold(WorkerInputs::NONE, |inputs, (required, _)| {
+                inputs | *required
+            });
+        let scorer_picker_inputs = scorers
+            .iter()
+            .fold(picker_inputs, |inputs, (required, _)| inputs | *required);
         Self {
-            kv_router_config,
             worker_label,
-            state: WorkerSelectionPolicyState::Custom(RefCell::new(CustomWorkerSelectionState {
+            exclusive_affinity: false,
+            state: WorkerSelectionPolicyState::Composed(RefCell::new(ComposedPolicyState {
                 filters,
                 scorers,
                 picker,
                 filter_inputs,
                 scorer_picker_inputs,
                 picker_inputs,
+                unscored_candidates: Vec::new(),
+                score_contributions: Vec::new(),
                 candidates: Vec::new(),
                 cache_inputs: Vec::new(),
                 load_inputs: Vec::new(),
@@ -101,47 +123,45 @@ impl WorkerSelectionPolicy {
         }
     }
 
-    /// Wrap Dynamo's built-in selector for a host that uses the policy selector type.
+    /// Ask the host to constrain selection to an eligible affinity target.
+    /// Explicit request pins remain mandatory regardless of this option.
+    pub fn with_exclusive_affinity(mut self, exclusive: bool) -> Self {
+        self.exclusive_affinity = exclusive;
+        self
+    }
+
+    /// Construct the native reference implementation for parity tests and benchmarks.
     ///
     /// `worker_label` selects the built-in scoring and logging contract. Typed hosts use
     /// [`crate::WorkerType::default_selector_label`] to preserve Dynamo's historical behavior.
-    pub fn default(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
+    #[cfg(any(test, feature = "bench"))]
+    pub fn reference(kv_router_config: KvRouterConfig, worker_label: &'static str) -> Self {
         let picker = DefaultWorkerPicker::new();
         Self {
-            kv_router_config,
             worker_label,
-            state: WorkerSelectionPolicyState::Default(picker),
+            exclusive_affinity: false,
+            state: WorkerSelectionPolicyState::Reference(Box::new(kv_router_config), picker),
         }
     }
 }
 
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
-fn push_scored_candidate(
-    context: &WorkerSelectionContext<'_>,
-    candidate: &WorkerCandidate,
-    scorers: &mut [Box<dyn WorkerScorer>],
+fn push_picker_candidate(
+    candidate: &CandidateData,
+    cost: f64,
     picker_inputs: WorkerInputs,
     candidates: &mut Vec<ScoredWorkerCandidate>,
-    cache_inputs: &mut Vec<WorkerCacheInput>,
+    cache_inputs: &mut Vec<WorkerCacheData>,
     load_inputs: &mut Vec<WorkerLoadInput>,
-) -> Result<(), KvSchedulerError> {
-    let mut cost = 0.0;
-    for (scorer_index, scorer) in scorers.iter_mut().enumerate() {
-        let contribution = scorer.score(context, candidate)?;
-        cost += contribution;
-        if !contribution.is_finite() || !cost.is_finite() {
-            return Err(WorkerSelectionPolicyError::NonFiniteCost {
-                scorer_index,
-                row: candidates.len(),
-            }
-            .into());
-        }
-    }
+) {
     candidates.push(ScoredWorkerCandidate {
         worker: candidate.worker,
         cost,
-        preferred_taint_multiplier: candidate.preferred_taint_multiplier,
+        preferred_taint_multiplier: if picker_inputs.contains(WorkerInputs::PREFERRED_TAINT) {
+            candidate.preferred_taint_multiplier
+        } else {
+            None
+        },
     });
     if picker_inputs.contains(WorkerInputs::CACHE) {
         cache_inputs.push(candidate.cache);
@@ -149,34 +169,86 @@ fn push_scored_candidate(
     if picker_inputs.contains(WorkerInputs::LOAD) {
         load_inputs.push(candidate.load);
     }
-    Ok(())
 }
 
-pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
-    state: &mut CustomWorkerSelectionState,
+impl ComposedPolicyState {
+    // Keep row construction and storage together to avoid passing a full row through a call.
+    #[inline(always)]
+    fn push_candidate(&mut self, candidate: CandidateData) {
+        // Build the picker's rows alongside the input snapshot. The scoring loop then only
+        // writes costs, without growing vectors or copying optional columns across trait calls.
+        push_picker_candidate(
+            &candidate,
+            0.0,
+            self.picker_inputs,
+            &mut self.candidates,
+            &mut self.cache_inputs,
+            &mut self.load_inputs,
+        );
+        if !self.scorers.is_empty() {
+            // Picker-only policies do not need a second copy of the worker inputs.
+            self.unscored_candidates.push(candidate);
+        }
+    }
+
+    fn score_candidates(
+        &mut self,
+        context: &WorkerSelectionContext<'_>,
+        cache_snapshot: &CacheSnapshot<'_>,
+    ) -> Result<(), KvSchedulerError> {
+        let Self {
+            scorers,
+            unscored_candidates,
+            score_contributions,
+            candidates,
+            ..
+        } = self;
+        if unscored_candidates.is_empty() {
+            return Ok(());
+        }
+        debug_assert_eq!(unscored_candidates.len(), candidates.len());
+        score_contributions.resize(candidates.len(), f64::NAN);
+        for (scorer_index, (inputs, scorer)) in scorers.iter_mut().enumerate() {
+            score_contributions.fill(f64::NAN);
+            scorer.score(
+                context,
+                WorkerCandidates::new(unscored_candidates, *inputs, cache_snapshot),
+                score_contributions,
+            )?;
+            for (row, (contribution, scored)) in score_contributions
+                .iter()
+                .zip(candidates.iter_mut())
+                .enumerate()
+            {
+                let cost = scored.cost + contribution;
+                if !contribution.is_finite() || !cost.is_finite() {
+                    return Err(
+                        WorkerSelectionPolicyError::NonFiniteCost { scorer_index, row }.into(),
+                    );
+                }
+                scored.cost = cost;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn collect_policy_candidates<C: WorkerConfigLike>(
+    state: &mut ComposedPolicyState,
     input: &MaterializedSelectionInput<'_>,
     workers: &HashMap<WorkerId, C>,
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Result<bool, KvSchedulerError> {
-    let CustomWorkerSelectionState {
-        filters,
-        scorers,
-        filter_inputs,
-        scorer_picker_inputs,
-        picker_inputs,
-        candidates,
-        cache_inputs,
-        load_inputs,
-        ..
-    } = state;
-    candidates.clear();
-    cache_inputs.clear();
-    load_inputs.clear();
-    if filters.is_empty() {
+    state.unscored_candidates.clear();
+    state.candidates.clear();
+    state.cache_inputs.clear();
+    state.load_inputs.clear();
+    if state.filters.is_empty() {
         let materialize_preferred_taint = eligibility.pinned_worker().is_none()
-            && scorer_picker_inputs.contains(WorkerInputs::PREFERRED_TAINT);
-        let mut error = None;
+            && state
+                .scorer_picker_inputs
+                .contains(WorkerInputs::PREFERRED_TAINT);
         eligibility.any_eligible_worker_rank(workers, |worker, config| {
             let preferred_taint_multiplier = if materialize_preferred_taint {
                 request
@@ -185,30 +257,21 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             } else {
                 None
             };
-            let candidate = input.row(worker, preferred_taint_multiplier, *scorer_picker_inputs);
-            if let Err(policy_error) = push_scored_candidate(
-                &input.context,
-                &candidate,
-                scorers,
-                *picker_inputs,
-                candidates,
-                cache_inputs,
-                load_inputs,
-            ) {
-                error = Some(policy_error);
-                return true;
-            }
+            let candidate = input.row(
+                worker,
+                preferred_taint_multiplier,
+                state.scorer_picker_inputs,
+            );
+            state.push_candidate(candidate);
             false
         });
-        if let Some(error) = error {
-            return Err(error);
-        }
-        return Ok(!candidates.is_empty());
+        state.score_candidates(&input.context, &input.cache_snapshot)?;
+        return Ok(!state.candidates.is_empty());
     }
 
-    let additional_inputs = scorer_picker_inputs.without(*filter_inputs);
+    let additional_inputs = state.scorer_picker_inputs.without(state.filter_inputs);
     let materialize_filter_preferred_taint = eligibility.pinned_worker().is_none()
-        && filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
+        && state.filter_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let materialize_additional_preferred_taint = eligibility.pinned_worker().is_none()
         && additional_inputs.contains(WorkerInputs::PREFERRED_TAINT);
     let mut has_eligible_worker = false;
@@ -222,9 +285,16 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
         } else {
             None
         };
-        let filter_candidate = input.row(worker, filter_preferred_taint_multiplier, *filter_inputs);
-        for filter in filters.iter_mut() {
-            match filter.keep(&input.context, &filter_candidate) {
+        let filter_candidate = input.row(
+            worker,
+            filter_preferred_taint_multiplier,
+            state.filter_inputs,
+        );
+        for (inputs, filter) in &mut state.filters {
+            match filter.keep(
+                &input.context,
+                WorkerCandidate::new(&filter_candidate, *inputs, &input.cache_snapshot),
+            ) {
                 Ok(true) => {}
                 Ok(false) => return false,
                 Err(policy_error) => {
@@ -246,36 +316,31 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
             additional_preferred_taint_multiplier,
             additional_inputs,
         );
-        let candidate = filter_candidate.with_inputs_from(&additional, *scorer_picker_inputs);
-        if let Err(policy_error) = push_scored_candidate(
-            &input.context,
-            &candidate,
-            scorers,
-            *picker_inputs,
-            candidates,
-            cache_inputs,
-            load_inputs,
-        ) {
-            error = Some(policy_error);
-            return true;
-        }
+        let candidate = filter_candidate.with_inputs_from(&additional, state.scorer_picker_inputs);
+        state.push_candidate(candidate);
         false
     });
     if let Some(error) = error {
         return Err(error);
     }
+    state.score_candidates(&input.context, &input.cache_snapshot)?;
     Ok(has_eligible_worker)
 }
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
+        #[cfg(any(test, feature = "bench"))]
+        if matches!(&self.state, WorkerSelectionPolicyState::Reference(..)) {
+            return true;
+        }
+        self.exclusive_affinity
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
         match &self.state {
-            WorkerSelectionPolicyState::Default(_) => WorkerInputs::CACHE | WorkerInputs::LOAD,
-            WorkerSelectionPolicyState::Custom(state) => {
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(..) => WorkerInputs::CACHE | WorkerInputs::LOAD,
+            WorkerSelectionPolicyState::Composed(state) => {
                 let state = state.borrow();
                 state.filter_inputs | state.scorer_picker_inputs
             }
@@ -289,15 +354,15 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         let state = match &self.state {
-            WorkerSelectionPolicyState::Default(picker) => {
-                WorkerSelectionPolicyStateRef::Default(picker)
+            #[cfg(any(test, feature = "bench"))]
+            WorkerSelectionPolicyState::Reference(config, picker) => {
+                WorkerSelectionPolicyStateRef::Reference(config, picker)
             }
-            WorkerSelectionPolicyState::Custom(state) => {
-                WorkerSelectionPolicyStateRef::Custom(state)
+            WorkerSelectionPolicyState::Composed(state) => {
+                WorkerSelectionPolicyStateRef::Composed(state)
             }
         };
         select_worker_with_policy(
-            &self.kv_router_config,
             self.worker_label,
             state,
             workers,
@@ -310,6 +375,9 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
 
 #[cfg(test)]
 mod tests {
+    use crate::plugins::worker_selection::WorkerInputView;
+    use crate::protocols::WorkerWithDpRank;
+    use crate::scheduling::SessionContext;
     use std::{
         cell::Cell,
         collections::{HashMap, HashSet},
@@ -320,9 +388,6 @@ mod tests {
     use super::super::DefaultWorkerSelector;
     use super::super::test_support::*;
     use super::*;
-    use crate::SessionContext;
-    use crate::plugins::worker_selection::WorkerInputView;
-    use crate::protocols::WorkerWithDpRank;
     use crate::scheduling::WorkerSelectionInputTrigger;
 
     fn uses_exclusive_affinity(selector: &impl WorkerSelector<TaintedWorkerConfig>) -> bool {
@@ -365,7 +430,7 @@ mod tests {
                 16,
             ))
             .unwrap();
-        let policy = WorkerSelectionPolicy::default(config, "test");
+        let policy = WorkerSelectionPolicy::reference(config, "test");
         assert!(uses_exclusive_affinity(&policy));
         let actual = policy
             .select_worker(WorkerSelectionInput::configured(
@@ -456,10 +521,14 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
-                assert!(candidate.preferred_taint_multiplier().is_some());
-                Ok(0.0)
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (candidate, cost) in candidates.iter().zip(costs) {
+                    assert!(candidate.preferred_taint_multiplier().is_some());
+                    *cost = 0.0;
+                }
+                Ok(())
             }
         }
 
@@ -600,7 +669,12 @@ mod tests {
                 input: WorkerInputView<'_>,
             ) -> Result<usize, WorkerSelectionPolicyError> {
                 assert_eq!(
-                    input.cache().expect("cache input")[0].device_overlap_blocks(),
+                    input
+                        .cache()
+                        .expect("cache input")
+                        .get(0)
+                        .unwrap()
+                        .device_overlap_blocks(),
                     0.0
                 );
                 Ok(0)
@@ -742,7 +816,7 @@ mod tests {
             fn keep(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                candidate: &WorkerCandidate,
+                candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 assert!(candidate.cache().is_none());
                 assert!(candidate.load().is_none());
@@ -761,8 +835,9 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
+                _candidates: WorkerCandidates<'_>,
+                _costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
                 unreachable!("rejected worker must not reach scorers")
             }
         }
@@ -799,7 +874,7 @@ mod tests {
             fn keep(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
+                _candidate: WorkerCandidate<'_>,
             ) -> Result<bool, WorkerSelectionPolicyError> {
                 Ok(true)
             }
@@ -814,9 +889,13 @@ mod tests {
             fn score(
                 &mut self,
                 _context: &WorkerSelectionContext<'_>,
-                _candidate: &WorkerCandidate,
-            ) -> Result<f64, WorkerSelectionPolicyError> {
-                Ok(0.0)
+                candidates: WorkerCandidates<'_>,
+                costs: &mut [f64],
+            ) -> Result<(), WorkerSelectionPolicyError> {
+                for (_candidate, cost) in candidates.iter().zip(costs) {
+                    *cost = 0.0;
+                }
+                Ok(())
             }
         }
 

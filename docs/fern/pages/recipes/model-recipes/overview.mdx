@@ -14,17 +14,17 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 
 <form className="dynamo-recipe-catalog-shell">
 <input className="dynamo-filter-input" type="radio" id="provider-all" name="provider" defaultChecked />
-<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-nvidia" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-google" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-qwen" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-deepseek" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-moonshot" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
-<input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-thinkingmachines" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-lg" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-meta" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
@@ -51,48 +51,49 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   </div>
 
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Provider</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="provider-all">All</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-nvidia">NVIDIA</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-google">Google</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-qwen">Qwen</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-deepseek">DeepSeek</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-moonshot">Moonshot</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label>
-  <label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-lg">LG AI Research</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
-<label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
+<label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
-<label className="dynamo-recipe-chip" htmlFor="runtime-sglang">SGLang</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Hardware</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="hardware-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-h100">H100</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-h200">H200</label>
+<label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label>
 <label className="dynamo-recipe-chip" htmlFor="hardware-gb200">GB200</label>
-<label className="dynamo-recipe-chip" htmlFor="hardware-gb300">GB300</label>
-<label className="dynamo-recipe-chip" htmlFor="hardware-b200">B200</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="hardware-gb300">GB300</label></div></div>
 </div>
 
 <div className="dynamo-model-grid" data-recipe-card-grid>
-  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="sglang" data-hardware="b200 gb200 h200" data-technique="aggregated prefix-caching spec-decoding" data-workload="agentic">
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="sglang" data-hardware="h200 b200 gb200" data-technique="aggregated prefix-caching spec-decoding" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
       <div><h3>Qwen3.6-35B-A3B</h3><p>Qwen</p></div>
     </div>
     <p className="dynamo-model-summary">SGLang recipes for agentic traffic on B200, GB200, or H200, with FP8 KV caching, prefix caching, and speculative decoding.</p>
-    <div className="dynamo-model-tags"><span>SGLang</span><span>1x B200 · 1x GB200 · 1x H200</span><span>Agentic · MTP</span></div>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>1x H200 · 1x B200 · 1x GB200</span><span>Agentic · MTP</span></div>
   <a className="dynamo-card-link" href="qwen3-6-35b-a3b.mdx" aria-label="Open the Qwen3.6-35B-A3B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="lg" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat-reuse">
     <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/lgai.webp" alt="" />
       <div><h3>K-EXAONE 2.0</h3><p>LG AI Research</p></div>
     </div>
     <p className="dynamo-model-summary">750B-A37B MoE in NVFP4 on B200, aggregated or disaggregated 1P1D, with MTP speculative decoding and KV-aware routing on an 8K/1K chat trace.</p>
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x/8x B200</span><span>Chat trace replay</span></div>
   <a className="dynamo-card-link" href="k-exaone-2.mdx" aria-label="Open the K-EXAONE 2.0 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="google" data-runtime="trtllm" data-hardware="b200 gb200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="google" data-runtime="trtllm" data-hardware="h200 b200 gb200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/google.webp" alt="" />
       <div><h3>Gemma-4-31B</h3><p>Google / NVIDIA</p></div>
@@ -110,13 +111,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>SGLang</span><span>8x GB200</span><span>Day-0 · up to 1M context</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-1-flash.mdx" aria-label="Open the DeepSeek-V4.1-Flash recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm" data-hardware="gb200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="vllm" data-hardware="h200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/zai-org.svg" alt="" />
       <div><h3>GLM-5.3-Flash</h3><p>Z.AI</p></div>
     </div>
     <p className="dynamo-model-summary">vLLM recipes for agentic traffic on GB200 or H200, aggregated or 1P1D disaggregated with KV-aware routing, NIXL KV transfer, and H200 MTP7.</p>
-    <div className="dynamo-model-tags"><span>vLLM</span><span>4x/8x GB200 · 8x/16x H200</span><span>Agentic · up to 1M context</span></div>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>8x/16x H200 · 4x/8x GB200</span><span>Agentic · up to 1M context</span></div>
   <a className="dynamo-card-link" href="glm-5-3-flash.mdx" aria-label="Open the GLM-5.3-Flash recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="skt" data-runtime="vllm" data-hardware="b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="chat">
@@ -129,43 +130,43 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <a className="dynamo-card-link" href="ax-k2.mdx" aria-label="Open the A.X-K2 recipe">Open recipe</a>
   </div>
 
-  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm sglang" data-hardware="h200 gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
+  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="sglang vllm" data-hardware="h200 gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />
       <div><h3>Kimi-K3</h3><p>Moonshot / NVIDIA</p></div>
     </div>
     <p className="dynamo-model-summary">Kimi-K3 recipes for vLLM on H200, GB200, and GB300, plus SGLang on GB200 and GB300.</p>
-    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>H200 · GB200 · GB300</span><span>Day-0</span></div>
+    <div className="dynamo-model-tags"><span>SGLang · vLLM</span><span>H200 · GB200 · GB300</span><span>Day-0</span></div>
   <a className="dynamo-card-link" href="kimi-k3.mdx" aria-label="Open the Kimi-K3 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm sglang" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="sglang vllm" data-hardware="gb200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
       <div><h3>Qwen3.8-2.4T-A95B</h3><p>Qwen</p></div>
     </div>
     <p className="dynamo-model-summary">vLLM and SGLang recipes for chat and agentic traffic on GB300 or GB200, aggregated or disaggregated, with KV-aware routing, MTP speculation, and FP8 weights/KV over MNNVL.</p>
-    <div className="dynamo-model-tags"><span>vLLM + SGLang</span><span>16x GB300 · 16x GB200</span><span>Chat + agentic · 262K context</span></div>
+    <div className="dynamo-model-tags"><span>vLLM + SGLang</span><span>16x GB200 · 16x GB300</span><span>Chat + agentic · 262K context</span></div>
   <a className="dynamo-card-link" href="qwen-3-8-2-4t-a95b-fp8.mdx" aria-label="Open the Qwen3.8-2.4T-A95B recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="zai" data-runtime="sglang" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/zai-org.svg" alt="" />
       <div><h3>GLM-5.3/5.2</h3><p>Z.AI / NVIDIA</p></div>
     </div>
     <p className="dynamo-model-summary">SGLang recipes for long-context agentic traffic on B200 (NVFP4) or H200 (FP8), aggregated or disaggregated, with KV-aware routing, EAGLE MTP speculation, and HiCache CPU offload.</p>
-    <div className="dynamo-model-tags"><span>SGLang</span><span>4x/12x B200 · 8x/16x H200</span><span>Agentic · up to 500K context</span></div>
+    <div className="dynamo-model-tags"><span>SGLang</span><span>8x/16x H200 · 4x/12x B200</span><span>Agentic · up to 500K context</span></div>
   <a className="dynamo-card-link" href="glm-5-2.mdx" aria-label="Open the GLM-5.3/5.2 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">
-      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.png" alt="" />
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/thinkingmachines.webp" alt="" />
       <div><h3>Inkling NVFP4</h3><p>Thinking Machines</p></div>
     </div>
     <p className="dynamo-model-summary">Thinking Machines' first open-weights model — a multimodal MoE with controllable reasoning effort. vLLM GB300 targets serve agentic traffic at 1M context with MTP speculation and KV-aware routing, aggregated or disaggregated; the Day-0 SGLang B200 target adds image and audio input.</p>
-    <div className="dynamo-model-tags"><span>vLLM · SGLang</span><span>8x GB300 / 8x B200</span><span>Agentic · 1M context</span><span>Text + image + audio</span></div>
+    <div className="dynamo-model-tags"><span>SGLang · vLLM</span><span>8x GB300 / 8x B200</span><span>Agentic · 1M context</span><span>Text + image + audio</span></div>
   <a className="dynamo-card-link" href="inkling-nvfp4.mdx" aria-label="Open the Inkling NVFP4 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="moonshot" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/moonshotai.webp" alt="" />
       <div><h3>Kimi-K2.6</h3><p>Moonshot / NVIDIA</p></div>
@@ -174,7 +175,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x B200 / 8x H200</span><span>Chat + agentic</span></div>
   <a className="dynamo-card-link" href="kimi-k2-6.mdx" aria-label="Open the Kimi-K2.6 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm trtllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="trtllm vllm" data-hardware="h100 h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
       <div><h3>Nemotron 3.5 Lightning</h3><p>NVIDIA</p></div>
@@ -183,7 +184,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM + TRT-LLM</span><span>1-4x GPU</span><span>Agentic · 1M context</span></div>
   <a className="dynamo-card-link" href="nemotron-3-5-lightning.mdx" aria-label="Open the Nemotron 3.5 Lightning recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
       <div><h3>Nemotron 3 Ultra</h3><p>NVIDIA</p></div>
@@ -192,7 +193,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>4x B200 / 8x H200</span><span>Chat + agentic</span></div>
   <a className="dynamo-card-link" href="nemotron-3-ultra.mdx" aria-label="Open the Nemotron 3 Ultra recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="nvidia" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/nvidia.webp" alt="" />
       <div><h3>Nemotron 3 Super</h3><p>NVIDIA</p></div>
@@ -210,7 +211,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>SGLang</span><span>20x GB200</span><span>Long output / static ISL-OSL</span></div>
   <a className="dynamo-card-link" href="glm-5-nvfp4.mdx" aria-label="Open the GLM-5 NVFP4 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
       <div><h3>DeepSeek-V4-Pro</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
@@ -219,7 +220,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>8–32x B200/H200</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-pro.mdx" aria-label="Open the DeepSeek-V4-Pro recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="gb200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="agentic">
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="h200 gb200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
       <div><h3>DeepSeek-V4-Pro-0813</h3><p>DeepSeek</p></div>
@@ -228,7 +229,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>8–16x GB200/H200</span><span>Agentic</span><span>1M ctx</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-pro-0813.mdx" aria-label="Open the DeepSeek-V4-Pro-0813 recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
+  <div className="dynamo-model-card" data-recipe-card data-provider="deepseek" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing expert-parallel mtp" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/deepseek-ai.webp" alt="" />
       <div><h3>DeepSeek-V4-Flash</h3><p>NVIDIA checkpoint / DeepSeek</p></div>
@@ -237,13 +238,13 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>4–28x B200/H200</span><span>Agentic</span></div>
   <a className="dynamo-card-link" href="deepseek-v4-flash.mdx" aria-label="Open the DeepSeek-V4-Flash recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="openai" data-runtime="trtllm vllm" data-hardware="b200 gb200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="static-generation long-output agentic-coding long-context-reuse">
+  <div className="dynamo-model-card" data-recipe-card data-provider="openai" data-runtime="trtllm vllm" data-hardware="h200 b200 gb200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="static-generation long-output agentic-coding long-context-reuse">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/openai.webp" alt="" />
       <div><h3>GPT-OSS-120B</h3><p>OpenAI</p></div>
     </div>
     <p className="dynamo-model-summary">TensorRT-LLM GB200 targets for static traffic plus vLLM B200/H200 agentic targets (agg + disagg) with KV-aware routing and EAGLE3 speculative decoding.</p>
-    <div className="dynamo-model-tags"><span>TRT-LLM + vLLM</span><span>GB200 · B200 · H200</span><span>Static + agentic</span></div>
+    <div className="dynamo-model-tags"><span>TRT-LLM + vLLM</span><span>H200 · B200 · GB200</span><span>Static + agentic</span></div>
   <a className="dynamo-card-link" href="gpt-oss-120b.mdx" aria-label="Open the GPT-OSS-120B recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="h200" data-technique="disaggregated kv-routing" data-workload="long-context-reuse">
@@ -255,7 +256,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>16x H200</span><span>Multi-turn conversation</span><span>Related benchmark</span></div>
   <a className="dynamo-card-link" href="qwen3-32b.mdx" aria-label="Open the Qwen3-32B recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="b200 h200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic">
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="vllm" data-hardware="h200 b200" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
       <div><h3>Qwen3.5-122B-A10B</h3><p>Qwen</p></div>
@@ -264,7 +265,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <div className="dynamo-model-tags"><span>vLLM</span><span>2-4x B200/H200</span><span>Agentic trace replay</span></div>
   <a className="dynamo-card-link" href="qwen3-5-122b.mdx" aria-label="Open the Qwen3.5-122B-A10B recipe">Open recipe</a>
   </div>
-  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="b200 h100 h200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
+  <div className="dynamo-model-card" data-recipe-card data-provider="qwen" data-runtime="trtllm" data-hardware="h100 h200 b200" data-technique="aggregated disaggregated expert-parallel" data-workload="static-generation">
     <div className="dynamo-model-card-top">
       <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/qwen.webp" alt="" />
       <div><h3>Qwen3-235B-A22B FP8</h3><p>Qwen</p></div>

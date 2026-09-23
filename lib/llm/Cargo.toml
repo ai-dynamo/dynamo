@@ -71,6 +71,7 @@ harness = false
 required-features = ["media-ffmpeg"]
 
 [dependencies]
+dynamo-custom-policy-builtin = { workspace = true }
 # repo
 dynamo-kv-router = { workspace = true, features = ["metrics", "runtime-protocols", "standalone-selection"] }
 dynamo-memory = { workspace = true }

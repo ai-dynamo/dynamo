@@ -103,7 +103,9 @@ pub enum EngineConfig {
         model: Box<LocalModel>,
     },
 
-    /// A Tokens engine receives tokens, expects to be wrapped with pre/post processors that handle tokenization.
+    /// A token engine receives preprocessed requests and emits raw engine output.
+    /// Distributed endpoints forward that output; standalone HTTP, gRPC, and
+    /// interactive inputs apply local pre/post-processing.
     InProcessTokens {
         engine: ExecutionContext,
         model: Box<LocalModel>,
