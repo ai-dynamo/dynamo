@@ -110,7 +110,7 @@ fn fill_missing_top_logprob_text(
 }
 
 struct DecoderParams {
-    prompt_token_ids: Vec<TokenIdType>,
+    prompt_token_ids: Arc<Vec<TokenIdType>>,
     stop_conditions: StopConditions,
     skip_special_tokens: bool,
     include_stop_str_in_output: bool,
@@ -129,7 +129,7 @@ struct DecoderParams {
 impl DecoderParams {
     fn from_request(request: &PreprocessedRequest) -> Self {
         Self {
-            prompt_token_ids: request.token_ids.as_ref().clone(),
+            prompt_token_ids: Arc::clone(&request.token_ids),
             stop_conditions: request.stop_conditions.clone(),
             // Default to true to match upstream framework behavior:
             //   vLLM/sgLang/TRT-LLM: SamplingParams.skip_special_tokens defaults True
@@ -1109,6 +1109,18 @@ mod tests {
     use dynamo_runtime::pipeline::{AsyncEngine, Error, ResponseStream};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[test]
+    fn decoder_params_share_prompt_and_preserve_request_copy_on_write() {
+        let mut request = jailing_request(2);
+        request.token_ids = Arc::new(vec![1, 2, 3]);
+        let params = DecoderParams::from_request(&request);
+
+        assert!(Arc::ptr_eq(&params.prompt_token_ids, &request.token_ids));
+        Arc::make_mut(&mut request.token_ids).push(4);
+        assert_eq!(params.prompt_token_ids.as_slice(), &[1, 2, 3]);
+        assert_eq!(request.token_ids.as_slice(), &[1, 2, 3, 4]);
+    }
 
     #[test]
     fn test_char_boundary_drain() {
