@@ -3779,17 +3779,24 @@ async fn chat_completions(
                 // well as errors converted into structured SSE + [DONE].
                 if response_streaming.is_none() {
                     let _entered_request_lifecycle = request_lifecycle.enter();
-                    response_streaming = Some(lifecycle.start(LifecycleStage::ResponseStreaming));
+                    response_streaming = Some(lifecycle.observe_stage(LifecycleStage::ResponseStreaming));
+                }
+                if let Some(observation) = response_streaming.as_mut() {
+                    observation.observe_event();
                 }
                 yield item;
             }
-            if let Some(outcome) = terminal_outcome_for_stream_error(&monitor_error_signal) {
-                terminal.finish(outcome);
+            let outcome = if let Some(outcome) = terminal_outcome_for_stream_error(&monitor_error_signal) {
+                outcome
             } else if ctx.is_stopped() || ctx.is_killed() {
-                terminal.finish(TerminalOutcome::Cancelled);
+                TerminalOutcome::Cancelled
             } else {
-                terminal.finish(TerminalOutcome::Success);
+                TerminalOutcome::Success
+            };
+            if let Some(observation) = response_streaming.as_mut() {
+                observation.finish(outcome);
             }
+            terminal.finish(outcome);
         };
 
         let mut sse_stream = Sse::new(stream);
@@ -6804,6 +6811,22 @@ mod tests {
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::Overload
+        );
+    }
+
+    #[test]
+    fn test_overload_response_is_a_rejected_lifecycle_outcome() {
+        let response = ErrorMessage::from_http_error(
+            ErrorClass::ResourceExhausted,
+            HttpError {
+                code: overload_status_code().as_u16(),
+                message: "site overloaded".to_string(),
+            },
+        );
+
+        assert_eq!(
+            terminal_outcome_for_error_response(&response),
+            TerminalOutcome::Rejected
         );
     }
 

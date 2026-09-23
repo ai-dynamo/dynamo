@@ -715,8 +715,7 @@ where
                     self.segment
                         .get()
                         .expect("segment not set")
-                        .generate(request)
-                        .instrument(lifecycle.start(LifecycleStage::RequestDispatch)),
+                        .generate(request),
                 )
                 .await
         }
@@ -843,6 +842,7 @@ where
             }
         });
 
+        let payload_bytes = payload.len() as u64;
         let (control_msg, data) = self.decode_control_message(payload)?;
         let lifecycle = match self.registered_lifecycle_role() {
             Some(role)
@@ -861,12 +861,18 @@ where
         // readers capture the current span and live until the request ends.
         // They must inherit handle_payload, not prolong worker.admission.
         let worker_admission = lifecycle.start(LifecycleStage::WorkerAdmission);
+        worker_admission.record("dynamo.worker.admission.payload.bytes", payload_bytes);
         let ParsedRequest {
             request,
             response_connection_info,
             frontend_send_ts_ns,
             payload_codec,
-        } = self.parse_and_build_request(control_msg, data).await?;
+        } = self
+            .parse_and_build_request(control_msg, data)
+            .await
+            .inspect_err(|_| {
+                worker_admission.record("dynamo.worker.admission.result", "rejected");
+            })?;
 
         // Compute network transit time (T2 - T1) using cross-process wall-clock timestamps
         if let Some(t1_ns) = frontend_send_ts_ns {
@@ -889,6 +895,7 @@ where
 
         match advertised_mode {
             ResponsePlaneMode::Tcp => {
+                worker_admission.record("dynamo.worker.admission.transport", "tcp");
                 tracing::trace!("creating tcp response stream");
                 let publisher = tcp::client::TcpClient::create_response_stream(
                     request.context(),
@@ -897,6 +904,7 @@ where
                 )
                 .await
                 .map_err(|error| {
+                    worker_admission.record("dynamo.worker.admission.result", "failed");
                     if let Some(metrics) = self.metrics() {
                         metrics
                             .error_counter
@@ -905,6 +913,7 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
+                worker_admission.record("dynamo.worker.admission.result", "accepted");
                 drop(worker_admission);
                 self.generate_and_publish(
                     request,
@@ -917,6 +926,7 @@ where
                 .await?;
             }
             ResponsePlaneMode::Quic => {
+                worker_admission.record("dynamo.worker.admission.transport", "quic");
                 tracing::trace!("creating QUIC response sender");
                 let response_pool = self.quic_response_client_pool()?;
                 let publisher = response_pool
@@ -927,6 +937,7 @@ where
                     )
                     .await
                     .map_err(|error| {
+                        worker_admission.record("dynamo.worker.admission.result", "failed");
                         if let Some(metrics) = self.metrics() {
                             metrics
                                 .error_counter
@@ -937,6 +948,7 @@ where
                             "Failed to create QUIC response stream: {error}"
                         ))
                     })?;
+                worker_admission.record("dynamo.worker.admission.result", "accepted");
                 drop(worker_admission);
                 self.generate_and_publish(
                     request,

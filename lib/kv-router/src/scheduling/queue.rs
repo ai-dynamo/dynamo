@@ -12,6 +12,9 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::Instant;
 
+#[cfg(feature = "runtime-protocols")]
+use dynamo_runtime::telemetry::{LifecycleStage, LifecycleTrace};
+
 #[cfg(test)]
 use super::config::RouterQueuePolicy;
 use super::filter::RoutingEligibility;
@@ -20,7 +23,9 @@ use super::overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, read_overlap_refresh_after, refresh_overlap,
 };
 use super::policy_config::{PolicyClassConfig, PolicyProfile};
-use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
+use super::policy_queue::{
+    PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueMetadata, QueueSnapshot,
+};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
 use super::request_classifier::{ClassificationOverrides, ClassifyRequest};
@@ -70,6 +75,20 @@ struct QueuedRequest {
     enqueue_at: Instant,
     due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
+    lifecycle_span: tracing::Span,
+}
+
+fn finish_queue_span(
+    span: tracing::Span,
+    depth: usize,
+    outcome: &'static str,
+    reason: Option<&'static str>,
+) {
+    span.record("dynamo.router.queue.depth.out", depth as u64);
+    span.record("dynamo.router.queue.outcome", outcome);
+    if let Some(reason) = reason {
+        span.record("dynamo.router.queue.reason", reason);
+    }
 }
 
 struct SelectedWorkerForRequest {
@@ -1209,7 +1228,10 @@ impl<
         for entry in self.pending.drain() {
             let class_index = entry.class_index();
             let snapshot = entry.snapshot();
-            self.pending_count.fetch_sub(1, AtomicOrdering::Relaxed);
+            let queue_depth_out = self
+                .pending_count
+                .fetch_sub(1, AtomicOrdering::Relaxed)
+                .saturating_sub(1);
             self.pending_isl_tokens
                 .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
             let counters = &class_counters[class_index];
@@ -1221,7 +1243,14 @@ impl<
                 .pending_cached_tokens
                 .fetch_sub(snapshot.cached_tokens, AtomicOrdering::Relaxed);
 
-            let mut request = entry.into_payload().request;
+            let queued = entry.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                queue_depth_out,
+                "failed",
+                Some("subscriber_shutdown"),
+            );
+            let mut request = queued.request;
             request.respond(Err(KvSchedulerError::SubscriberShutdown));
         }
     }
@@ -1281,6 +1310,32 @@ impl<
             }
         }
         tracing::trace!(policy_class = class.name, "ordering request");
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_trace = request
+            .mode
+            .request_id()
+            .map(LifecycleTrace::frontend_request_without_session)
+            .unwrap_or_else(|| LifecycleTrace::new(false));
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_span = lifecycle_trace.start(LifecycleStage::RouterQueue);
+        #[cfg(not(feature = "runtime-protocols"))]
+        let lifecycle_span = tracing::Span::none();
+        let queue_depth_in = self.pending_count.load(AtomicOrdering::Relaxed);
+        lifecycle_span.record("dynamo.router.queue.class", class.name.as_str());
+        lifecycle_span.record("dynamo.router.queue.policy", class.queue_policy.to_string());
+        lifecycle_span.record("dynamo.router.queue.depth.in", queue_depth_in as u64);
+        // Policy-queue membership alone does not mean capacity deferred the
+        // request: ordinary arrivals can drain in the same actor turn.
+        let backlog = self.pending.has_backlog(class_index);
+        lifecycle_span.record("dynamo.router.queue.deferred", backlog);
+        lifecycle_span.record(
+            "dynamo.router.queue.reason",
+            if backlog {
+                "class_backlog"
+            } else {
+                "policy_ordering"
+            },
+        );
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1293,6 +1348,7 @@ impl<
             enqueue_at: decay_now,
             due_at: queue_metadata.due_at,
             block_hashes,
+            lifecycle_span,
         };
         let worker_count = self.workers_with_configs.borrow().len();
         if let Err((rejection, queued)) = self.pending.enqueue_with_due_at(
@@ -1303,6 +1359,16 @@ impl<
             placement,
             queued,
         ) {
+            finish_queue_span(
+                queued.lifecycle_span,
+                queue_depth_in,
+                "rejected",
+                Some(match rejection.limit_kind {
+                    QueueLimitKind::Requests => "request_limit",
+                    QueueLimitKind::RawIslTokens => "raw_isl_token_limit",
+                    QueueLimitKind::CachedTokens => "cached_token_limit",
+                }),
+            );
             let mut request = queued.request;
             request.respond(Err(KvSchedulerError::QueueRejected(rejection)));
             return false;
@@ -1328,8 +1394,14 @@ impl<
         for entry in self.pending.take_expired(now) {
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
-            let mut request = entry.into_payload().request;
-            self.reject_due_time_passed(class_index, &mut request);
+            let mut queued = entry.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                self.pending_count.load(AtomicOrdering::Relaxed),
+                "timed_out",
+                Some("deadline_expired"),
+            );
+            self.reject_due_time_passed(class_index, &mut queued.request);
         }
     }
 
@@ -1431,7 +1503,7 @@ impl<
                     });
                 removed_ready_head |= class_head_removed;
                 for entry in removed {
-                    self.subtract_pending_counters(class_index, entry.snapshot());
+                    self.release_cancelled_queue_entry(entry);
                 }
             }
         }
@@ -1463,6 +1535,23 @@ impl<
         self.pending_isl_tokens
             .fetch_sub(snapshot.raw_isl_tokens, AtomicOrdering::Relaxed);
         self.subtract_class_counters(class_index, snapshot);
+    }
+
+    fn release_cancelled_queue_entry(&self, entry: PolicyQueueEntry<QueuedRequest>) {
+        let class_index = entry.class_index();
+        let snapshot = entry.snapshot();
+        let queue_depth_out = self
+            .pending_count
+            .load(AtomicOrdering::Relaxed)
+            .saturating_sub(1);
+        self.subtract_pending_counters(class_index, snapshot);
+        let queued = entry.into_payload();
+        finish_queue_span(
+            queued.lifecycle_span,
+            queue_depth_out,
+            "cancelled",
+            Some("request_lifecycle_ended_before_admission"),
+        );
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
@@ -1513,7 +1602,7 @@ impl<
                     // TODO: This preserves head-of-line blocking within each policy
                     // class. A blocked constrained head can stall later entries in
                     // that class until a bounded non-HOL policy is introduced.
-                    !Self::all_workers_prefill_busy_with(
+                    let blocked = Self::all_workers_prefill_busy_with(
                         &active_tokens,
                         &configs,
                         class,
@@ -1521,7 +1610,16 @@ impl<
                             .request
                             .eligibility()
                             .with_available_workers(available.as_deref()),
-                    )
+                    );
+                    if blocked {
+                        queued
+                            .lifecycle_span
+                            .record("dynamo.router.queue.deferred", true);
+                        queued
+                            .lifecycle_span
+                            .record("dynamo.router.queue.reason", "prefill_capacity");
+                    }
+                    !blocked
                 })
             };
             let Some(mut popped) = popped else {
@@ -1568,8 +1666,14 @@ impl<
                 // The pop already charged this entry's scheduling cost against
                 // the class deficit; the credit is intentionally not refunded,
                 // matching every other post-pop terminal outcome.
-                let mut request = popped.into_payload().request;
-                self.reject_due_time_passed(class_index, &mut request);
+                let mut queued = popped.into_payload();
+                finish_queue_span(
+                    queued.lifecycle_span,
+                    self.pending_count.load(AtomicOrdering::Relaxed),
+                    "timed_out",
+                    Some("deadline_expired"),
+                );
+                self.reject_due_time_passed(class_index, &mut queued.request);
                 continue;
             }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
@@ -1590,6 +1694,12 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
+            finish_queue_span(
+                queued.lifecycle_span,
+                self.pending_count.load(AtomicOrdering::Relaxed),
+                "admitted",
+                None,
+            );
             tracing::trace!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
@@ -1617,6 +1727,17 @@ impl<
             .as_ref()
             .and_then(|provider| provider(request));
 
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_trace = request
+            .mode
+            .request_id()
+            .map(LifecycleTrace::frontend_request_without_session)
+            .unwrap_or_else(|| LifecycleTrace::new(false));
+        #[cfg(feature = "runtime-protocols")]
+        let lifecycle_span = lifecycle_trace.start(LifecycleStage::RouterSelection);
+        #[cfg(not(feature = "runtime-protocols"))]
+        let lifecycle_span = tracing::Span::none();
+
         {
             let workers = self.workers_with_configs.borrow();
             let overloaded_worker_ids = self
@@ -1632,13 +1753,16 @@ impl<
             {
                 eligibility = eligibility.with_affinity_target(target);
             }
-            self.selector
-                .select_worker(WorkerSelectionInput::configured(
-                    &workers,
-                    request,
-                    eligibility,
-                    self.block_size,
-                ))
+            lifecycle_span
+                .in_scope(|| {
+                    self.selector
+                        .select_worker(WorkerSelectionInput::configured(
+                            &workers,
+                            request,
+                            eligibility,
+                            self.block_size,
+                        ))
+                })
                 .map(|selection| {
                     let non_max_overlap_selection = if request.mode.is_tracked()
                         && self.non_max_overlap_selection_observer.get().is_some()

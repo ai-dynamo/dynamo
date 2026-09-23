@@ -5,6 +5,8 @@
 //!
 //! Coarse runtime timing, causal parentage, request identity, and terminal outcomes.
 //! Engine-internal metrics and invariants are intentionally not instrumented here.
+//! Lifecycle attributes are deliberately bounded: core mode records stable identifiers
+//! and decision summaries, while investigation mode may add bounded detail.
 
 use std::sync::{
     Arc, OnceLock,
@@ -122,14 +124,14 @@ impl LifecycleIdentity {
 /// runtime boundaries around the worker operation; they are not direct engine
 /// execution measurements.
 ///
-/// Router queue and selection stages are intentionally deferred. A later
-/// instrumentation milestone will add spans at the actual scheduling
-/// boundaries together with the router-specific metrics and invariants needed
-/// to interpret them.
+/// Router queue and selection stages describe scheduling boundaries and carry
+/// router-specific evidence for interpreting those decisions.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleStage {
     RequestLifecycle,
     RequestPreprocessing,
+    RouterQueue,
+    RouterSelection,
     WorkerAdmission,
     RequestDispatch,
     WorkerOperation,
@@ -146,11 +148,12 @@ pub enum LifecycleStage {
 impl LifecycleStage {
     const fn component(self) -> &'static str {
         match self {
-            Self::RequestLifecycle | Self::RequestPreprocessing | Self::ResponseStreaming => {
-                "frontend"
-            }
-            Self::WorkerAdmission
+            Self::RequestLifecycle
+            | Self::RequestPreprocessing
             | Self::RequestDispatch
+            | Self::ResponseStreaming => "frontend",
+            Self::RouterQueue | Self::RouterSelection => "router",
+            Self::WorkerAdmission
             | Self::WorkerOperation
             | Self::WorkerOperationEncode
             | Self::WorkerOperationPrefill
@@ -164,7 +167,7 @@ impl LifecycleStage {
 
     fn span(self, identity: &LifecycleIdentity) -> Span {
         macro_rules! common_span {
-            ($name:literal) => {
+            ($name:literal $(, $field:literal = $value:expr)* $(,)?) => {
                 tracing::info_span!(
                     target: LIFECYCLE_TARGET, $name,
                     "dynamo.request.id" = %identity.request_id,
@@ -177,6 +180,7 @@ impl LifecycleStage {
                     "dynamo.instance.id" = instance_id(),
                     "dynamo.process.epoch" = process_epoch(),
                     "dynamo.lifecycle.identity.state" = identity.identity_state,
+                    $($field = $value,)*
                 )
             };
         }
@@ -200,14 +204,80 @@ impl LifecycleStage {
                 "dynamo.request.terminal.error" = tracing::field::Empty,
                 "dynamo.request.terminal.timestamp_unix_ns" = tracing::field::Empty,
             ),
-            Self::RequestPreprocessing => common_span!("request.preprocessing"),
-            Self::WorkerAdmission => common_span!("worker.admission"),
-            Self::RequestDispatch => common_span!("request.dispatch"),
+            Self::RequestPreprocessing => common_span!(
+                "request.preprocessing",
+                "dynamo.stage.outcome" = tracing::field::Empty,
+                "dynamo.stage.checkpoint" = tracing::field::Empty,
+            ),
+            Self::RouterQueue => common_span!(
+                "router.queue",
+                "dynamo.request.attempt" = 0_u64,
+                "dynamo.lifecycle.capture.state" = "recorded",
+                "dynamo.lifecycle.detail_schema" = "router_queue.v1",
+                "dynamo.router.queue.class" = tracing::field::Empty,
+                "dynamo.router.queue.policy" = tracing::field::Empty,
+                "dynamo.router.queue.depth.in" = tracing::field::Empty,
+                "dynamo.router.queue.depth.out" = tracing::field::Empty,
+                "dynamo.router.queue.deferred" = tracing::field::Empty,
+                "dynamo.router.queue.outcome" = tracing::field::Empty,
+                "dynamo.router.queue.reason" = tracing::field::Empty,
+            ),
+            Self::RouterSelection => common_span!(
+                "router.selection",
+                "dynamo.request.attempt" = 0_u64,
+                "dynamo.lifecycle.capture.state" = "recorded",
+                "dynamo.lifecycle.detail_schema" = "router_selection.v1",
+                "dynamo.router.candidate.count" = tracing::field::Empty,
+                "dynamo.router.candidate.eligible.count" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.count" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.not_allowed" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.constraints" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.overloaded" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.unavailable" = tracing::field::Empty,
+                "dynamo.router.candidate.filtered.policy" = tracing::field::Empty,
+                "dynamo.router.algorithm.id" = tracing::field::Empty,
+                "dynamo.router.algorithm.version" = tracing::field::Empty,
+                "dynamo.router.decision.schema" = tracing::field::Empty,
+                "dynamo.router.selection.policy" = tracing::field::Empty,
+                "dynamo.router.pool.role" = tracing::field::Empty,
+                "dynamo.router.selected.worker.id" = tracing::field::Empty,
+                "dynamo.router.selected.dp.rank" = tracing::field::Empty,
+                "dynamo.router.selected.score" = tracing::field::Empty,
+                "dynamo.router.best.worker.id" = tracing::field::Empty,
+                "dynamo.router.best.dp.rank" = tracing::field::Empty,
+                "dynamo.router.best.score" = tracing::field::Empty,
+                "dynamo.router.best.margin" = tracing::field::Empty,
+                "dynamo.router.candidates.detail_schema" = tracing::field::Empty,
+                "dynamo.router.candidates.top_k" = tracing::field::Empty,
+            ),
+            Self::WorkerAdmission => common_span!(
+                "worker.admission",
+                "dynamo.request.attempt" = 0_u64,
+                "dynamo.lifecycle.capture.state" = "recorded",
+                "dynamo.lifecycle.detail_schema" = "admission.v1",
+                "dynamo.worker.admission.transport" = tracing::field::Empty,
+                "dynamo.worker.admission.payload.bytes" = tracing::field::Empty,
+                "dynamo.worker.admission.result" = tracing::field::Empty,
+            ),
+            Self::RequestDispatch => common_span!(
+                "request.dispatch",
+                "dynamo.request.attempt" = 0_u64,
+                "dynamo.lifecycle.capture.state" = "recorded",
+                "dynamo.lifecycle.detail_schema" = "dispatch.v1",
+                "dynamo.dispatch.destination.worker.id" = tracing::field::Empty,
+                "dynamo.dispatch.destination.dp.rank" = tracing::field::Empty,
+                "dynamo.dispatch.route" = tracing::field::Empty,
+                "dynamo.dispatch.result" = tracing::field::Empty,
+            ),
             Self::WorkerOperation => common_span!("worker.operation"),
             Self::WorkerOperationEncode => common_span!("worker.operation.encode"),
             Self::WorkerOperationPrefill => common_span!("worker.operation.prefill"),
             Self::WorkerOperationDecode => common_span!("worker.operation.decode"),
-            Self::ResponseStreaming => common_span!("response.streaming"),
+            Self::ResponseStreaming => common_span!(
+                "response.streaming",
+                "dynamo.stage.outcome" = tracing::field::Empty,
+                "dynamo.stream.events" = tracing::field::Empty,
+            ),
             Self::ResponseStreamingEncode => common_span!("response.streaming.encode"),
             Self::ResponseStreamingPrefill => common_span!("response.streaming.prefill"),
             Self::ResponseStreamingDecode => common_span!("response.streaming.decode"),
@@ -279,6 +349,15 @@ impl LifecycleTrace {
         self.enabled
     }
 
+    /// Investigation mode permits bounded, per-request decision detail.
+    pub fn is_investigation_mode(&self) -> bool {
+        self.enabled
+            && self
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.mode == "investigation")
+    }
+
     /// Start the request root and return a recorder shared with all terminal paths.
     #[must_use]
     pub fn start_request(&self) -> LifecycleRequest {
@@ -304,6 +383,19 @@ impl LifecycleTrace {
         }
     }
 
+    /// Observe a frontend stage without per-event tracing or payload capture.
+    /// Detailed state is written once, on drop, and only in investigation mode.
+    #[must_use]
+    pub fn observe_stage(&self, stage: LifecycleStage) -> LifecycleStageObservation {
+        LifecycleStageObservation {
+            span: self.start(stage),
+            detailed: self.is_investigation_mode(),
+            outcome: None,
+            checkpoint: None,
+            events: matches!(stage, LifecycleStage::ResponseStreaming).then_some(0),
+        }
+    }
+
     /// Start the worker response-streaming boundary with its configured
     /// disaggregation role encoded in the timing span name.
     #[must_use]
@@ -326,6 +418,62 @@ impl LifecycleTrace {
         }
         let role = self.identity.as_ref().map(|identity| identity.role);
         self.start(worker_operation_stage(role))
+    }
+}
+
+/// Bounded frontend stage state. `abandoned` means dropped without an observed
+/// outcome, not necessarily client cancellation; consult the request terminal.
+/// Event counts describe SSE items yielded by the frontend, not tokens or client
+/// receipt. No per-event clock reads, allocations, or tracing calls are needed.
+pub struct LifecycleStageObservation {
+    span: Span,
+    detailed: bool,
+    outcome: Option<TerminalOutcome>,
+    checkpoint: Option<&'static str>,
+    events: Option<u64>,
+}
+
+impl LifecycleStageObservation {
+    pub fn span(&self) -> &Span {
+        &self.span
+    }
+
+    pub fn checkpoint(&mut self, checkpoint: &'static str) {
+        if self.detailed {
+            self.checkpoint = Some(checkpoint);
+        }
+    }
+
+    pub fn finish(&mut self, outcome: TerminalOutcome) {
+        if self.detailed {
+            self.outcome = Some(outcome);
+        }
+    }
+
+    pub fn observe_event(&mut self) {
+        if self.detailed
+            && let Some(events) = &mut self.events
+        {
+            *events = events.saturating_add(1);
+        }
+    }
+}
+
+impl Drop for LifecycleStageObservation {
+    fn drop(&mut self) {
+        if !self.detailed {
+            return;
+        }
+        self.span.record(
+            "dynamo.stage.outcome",
+            self.outcome.map_or("abandoned", TerminalOutcome::as_str),
+        );
+        if let Some(checkpoint) = self.checkpoint {
+            self.span.record("dynamo.stage.checkpoint", checkpoint);
+        }
+        if let Some(events) = self.events {
+            self.span.record("dynamo.stream.events", events);
+        }
     }
 }
 
@@ -515,6 +663,84 @@ mod tests {
                 role: Some("worker".to_string()),
             }]
         );
+    }
+
+    #[derive(Default)]
+    struct DetailFields(Vec<(String, String)>);
+
+    impl tracing::field::Visit for DetailFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push((field.name().to_owned(), format!("{value:?}")));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_owned(), value.to_owned()));
+        }
+    }
+
+    struct DetailCapture(Arc<Mutex<DetailFields>>);
+
+    impl<S: Subscriber> Layer<S> for DetailCapture {
+        fn on_record(
+            &self,
+            _id: &tracing::Id,
+            values: &tracing::span::Record<'_>,
+            _ctx: Context<'_, S>,
+        ) {
+            values.record(&mut *self.0.lock().unwrap());
+        }
+    }
+
+    #[test]
+    fn lifecycle_stage_details_are_bounded_and_investigation_only() {
+        for stage in [
+            LifecycleStage::RequestPreprocessing,
+            LifecycleStage::ResponseStreaming,
+        ] {
+            for mode in ["core", "investigation"] {
+                for outcome in [
+                    None,
+                    Some(TerminalOutcome::Success),
+                    Some(TerminalOutcome::Failed),
+                ] {
+                    let captured = Arc::new(Mutex::new(DetailFields::default()));
+                    let subscriber =
+                        tracing_subscriber::registry().with(DetailCapture(captured.clone()));
+                    let _guard = tracing::subscriber::set_default(subscriber);
+                    let mut identity = LifecycleIdentity::new(
+                        Some("request".into()),
+                        LifecycleOperationRole::Frontend,
+                    );
+                    identity.mode = mode;
+                    let trace = LifecycleTrace::enabled(identity);
+                    let mut observation = trace.observe_stage(stage);
+                    let expected = if stage == LifecycleStage::RequestPreprocessing {
+                        observation.checkpoint("preprocess_request");
+                        ("dynamo.stage.checkpoint", "preprocess_request")
+                    } else {
+                        observation.observe_event();
+                        observation.observe_event();
+                        ("dynamo.stream.events", "2")
+                    };
+                    if let Some(outcome) = outcome {
+                        observation.finish(outcome);
+                    }
+                    assert!(captured.lock().unwrap().0.is_empty(), "record only on drop");
+                    drop(observation);
+                    let fields = &captured.lock().unwrap().0;
+                    if mode == "core" {
+                        assert!(fields.is_empty());
+                    } else {
+                        assert_eq!(fields.len(), 2);
+                        assert!(fields.contains(&(
+                            "dynamo.stage.outcome".into(),
+                            outcome.map_or("abandoned", TerminalOutcome::as_str).into()
+                        )));
+                        assert!(fields.contains(&(expected.0.into(), expected.1.into())));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
