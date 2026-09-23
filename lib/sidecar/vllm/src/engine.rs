@@ -23,6 +23,7 @@ use crate::args::Args;
 use crate::client::{self, CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{
     ResponseState, build_generate_request, data_parallel_rank, normalize_response_options,
+    request_has_multimodal_input,
 };
 use crate::lora::{self, build_downloader, parse_load_lora, parse_lora_name, resolve_source_path};
 use crate::model::DiscoveredModel;
@@ -153,7 +154,7 @@ impl VllmSidecarEngine {
                 .sidecar
                 .common
                 .exclude_tools_when_tool_choice_none,
-            enable_kv_routing: true,
+            enable_kv_routing: !mode.is_encode(),
             disaggregation_mode: mode,
             route_to_encoder: args.sidecar.common.route_to_encoder,
             enable_rl,
@@ -691,6 +692,7 @@ impl LLMEngine for VllmSidecarEngine {
         let (model, server) = client.discover(startup_deadline).await?;
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
+        let engine_config = observed.engine_config(!self.mode.is_encode())?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -703,7 +705,7 @@ impl LLMEngine for VllmSidecarEngine {
             mode = %self.mode,
             "vLLM gRPC services are ready"
         );
-        Ok(observed.engine_config())
+        Ok(engine_config)
     }
 
     async fn generate(
@@ -711,12 +713,7 @@ impl LLMEngine for VllmSidecarEngine {
         request: dynamo_backend_common::PreprocessedRequest,
         ctx: GenerateContext,
     ) -> Result<BoxStream<'static, Result<LLMEngineOutput, DynamoError>>, DynamoError> {
-        if request
-            .multi_modal_data
-            .as_ref()
-            .is_some_and(|media| media.values().any(|items| !items.is_empty()))
-            && !self.model.supports_multimodal
-        {
+        if request_has_multimodal_input(&request) && !self.model.supports_multimodal {
             return Err(client::invalid_argument(format!(
                 "model `{}` does not advertise multimodal support",
                 self.model.served_name

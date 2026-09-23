@@ -10,8 +10,8 @@ use parking_lot::Mutex;
 
 use super::policy::WorkerSelectionPolicyStateRef;
 use super::{
-    LogitWeights, MaterializedSelectionInput, WorkerCandidate, WorkerInputs,
-    WorkerSelectionContext, WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
+    CandidateData, MaterializedSelectionInput, WorkerInputs, WorkerSelectionContext,
+    WorkerSelectionInput, WorkerSelector, select_worker_with_policy,
 };
 use crate::protocols::{WorkerConfigLike, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use crate::scheduling::config::KvRouterConfig;
@@ -88,6 +88,14 @@ fn softmax_sample_index<T>(
     entries.len() - 1
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LogitWeights {
+    overlap_score_credit: f64,
+    overlap_score_credit_decay: f64,
+    prefill_load_scale: f64,
+    shared_cache_multiplier: f64,
+}
+
 /// Default implementation matching the Python _cost_function.
 pub struct DefaultWorkerSelector {
     pub kv_router_config: KvRouterConfig,
@@ -102,6 +110,7 @@ pub(super) struct DefaultWorkerScorer<C = KvRouterConfig> {
 
 #[derive(Debug, Clone, Copy)]
 struct DefaultScoringContext {
+    weights: LogitWeights,
     min_active_prefill_tokens: usize,
     has_tier_overlap_blocks: bool,
 }
@@ -192,7 +201,7 @@ impl DefaultWorkerScorer<KvRouterConfig> {
     }
 }
 
-pub(super) fn selection_weights(
+fn selection_weights(
     kv_router_config: &KvRouterConfig,
     request: &SchedulingRequest,
 ) -> LogitWeights {
@@ -237,6 +246,7 @@ impl DefaultScoringContext {
             || !request.overlap.tier_overlap_blocks.host_pinned.is_empty()
             || !request.overlap.tier_overlap_blocks.disk.is_empty();
         Self {
+            weights,
             min_active_prefill_tokens,
             has_tier_overlap_blocks,
         }
@@ -256,7 +266,7 @@ fn default_row(
     context: DefaultScoringContext,
     worker: WorkerWithDpRank,
     preferred_taint_multiplier: Option<f64>,
-) -> WorkerCandidate {
+) -> CandidateData {
     input.row_with_device_overlap(
         worker,
         preferred_taint_multiplier,
@@ -272,17 +282,23 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
-        row: &WorkerCandidate,
+        row: &CandidateData,
         formula_name: &'static str,
     ) -> f64 {
         let kv_router_config = self.kv_router_config.borrow();
-        let weights = context.weights;
+        let weights = default_context.weights;
         let worker = row.worker;
         let cache = &row.cache;
         let load = &row.load;
         let effective_overlap_blocks = cache.effective_overlap_blocks;
         let device_overlap_blocks = cache.device_overlap_blocks;
-        let shared_beyond_device_blocks = cache.shared_beyond_device_blocks;
+        let shared_beyond_device_blocks = context
+            .request
+            .shared_cache_hits
+            .as_ref()
+            .map_or(0, |hits| {
+                hits.hits_beyond(device_overlap_blocks.round().max(0.0) as u32)
+            });
         let shared_overlap_blocks =
             weights.shared_cache_multiplier * shared_beyond_device_blocks as f64;
         // Normalize backlog above the least-loaded eligible worker by this request's
@@ -328,7 +344,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             // `SchedulerQueueActor` task, so the logging layer cannot attach request identity to
             // it, and this branch returns early without reaching them.
             tracing::debug!(
-                request_id = context.request_id,
+                request_id = context.request.mode.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = max(0, decode_blocks - overlap_credit_blocks) + active_request_cost_blocks \
@@ -339,7 +355,21 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
             return logit;
         }
 
-        let adjusted_prefill_blocks = (load.raw_prefill_blocks - overlap_credit_blocks).max(0.0);
+        // Keep reference-only arithmetic out of public worker-input rows, including
+        // benchmark builds: their layout must match the production plugin's inputs.
+        let raw_prefill_tokens = if context.track_prefill_tokens {
+            if load.available {
+                let cached_tokens = cache.estimated_cached_tokens;
+                let uncached_tokens = context.request.isl_tokens.saturating_sub(cached_tokens);
+                (load.active_prefill_tokens + uncached_tokens).saturating_add(cached_tokens)
+            } else {
+                context.request.isl_tokens
+            }
+        } else {
+            0
+        };
+        let raw_prefill_blocks = raw_prefill_tokens as f64 / context.block_size as f64;
+        let adjusted_prefill_blocks = (raw_prefill_blocks - overlap_credit_blocks).max(0.0);
         let prefill_cost_blocks = weights.prefill_load_scale * adjusted_prefill_blocks;
         let logit = prefill_cost_blocks + decode_cost_blocks + active_request_cost_blocks;
 
@@ -351,7 +381,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         // inside the macro so they cost nothing when DEBUG is disabled.
         if shared_beyond_device_blocks > 0 {
             tracing::debug!(
-                request_id = context.request_id,
+                request_id = context.request.mode.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks, \
                  {} shared blocks beyond device (multiplier={shared_cache_multiplier:.2}): {logit:.3} \
@@ -362,13 +392,13 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                 worker.worker_id,
                 worker.dp_rank,
                 shared_beyond_device_blocks,
-                load.raw_prefill_blocks,
+                raw_prefill_blocks,
                 shared_cache_multiplier = weights.shared_cache_multiplier,
                 prefill_load_scale = weights.prefill_load_scale
             );
         } else {
             tracing::debug!(
-                request_id = context.request_id,
+                request_id = context.request.mode.request_id().unwrap_or("-"),
                 worker_type = self.worker_type,
                 "{formula_name} for worker_id={} dp_rank={:?} with {effective_overlap_blocks:.2} effective cached blocks: {logit:.3} \
                  = prefill_load_scale * adjusted_prefill_blocks + decode_blocks + active_request_cost_blocks \
@@ -377,7 +407,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
                  overlap_credit_decay: {overlap_credit_decay:.3})",
                 worker.worker_id,
                 worker.dp_rank,
-                load.raw_prefill_blocks,
+                raw_prefill_blocks,
                 prefill_load_scale = weights.prefill_load_scale
             );
         }
@@ -390,7 +420,7 @@ impl<C: Borrow<KvRouterConfig>> DefaultWorkerScorer<C> {
         &self,
         context: &WorkerSelectionContext<'_>,
         default_context: DefaultScoringContext,
-        row: &WorkerCandidate,
+        row: &CandidateData,
     ) -> f64 {
         let base_score = self.worker_logit(context, default_context, row, "Formula");
         match row.preferred_taint_multiplier {
@@ -420,8 +450,12 @@ pub(super) fn pick_default_worker<C: WorkerConfigLike>(
     request: &SchedulingRequest,
     eligibility: RoutingEligibility<'_>,
 ) -> Option<(WorkerWithDpRank, f64)> {
-    let default_context =
-        DefaultScoringContext::new(workers, request, eligibility, input.context.weights);
+    let default_context = DefaultScoringContext::new(
+        workers,
+        request,
+        eligibility,
+        selection_weights(scorer.kv_router_config, request),
+    );
     if let Some(worker) = eligibility.pinned_worker() {
         let row = default_row(input, default_context, worker, None);
         return Some((
@@ -554,9 +588,8 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         let (workers, request, eligibility, block_size) = input.into_configured()?;
         select_worker_with_policy(
-            &self.kv_router_config,
             self.worker_type,
-            WorkerSelectionPolicyStateRef::Default(&self.picker),
+            WorkerSelectionPolicyStateRef::Reference(&self.kv_router_config, &self.picker),
             workers,
             request,
             eligibility,
@@ -585,7 +618,7 @@ mod tests {
         weights: LogitWeights,
     ) -> f64 {
         let workers = HashMap::from([(worker.worker_id, TaintedWorkerConfig::default())]);
-        let input = MaterializedSelectionInput::new(request, block_size, weights);
+        let input = MaterializedSelectionInput::new(request, block_size);
         let default_context =
             DefaultScoringContext::new(&workers, request, request.eligibility(), weights);
         DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type)
@@ -673,8 +706,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1076,8 +1109,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1135,8 +1168,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1212,8 +1245,8 @@ mod tests {
                 isl_tokens: 16,
                 overlap: OverlapSignals {
                     tier_overlap_blocks: Default::default(),
-                    effective_overlap_blocks: HashMap::default(),
-                    effective_cached_tokens: HashMap::default(),
+                    effective_overlap_blocks: Default::default(),
+                    effective_cached_tokens: Default::default(),
                 },
                 kv_transfer_candidates: None,
                 retain_kv_transfer_chain: false,
@@ -1287,8 +1320,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1358,8 +1391,8 @@ mod tests {
             isl_tokens: 16,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
-                effective_overlap_blocks: HashMap::default(),
-                effective_cached_tokens: HashMap::default(),
+                effective_overlap_blocks: Default::default(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1411,11 +1444,11 @@ mod tests {
         let isl = 4usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 2.0);
         // worker1 has 0 overlap (not in map)
 
-        let mut effective_cached_tokens = HashMap::new();
+        let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 2);
 
         let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
@@ -1492,7 +1525,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
 
-        let mut effective_cached_tokens = HashMap::new();
+        let mut effective_cached_tokens = rustc_hash::FxHashMap::default();
         effective_cached_tokens.insert(worker0, 32);
 
         let mut tier_overlap_blocks = crate::scheduling::TierOverlapBlocks::default();
@@ -1523,7 +1556,7 @@ mod tests {
             isl_tokens: isl,
             overlap: OverlapSignals {
                 tier_overlap_blocks,
-                effective_overlap_blocks: HashMap::new(),
+                effective_overlap_blocks: Default::default(),
                 effective_cached_tokens,
             },
             kv_transfer_candidates: None,
@@ -1798,7 +1831,7 @@ mod tests {
         let worker0 = WorkerWithDpRank::from_worker_id(0);
         let worker1 = WorkerWithDpRank::from_worker_id(1);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 4.0);
 
         let config = KvRouterConfig {
@@ -1826,7 +1859,7 @@ mod tests {
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks,
-                effective_cached_tokens: HashMap::new(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,
@@ -1877,16 +1910,30 @@ mod tests {
             prefill_load_scale: 1.0,
             shared_cache_multiplier: 1.0,
         };
-        let input = MaterializedSelectionInput::new(&request, 16, weights);
+        let input = MaterializedSelectionInput::new(&request, 16);
         let default_context =
             DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
         let custom_row = input.row(worker, None, WorkerInputs::CACHE);
         let default_row = default_row(&input, default_context, worker, None);
 
         assert_eq!(custom_row.cache.device_overlap_blocks, 0.0);
-        assert_eq!(custom_row.cache.shared_beyond_device_blocks, 4);
+        assert_eq!(
+            request
+                .shared_cache_hits
+                .as_ref()
+                .unwrap()
+                .hits_beyond(custom_row.cache.device_overlap_blocks as u32),
+            4
+        );
         assert_eq!(default_row.cache.device_overlap_blocks, 2.0);
-        assert_eq!(default_row.cache.shared_beyond_device_blocks, 2);
+        assert_eq!(
+            request
+                .shared_cache_hits
+                .as_ref()
+                .unwrap()
+                .hits_beyond(default_row.cache.device_overlap_blocks as u32),
+            2
+        );
     }
 
     /// Without shared cache hits, the scoring should be unchanged.
@@ -1898,7 +1945,7 @@ mod tests {
         let isl = 64usize;
         let worker0 = WorkerWithDpRank::from_worker_id(0);
 
-        let mut effective_overlap_blocks = HashMap::new();
+        let mut effective_overlap_blocks = rustc_hash::FxHashMap::default();
         effective_overlap_blocks.insert(worker0, 2.0);
 
         let config = KvRouterConfig::default();
@@ -1916,7 +1963,7 @@ mod tests {
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks,
-                effective_cached_tokens: HashMap::new(),
+                effective_cached_tokens: Default::default(),
             },
             kv_transfer_candidates: None,
             retain_kv_transfer_chain: false,

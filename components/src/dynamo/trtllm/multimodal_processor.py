@@ -163,7 +163,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -588,7 +589,10 @@ class MultimodalRequestProcessor:
                     normalized_url = await validate_media_url(url, self._url_policy)
                     if urlparse(normalized_url).scheme in ("http", "https"):
                         content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
+                            normalized_url,
+                            30.0,
+                            policy=self._url_policy,
+                            max_bytes=self.max_file_size_bytes,
                         )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.

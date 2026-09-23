@@ -1036,6 +1036,7 @@ pub struct ResponseParams {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub max_output_tokens: Option<u32>,
+    pub metadata: Option<HashMap<String, String>>,
     pub parallel_tool_calls: Option<bool>,
     pub store: Option<bool>,
     pub tools: Option<Vec<Tool>>,
@@ -1312,7 +1313,7 @@ pub fn chat_completion_to_response(
         output,
         // Spec-required defaults (OpenResponses requires these as non-null)
         background: Some(false),
-        metadata: Some(HashMap::new()),
+        metadata: Some(params.metadata.clone().unwrap_or_default()),
         parallel_tool_calls: params.parallel_tool_calls.or(Some(true)),
         temperature: params.temperature.or(Some(1.0)),
         text: Some(params.text.clone().unwrap_or(ResponseTextParam {

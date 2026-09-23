@@ -1934,7 +1934,7 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let needs_policy_role = plugins.worker_selection().is_some();
+    let needs_policy_role = plugins.has_custom_worker_selection();
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
@@ -2032,7 +2032,11 @@ async fn create_kv_router_from_endpoint(
 
     // Preserve the model card's role and display name, which can differ
     // from the metric role and the routing partition name.
-    let plugins = if let Some(factory) = plugins.worker_selection().cloned() {
+    let plugins = if let Some(factory) = plugins
+        .worker_selection()
+        .filter(|_| needs_policy_role)
+        .cloned()
+    {
         let policy_worker_role = policy_worker_role
             .expect("a configured worker-selection policy waits for a typed model card above");
         let policy_model_name = policy_model_name.unwrap_or_default();
