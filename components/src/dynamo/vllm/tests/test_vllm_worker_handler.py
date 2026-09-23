@@ -175,8 +175,18 @@ def _make_engine_response(request_id: str = "req-1", finished: bool = True):
     return resp
 
 
-def test_lora_discovery_publishes_engine_generate_capability():
-    config = _make_config()
+@pytest.mark.parametrize(
+    ("disaggregation_mode", "expected_worker_type"),
+    [
+        (None, mod.WorkerType.Aggregated),
+        ("PREFILL", None),
+        ("DECODE", None),
+    ],
+)
+def test_lora_discovery_publishes_engine_generate_capability_only_for_aggregated(
+    disaggregation_mode, expected_worker_type
+):
+    config = _make_config(disaggregation_mode=disaggregation_mode)
     handler = _make_handler(config)
     handler.config = config
     handler.generate_endpoint = MagicMock()
@@ -208,19 +218,22 @@ def test_lora_discovery_publishes_engine_generate_capability():
     ):
         asyncio.run(handler._register_lora_discovery("adapter-v1", 42))
 
-    publish_generate.assert_called_once()
-    (
-        runtime_arg,
-        input_arg,
-        model_type_arg,
-        worker_arg,
-        tower_lora_arg,
-    ) = publish_generate.call_args.args
-    assert runtime_arg is runtime_config
-    assert input_arg == mod.ModelInput.Tokens
-    assert model_type_arg.supports_chat()
-    assert worker_arg == mod.WorkerType.Aggregated
-    assert tower_lora_arg is True
+    if expected_worker_type is None:
+        publish_generate.assert_not_called()
+    else:
+        publish_generate.assert_called_once()
+        (
+            runtime_arg,
+            input_arg,
+            model_type_arg,
+            worker_arg,
+            tower_lora_arg,
+        ) = publish_generate.call_args.args
+        assert runtime_arg is runtime_config
+        assert input_arg == mod.ModelInput.Tokens
+        assert model_type_arg.supports_chat()
+        assert worker_arg == expected_worker_type
+        assert tower_lora_arg is True
     assert register_model.await_args.kwargs["runtime_config"] is runtime_config
 
 

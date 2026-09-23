@@ -2567,17 +2567,18 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         runtime_config.tool_call_parser = self.config.dyn_tool_call_parser
         runtime_config.reasoning_parser = self.config.dyn_reasoning_parser
 
-        lora_config = self.engine_client.vllm_config.lora_config
-        publish_engine_generate_capability(
-            runtime_config,
-            ModelInput.Tokens,
-            lora_model_type,
-            lora_worker_type,
-            bool(
-                lora_config
-                and getattr(lora_config, "enable_tower_connector_lora", False)
-            ),
-        )
+        if lora_worker_type == WorkerType.Aggregated:
+            lora_config = self.engine_client.vllm_config.lora_config
+            publish_engine_generate_capability(
+                runtime_config,
+                ModelInput.Tokens,
+                lora_model_type,
+                lora_worker_type,
+                bool(
+                    lora_config
+                    and getattr(lora_config, "enable_tower_connector_lora", False)
+                ),
+            )
 
         lora_needs: list[list[WorkerType]] = [lora_needs_set] if lora_needs_set else []
 
