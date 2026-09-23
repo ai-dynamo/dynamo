@@ -69,9 +69,11 @@ pub struct ResponseOptions {
     /// Record output token ids.
     ///
     /// The tap holds the recorded tokens of every in-flight request until its
-    /// stream ends. `capacity` does not bound this; the bound is the number of
-    /// in-flight requests times `max_tokens` (or the response length when
-    /// `max_tokens` is unset) times 4 bytes per token, for each tap.
+    /// stream ends. `capacity` does not bound this. Each in-flight request
+    /// holds 4 bytes per recorded token, for each tap: up to `max_tokens` for
+    /// each of its `n` choices, or its whole response when `max_tokens` is
+    /// unset. `chunk_timing` adds 8 bytes for each chunk that carried tokens,
+    /// and `max_tokens` does not cap that.
     #[serde(default = "default_true")]
     pub tokens: bool,
     /// Record at most this many token ids for each choice. The record marks
