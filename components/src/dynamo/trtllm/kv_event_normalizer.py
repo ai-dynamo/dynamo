@@ -139,6 +139,7 @@ def normalize_kv_event_blocks(
         raw_token_ids: list[int | str] = []
         for token in block["tokens"]:
             token_id = token["token_id"]
+            normalized_token_id: int | str
             if isinstance(token_id, str):
                 normalized_token_id = token_id
                 has_digest = True
