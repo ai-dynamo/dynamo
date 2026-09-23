@@ -8,6 +8,8 @@ shipped runtime image (no imageio/encode mock, no pip install). This is the
 pre_merge guard for the gap that let two failures ship green:
   - the image shipping no VP9 encoder (encode raises -> status "failed"), and
   - the handler defaulting to a removed H.264 encoder (would also fail).
+It also decodes the output and checks its colors, which a codec-name check
+cannot see: the in-tree FFmpeg 8.1.2 turned red magenta (ai-dynamo/dynamo#15198).
 Runs on the CUDA image only (gpu_0, no xpu) because the in-tree ffmpeg is copied
 into the CUDA runtime; encoding VP9 (libvpx-vp9) is CPU-only, so no GPU is used.
 """
@@ -16,9 +18,12 @@ import base64
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tests.utils.video_color import assert_quadrant_colors, quadrant_frames
 
 try:
     from PIL import Image
@@ -37,14 +42,11 @@ pytestmark = [
 ]
 
 
-def _synthetic_pil_frames(n: int = 8, size: int = 64) -> list:
-    return [
-        Image.fromarray(np.full((size, size, 3), (i * 24) % 256, dtype=np.uint8))
-        for i in range(n)
-    ]
+def _synthetic_pil_frames() -> list:
+    return [Image.fromarray(frame) for frame in quadrant_frames()]
 
 
-def _synthetic_numpy_frames(n: int = 8, size: int = 64) -> list:
+def _synthetic_numpy_frames() -> list:
     """A single float32 [0, 1] video tensor, as diffusion pipelines emit it.
 
     Wraps one ``(n, size, size, 3)`` array in a length-1 list so it flows through
@@ -52,13 +54,7 @@ def _synthetic_numpy_frames(n: int = 8, size: int = 64) -> list:
     Wan2.1 T2V serve path — the shape that regressed with 'numpy.ndarray' object
     has no attribute 'convert'.
     """
-    video = np.stack(
-        [
-            np.full((size, size, 3), (i * 24) % 256, dtype=np.float32) / 255.0
-            for i in range(n)
-        ]
-    )
-    return [video]
+    return [quadrant_frames().astype(np.float32) / 255.0]
 
 
 def _probe_video_codec(video_bytes: bytes) -> str:
@@ -86,7 +82,7 @@ def _probe_video_codec(video_bytes: bytes) -> str:
 
 
 @pytest.mark.asyncio
-async def test_omni_video_output_is_vp9_in_shipped_image():
+async def test_omni_video_output_is_vp9_in_shipped_image(tmp_path: Path):
     formatter = DiffusionFormatter(
         model_name="test", media_fs=None, media_http_url=None
     )
@@ -103,10 +99,11 @@ async def test_omni_video_output_is_vp9_in_shipped_image():
     assert video_bytes, "encoder produced no bytes"
     codec = _probe_video_codec(video_bytes)
     assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+    assert_quadrant_colors(video_bytes, tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_omni_video_output_accepts_numpy_frames():
+async def test_omni_video_output_accepts_numpy_frames(tmp_path: Path):
     """Regression: real diffusion pipelines emit float numpy frames, not PIL.
 
     The PIL-only ``frames_to_numpy`` crashed the Wan2.1 T2V serve path with
@@ -127,3 +124,4 @@ async def test_omni_video_output_accepts_numpy_frames():
     assert video_bytes, "encoder produced no bytes"
     codec = _probe_video_codec(video_bytes)
     assert codec == "vp9", f"expected vp9-encoded output, got codec={codec!r}"
+    assert_quadrant_colors(video_bytes, tmp_path)

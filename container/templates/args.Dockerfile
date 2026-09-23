@@ -52,6 +52,7 @@ ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
+ARG FFMPEG_SHA256={{ context.dynamo.ffmpeg_sha256 }}
 ARG LIBVPX_REF={{ context.dynamo.libvpx_ref }}
 {% if device == "cuda" -%}
 ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}

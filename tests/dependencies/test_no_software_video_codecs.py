@@ -4,7 +4,7 @@
 """Assert the shipped runtime images carry no software H.264/H.265/AAC decoder.
 
 The in-tree FFmpeg is already guarded where it is built: `wheel_builder.Dockerfile`
-enumerates `-encoders -decoders -parsers` and fails the build on a match. That
+enumerates its encoders, decoders and parsers and fails the build on a match. That
 guard runs in the builder stage, so it proves what was *produced*, not what the
 runtime image finally *ships* — a base-image bump, a stray copy, or an ffmpeg
 earlier on `PATH` would all slip past it.
@@ -36,6 +36,7 @@ import ctypes
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -80,10 +81,59 @@ def _ffmpeg() -> str:
 
 
 def _surface(exe: str, surface: str) -> str:
+    if surface == "parsers":
+        # The CLI has no -parsers option: it exits "Unrecognized option" with an
+        # empty stdout, which the absence check would read as a clean surface.
+        listing = "\n".join(sorted(_registered_parsers(_linked_libavcodec(exe))))
+        if not listing:
+            pytest.fail(f"the libavcodec {exe} links registers no parsers")
+        return listing
     proc = subprocess.run(
         [exe, "-hide_banner", f"-{surface}"], capture_output=True, text=True
     )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        pytest.fail(
+            f"`{exe} -{surface}` exited {proc.returncode} without a listing, so "
+            f"its absence check would prove nothing:\n{proc.stderr}"
+        )
     return proc.stdout
+
+
+def _linked_libavcodec(exe: str) -> str:
+    """The libavcodec the shipped ffmpeg loads, as the dynamic loader resolves it."""
+    proc = subprocess.run(
+        ["ldd", shutil.which(exe) or exe], capture_output=True, text=True
+    )
+    match = re.search(r"^\s*libavcodec\S*\s+=>\s+(/\S+)", proc.stdout, re.MULTILINE)
+    if not match:
+        pytest.fail(
+            f"cannot resolve the libavcodec {exe} links:\n{proc.stdout}{proc.stderr}"
+        )
+    return match.group(1)
+
+
+def _registered_parsers(lib_path: str) -> set[str]:
+    """Codec names a libavcodec's parsers register, via av_parser_iterate."""
+
+    class AVCodecParser(ctypes.Structure):
+        # The whole public struct; unused slots hold AV_CODEC_ID_NONE (0).
+        _fields_ = [("codec_ids", ctypes.c_int * 7)]
+
+    lib = ctypes.CDLL(lib_path)
+    lib.av_parser_iterate.restype = ctypes.c_void_p
+    lib.av_parser_iterate.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    lib.avcodec_get_name.restype = ctypes.c_char_p
+    lib.avcodec_get_name.argtypes = [ctypes.c_int]
+
+    opaque = ctypes.c_void_p(None)
+    names: set[str] = set()
+    while True:
+        parser = lib.av_parser_iterate(ctypes.byref(opaque))
+        if not parser:
+            break
+        entry = ctypes.cast(parser, ctypes.POINTER(AVCodecParser)).contents
+        names.update(lib.avcodec_get_name(i).decode() for i in entry.codec_ids if i)
+    return names
 
 
 def _surfaces() -> dict[str, str]:

@@ -302,7 +302,7 @@ class _Decoder:
 
 
 def test_source_fps_prefers_stream_metadata():
-    """PyNvVideoCodec 2.2.0 reports the rate via get_stream_metadata()."""
+    """PyNvVideoCodec reports the rate via get_stream_metadata()."""
     dec = _Decoder(meta=_Meta(average_fps=10.0), get_fps=lambda: 30.0)
     assert nd._source_fps(dec) == 10.0
 

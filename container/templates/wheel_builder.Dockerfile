@@ -328,10 +328,11 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
 # imageio encode path with "Protocol not found. Did you mean file:fd:?". Both
 # are pure fd/stream I/O and carry no codec implementation.
 #
-# Combined with the 8.1 -> 8.1.2 bump below (an upstream maintenance release),
-# this also trims the decoder surface to what we ship.
+# The release is pinned by version and tarball SHA256 in container/context.yaml;
+# read the note there before moving it.
 # Do not delete the source tarball for legal reasons.
 ARG FFMPEG_VERSION
+ARG FFMPEG_SHA256
 ARG LIBVPX_REF
 RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token \
     --mount=type=secret,id=aws-role-arn,env=AWS_ROLE_ARN \
@@ -372,10 +373,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         sleep 10; \
     done && \
     test -s ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    echo "${FFMPEG_SHA256:?FFMPEG_SHA256 must be set alongside FFMPEG_VERSION}  ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+        | sha256sum -c - && \
     tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
     cd ffmpeg-${FFMPEG_VERSION} && \
     ./configure \
         --prefix=/usr/local \
+        --build-suffix=_dynamo \
         --disable-gpl \
         --disable-nonfree \
         --disable-doc \
@@ -402,6 +406,28 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
         --enable-protocol=file,pipe,fd && \
     make -j$(nproc) && \
     make install && \
+    # ldconfig BEFORE the guard below, not after. The binary carries no RPATH, so
+    # until the cache knows about these libraries it cannot start -- and the guard
+    # discards stderr, so an unstartable binary produces empty output, matches no
+    # disallowed codec, and passes having checked nothing. Measured on a shipped
+    # image: with the ffmpeg libraries missing from the cache the run fails with
+    # "error while loading shared libraries" and the guard still passes.
+    ldconfig && \
+    # --build-suffix renames the pkg-config files too, so `pkg-config libavformat`
+    # stops resolving and ffmpeg-sys-next's probe fails the Rust build outright.
+    # Canonical-name symlinks keep that working; each .pc still reports
+    # -lavformat_dynamo, so consumers link the suffixed library.
+    for pc in /usr/local/lib/pkgconfig/*_dynamo.pc; do \
+        ln -sf "$(basename "$pc")" "${pc%_dynamo.pc}.pc"; \
+    done && \
+    # Positive check first: everything below is an absence test, and an absence
+    # test over empty output proves nothing. VP9 is present here by construction.
+    { /usr/local/bin/ffmpeg -hide_banner -encoders 2>/dev/null \
+        | grep -qiE 'libvpx[-_]vp9' \
+      || { echo "ERROR: the in-tree ffmpeg does not list its VP9 encoder; it is" >&2; \
+           echo "       either broken or unable to start, and the codec guard" >&2; \
+           echo "       below would then pass without checking anything." >&2; \
+           exit 1; }; } && \
     # Compliance guard: fail the build if any royalty-bearing / HW codec surface
     # leaked into the in-tree ffmpeg. By construction this build is VP9-only, so a
     # match here means a config regression. Check the implementation-carrying
@@ -409,17 +435,30 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # implementation is built) and not -bsfs: bitstream filters (e.g.
     # aac_adtstoasc, h264_mp4toannexb) only reframe an already-encoded stream, are
     # pulled in as mov/mp4 muxer dependencies, and carry no codec implementation.
+    #
+    # Each listing must name vp9 before its absence test counts, so one that
+    # failed or came back empty fails the build instead of passing it. The CLI has
+    # no -parsers option (it exits "Unrecognized option" with no listing), so
+    # parsers come from the registry configure generated for libavcodec.
     for surface in encoders decoders parsers; do \
-        if /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
-             | grep -qiE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec'; then \
-            echo "ERROR: in-tree ffmpeg exposes a disallowed codec via -${surface}" >&2; \
-            /usr/local/bin/ffmpeg -hide_banner "-${surface}" 2>/dev/null \
-             | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; \
+        if [ "$surface" = parsers ]; then \
+            listing="$(sed -n 's/^ *&ff_\([a-z0-9_]*\)_parser,$/\1/p' \
+                /tmp/ffmpeg-${FFMPEG_VERSION}/libavcodec/parser_list.c)"; \
+        else \
+            listing="$(/usr/local/bin/ffmpeg -hide_banner "-${surface}")"; \
+        fi; \
+        printf '%s\n' "$listing" | grep -qi 'vp9' \
+          || { echo "ERROR: the in-tree ffmpeg ${surface} listing names no vp9; it is" >&2; \
+               echo "       broken or unreadable, and the absence check below would" >&2; \
+               echo "       pass without checking anything." >&2; \
+               exit 1; }; \
+        if printf '%s\n' "$listing" \
+             | grep -iE 'h\.?264|h\.?265|hevc|(^| )aac|nvenc|cuvid|nvdec' >&2; then \
+            echo "ERROR: in-tree ffmpeg exposes a disallowed codec via ${surface}" >&2; \
             exit 1; \
         fi; \
     done && \
     /tmp/use-sccache.sh show-stats "FFMPEG" && \
-    ldconfig && \
     mkdir -p /usr/local/src/ffmpeg && \
     find /tmp/ffmpeg-${FFMPEG_VERSION} \( -name config.log -o -name config.status \) -delete && \
     mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/
@@ -599,6 +638,11 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # wheel, which the codec gate rejects. Repair with those sonames excluded so
     # they stay external and resolve to the image's /usr/local/lib copies. This
     # media-enabled wheel is intentionally image-only and non-self-contained.
+    #
+    # The exclusions name the _dynamo-suffixed sonames, because that is what the
+    # wheel's DT_NEEDED entries carry. auditwheel globs these against the soname
+    # and 'libavcodec.so.*' does not match 'libavcodec_dynamo.so.62', so leaving
+    # them unsuffixed silently re-enables the grafting this exists to prevent.
 {% if device == "xpu" %}        ARCH_ALT=x86_64 && \
     MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
 {% else %}
@@ -611,13 +655,13 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 {% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
-            --exclude 'libavcodec.so.*' \
-            --exclude 'libavdevice.so.*' \
-            --exclude 'libavfilter.so.*' \
-            --exclude 'libavformat.so.*' \
-            --exclude 'libavutil.so.*' \
-            --exclude 'libswresample.so.*' \
-            --exclude 'libswscale.so.*' \
+            --exclude 'libavcodec_dynamo.so.*' \
+            --exclude 'libavdevice_dynamo.so.*' \
+            --exclude 'libavfilter_dynamo.so.*' \
+            --exclude 'libavformat_dynamo.so.*' \
+            --exclude 'libavutil_dynamo.so.*' \
+            --exclude 'libswresample_dynamo.so.*' \
+            --exclude 'libswscale_dynamo.so.*' \
             --plat ${MANYLINUX_POLICY} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
