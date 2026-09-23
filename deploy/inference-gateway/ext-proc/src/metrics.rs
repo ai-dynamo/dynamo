@@ -19,7 +19,7 @@ use axum::{
 };
 use dynamo_llm::http::service::metrics::generate_log_buckets;
 use dynamo_llm::kv_router::metrics::RouterRequestMetrics;
-use dynamo_runtime::metrics::prometheus_names::name_prefix;
+use dynamo_runtime::metrics::prometheus_names::{name_prefix, router};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, Registry, TEXT_FORMAT, TextEncoder};
 
 /// Port the `/metrics` endpoint binds to unless `DYN_EPP_METRICS_PORT` says
@@ -66,10 +66,15 @@ pub(crate) fn register_router_metrics(
     model: &str,
     inference_pool: &str,
 ) -> anyhow::Result<Arc<RouterRequestMetrics>> {
-    RouterRequestMetrics::from_registry(
+    RouterRequestMetrics::from_registry_subset(
         &REGISTRY,
         name_prefix::COMPONENT,
         &[("model", model), ("inference_pool", inference_pool)],
+        &[
+            router::REQUESTS_STARTED_TOTAL,
+            router::INPUT_SEQUENCE_TOKENS,
+            router::OUTPUT_SEQUENCE_TOKENS,
+        ],
     )
 }
 
@@ -242,6 +247,15 @@ mod tests {
         assert!(started.contains("inference_pool=\"router-test-pool\""));
         assert!(started.ends_with("} 1"));
         assert!(body.contains("dynamo_component_router_input_sequence_tokens_sum{"));
+        assert!(body.contains("dynamo_component_router_output_sequence_tokens_sum{"));
         assert!(body.contains("# TYPE dynamo_epp_cached_tokens histogram"));
+        assert_eq!(
+            REGISTRY
+                .gather()
+                .iter()
+                .filter(|family| family.name().starts_with("dynamo_component_router_"))
+                .count(),
+            3
+        );
     }
 }

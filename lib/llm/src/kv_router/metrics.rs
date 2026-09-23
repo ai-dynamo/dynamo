@@ -21,7 +21,7 @@
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`
 //!   or on the standalone EPP's private `prometheus::Registry` without a DRT.
-//!   Eagerly created so they appear as zeros before any requests arrive.
+//!   Eagerly created so registered families appear as zeros before requests.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
@@ -1048,10 +1048,17 @@ static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::n
 // Keep names, help text, buckets and eager series identical across both paths.
 enum RequestMetricsRegistration<'a> {
     Hierarchy(&'a dyn MetricsHierarchy),
-    Registry(&'a prometheus::Registry, &'a str),
+    Registry(&'a prometheus::Registry, &'a str, Option<&'a [&'a str]>),
 }
 
 impl RequestMetricsRegistration<'_> {
+    fn includes(&self, name: &str) -> bool {
+        match self {
+            Self::Hierarchy(_) | Self::Registry(_, _, None) => true,
+            Self::Registry(_, _, Some(names)) => names.contains(&name),
+        }
+    }
+
     fn create<T: dynamo_runtime::metrics::PrometheusMetric>(
         &self,
         name: &str,
@@ -1069,7 +1076,7 @@ impl RequestMetricsRegistration<'_> {
                 buckets,
                 label_names,
             ),
-            Self::Registry(registry, prefix) => {
+            Self::Registry(registry, prefix, _) => {
                 let labels = const_labels
                     .iter()
                     .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -1100,7 +1107,9 @@ impl RequestMetricsRegistration<'_> {
                         T::with_opts(opts)?
                     }
                 };
-                registry.register(Box::new(metric.clone()))?;
+                if self.includes(name) {
+                    registry.register(Box::new(metric.clone()))?;
+                }
                 Ok(metric)
             }
         }
@@ -1145,6 +1154,27 @@ impl RouterRequestMetrics {
         prefix: &str,
         const_labels: &[(&str, &str)],
     ) -> anyhow::Result<Arc<Self>> {
+        Self::from_registry_with_filter(registry, prefix, const_labels, None)
+    }
+
+    /// Register only the named `router_*` families while retaining the shared
+    /// handles and definitions. Unregistered handles cannot appear in scrapes.
+    /// Intended for observers that can populate only part of the metric set.
+    pub fn from_registry_subset(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: &[(&str, &str)],
+        names: &[&str],
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::from_registry_with_filter(registry, prefix, const_labels, Some(names))
+    }
+
+    fn from_registry_with_filter(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: &[(&str, &str)],
+        names: Option<&[&str]>,
+    ) -> anyhow::Result<Arc<Self>> {
         let mut keys = std::collections::HashSet::new();
         for (key, _) in const_labels {
             anyhow::ensure!(keys.insert(*key), "duplicate router metric label: {key}");
@@ -1154,7 +1184,7 @@ impl RouterRequestMetrics {
             );
         }
         Ok(Arc::new(Self::build(
-            RequestMetricsRegistration::Registry(registry, prefix),
+            RequestMetricsRegistration::Registry(registry, prefix, names),
             const_labels,
         )?))
     }
@@ -1247,8 +1277,12 @@ impl RouterRequestMetrics {
             Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
             Some(&[labels::WORKER_TYPE]),
         )?;
-        non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-        overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        if registration.includes(router::NON_MAX_OVERLAP_SELECTIONS_TOTAL) {
+            non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+        }
+        if registration.includes(router::OVERLAP_BLOCKS_LOST) {
+            overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        }
         Ok(Self {
             requests_started_total,
             requests_total,
@@ -2099,5 +2133,45 @@ mod registration_tests {
             .is_err()
         );
         assert!(duplicate.gather().is_empty());
+    }
+
+    #[test]
+    fn router_registry_subset_keeps_the_selected_family_schema() {
+        let full_registry = prometheus::Registry::new();
+        let subset_registry = prometheus::Registry::new();
+        let labels = &[("model", "served-model"), ("inference_pool", "pool")];
+        let full =
+            RouterRequestMetrics::from_registry(&full_registry, name_prefix::COMPONENT, labels)
+                .unwrap();
+        let subset = RouterRequestMetrics::from_registry_subset(
+            &subset_registry,
+            name_prefix::COMPONENT,
+            labels,
+            &[
+                router::REQUESTS_STARTED_TOTAL,
+                router::INPUT_SEQUENCE_TOKENS,
+                router::OUTPUT_SEQUENCE_TOKENS,
+            ],
+        )
+        .unwrap();
+        for metrics in [&full, &subset] {
+            metrics.requests_started_total.inc();
+            metrics.input_sequence_tokens.observe(19.0);
+            metrics.output_sequence_tokens.observe(8.0);
+        }
+        let full_selected: Vec<_> = full_registry
+            .gather()
+            .into_iter()
+            .filter(|family| {
+                matches!(
+                    family.name(),
+                    "dynamo_component_router_requests_started_total"
+                        | "dynamo_component_router_input_sequence_tokens"
+                        | "dynamo_component_router_output_sequence_tokens"
+                )
+            })
+            .collect();
+        assert_eq!(subset_registry.gather(), full_selected);
+        assert_eq!(subset_registry.gather().len(), 3);
     }
 }

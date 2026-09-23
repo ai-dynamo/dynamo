@@ -5,6 +5,7 @@ use std::collections::HashMap;
 
 use axum::{Json, Router, routing::post};
 use dynamo_kv_router::services::selection::{CatalogReconciler, WorkerRequest};
+use dynamo_runtime::metrics::prometheus_names::router as router_names;
 use prometheus::{Encoder, Registry, TextEncoder};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -134,12 +135,17 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
         RegistrationDefaults::from_config(&cfg),
     );
     let registry = Registry::new();
-    let metrics = RouterRequestMetrics::from_registry(
+    let metrics = RouterRequestMetrics::from_registry_subset(
         &registry,
         "dynamo_component",
         &[
             ("model", &cfg.model_name),
             ("inference_pool", &cfg.inference_pool_name),
+        ],
+        &[
+            router_names::REQUESTS_STARTED_TOTAL,
+            router_names::INPUT_SEQUENCE_TOKENS,
+            router_names::OUTPUT_SEQUENCE_TOKENS,
         ],
     )
     .unwrap();
@@ -227,6 +233,7 @@ async fn standalone_router_metrics_follow_the_wire_observation_paths() {
         .encode(&registry.gather(), &mut encoded)
         .unwrap();
     let text = String::from_utf8(encoded).unwrap();
+    assert_eq!(registry.gather().len(), 3);
     assert!(text.contains("model=\"served-model\""));
     assert!(text.contains("inference_pool=\"test-pool\""));
     assert!(!text.contains("untrusted-name"));
