@@ -5,8 +5,13 @@
 
 #[cfg(test)]
 #[macro_use]
-#[path = "../../testkit/tests/unit/lane.rs"]
-mod test_lane;
+#[path = "../../testkit/tests/unit/support/mod.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/tests/unit/shared.rs"]
+mod test_shared;
 
 mod args;
 mod endpoint;
@@ -32,5 +37,6 @@ pub use error::{
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain};
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/common/transport.rs"]
-mod unit_transport;
+mod unit_common_transport {
+    sidecar_shared_tests!(transport);
+}

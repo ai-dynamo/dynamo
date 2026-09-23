@@ -5,8 +5,23 @@
 
 #[cfg(test)]
 #[macro_use]
-#[path = "../../testkit/tests/unit/lane.rs"]
-mod test_lane;
+#[path = "../../testkit/tests/unit/support/mod.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/tests/unit/shared.rs"]
+mod test_shared;
+
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/tests/unit/support/vllm.rs"]
+mod test_vllm_support;
+
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/tests/unit/vllm.rs"]
+mod test_vllm;
 
 mod args;
 mod client;
@@ -25,9 +40,8 @@ pub use engine::VllmSidecarEngine;
 mod tests;
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/fixtures.rs"]
-mod unit_fixtures;
+use dynamo_sidecar_testkit::fixtures as unit_fixtures;
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/fixtures/vllm.rs"]
+#[path = "../../testkit/tests/support/fixtures/vllm.rs"]
 mod unit_vllm_fixtures;

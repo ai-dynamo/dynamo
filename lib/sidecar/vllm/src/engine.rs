@@ -1293,5 +1293,18 @@ fn is_hot_swap_requested() -> bool {
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/config/worker.rs"]
-mod unit_worker;
+mod unit_support {
+    pub(super) mod worker {
+        sidecar_vllm_support!(worker);
+    }
+}
+
+#[cfg(test)]
+mod unit_shared_worker {
+    sidecar_shared_tests!(worker);
+}
+
+#[cfg(test)]
+mod unit_native_worker {
+    sidecar_vllm_tests!(worker);
+}

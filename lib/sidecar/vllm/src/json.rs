@@ -112,5 +112,6 @@ fn value_to_json(value: prost_types::Value) -> Result<serde_json::Value, DynamoE
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/requests/json.rs"]
-mod unit_json;
+mod unit_native_json {
+    sidecar_vllm_tests!(json);
+}

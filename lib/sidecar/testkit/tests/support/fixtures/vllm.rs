@@ -204,3 +204,54 @@ pub(crate) fn decode_request() -> PreprocessedRequest {
     });
     request
 }
+
+pub(crate) fn terminal_response(
+    reason: dynamo_backend_common::FinishReason,
+) -> pb::GenerateResponse {
+    let mut response = sequence_response(true, false, None);
+    response
+        .outputs
+        .as_mut()
+        .unwrap()
+        .finish_info
+        .as_mut()
+        .unwrap()
+        .finish_reason = match reason {
+        dynamo_backend_common::FinishReason::Stop => pb::finish_info::FinishReason::Stop,
+        dynamo_backend_common::FinishReason::Length => pb::finish_info::FinishReason::Length,
+        dynamo_backend_common::FinishReason::Cancelled => pb::finish_info::FinishReason::Aborted,
+        other => panic!("unsupported fixture finish reason: {other:?}"),
+    } as i32;
+    response
+}
+
+pub(crate) fn prompt_logprob_response(
+    token_ids: &[u32],
+    selected: &[f32],
+    candidates: &[Vec<(u32, f32)>],
+) -> pb::GenerateResponse {
+    let mut response = sequence_response(true, false, None);
+    response.prompt_info = Some(pb::PromptInfo {
+        num_prompt_tokens: token_ids.len() as u32,
+        token_ids: token_ids.to_vec(),
+        logprobs: selected.to_vec(),
+        ranks: (0..selected.len() as u32).collect(),
+        candidate_tokens: candidates
+            .iter()
+            .map(|entries| pb::CandidateTokenInfo {
+                tokens: entries
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, &(id, logprob))| pb::candidate_token_info::TokenInfo {
+                            id,
+                            logprob,
+                            rank: index as u32 + 2,
+                        },
+                    )
+                    .collect(),
+            })
+            .collect(),
+    });
+    response
+}

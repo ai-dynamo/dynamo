@@ -17,44 +17,81 @@ recorded separately in [DEVIATIONS.md](DEVIATIONS.md).
 Tests live in `tests/unit/` and are included as `#[cfg(test)]` child modules by
 their production owners. They use no sockets, processes, engines or model
 downloads. Common production code runs once; shared unit scenarios are
-instantiated for vLLM first. SGLang unit adapters are follow-up work. The existing
-shared wire suite still instantiates both backends, both retained Mocker suites
+instantiated for vLLM first. SGLang unit setup and enrollment are follow-up
+work. The existing shared wire suite still instantiates both backends, both retained Mocker suites
 remain, and E2E allocation is unchanged. Additional wire, process and native
 integration belong to [#15091](https://github.com/ai-dynamo/dynamo/pull/15091), as
 mapped in [COVERAGE.md](COVERAGE.md).
 
-## Shared bodies and native adapters
+## Shared and backend-specific cases
+
+Test definitions live in two case files. Small source-group macros include each
+group under its private production owner; they do not implement conversion or
+model another backend's protocol.
+
+```text
+src/
+  fixtures.rs                 # Common inputs for unit and integration tests
+  assert.rs                   # Common output assertions
+tests/
+  unit/
+    shared.rs                 # Common-code and cross-backend test definitions
+    vllm.rs                   # Only vLLM-specific test definitions
+    support/
+      mod.rs                  # Per-test lane macro
+      vllm.rs                 # Plain native setup and production calls
+  support/
+    fixtures/
+      vllm.rs                 # Native input builders for both test suites
+    ...                       # Existing integration server support
+  conformance.rs              # Existing shared CPU integration scenarios
+```
 
 | Source | Responsibility |
 | --- | --- |
-| `fixtures.rs` | Minimal canonical request with tokens and default options. |
-| `fixtures/vllm.rs` | Rich requests and native model, response, media and handoff fixtures used by vLLM units and retained wire tests. |
-| `requests/shared.rs` | Canonical request inputs, success/rejection assertions and explicit native representation expectations. |
-| `responses/shared.rs` | Token chunks, usage, logprob opt-in/alignment, stop visibility and prefill completion behavior. |
-| `config/model.rs`, `config/worker_scenarios.rs` | Common configuration results and worker lifecycle assertions. |
-| `requests/vllm.rs`, `responses/vllm.rs`, `config/{vllm,worker}.rs` | Thin adapters calling real production functions, plus native regression assertions. |
-| `common/`, `errors/common.rs` | Tests of shared production code, executed once rather than once per backend. |
+| `src/fixtures.rs` | Minimal canonical request plus the existing integration input builders. |
+| `tests/support/fixtures/vllm.rs` | Rich requests and native model, response, media and handoff builders used by unit and retained wire tests. |
+| `tests/unit/shared.rs` | Complete common-code and cross-backend scenarios: inputs, production calls, assertions and lane declarations. |
+| `tests/unit/vllm.rs` | Native request, response, configuration, JSON, LoRA and candidate assertions. No shared-test wrappers. |
+| `tests/unit/support/mod.rs` | The `sidecar_test!` lane declaration macro. |
+| `tests/unit/support/vllm.rs` | Model, worker, request and response setup functions grouped for inclusion beneath private production owners. No test definitions or scenario assertions. |
 
-Shared files are included as a child module named `shared` by each adapter.
-Their compiled names identify the backend instance and the scenario. Request
-adapters read the actual native fields; response/configuration adapters return
-actual common Dynamo output types. Expected constants describe native encoding,
-not a second implementation of conversion. Private production functions remain
-private. Source inclusion adds no sidecar-to-testkit Cargo dependency.
+The production owners' test-only hooks enroll shared and native groups
+separately. Compiled module names use `unit_common_*`, `unit_shared_*` and
+`unit_native_*`, so registration and runner reporting preserve the distinction.
+Common production code is tested once. No empty SGLang or TensorRT-LLM files are
+created before those backends are enrolled.
 
-A capability means either successful preservation or an explicit rejection;
-both execute assertions. Missing support must not become an early-returning
-passing test. Native-only tests remain where a shared assertion would invent
-another backend's protocol or hide relevant wire details.
+Share a complete scenario when its contract is common and a plain function or
+small amount of native setup connects it to production code. Prefer existing
+Dynamo input/output types. If sharing needs a second request/response model,
+capability matrix or substantial backend-dependent behavior, keep the test
+native. A shared fixture alone does not make a test shared. The number of shared
+cases follows these decisions; it is not a quota.
+
+The ten shared backend scenarios are:
+
+| Group | Shared scenarios |
+| --- | --- |
+| Requests | Oversized logprob rejection, selected LoRA forwarding, prefill/decode rank selection and fallback. |
+| Responses | Prompt-logprob opt-in/positions/values and terminal-reason preservation through real conversion helpers. |
+| Model | Model identity/limits, absent optional limits and logical block size/per-rank capacity. |
+| Worker | Worker options/model identity and generation/cleanup before startup. |
+
+Private production functions remain private. Native setup calls the real
+functions rather than reproducing their transformations. The vLLM crate has a
+test-only dependency on testkit to reuse its common fixtures; normal sidecar
+builds gain no dependency on testing infrastructure.
 
 | Native exception | Why it remains backend-specific |
 | --- | --- |
-| Legacy `vllm_tito` envelopes, KV aliases and port normalization | These exact keys, compatibility precedence and wire representations are vLLM contracts. Shared cases still check canonical controls and valid/invalid handoffs. |
+| Native sampling, structured output, priority and cache controls | Exact native fields and support rules differ. Direct assertions avoid a common observation type and capability matrix. |
+| Legacy `vllm_tito` envelopes, KV aliases and port normalization | These keys, compatibility precedence and wire representations are vLLM contracts. |
 | Protobuf Struct integer bounds and nonfinite values | The double-number encoding has precision limits absent from SGLang's typed integers and JSON strings. |
-| Image-only Encode, media identifiers and encoder responses | SGLang sidecar has no corresponding Encode service; its future encoder must not inherit vLLM-only media restrictions. |
-| LoRA loading/inventory, RL capabilities and draft updates | These management schemas are distinct from shared adapter selection or worker configuration. |
-| Discovery fallback, topology ownership and startup compatibility | Shared tests assert the resulting identity, limits and effective block size; native tests retain field precedence, overflow and protocol-specific compatibility checks. |
-| Malformed vLLM messages, numeric logprob normalization and handoff timing | Native invalid shapes, clamping rules and completed-prefill metadata differ from SGLang's response metadata and early bootstrap handoff. Common output assertions remain shared. |
+| Image-only Encode, media identifiers and encoder responses | SGLang sidecar has no corresponding Encode service. |
+| LoRA loading/inventory, RL capabilities and draft updates | These management schemas differ from shared worker configuration. |
+| Discovery fallback, missing model identity, topology ownership and startup compatibility | Shared cases check resulting identity, limits and block capacity; field validation, fallback and native compatibility remain local. |
+| Streaming conversion, malformed messages, logprob metadata and handoff timing | vLLM has a directly callable response state; SGLang conversion is coupled to its live stream. Do not imitate that loop or invent a synthetic response interface just to share its tests. Common response checks are shared only where the actual production helper is callable. |
 
 ## Per-test lanes and runner selection
 
@@ -83,7 +120,7 @@ in governed unit modules fail compilation or inventory validation.
 `--suite unit` selects isolated units, `--framework vllm` selects the activated
 backend plus common tests, and `--lane` selects this cumulative lane set.
 `--framework all` currently has the same backend enrollment. Explicit
-`--framework sglang` fails until its unit adapters are implemented; it does not
+`--framework sglang` fails until its unit setup is implemented; it does not
 fall back to vLLM. The compatibility aliases are `--level pre-merge` for
 `--suite unit --lane pre-merge`, and `--level unit` or `--level all` for
 `--suite unit --lane all`. Conflicting `--level` and `--lane` values fail.
@@ -94,9 +131,11 @@ Export records all unit lanes in versioned `tests.json`, even when an earlier
 lane was requested. Running exported artifacts recollects each binary and
 checks it against the stored inventory before selection. Empty, duplicate,
 missing or mismatched inventories, failures, and ignored governed tests fail.
-The current source declares **81 tests: 11 common, 28 shared vLLM instances and
-42 native regressions**, all `pre_merge`. Compiled collection and execution
-confirmed this inventory; counts track coverage rather than an acceptance quota.
+The reorganized suite retains **81 test registrations: 11 common, 10 shared
+vLLM instances and 60 native cases**, all `pre_merge`. The shared backend cases
+comprise three request, two response, three model and two worker scenarios.
+Compiled collection and execution confirmed these counts; they track coverage
+rather than an acceptance quota.
 
 The PR workflow selects pre-merge. Push-triggered execution of
 `pre-merge.yml` selects post-merge, and nightly Rust coverage includes all lanes.
@@ -108,25 +147,30 @@ The isolated unit selection does not claim integration execution.
 
 ## Enabling SGLang in a follow-up
 
-Implement SGLang adapters under its private production owners, supply native
-fixtures and explicit expectations, and register the backend in the runner.
-Then `--framework sglang` must instantiate the existing shared bodies, and
-`--framework all` must include both backend instances while common tests run
-once. Consolidate existing SGLang model, prefill-limit, rank-fallback, handoff and
-logprob assertions before removing any old test. Do not copy shared bodies or
-add dummy adapters solely to make the flag succeed.
+Add `unit/support/sglang.rs` for the native setup needed by existing shared
+scenarios, and `unit/sglang.rs` only for backend-specific cases. Include shared
+groups through SGLang's test-only production hooks and enroll the backend in the
+runner. Then `--framework sglang` selects its shared and native tests plus common
+tests; `--framework all` includes both backend instances with common code tested
+once. Reuse `src/fixtures.rs` and add native builders under
+`tests/support/fixtures/` only where necessary.
 
-Account separately for SGLang's typed gRPC and opaque HTTP paths. For example,
-typed gRPC rejects seed, nonzero priority and some guide forms, whereas the
-native HTTP envelope forwards native sampling fields and uses a different
-priority representation. Backend exclusions must identify the path and reason.
+Consolidate existing SGLang model, rank-fallback and other matching assertions
+before removing an old test. Sharing must use actual production functions, not
+copied converters, fake production behavior or a dummy setup that makes the flag
+succeed. In particular, live response-stream conversion stays at the integration
+boundary unless a real callable production helper provides the unit boundary.
+SGLang worker construction currently performs bootstrap I/O; exposing a private
+in-memory construction seam is separate follow-up work.
 
-The source audit identified parity gaps for typed SGLang special-token policy,
-canonical cache controls, invalid top-k, orphan media identifiers and conflicting
-guides. Decide whether each input must be supported or explicitly rejected and
-validate that behavior before declaring its shared case covered. These are
-unexecuted parity observations, not demonstrated user-facing failures. Early
-bootstrap handoff also needs its own protocol assertions rather than vLLM's
+Account separately for SGLang's typed gRPC and opaque HTTP paths. Typed gRPC
+rejects seed, nonzero priority and some guide forms, whereas the HTTP envelope
+forwards native sampling fields and uses a different priority representation.
+Special-token policy, cache controls, invalid top-k, orphan media identifiers and
+conflicting guides require backend-specific decisions and checks; they are not
+reasons to add capability branches to every shared unit. These are unexecuted
+parity observations, not demonstrated user-facing failures. Early bootstrap
+handoff also needs its own protocol assertions rather than vLLM's
 completed-prefill handoff expectation.
 
 ## R01–R32 mapping
@@ -138,7 +182,7 @@ executable owner; deferred scenarios do not count as executed coverage.
 | --- | --- | --- |
 | R01 | Move existing endpoint authority, scheme, IPv6 and HTTP checks unchanged. | [Common endpoints][endpoints] |
 | R02 | Move common defaults, overrides and zero rejection; defer new SGLang clamp cases. | [Common arguments][args] |
-| R03 | Retain discovery/config checks; add exact WorkerConfig fields, model identity, parser and Encode rejection through production `from_discovered`. | [Worker config][worker], [model config][config]; retained bootstrap sockets |
+| R03 | Retain discovery/config checks; add exact WorkerConfig fields, model identity, parser and Encode rejection through production `from_discovered`. | [Shared worker/model cases][shared-worker], [native configuration][config]; retained bootstrap sockets |
 | R04 | Execute the actual retry policy with virtual time: first failure/retry, all pool slots, one absolute deadline, bounded attempt/sleep and retained peer cause. | [Common transport][transport]; existing connection sockets |
 | R05 | Move and extend the status table to all 17 codes, categories, RPC/code/message text and both tonic versions. | [Common errors][errors] |
 | R06 | Move exact nondefault native field assertions from the aggregate socket test; add optional/zero/false sentinels, deduplicated stop IDs and top-k boundaries. Keep gRPC metadata and outputs in wire tests. | [Requests][requests] |
@@ -148,10 +192,10 @@ executable owner; deferred scenarios do not count as executed coverage.
 | R10 | Check typed malformed sequence/count/finish/logprob/prompt metadata failures. Real stream termination after conversion failure belongs to the additional wire coverage in #15091. | [Responses][responses]; [error wire][wire-errors] |
 | R11 | Keep open/read/EOF and postterminal consumption at the real generation boundary; do not copy its loop into units. | [Error wire][wire-errors], [streaming wire][streaming] |
 | R12 | Keep cancellation and remote release at wire level, including decode's first-token safeguard. | [Cancellation wire][cancellation]; [retained decode sockets][legacy] |
-| R13 | Add vLLM unstarted generation and idempotent cleanup; remove only its matching wire subsection after replacement validation. Preserve SGLang's original subsection and both backends' active cleanup. Post-cleanup admission additions belong to #15091. | [Worker config][worker], [lifecycle wire][lifecycle] |
+| R13 | Add vLLM unstarted generation and idempotent cleanup; remove only its matching wire subsection after replacement validation. Preserve SGLang's original subsection and both backends' active cleanup. Post-cleanup admission additions belong to #15091. | [Shared worker cases][shared-worker], [lifecycle wire][lifecycle] |
 | R14 | Concurrent identity and cancellation isolation use the shared wire scenario, without a duplicate backend unit loop. | [Cancellation wire][cancellation] |
 | R15 | Retain selected-only logprobs; add exact multi-token selected/top IDs, ranks, values, opt-in and alignment. | [Responses][responses] |
-| R16 | Retain prompt-metadata timing; add exact first-position null, selected/alternate payload and terminal-only opt-in. | [Responses][responses] |
+| R16 | Retain prompt-metadata timing; add exact first-position null, selected/alternate payload and terminal-only opt-in. | [Shared responses][shared-responses], [native responses][responses] |
 | R17 | Add user string/token, system EOS and hidden-token overlap table; fix exposed system-only stop reasons. | [Responses][responses] |
 | R18 | vLLM releases GenerateStream; it has no targeted Abort RPC to test. Explicit-RPC fixtures for other backends are deferred; R12 remains required. | [Cancellation wire][cancellation] |
 | R19 | Retain opaque/repeated handoff sockets; add decode precedence, port normalization, malformed/missing payload, prefill suppression/usage and failed-prefill no-handoff. | [Requests][requests], [responses][responses]; retained handoff sockets; process/native additions in #15091 |
@@ -159,11 +203,11 @@ executable owner; deferred scenarios do not count as executed coverage.
 | R21 | Move existing JSON cases; add signed integer limits, fractions and nested nonfinite incoming values. | [JSON conversion][json] |
 | R22 | Retain negative-infinity normalization; add NaN, positive infinity and finite-underflow association checks. | [Responses][responses] |
 | R23 | Defer new SGLang JSON discovery fixtures; cover supported vLLM native identity, aliases, optional metadata and startup compatibility. | [Model config][config] |
-| R24 | Retain vLLM local ranks and capacity checks; consume authoritative effective block size with legacy fallback, without reproducing engine arithmetic. Stock 0.29 producer limitation remains below. | [Model config][config], [ranks][ranks] |
+| R24 | Retain vLLM local ranks and capacity checks; consume authoritative effective block size with legacy fallback, without reproducing engine arithmetic. Stock 0.29 producer limitation remains below. | [Shared model cases][shared-model], [native configuration/ranks][config] |
 | R25 | Defer new SGLang health fixtures. Isolate vLLM incompatible local configuration; retain existing wire checks; additional process registration sequencing belongs to #15091. | [Worker config][worker]; integration |
 | R26 | SGLang bootstrap-address policy is not a vLLM contract. Cover vLLM opaque port handling in R19 and roles in R03. | New SGLang cases deferred |
 | R27 | SGLang room/rendezvous protocol is not a vLLM contract. Cover failed-prefill/success handoff in R19. | New SGLang cases deferred |
-| R28 | Refresh stale unsupported claim: check vLLM LoRA name and role-specific DP/prefill ranks, fallback, load schema and inventory identity; retain administration sockets. | [Requests][requests], [LoRA][lora], [legacy sockets][legacy] |
+| R28 | Refresh stale unsupported claim: check vLLM LoRA name and role-specific DP/prefill ranks, fallback, load schema and inventory identity; retain administration sockets. | [Shared requests][shared-requests], [native requests/LoRA][lora], [legacy sockets][legacy] |
 | R29 | vLLM's request schema has no SGLang trace-header field. Preserve shared tracing coverage; do not invent a native field. | New SGLang cases deferred |
 | R30 | Preserve existing SGLang released-protobuf tag test and CI. vLLM uses published `vllm-proto` 0.3.0. | Existing SGLang activation retained; no new backend unit cases |
 | R31 | TRT mandatory max-tokens adaptation is not vLLM behavior. vLLM absent/zero sentinel forwarding is R06. | New TRT cases deferred |
@@ -175,7 +219,7 @@ The original unit increment moved these 21 pure definitions from
 `vllm/src/tests.rs`. The mapping below follows their assertions through shared
 extraction; renamed or split scenarios are not lost coverage. Socket tests remain
 in [that file][legacy]. Rich/native builders are in
-[the vLLM fixtures](tests/unit/fixtures/vllm.rs), used by both layers.
+[the vLLM fixtures](tests/support/fixtures/vllm.rs), used by both layers.
 
 | Original test | New owner |
 | --- | --- |
@@ -188,27 +232,27 @@ in [that file][legacy]. Rich/native builders are in
 | `engine_config_normalizes_total_kv_blocks_per_dp_rank` | `logical_block_size_and_per_rank_capacity_are_registered` in [shared model cases][shared-model]. |
 | `engine_config_handles_zero_and_inexact_aggregate_kv_capacity` | [Model config][config] |
 | `oversized_logprob_counts_are_rejected` | Same scenario in [shared requests][shared-requests]. |
-| `skip_special_tokens_is_forwarded_without_compatibility_envelope` | `special_token_policy_is_forwarded_or_explicitly_rejected` in [shared requests][shared-requests]. |
+| `skip_special_tokens_is_forwarded_without_compatibility_envelope` | Direct native special-token assertions in [requests][requests]. |
 | `compatibility_envelope_preserves_typed_controls` | [Requests][requests] |
 | `native_sampling_is_rejected_instead_of_silently_discarded` | [Requests][requests] |
 | `prefill_uses_canonical_controls_without_decode_sampling_json` | [Requests][requests] |
 | `released_envelope_hydrates_kv_transfer_with_canonical_precedence` | [Requests][requests] |
-| `canonical_dynamo_priority_is_converted_for_vllm` | Shared priority scenario, including signed-minimum input, with literal vLLM wire expectations. |
+| `canonical_dynamo_priority_is_converted_for_vllm` | Native priority scenario, including signed-minimum input and literal wire expectations, in [requests][requests]. |
 | `unsafe_media_uuids_are_rejected` | [Requests][requests] |
 | `encode_requests_reject_non_image_media` | [Requests][requests] |
 | `encode_response_enforces_terminal_contract` | [Responses][responses] |
-| `prompt_logprobs_are_retained_for_the_terminal_chunk` | Shared prompt opt-in/positions/values; native early-frame metadata regression in [responses][responses]. |
+| `prompt_logprobs_are_retained_for_the_terminal_chunk` | Shared prompt opt-in, positions and values; native early-frame metadata checks in [responses][responses]. |
 | `negative_infinity_logprobs_are_normalized` | [Responses][responses] |
-| `zero_output_logprobs_omits_top_logprobs` | Zero/absent/top-candidate table in [shared responses][shared-responses]. |
+| `zero_output_logprobs_omits_top_logprobs` | Native zero/absent/top-candidate assertions in [responses][responses]. |
 
 Existing inline common argument/endpoint/error tests and vLLM JSON, rank and
-[candidate extraction](tests/unit/requests/candidates.rs) tests also moved to
+[candidate extraction](tests/unit/vllm.rs) tests also moved to
 their owning isolated modules. The broad aggregate socket test's exact request
 field assertions moved into
 `representative_request_preserves_all_supported_native_fields` at the previous
-boundary. Its current replacements are shared canonical sampling/stopping and
-native extension-field assertions; new execution evidence is required below. Registration, transport DP metadata, tokens/text/logprobs
-and usage assertions remain at their wire boundary. No existing SGLang/TRT or
+boundary. Its current replacements are direct native sampling, stopping and
+extension-field assertions; execution evidence is recorded below.
+Registration, transport DP metadata, tokens/text/logprobs and usage assertions remain at their wire boundary. No existing SGLang/TRT or
 Python/E2E test is migrated or removed by this increment. The four retained
 Mocker tests for each of vLLM and SGLang remain; the five additional vLLM wire
 replacements are reserved for #15091, not this unit boundary.
@@ -217,11 +261,11 @@ The remaining mixed tests are split by obligation:
 
 | Previous combined assertion | Current ownership |
 | --- | --- |
-| Stops, top-k, selected adapter and rank hints | Four shared request scenarios; Encode rank omission remains native. |
-| Guide variants and rejected guide options | Shared exact type/payload, modifier support/rejection and conflict scenarios. |
-| Missing/malformed handoff and native port normalization | Shared decode handoff validation; native opaque payload and port-shape regression. |
-| Optional/zero request values and protobuf defaults | Shared presence/opt-in behavior; exact native sentinel message remains native. |
-| Stream chunks, terminal reasons, stop visibility, logprob alignment and prompt metadata | Shared response scenarios; native invalid shapes, ranks, normalization and early-frame details remain native. |
+| Stops, top-k, selected adapter and rank hints | Shared LoRA selection and rank scenarios; native stopping, top-k and Encode rank assertions. |
+| Guide variants and rejected guide options | Native exact type/payload, modifier rejection and conflict scenarios. |
+| Missing/malformed handoff and native port normalization | Native handoff validation, opaque payload and port-shape regressions. |
+| Optional/zero request values and protobuf defaults | Direct native presence, opt-in and sentinel assertions. |
+| Stream chunks, terminal reasons, stop visibility, logprob alignment and prompt metadata | Shared terminal-reason and prompt-metadata helpers; native streaming conversion, stop visibility, selected/top logprobs, invalid shapes, ranks, normalization and early-frame details remain local. |
 | Worker identity/options and cleanup before startup | Shared worker scenarios; parser/Encode and native administration exceptions remain local. |
 
 ## Pinned native limitations
@@ -246,24 +290,35 @@ inputs receive explicit rejection tests. Native messages cannot expose missing
 cached-token, expert-tensor or thinking-token fields. GPU work release and KV
 transfer require the separate native integration evidence.
 
-## Validation of the shared scenarios and lanes
+## Validation
 
-Local validation of the shared-scenario and lane changes produced these results:
+The reorganized unit suite was collected and executed locally. Its inventory
+retains all 81 prior scenario registrations, with five descriptive name changes.
 
 | Selection | Executed result |
 | --- | --- |
-| Isolated units from compiled binaries | 81 passed: 11 common, 28 shared vLLM instances and 42 native regressions; zero failed or ignored. |
+| Compiled inventory and exported runner | 81 passed: 11 common, 10 shared vLLM instances and 60 native cases; zero failed or ignored. |
 | Complete common/vLLM library suites | 121 passed: 13 common and 108 vLLM; zero failed or ignored. This includes the 81 isolated units. |
-| Runner self-tests | Five passed, covering collection, lane selection and artifact validation. |
-| Retained integration suites | Eight testkit conformance, four vLLM Mocker and four SGLang Mocker tests passed; zero failed or ignored. |
-| Artifact export | All 81 isolated tests were inventoried and exported. |
-| CPU container | All 81 units passed with zero failed or ignored, using read-only exported binaries and `--network none`, without engines, GPUs or model mounts. |
-| Static checks | Workspace formatting, Ruff and Black for the runner and its tests, and workflow YAML parsing passed. |
+| Retained integration suites | Eight testkit conformance, four vLLM Mocker and four SGLang Mocker tests passed. |
+| CPU container | All 81 units passed in `sidecar-restack-unit:latest`, with `--network none`, read-only root and artifact mount, and `--cap-drop ALL`. |
+| Static checks | `cargo fmt --all --check`, runner Black and Ruff checks passed. |
 | Targeted Clippy | Common, vLLM and testkit packages passed with `--all-targets --no-deps -- -D warnings`. |
 
-No current-head GitHub CI or full-workspace test execution was performed for
-these changes. The runner self-tests exercise workspace command selection; they
-do not execute every workspace package.
+The permanent runner self-tests and their CI invocation have been removed. Five
+one-time checks passed from a temporary copy: inventory validation, export
+completeness, CLI compatibility, compiled Rust lane selection and workspace
+execution with later-lane failures and a custom benchmark. These small Rust
+programs do not constitute a full-workspace Dynamo run. This validation does not
+claim current-head GitHub CI or full-workspace execution.
+
+### Previous shared-framework boundary (`0857c0722e`)
+
+Before consolidation and adapter removal, `0857c0722e` passed 81 units
+(11 common, 28 shared vLLM instances and 42 native cases), including a
+network-isolated CPU run. Its 121 common/vLLM library tests, eight conformance
+cases and both four-case Mocker suites also passed. These historical results
+belong to the previous structure; the table above records fresh validation of
+the reorganized suite.
 
 Use Rust 1.96.1, protoc 30.2 and an external `CARGO_TARGET_DIR`. Set `PROTOC` and
 `PROTOC_INCLUDE` to that compiler and its matching includes. From the repository
@@ -280,7 +335,7 @@ docker run --rm --network none sidecar-units --suite unit --framework vllm --lan
 
 The common target explicitly enables `tonic-v14`, which vLLM consumes, without
 relying on workspace feature unification. Record selected names, failures and
-ignored cases for the new revision. Wire-preservation commands are in
+ignored cases when validating a new revision. Wire-preservation commands are in
 [COVERAGE.md](COVERAGE.md).
 
 ### Previous unit boundary
@@ -292,7 +347,7 @@ shared foundation cases and 102 complete common/vLLM library cases also passed
 (13 common, 89 vLLM); those selections overlap. Both unchanged four-case Mocker
 suites passed independently, and targeted common/vLLM/testkit Clippy passed with
 warnings denied. These historical results do not certify the changed shared
-bodies, adapters, lane selection or workflows.
+bodies, setup, lane selection or workflows.
 
 ## Historical execution and failure evidence
 
@@ -344,24 +399,24 @@ regressions; they are not a new mutation run on the refreshed stack. Existing
 Python coverage was not executed by the unit commands above. Counts describe
 observed cases, not acceptance quotas or full legacy Python parity.
 
-[endpoints]: tests/unit/common/endpoint.rs
-[args]: tests/unit/common/args.rs
-[transport]: tests/unit/common/transport.rs
-[errors]: tests/unit/errors/common.rs
-[worker]: tests/unit/config/worker.rs
-[config]: tests/unit/config/vllm.rs
-[ranks]: tests/unit/config/ranks.rs
-[requests]: tests/unit/requests/vllm.rs
-[responses]: tests/unit/responses/vllm.rs
-[json]: tests/unit/requests/json.rs
-[lora]: tests/unit/requests/lora.rs
+[endpoints]: tests/unit/shared.rs
+[args]: tests/unit/shared.rs
+[transport]: tests/unit/shared.rs
+[errors]: tests/unit/shared.rs
+[worker]: tests/unit/vllm.rs
+[config]: tests/unit/vllm.rs
+[ranks]: tests/unit/vllm.rs
+[requests]: tests/unit/vllm.rs
+[responses]: tests/unit/vllm.rs
+[json]: tests/unit/vllm.rs
+[lora]: tests/unit/vllm.rs
 [legacy]: ../vllm/src/tests.rs
 [streaming]: tests/conformance.rs
 [wire-errors]: tests/conformance.rs
 [cancellation]: tests/conformance.rs
 [lifecycle]: tests/conformance.rs
 
-[shared-requests]: tests/unit/requests/shared.rs
-[shared-responses]: tests/unit/responses/shared.rs
-[shared-model]: tests/unit/config/model.rs
-[shared-worker]: tests/unit/config/worker_scenarios.rs
+[shared-requests]: tests/unit/shared.rs
+[shared-responses]: tests/unit/shared.rs
+[shared-model]: tests/unit/shared.rs
+[shared-worker]: tests/unit/shared.rs

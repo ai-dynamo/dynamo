@@ -8,6 +8,17 @@ use futures::StreamExt;
 
 pub type Outputs = Vec<Result<LLMEngineOutput, DynamoError>>;
 
+pub fn minimal_request() -> PreprocessedRequest {
+    PreprocessedRequest::builder()
+        .model("served-model".to_string())
+        .token_ids(vec![11, 22, 33])
+        .sampling_options(Default::default())
+        .stop_conditions(Default::default())
+        .output_options(Default::default())
+        .build()
+        .expect("minimal request")
+}
+
 pub fn request(model: &str, tokens: Vec<u32>, max_tokens: u32) -> PreprocessedRequest {
     PreprocessedRequest::builder()
         .model(model.to_owned())

@@ -47,7 +47,7 @@ def specifications(suite="unit", framework="all"):
     if suite != "unit":
         raise ValueError(f"Unsupported test suite: {suite}")
     if framework != "all" and framework not in UNIT_BACKENDS:
-        raise ValueError(f"Unit adapters are not implemented for {framework}")
+        raise ValueError(f"Unit suites are not implemented for {framework}")
     backends = UNIT_BACKENDS if framework == "all" else [framework]
     return [
         {
@@ -99,7 +99,10 @@ def inventory(output, framework):
                     "common"
                     if framework == "common"
                     else "shared"
-                    if "shared" in parts
+                    if any(
+                        part == "shared" or part.startswith("unit_shared_")
+                        for part in parts
+                    )
                     else "native"
                 ),
             }
@@ -267,7 +270,7 @@ def arguments(argv=None):
         args.lane = alias
     args.lane = args.lane or "all"
     if args.framework != "all" and args.framework not in UNIT_BACKENDS:
-        parser.error(f"{args.framework} unit adapters are not implemented yet")
+        parser.error(f"{args.framework} unit suites are not implemented yet")
     if args.export and args.list:
         parser.error("--export builds artifacts; use --artifacts with --list")
     if args.libtest_args and (args.export or args.artifacts or args.list):

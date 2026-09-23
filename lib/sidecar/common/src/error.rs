@@ -109,5 +109,6 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/errors/common.rs"]
-mod unit_common;
+mod unit_common_errors {
+    sidecar_shared_tests!(errors);
+}

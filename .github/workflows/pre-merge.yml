@@ -439,7 +439,6 @@ jobs:
       shell: bash
       run: |
         if [[ '${{ matrix.dir }}' == '.' ]]; then
-          python3 -m unittest discover -s lib/sidecar/testkit/tests -p test_runner.py
           python3 lib/sidecar/testkit/run.py --workspace-tests --lane "$SIDECAR_TEST_LANE"
         else
           cargo test --locked --all-targets

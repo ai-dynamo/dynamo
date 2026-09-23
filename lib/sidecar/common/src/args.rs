@@ -108,5 +108,6 @@ impl Default for GrpcTransportConfig {
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/common/args.rs"]
-mod unit_args;
+mod unit_common_args {
+    sidecar_shared_tests!(args);
+}

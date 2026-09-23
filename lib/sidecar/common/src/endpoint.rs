@@ -167,5 +167,6 @@ impl fmt::Display for GrpcEndpoint {
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/common/endpoint.rs"]
-mod unit_endpoint;
+mod unit_common_endpoint {
+    sidecar_shared_tests!(endpoint);
+}

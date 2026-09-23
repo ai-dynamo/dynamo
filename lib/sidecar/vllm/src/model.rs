@@ -314,9 +314,23 @@ where
 }
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/config/ranks.rs"]
-mod unit_ranks;
+mod unit_support {
+    pub(super) mod model {
+        sidecar_vllm_support!(model);
+    }
+}
 
 #[cfg(test)]
-#[path = "../../testkit/tests/unit/config/vllm.rs"]
-mod unit_config;
+mod unit_native_ranks {
+    sidecar_vllm_tests!(ranks);
+}
+
+#[cfg(test)]
+mod unit_shared_model {
+    sidecar_shared_tests!(model);
+}
+
+#[cfg(test)]
+mod unit_native_model {
+    sidecar_vllm_tests!(model);
+}
