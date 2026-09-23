@@ -18,8 +18,6 @@ pytestmark = [
 LAUNCH_UTILS = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
 LAUNCH_DIR = Path(__file__).parents[2] / "examples/backends/vllm/launch"
 
-# The disaggregated multimodal scripts whose workers take a NixlConnector
-# KV-transfer config, and the label each backgrounded process must carry.
 LABELLED_SCRIPTS = {
     "disagg_multimodal_epd.sh": ["frontend", "encode", "prefill", "decode"],
     "disagg_multimodal_p_d.sh": ["frontend", "prefill", "decode"],
