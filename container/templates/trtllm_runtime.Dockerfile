@@ -83,10 +83,41 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 # same image: VRAM 456 MiB to 6.7 GB to 41.6 GB, `Registered endpoint` once, and
 # zero MPI errors.
 #
+# Selecting ompi4 also means taking on its etc/openmpi-mca-params.conf. The base
+# image edits two lines of that file, and only in the Open MPI it selects itself:
+# `hwloc_base_binding_policy = core` becomes `none`, and `btl = self` is
+# commented out. In 1.3.0rc27 that is ompi5, so ompi4 keeps the HPC-X defaults.
+# rc26's ompi4 file and rc27's ompi5 file are byte-identical, and rc27's ompi4
+# file differs from them at those two lines and nowhere else.
+#
+# The binding line is not cosmetic. `import tensorrt_llm` runs MPI_Init
+# (tensorrt_llm/_utils.py imports mpi4py.MPI), and with `core` that singleton
+# MPI_Init binds the calling process to CPUs 0-1. Every thread and child it
+# starts inherits the mask. Measured on an amd64 GPU host in the image as
+# shipped before this edit: a bare `import tensorrt_llm` went from 32 CPUs to
+# [0, 1], and a running `python3 -m dynamo.trtllm` worker reported
+# Cpus_allowed_list 0-1. The `btl = self` line leaves Open MPI's ob1 PML no
+# transport between ranks: in the same image, `mpirun --mca pml ob1 -n 2` fails
+# in MPI_INIT with "at least one MPI process is unreachable from another". The
+# multi-node launch path passes that flag
+# (deploy/operator/internal/dynamo/backend_trtllm.go).
+#
+# So apply the same two edits to whichever Open MPI is selected, and fail the
+# build if either setting survives. The edits are idempotent: on a file that
+# already has them, sed changes nothing and the guards pass.
+# tests/dependencies/test_mpi_init_keeps_cpu_affinity.py checks the binding in
+# the built image.
+#
 # Transitional. Delete this and the ENV entries when upstream's ompi5 can spawn,
 # and re-measure rather than assume.
 RUN if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
     test -d "$t" && \
+    conf="$t/etc/openmpi-mca-params.conf" && \
+    test -f "$conf" && \
+    sed -i -e 's/^\(hwloc_base_binding_policy\) = core$/\1 = none/' \
+           -e 's/^\(btl = self\)$/#\1/' "$conf" && \
+    ! grep -qE '^[[:space:]]*hwloc_base_binding_policy[[:space:]]*=[[:space:]]*core' "$conf" && \
+    ! grep -qE '^[[:space:]]*btl[[:space:]]*=[[:space:]]*self[[:space:]]*$' "$conf" && \
     mkdir -p /opt/dynamo && ln -sfn "$t" /opt/dynamo/mpi && \
     echo "MPI for ${TARGETARCH}: $(readlink -f /opt/dynamo/mpi)"
 
@@ -702,6 +733,16 @@ RUN rm -rf /workspace /home/ubuntu \
     ! /usr/bin/python3 -c "import cv2" 2>/dev/null && \
     ! /usr/bin/python3 -c "import wandb" 2>/dev/null
 COPY --from=runtime_full / /
+
+# Post-overlay guard for the Open MPI settings edit in runtime_full. This stage
+# starts from the base image again, where the selected Open MPI's
+# etc/openmpi-mca-params.conf is the base image's copy, so the edit ships only
+# if the overlay above carried it across. Check the file the shipped ENV points
+# at.
+RUN conf=/opt/dynamo/mpi/etc/openmpi-mca-params.conf && \
+    test -f "$conf" && \
+    ! grep -qE '^[[:space:]]*hwloc_base_binding_policy[[:space:]]*=[[:space:]]*core' "$conf" && \
+    ! grep -qE '^[[:space:]]*btl[[:space:]]*=[[:space:]]*self[[:space:]]*$' "$conf"
 
 # Post-overlay guard for the DALI whiteout above. This is the only stage where
 # the failure can appear: runtime_full holds exactly one DALI, and the whiteout
