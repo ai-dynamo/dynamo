@@ -7,13 +7,15 @@ from unittest.mock import AsyncMock
 import numpy as np
 import pytest
 
-from dynamo.common.http import HttpStatusError
+from dynamo.common.http import HttpConfigurationError, HttpStatusError
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
 from dynamo.common.multimodal import codec_errors
 from dynamo.common.multimodal import video_loader as video_loader_module
 from dynamo.common.multimodal.codec_errors import MissingMediaDecoderError
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
+
+from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB  # isort: skip
 
 pytestmark = [
     pytest.mark.unit,
@@ -73,6 +75,25 @@ async def test_load_video_uses_vllm_media_connector():
     assert loaded_frames.flags["C_CONTIGUOUS"]
     np.testing.assert_array_equal(loaded_frames, np.ascontiguousarray(frames))
     assert loaded_metadata == metadata
+
+
+@pytest.mark.asyncio
+async def test_http_fetch_honors_configured_media_limit(monkeypatch):
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    loader = VideoLoader(
+        url_policy=UrlValidationPolicy(allow_http=True, allow_private_ips=True)
+    )
+    frames = np.zeros((1, 2, 2, 3), dtype=np.uint8)
+    metadata = {"fps": 1.0, "frames_indices": [0], "total_num_frames": 1}
+    mock_fetch = AsyncMock(return_value=b"video")
+    mock_decode = AsyncMock(return_value=(frames, metadata))
+    monkeypatch.setattr(video_loader_module, "fetch_bytes", mock_fetch)
+    monkeypatch.setattr(loader, "_create_vllm_video_io", lambda kwargs=None: object())
+    monkeypatch.setattr(loader, "_decode_video_bytes", mock_decode)
+
+    await loader._load_video_with_vllm("https://example.com/limited.mp4")
+
+    assert mock_fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 @pytest.mark.asyncio
@@ -536,3 +557,25 @@ async def test_load_video_preserves_missing_decoder_error(monkeypatch):
         await loader.load_video("https://example.com/x.mp4")
 
     assert exc_info.value is err
+
+
+@pytest.mark.asyncio
+async def test_load_video_preserves_a_configuration_error(monkeypatch):
+    """An operator fault must not reach the client as a 4xx.
+
+    Same reasoning as the audio loader: the generic ``except Exception`` there
+    rewrites unknown errors as ``ValueError``, which maps to ``InvalidArgument``.
+    """
+    from dynamo.common.multimodal.video_loader import VideoLoader
+
+    loader = VideoLoader.__new__(VideoLoader)
+
+    async def _boom(*args, **kwargs):
+        raise HttpConfigurationError("egress proxy is not trusted")
+
+    monkeypatch.setattr(loader, "_load_video_with_vllm", _boom, raising=False)
+
+    with pytest.raises(HttpConfigurationError) as excinfo:
+        await loader.load_video("https://example.com/v.mp4")
+
+    assert not isinstance(excinfo.value, ValueError)

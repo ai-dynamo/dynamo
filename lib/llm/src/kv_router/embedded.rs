@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -28,7 +29,7 @@ use dynamo_kv_router::services::selection::{
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest, WorkerSelectionPolicyRegistry,
+    WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
@@ -182,20 +183,6 @@ pub(crate) struct EmbeddedSelection {
     queue_metric_indices: HashMap<String, usize>,
 }
 
-static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = OnceLock::new();
-
-/// Install the process-wide worker-selection policy registry (linked custom
-/// policies) that embedded selection partitions resolve `KvRouterConfig`
-/// policy instances against. Returns `false` if one is already installed.
-pub fn install_worker_selection_policy_registry(registry: WorkerSelectionPolicyRegistry) -> bool {
-    INSTALLED_POLICY_REGISTRY.set(registry).is_ok()
-}
-
-/// The installed registry, or the built-in default.
-pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    INSTALLED_POLICY_REGISTRY.get().cloned().unwrap_or_default()
-}
-
 /// Bridges the partition's scheduler load snapshots to the router's
 /// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`, and its per-worker
 /// load to the frontend gauges.
@@ -267,9 +254,10 @@ impl EmbeddedSelection {
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
+        .host_manages_request_lifecycle()
         .indexer_threads(1)
         .host(SelectionHost {
             load: HostLoad {

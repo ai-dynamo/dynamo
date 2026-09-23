@@ -229,6 +229,19 @@ fn parse_discovery(
 ) -> Result<Discovery, DynamoError> {
     let model_info = parse_json_object("GetModelInfo.json_info", &model.json_info)?;
     let server_info = parse_json_object("GetServerInfo.json_info", &server.json_info)?;
+    // Generate responses are forwarded as token deltas. Accepting cumulative
+    // output here would duplicate tokens and inflate completion usage.
+    if server_info
+        .get("incremental_streaming_output")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err(invalid_arg(
+            "SGLang sidecar requires incremental streaming output; restart the SGLang server \
+             with --incremental-streaming-output to prevent duplicated tokens and inflated \
+             completion-token counts",
+        ));
+    }
     let model_path = if model.model_path.trim().is_empty() {
         model_info
             .get("model_path")
@@ -378,13 +391,30 @@ mod tests {
                 json_info: json!({"tokenizer_path": "tokenizer-repo"}).to_string(),
             },
             pb::GetServerInfoResponse {
-                json_info: json!({}).to_string(),
+                json_info: json!({"incremental_streaming_output": true}).to_string(),
             },
             Vec::new(),
         )
         .unwrap();
         assert_eq!(discovery.model_path, "model-repo");
         assert_eq!(discovery.tokenizer_path, "tokenizer-repo");
+    }
+
+    #[test]
+    fn discovery_requires_incremental_streaming() {
+        let error = parse_discovery(
+            pb::GetModelInfoResponse {
+                model_path: "model-repo".to_string(),
+                json_info: "{}".to_string(),
+            },
+            pb::GetServerInfoResponse {
+                json_info: json!({"incremental_streaming_output": false}).to_string(),
+            },
+            Vec::new(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--incremental-streaming-output"), "{error}");
     }
 
     #[tokio::test]
