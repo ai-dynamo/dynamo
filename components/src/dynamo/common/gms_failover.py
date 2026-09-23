@@ -606,6 +606,12 @@ async def _finish_gpu_quiescence_recovery(
         gpu_quiesced=True,
         recovery_owner_id=recovery_owner_id,
     )
+    if backend_name == "sglang":
+        from gpu_memory_service.integrations.sglang.writer_lifecycle import (
+            mark_gpu_quiescence_ready,
+        )
+
+        await asyncio.to_thread(mark_gpu_quiescence_ready)
 
 
 def _phase_two_finished(task: asyncio.Task[None]) -> None:
