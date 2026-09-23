@@ -131,7 +131,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// set runtimeVersionOverride explicitly.
 	//
 	// All other containers are user-managed sidecars and must specify their
-	// required fields, including image.
+	// required fields, including image. Exception: the init container named
+	// by dynamoSidecar receives Dynamo runtime defaults instead of main.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 
@@ -221,13 +222,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
 
 	// dynamoSidecar names the restartable init container that carries the Dynamo
-	// runtime in engine-primary mode, the recommended architecture for vLLM and
-	// other engine integrations. Setting this field activates engine-primary mode:
+	// runtime in Dynamo sidecar mode, the recommended architecture for vLLM and
+	// other engine integrations. Setting this field activates Dynamo sidecar mode:
 	// the engine runs in main with user-provided launch configuration, and the
 	// operator injects Dynamo configuration (env, identity, system port, probes)
 	// into the named init container instead. The init container must declare
 	// restartPolicy: Always. Multinode deployments, enabled checkpoint, GPU memory
-	// service, and failover are not yet supported in engine-primary mode. This
+	// service, and failover are not yet supported in Dynamo sidecar mode. This
 	// field is preserved through v1alpha1 conversion annotations.
 	// +optional
 	DynamoSidecar *string `json:"dynamoSidecar,omitempty"`
