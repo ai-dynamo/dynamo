@@ -123,7 +123,6 @@ class WorkerProcess(ManagedProcess):
         self.frontend_port = int(frontend_port)
         self.system_port = int(system_port)
 
-        # The VRAM budget this test was scheduled against, in GiB.
         vram_mark = request.node.get_closest_marker("profiled_vram_gib")
         self.required_vram_gib = float(vram_mark.args[0]) if vram_mark else None
 
