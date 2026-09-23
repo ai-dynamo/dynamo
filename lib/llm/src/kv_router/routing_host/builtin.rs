@@ -96,10 +96,7 @@ fn selection(worker_id: u64) -> WorkerSelectionResult {
 
 use super::*;
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     fn select_lora_target(
         &self,
         request: &PreprocessedRequest,
@@ -324,6 +321,7 @@ where
                 None,
             )
         } else {
+            self.validate_explicit_worker(request.content(), phase)?;
             self.select_with_session_affinity(&request, phase, is_query_only, &budget, |target| {
                 let pinned_target = explicit.or(match self.session_affinity_mode {
                     SessionAffinityMode::Hard => target,
@@ -347,7 +345,7 @@ where
             device_aware_telemetry,
         } = selection;
         let soft_affinity_target = if self.session_affinity_mode == SessionAffinityMode::Soft {
-            operation.as_ref().and_then(AffinityAcquire::target)
+            operation.as_ref().and_then(Hold::target).map(from_table)
         } else {
             None
         };
@@ -360,7 +358,7 @@ where
         let uses_occupancy = self
             .required_worker_inputs()
             .contains(WorkerInputs::OCCUPANCY);
-        let mut guard: RequestGuard<Sel> = RequestGuard::new_builtin(
+        let mut guard: RequestGuard = RequestGuard::new_builtin(
             self.request_metrics.clone(),
             initial_worker,
             occupancy_reservation,
@@ -531,13 +529,7 @@ where
         }
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
-        match operation {
-            Some(operation) => Ok((
-                metadata,
-                operation.into_stream(target, stream, self.session_affinity_mode)?,
-            )),
-            None => Ok((metadata, stream)),
-        }
+        Ok((metadata, self.bind_affinity(operation, target, stream)?))
     }
 }
 

@@ -57,6 +57,7 @@ use tracing::Instrument;
 /// This must match `MIGRATION_BLOCKING_REASONS` in `lib/llm/src/migration.rs`.
 pub(crate) const MIGRATION_SENSITIVE_ERROR_REASONS: &[&str] = &[
     "request.cancelled",
+    "request.deadline_exceeded",
     "backend.cancelled",
     "capacity.exhausted",
     "capacity.pool_exhausted",

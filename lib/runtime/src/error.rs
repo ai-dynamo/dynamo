@@ -418,7 +418,8 @@ impl ErrorReason {
             "transport.connection_timeout"
             | "backend.response_timeout"
             | "backend.connection_timeout"
-            | "request.deadline_exceeded" => Some(ErrorClass::DeadlineExceeded),
+            | "request.deadline_exceeded"
+            | "router.queue_deadline_exceeded" => Some(ErrorClass::DeadlineExceeded),
             "request.cancelled" | "backend.cancelled" => Some(ErrorClass::Cancelled),
             "capacity.pool_exhausted" | "capacity.worker_overloaded" | "capacity.exhausted" => {
                 Some(ErrorClass::CapacityExhausted)
@@ -570,6 +571,18 @@ impl PublicDetails {
     }
 }
 
+fn bounded_message(mut message: String) -> String {
+    if message.len() > Diagnostic::MAX_BYTES {
+        let mut end = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push_str(Diagnostic::TRUNCATION_SUFFIX);
+    }
+    message
+}
+
 /// Bounded operator-only diagnostic text.
 #[derive(Debug, Clone, Default)]
 pub struct Diagnostic {
@@ -582,17 +595,8 @@ impl Diagnostic {
     pub const TRUNCATION_SUFFIX: &'static str = "...[truncated]";
 
     pub fn new(value: impl Into<String>) -> Self {
-        let mut message = value.into();
-        if message.len() > Self::MAX_BYTES {
-            let mut end = Self::MAX_BYTES - Self::TRUNCATION_SUFFIX.len();
-            while !message.is_char_boundary(end) {
-                end -= 1;
-            }
-            message.truncate(end);
-            message.push_str(Self::TRUNCATION_SUFFIX);
-        }
         Self {
-            message,
+            message: bounded_message(value.into()),
             source: None,
         }
     }
@@ -1004,11 +1008,10 @@ impl DynamoErrorBuilder {
         self.diagnostic(message)
     }
 
-    /// Set a client-safe rejection message.
+    /// Set a bounded client-safe rejection message.
     pub fn public_message(mut self, message: impl Into<String>) -> Self {
-        self.public = Some(PublicDetails::Message {
-            message: message.into(),
-        });
+        let message = bounded_message(message.into());
+        self.public = Some(PublicDetails::Message { message });
         self
     }
 
@@ -1355,6 +1358,21 @@ mod tests {
     }
 
     #[test]
+    fn public_message_is_bounded_at_utf8_boundary() {
+        let truncation_index = Diagnostic::MAX_BYTES - Diagnostic::TRUNCATION_SUFFIX.len();
+        let message = "x".repeat(truncation_index - 1) + "é" + &"x".repeat(Diagnostic::MAX_BYTES);
+        let error = DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .public_message(message)
+            .build();
+        let public_message = error.public_message().unwrap();
+
+        assert!(public_message.len() <= Diagnostic::MAX_BYTES);
+        assert!(public_message.is_char_boundary(public_message.len()));
+        assert!(public_message.ends_with(Diagnostic::TRUNCATION_SUFFIX));
+    }
+
+    #[test]
     fn legacy_builder_derives_semantic_defaults() {
         let legacy_type: ErrorType = ErrorType::InvalidArgument;
         let err = DynamoError::builder()
@@ -1546,6 +1564,7 @@ mod tests {
         );
         assert_eq!(ErrorClass::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorClass::Cancelled.to_string(), "Cancelled");
+        assert_eq!(ErrorClass::DeadlineExceeded.to_string(), "DeadlineExceeded");
         assert_eq!(
             ErrorClass::ResourceExhausted.to_string(),
             "ResourceExhausted"
