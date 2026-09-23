@@ -17,6 +17,7 @@ ignored = ["mio"]
 [features]
 default = []
 integration = []
+velo-ucx = ["velo/ucx"]
 testing-etcd = [] # Tests that require an active ETCD server
 # White-box helpers for cross-crate lifecycle tests. Never enabled by a normal build.
 testing = []
@@ -28,6 +29,7 @@ tcp-low-latency = [] # Enable Linux-specific TCP optimizations (TCP_QUICKACK, SO
 nvtx = ["dep:cudarc"]
 
 [dependencies]
+velo = { workspace = true }
 # repo
 dynamo-truthy = { workspace = true }
 

@@ -288,7 +288,7 @@ impl TcpClient {
                 .instrument(reader_span),
         );
 
-        Ok(StreamReceiver { rx: bytes_rx })
+        Ok(StreamReceiver { rx: bytes_rx.into() })
     }
 }
 

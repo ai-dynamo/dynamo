@@ -477,6 +477,7 @@ def test_frontend_response_plane_defaults_to_tcp_and_accepts_quic(
 
     assert default_config.response_plane == "tcp"
     assert quic_config.response_plane == "quic"
+    assert parser.parse_args(["--response-plane", "velo"]).response_plane == "velo"
     assert env_config.response_plane == "quic"
 
     with pytest.raises(SystemExit):

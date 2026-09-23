@@ -36,8 +36,8 @@ use crate::pipeline::network::StreamReceiver;
 use crate::pipeline::network::StreamSender;
 use crate::pipeline::network::TwoPartCodec;
 use crate::pipeline::network::codec::TwoPartMessage;
-use crate::pipeline::network::quic_response;
 use crate::pipeline::network::tcp;
+use crate::pipeline::network::{quic_response, velo_response};
 use crate::pipeline::{ManyIn, ManyOut, PipelineError, ResponseStream, SingleIn};
 use crate::protocols::maybe_error::MaybeError;
 use crate::traits::DistributedRuntimeProvider;
@@ -244,7 +244,7 @@ where
 /// - hands off the `InflightGuard` to a stream-lifetime `InflightDecStream` so
 ///   the inflight gauge stays accurate for the whole response lifetime.
 fn decode_response_stream<U>(
-    response_rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    response_rx: super::super::ByteReceiver,
     engine_ctx: Arc<dyn crate::engine::AsyncEngineContext>,
     queue_start: Instant,
     tx_start: Instant,
@@ -257,8 +257,15 @@ where
     let engine_ctx_for_stream = engine_ctx.clone();
     let mut is_complete_final = false;
     let mut first_response = true;
-    let stream = StreamNotifyClose::new(ReceiverStream::new(response_rx)).filter_map(move |res| {
+    let stream = StreamNotifyClose::new(response_rx).filter_map(move |res| {
         if let Some(res_bytes) = res {
+            let res_bytes = match res_bytes {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    is_complete_final = true; // Emit the transport error exactly once.
+                    return Some(U::from_err(error));
+                }
+            };
             if first_response {
                 first_response = false;
                 REQUEST_PLANE_ROUNDTRIP_TTFT_SECONDS.observe(tx_start.elapsed().as_secs_f64());
@@ -585,6 +592,7 @@ pub struct AddressedPushRouter {
 enum ResponseServer {
     Tcp(Arc<tcp::server::TcpStreamServer>),
     Quic(Arc<quic_response::QuicResponseServer>),
+    Velo(Arc<velo_response::VeloResponseService>),
 }
 
 impl AddressedPushRouter {
@@ -629,6 +637,14 @@ impl AddressedPushRouter {
 
         match provider.drt().response_plane() {
             ResponsePlaneMode::Tcp => Self::new(req_client, request_callbacks),
+            ResponsePlaneMode::Velo => {
+                let responses = provider.drt().velo_response_service().await?;
+                Ok(Arc::new(Self {
+                    req_client,
+                    request_callbacks,
+                    responses: ResponseServer::Velo(responses),
+                }))
+            }
             ResponsePlaneMode::Quic => {
                 let responses = provider.drt().quic_response_server().await?;
                 Ok(Self::new_quic(req_client, request_callbacks, responses))
@@ -648,6 +664,14 @@ impl AddressedPushRouter {
                         .cancel_instance_streams(instance_id)
                         .await
             }
+            ResponseServer::Velo(responses) => {
+                let response_count = responses.cancel_instance_streams(instance_id).await;
+                response_count
+                    + self
+                        .request_callbacks
+                        .cancel_instance_streams(instance_id)
+                        .await
+            }
         }
     }
 
@@ -658,6 +682,12 @@ impl AddressedPushRouter {
                 responses.clear_instance_tombstone(instance_id).await;
             }
             ResponseServer::Quic(responses) => {
+                responses.clear_instance_tombstone(instance_id).await;
+                self.request_callbacks
+                    .clear_instance_tombstone(instance_id)
+                    .await;
+            }
+            ResponseServer::Velo(responses) => {
                 responses.clear_instance_tombstone(instance_id).await;
                 self.request_callbacks
                     .clear_instance_tombstone(instance_id)
@@ -753,6 +783,28 @@ impl AddressedPushRouter {
                     None => false,
                 },
                 ResponseServer::Quic(responses) => {
+                    let response_ok = match response_registration {
+                        Some(registration_id) => {
+                            responses
+                                .associate_instance(registration_id, &instance_id)
+                                .await
+                        }
+                        None => false,
+                    };
+                    let request_ok = match send_subject.as_deref() {
+                        Some(subject) => {
+                            self.request_callbacks
+                                .associate_request_instance(subject, &instance_id)
+                                .await
+                        }
+                        None => true,
+                    };
+                    if !request_ok && let Some(registration_id) = response_registration {
+                        responses.cancel_response(registration_id).await;
+                    }
+                    response_ok && request_ok
+                }
+                ResponseServer::Velo(responses) => {
                     let response_ok = match response_registration {
                         Some(registration_id) => {
                             responses
@@ -901,6 +953,21 @@ impl AddressedPushRouter {
                     None
                 };
                 (send_stream, Some(responses.register_response(engine_ctx)))
+            }
+            ResponseServer::Velo(responses) => {
+                let send_stream = if enable_request_stream {
+                    let options = StreamOptions::builder()
+                        .context(engine_ctx.clone())
+                        .enable_request_stream(true)
+                        .enable_response_stream(false)
+                        .build()?;
+                    let pending: PendingConnections =
+                        self.request_callbacks.register(options).await;
+                    pending.send_stream
+                } else {
+                    None
+                };
+                (send_stream, Some(responses.register_response(engine_ctx)?))
             }
         };
         let recv_stream = recv_stream.ok_or_else(|| {

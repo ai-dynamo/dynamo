@@ -612,7 +612,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--response-plane",
         type=str,
-        choices=["tcp", "quic"],
+        choices=["tcp", "quic", "velo"],
         default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
         help="Select the response transport. Frontend and workers must match.",
     )

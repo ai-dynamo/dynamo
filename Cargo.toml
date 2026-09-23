@@ -93,7 +93,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.6.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.6.0" }
 
 # velo
-velo = { version = "0.12.0" }
+velo = { path = "../velo-stream-lifecycle/lib/velo", default-features = false }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -102,7 +102,7 @@ async-nats = { version = "0.49.1", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 blake3 = { version = "1.8.7" }
-bytes = { version = "1.9" }
+bytes = { version = "1.9", features = ["serde"] }
 chrono = { version = "0.4", default-features = false, features = [
     "alloc",
     "std",

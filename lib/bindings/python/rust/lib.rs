@@ -519,9 +519,10 @@ fn resolve_response_plane_mode(
     match response_plane {
         Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
         Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
+        Some("velo") => Ok(Some(ResponsePlaneMode::Velo)),
         Some("") | None => Ok(None),
         Some(other) => Err(PyValueError::new_err(format!(
-            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic'"
+            "Invalid response_plane value '{other}'. Valid values: 'tcp', 'quic', 'velo'"
         ))),
     }
 }

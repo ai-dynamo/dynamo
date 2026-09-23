@@ -102,6 +102,8 @@ pub struct DistributedRuntime {
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     quic_response_server:
         Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
+    velo_response_service:
+        Arc<OnceCell<Arc<crate::pipeline::network::velo_response::VeloResponseService>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
     response_plane: ResponsePlaneMode,
@@ -262,6 +264,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             quic_response_server: Arc::new(OnceCell::new()),
+            velo_response_service: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             endpoint_registrations,
@@ -515,6 +518,16 @@ impl DistributedRuntime {
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
+            .await?
+            .clone())
+    }
+
+    pub async fn velo_response_service(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::velo_response::VeloResponseService>> {
+        Ok(self
+            .velo_response_service
+            .get_or_try_init(crate::pipeline::network::velo_response::VeloResponseService::shared())
             .await?
             .clone())
     }
