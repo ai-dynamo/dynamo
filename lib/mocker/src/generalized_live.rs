@@ -1658,8 +1658,8 @@ mod tests {
                 max_num_seqs: 8,
                 max_num_batched_tokens: 256,
                 timing_model: TimingModelConfig::Fixed {
-                    prefill_ms: 100.0,
-                    decode_ms: 0.0,
+                    prefill_ms: 0.0,
+                    decode_ms: 100.0,
                 },
                 ..EngineConfig::default()
             },

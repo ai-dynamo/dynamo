@@ -34,7 +34,7 @@ def main() -> None:
         "current",
     ]
 
-    from aiconfigurator_core.sdk.engine import EngineHandle
+    from aisimulate_core.sdk.engine import EngineHandle
 
     from dynamo.frontend.main import parse_args
     from dynamo.llm import AicPerfConfig

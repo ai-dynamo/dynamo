@@ -2378,6 +2378,7 @@ fn build_synthetic_workload(
     }
 
     RsTrace::synthetic(SyntheticTraceSpec {
+        cached_prefix_tokens: 0,
         block_size,
         num_sessions: request_count,
         turns_per_session,

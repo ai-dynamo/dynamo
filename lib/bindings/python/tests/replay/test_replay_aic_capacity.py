@@ -22,7 +22,7 @@ pytestmark = [
 
 def _aisimulate_replay_modules():
     _require_aisimulate_distribution()
-    replay_aic = importlib.import_module("aisimulate.aic")
+    replay_aic = importlib.import_module("aisimulate.capacity")
     replay_config = importlib.import_module("dynamo.replay.config")
     return replay_aic, replay_config
 

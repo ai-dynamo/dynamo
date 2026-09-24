@@ -30,7 +30,7 @@ from aisimulate.sweeper.replay import (
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
-from dynamo.replay.config import resolve_aic_num_gpu_blocks
+from dynamo.replay.config import lower_canonical_aic_timing, resolve_aic_num_gpu_blocks
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -320,6 +320,7 @@ class DynamoReplayRunner:
             ):
                 lowered.pop(name, None)
         resolve_aic_num_gpu_blocks(lowered)
+        lower_canonical_aic_timing(lowered)
         # Pipeline parallelism is already represented in the public parallel
         # mapping and used for AIC capacity. MockEngineArgs has no PP field.
         lowered.pop("aic_pp_size", None)
@@ -340,6 +341,12 @@ class DynamoReplayRunner:
                 "Dynamo replay does not support prefill_decode_interval values "
                 "other than 0"
             )
+        for field, default in (
+            ("aic_database_mode", "SILICON"),
+            ("cuda_graph_reserved_bytes", 0),
+        ):
+            if lowered.pop(field, default) != default:
+                raise ValueError(f"Dynamo replay does not support non-default {field}")
         return MockEngineArgs.from_json(json.dumps(lowered))
 
     def _run_trace(

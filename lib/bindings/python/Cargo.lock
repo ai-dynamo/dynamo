@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "aisimulate-core"
-version = "0.12.0-dev.202609170000000044"
+version = "0.13.0-dev.202609230000000054"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0db9284542eb70c68dedbd2a6c61a1e6cb73fb45d8b808c0d692cb39ac16ebe"
+checksum = "c1eb690a3e567d98387d744930eca4c632a2607240bf505b44fa1c33c03f08ed"
 dependencies = [
  "anyhow",
  "bincode 1.3.3",
@@ -56,6 +56,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "serde_yaml",
  "sha2 0.10.9",
  "slotmap",

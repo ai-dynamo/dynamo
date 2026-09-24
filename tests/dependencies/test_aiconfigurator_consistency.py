@@ -93,13 +93,13 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
     assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.12.0-dev.202609170000000044",
+        "version": "=0.13.0-dev.202609230000000054",
         "optional": True,
         "features": ["python"],
     }
 
 
-def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
+def test_aisimulate_wheel_provides_public_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
@@ -108,14 +108,10 @@ def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
     release_files = {str(path) for path in release.files or []}
 
     assert not (release_requirements & LEGACY_DISTRIBUTIONS)
-    assert "aiconfigurator/__init__.py" in release_files
-    assert "aiconfigurator_core/__init__.py" in release_files
+    assert "aisimulate/__init__.py" in release_files
+    assert "aisimulate_core/__init__.py" in release_files
+    from aisimulate.capacity import materialize_aic_num_gpu_blocks
+    from aisimulate_core.sdk import RustForwardPassPerfModel
 
-    import aiconfigurator
-    import aiconfigurator_core
-    from aiconfigurator_core.sdk import RustForwardPassPerfModel
-    from aisimulate_core.sdk import RustForwardPassPerfModel as PublicPerfModel
-
-    assert aiconfigurator is not None
-    assert aiconfigurator_core is not None
-    assert RustForwardPassPerfModel is PublicPerfModel
+    assert callable(materialize_aic_num_gpu_blocks)
+    assert callable(RustForwardPassPerfModel)

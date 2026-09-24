@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aisimulate.aic import materialize_aic_num_gpu_blocks
+from aisimulate.capacity import materialize_aic_num_gpu_blocks
 
 from dynamo._internal.aic import resolve_backend_version
 from dynamo.mocker import MockEngineArgs
@@ -37,6 +37,63 @@ def resolve_aic_num_gpu_blocks(raw: dict[str, Any]) -> None:
     lowered = materialize_aic_num_gpu_blocks(raw)
     raw.clear()
     raw.update(lowered)
+
+
+def lower_canonical_aic_timing(raw: dict[str, Any]) -> None:
+    """Adapt resolved op-level timing to Dynamo's existing AIC callback."""
+    timing = raw.get("timing_model", {})
+    if (
+        not isinstance(timing, dict)
+        or timing.get("type") != "external"
+        or timing.get("provider") != "aic"
+    ):
+        return
+    from aisimulate_core import RustForwardPassPerfModel
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+    from aisimulate_core.sdk.common import resolve_transfer_policy
+
+    config = timing["config"]
+    fields = {
+        "model": "aic_model_path",
+        "system": "aic_system",
+        "backend": "aic_backend",
+        "backend_version": "aic_backend_version",
+        "tp": "aic_tp_size",
+        "attention_dp": "aic_attention_dp_size",
+        "moe_tp_size": "aic_moe_tp_size",
+        "moe_ep_size": "aic_moe_ep_size",
+        "gemm_quant_mode": "aic_gemm_dtype",
+        "moe_quant_mode": "aic_moe_dtype",
+        "fmha_quant_mode": "aic_fmha_dtype",
+        "kvcache_quant_mode": "aic_kv_cache_dtype",
+        "comm_quant_mode": "aic_comm_dtype",
+        "nextn": "aic_nextn",
+        "kv_block_size": "block_size",
+    }
+    defaults = ForwardPassPerfModelConfig(
+        model=config["model"],
+        system=config["system"],
+        backend=config["backend"],
+        worker_type=config["worker_type"],
+        estimation_mode="op_level",
+    ).to_dict()
+    defaults = json.loads(
+        RustForwardPassPerfModel.normalize_config(json.dumps(defaults))
+    )
+    for field, value in config.items():
+        if field == "transfer_policy":
+            if resolve_transfer_policy(value) == resolve_transfer_policy(None):
+                continue
+        if field not in fields and value != defaults.get(field):
+            raise ValueError(
+                f"Dynamo replay does not support AIC timing option {field}={value!r}"
+            )
+    for source, target in fields.items():
+        value = config.get(source)
+        if value is not None and not (source == "nextn" and value == 0):
+            raw[target] = value
+    raw.pop("tensor_parallel_size", None)
+    raw.pop("timing_model")
 
 
 def resolve_planner_profile_data(

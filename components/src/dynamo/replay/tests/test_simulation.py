@@ -516,7 +516,12 @@ def test_fixed_timing_keeps_aic_identity_out_of_runtime_args(monkeypatch) -> Non
 
 @pytest.mark.parametrize(
     ("field", "neutral"),
-    [("prefill_schedule_interval", 1), ("prefill_decode_interval", 0)],
+    [
+        ("prefill_schedule_interval", 1),
+        ("prefill_decode_interval", 0),
+        ("aic_database_mode", "SILICON"),
+        ("cuda_graph_reserved_bytes", 0),
+    ],
 )
 def test_engine_args_removes_neutral_prefill_interval(
     monkeypatch, field, neutral
@@ -536,7 +541,13 @@ def test_engine_args_removes_neutral_prefill_interval(
 
 
 @pytest.mark.parametrize(
-    "field", ["prefill_schedule_interval", "prefill_decode_interval"]
+    "field",
+    [
+        "prefill_schedule_interval",
+        "prefill_decode_interval",
+        "aic_database_mode",
+        "cuda_graph_reserved_bytes",
+    ],
 )
 def test_engine_args_rejects_nondefault_prefill_interval(monkeypatch, field) -> None:
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
@@ -605,3 +616,28 @@ def test_goodput_goal_fails_closed_when_replay_omits_metric(monkeypatch) -> None
 
     with pytest.raises(RuntimeError, match="did not emit goodput"):
         simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("estimation_mode", "fpm_interpolation"), ("pp", 2), ("database_mode", "SOL")],
+)
+def test_canonical_aic_timing_rejects_unsupported_options(field, value):
+    from aisimulate_core import RustForwardPassPerfModel
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    from dynamo.replay.config import lower_canonical_aic_timing
+
+    config = ForwardPassPerfModelConfig(
+        model="test-model",
+        system="test-system",
+        backend="vllm",
+        worker_type="aggregated",
+        estimation_mode="op_level",
+    ).to_dict()
+    config = json.loads(RustForwardPassPerfModel.normalize_config(json.dumps(config)))
+    config[field] = value
+    with pytest.raises(ValueError, match=field):
+        lower_canonical_aic_timing(
+            {"timing_model": {"type": "external", "provider": "aic", "config": config}}
+        )
