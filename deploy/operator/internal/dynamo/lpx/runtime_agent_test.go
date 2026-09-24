@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -138,6 +139,39 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				require.Equal(t, authored.VolumeMounts, container.VolumeMounts)
 			})
 		}
+	}
+}
+
+func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		bindings []corev1.EnvVar
+	}{
+		{name: "absent"},
+		{name: "existing", bindings: []corev1.EnvVar{{Name: allocationEnvVar, Value: "stale"}}},
+		{name: "duplicates", bindings: []corev1.EnvVar{
+			{Name: allocationEnvVar, Value: "stale"},
+			{Name: allocationEnvVar, ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Log("Author environment references before any stale allocation bindings")
+			authored := []corev1.EnvVar{
+				{Name: "NOVA_ALLOCATION", Value: "$(LPX_ALLOCATION)"},
+				{Name: "OTHER", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}},
+			}
+			pod := corev1.PodSpec{Containers: []corev1.Container{{
+				Name: commonconsts.MainContainerName, Command: []string{"custom-conductor"}, Args: []string{"--workers", "$(LPX_ALLOCATION)"},
+				Env: append(slices.Clone(authored), test.bindings...),
+			}}}
+			want := pod.Containers[0].DeepCopy()
+			want.Name = v1beta1.ComponentRoleLPXConductor
+			want.Env = append([]corev1.EnvVar{{Name: allocationEnvVar, Value: "agt0:agt1"}}, authored...)
+
+			t.Log("Publish exactly one authoritative allocation before references without changing startup or other environment")
+			configureNodeLocalConductorRuntime(&pod, "agt0:agt1")
+			require.Equal(t, *want, pod.Containers[0])
+		})
 	}
 }
 

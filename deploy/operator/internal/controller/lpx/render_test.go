@@ -629,7 +629,7 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 		var hash string
 		for _, clique := range pcs.Spec.Template.Cliques {
 			if clique.Name == plan.ConductorTemplate {
-				require.Equal(t, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)}, clique.Spec.PodSpec.Containers[0].Env[0])
+				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, corev1.EnvVar{Name: "LPX_MODEL_PATH", Value: filepath.Join("/nfs", buildID)})
 				require.Contains(t, clique.Spec.PodSpec.Containers[0].Env, env)
 				hash = clique.Annotations[v1alpha1.AnnotationExtraResourcesHash]
 			}

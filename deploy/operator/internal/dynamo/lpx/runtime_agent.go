@@ -23,7 +23,17 @@ func configureNodeLocalConductorRuntime(
 	// Bind placement data without interpreting the template's executable or arguments.
 	conductor := common.FindContainerByName(conductorPodSpec.Containers, commonconsts.MainContainerName)
 	conductor.Name = dynamov1beta1.ComponentRoleLPXConductor
-	setContainerEnv(conductor, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
+
+	// Kubernetes expands environment references in order; publish allocation before authored bindings.
+	env := make([]corev1.EnvVar, 0, len(conductor.Env)+1)
+	env = append(env, corev1.EnvVar{Name: allocationEnvVar, Value: allocation})
+	for _, variable := range conductor.Env {
+		if variable.Name != allocationEnvVar {
+			env = append(env, variable)
+		}
+	}
+	conductor.Env = env
+
 	retargetMainContainerReferences(conductorPodSpec, conductor)
 }
 
