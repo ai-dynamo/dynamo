@@ -369,6 +369,10 @@ mod tests {
             parent_session_id: None,
             session_final: None,
             subagent_spawn: None,
+            retention_ttl_ms: None,
+            retention_block_start: None,
+            retention_block_count: None,
+            inferred_tool_call: None,
             compaction: Some(AgentCompaction {
                 trigger: Some("manual".to_string()),
                 reason: Some("user_requested".to_string()),
@@ -451,6 +455,10 @@ mod tests {
             parent_session_id: None,
             session_final: None,
             subagent_spawn: None,
+            retention_ttl_ms: None,
+            retention_block_start: None,
+            retention_block_count: None,
+            inferred_tool_call: None,
             compaction: None,
             input_trigger: None,
         });

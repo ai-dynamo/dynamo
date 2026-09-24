@@ -103,9 +103,12 @@ docker run --rm --entrypoint python3 "$IMAGE" -c 'import inspect; from vllm.v1.k
 | `v1/kv_hints/protocol.py` | Envelope and action types |
 | `v1/kv_hints/actions.py` | Retain and evict parsing |
 | `v1/core/retained_block_queue.py` | Retention lease queue |
-| `v1/core/block_pool.py` | External-hash index, retained queue, and `BlockStored.session_id` |
+| `v1/core/block_pool.py` | External-hash index, retained queue, occupancy accounting, and `BlockStored.session_id` |
+| `v1/core/kv_cache_coordinator.py` | Retention-budget propagation into the block pool |
 | `v1/core/kv_cache_manager.py` | Request-completion retention and eviction |
+| `v1/core/kv_cache_utils.py` | Retention-budget propagation into runtime KV-cache configuration |
 | `v1/core/sched/scheduler.py` | Request-completion action timing |
+| `v1/kv_cache_interface.py` | Runtime retention-budget field |
 | `v1/engine/__init__.py` | `EngineCoreRequest.kv_hints` |
 | `v1/engine/async_llm.py` | Request propagation |
 | `v1/engine/input_processor.py` | Request propagation |
@@ -116,3 +119,5 @@ docker run --rm --entrypoint python3 "$IMAGE" -c 'import inspect; from vllm.v1.k
 | `distributed/kv_events.py` | `BlockStored.session_id` |
 | `distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py` | Connector propagation |
 | `engine/protocol.py` | Engine client protocol field |
+| `config/cache.py` | Worker-level retained-block budget |
+| `engine/arg_utils.py` | Retained-block budget CLI plumbing |

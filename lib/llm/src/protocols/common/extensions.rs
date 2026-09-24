@@ -124,6 +124,26 @@ pub struct AgentContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_spawn: Option<bool>,
 
+    /// Requested retention duration for this request's session lineage.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_ttl_ms: Option<u64>,
+
+    /// First current-request KV block selected by a replay oracle.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_block_start: Option<u32>,
+
+    /// Number of current-request KV blocks selected by a replay oracle.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention_block_count: Option<u32>,
+
+    /// Whether replay metadata inferred that this request launched a tool call.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inferred_tool_call: Option<bool>,
+
     /// Present when the current inference creates a compacted session summary.
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,6 +395,10 @@ impl From<AgentContextHeaderValues> for AgentContext {
             parent_session_id: values.parent_session_id,
             session_final: values.session_final,
             subagent_spawn: values.subagent_spawn,
+            retention_ttl_ms: values.retention_ttl_ms,
+            retention_block_start: values.retention_block_start,
+            retention_block_count: values.retention_block_count,
+            inferred_tool_call: values.inferred_tool_call,
             compaction: values.compaction,
             input_trigger: None,
         }
@@ -895,9 +919,11 @@ mod tests {
     use crate::protocols::agents::{
         HEADER_CLAUDE_CODE_AGENT_ID, HEADER_CLAUDE_CODE_PARENT_AGENT_ID,
         HEADER_CLAUDE_CODE_SESSION_ID, HEADER_CODEX_PARENT_THREAD_ID, HEADER_CODEX_THREAD_ID,
-        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_SESSION_FINAL,
-        HEADER_DYNAMO_SESSION_ID, HEADER_DYNAMO_SUBAGENT_SPAWN, HEADER_OPENCODE_PARENT_SESSION_ID,
-        HEADER_OPENCODE_SESSION_ID,
+        HEADER_CODEX_TURN_METADATA, HEADER_DYNAMO_INFERRED_TOOL_CALL,
+        HEADER_DYNAMO_PARENT_SESSION_ID, HEADER_DYNAMO_RETENTION_BLOCK_COUNT,
+        HEADER_DYNAMO_RETENTION_BLOCK_START, HEADER_DYNAMO_RETENTION_TTL_MS,
+        HEADER_DYNAMO_SESSION_FINAL, HEADER_DYNAMO_SESSION_ID, HEADER_DYNAMO_SUBAGENT_SPAWN,
+        HEADER_OPENCODE_PARENT_SESSION_ID, HEADER_OPENCODE_SESSION_ID,
     };
 
     #[derive(Default)]
@@ -1558,6 +1584,10 @@ mod tests {
         );
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "true".parse().unwrap());
         headers.insert(HEADER_DYNAMO_SUBAGENT_SPAWN, "true".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_RETENTION_TTL_MS, "5000".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_RETENTION_BLOCK_START, "11".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_RETENTION_BLOCK_COUNT, "7".parse().unwrap());
+        headers.insert(HEADER_DYNAMO_INFERRED_TOOL_CALL, "true".parse().unwrap());
 
         let agent_context = agent_context_from_headers(&headers).unwrap();
 
@@ -1568,6 +1598,10 @@ mod tests {
         );
         assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(agent_context.subagent_spawn, Some(true));
+        assert_eq!(agent_context.retention_ttl_ms, Some(5000));
+        assert_eq!(agent_context.retention_block_start, Some(11));
+        assert_eq!(agent_context.retention_block_count, Some(7));
+        assert_eq!(agent_context.inferred_tool_call, Some(true));
         headers.insert(HEADER_DYNAMO_SESSION_FINAL, "false".parse().unwrap());
         assert_eq!(
             agent_context_from_headers(&headers).unwrap().session_final,

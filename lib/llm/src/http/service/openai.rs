@@ -5850,6 +5850,10 @@ mod tests {
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
                 subagent_spawn: None,
+                retention_ttl_ms: None,
+                retention_block_start: None,
+                retention_block_count: None,
+                inferred_tool_call: None,
                 compaction: Some(AgentCompaction {
                     trigger: Some("automatic".to_string()),
                     ..Default::default()

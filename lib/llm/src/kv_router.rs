@@ -278,6 +278,10 @@ pub(crate) fn to_worker_selection_session_context(
         parent_session_id,
         session_final,
         subagent_spawn: _,
+        retention_ttl_ms: _,
+        retention_block_start: _,
+        retention_block_count: _,
+        inferred_tool_call: _,
         compaction: _,
         input_trigger,
     } = context;
@@ -2506,6 +2510,10 @@ mod tests {
             parent_session_id: Some("root-session".into()),
             session_final: Some(true),
             subagent_spawn: Some(false),
+            retention_ttl_ms: None,
+            retention_block_start: None,
+            retention_block_count: None,
+            inferred_tool_call: None,
             compaction: None,
             input_trigger: Some(InputTrigger::ToolResult),
         };

@@ -20,6 +20,10 @@ pub(crate) const HEADER_DYNAMO_SESSION_ID: &str = "x-dynamo-session-id";
 pub(crate) const HEADER_DYNAMO_PARENT_SESSION_ID: &str = "x-dynamo-parent-session-id";
 pub(crate) const HEADER_DYNAMO_SESSION_FINAL: &str = "x-dynamo-session-final";
 pub(crate) const HEADER_DYNAMO_SUBAGENT_SPAWN: &str = "x-dynamo-subagent-spawn";
+pub(crate) const HEADER_DYNAMO_RETENTION_TTL_MS: &str = "x-dynamo-retention-ttl-ms";
+pub(crate) const HEADER_DYNAMO_RETENTION_BLOCK_START: &str = "x-dynamo-retention-block-start";
+pub(crate) const HEADER_DYNAMO_RETENTION_BLOCK_COUNT: &str = "x-dynamo-retention-block-count";
+pub(crate) const HEADER_DYNAMO_INFERRED_TOOL_CALL: &str = "x-dynamo-inferred-tool-call";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AgentHeaderMapping {
@@ -56,6 +60,10 @@ pub(crate) struct AgentContextHeaderValues {
     pub(crate) parent_session_id: Option<String>,
     pub(crate) session_final: Option<bool>,
     pub(crate) subagent_spawn: Option<bool>,
+    pub(crate) retention_ttl_ms: Option<u64>,
+    pub(crate) retention_block_start: Option<u32>,
+    pub(crate) retention_block_count: Option<u32>,
+    pub(crate) inferred_tool_call: Option<bool>,
     pub(crate) compaction: Option<AgentCompaction>,
 }
 
@@ -73,6 +81,12 @@ fn borrowed_header_value<'a>(headers: &'a HeaderMap, header_name: &str) -> Optio
 pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentContextHeaderValues> {
     let session_final = header_bool(headers, HEADER_DYNAMO_SESSION_FINAL);
     let subagent_spawn = header_bool(headers, HEADER_DYNAMO_SUBAGENT_SPAWN);
+    let retention_ttl_ms = header_u64(headers, HEADER_DYNAMO_RETENTION_TTL_MS);
+    let retention_block_start = header_u64(headers, HEADER_DYNAMO_RETENTION_BLOCK_START)
+        .and_then(|value| u32::try_from(value).ok());
+    let retention_block_count = header_u64(headers, HEADER_DYNAMO_RETENTION_BLOCK_COUNT)
+        .and_then(|value| u32::try_from(value).ok());
+    let inferred_tool_call = header_bool(headers, HEADER_DYNAMO_INFERRED_TOOL_CALL);
     let compaction = borrowed_header_value(headers, HEADER_CODEX_THREAD_ID)
         .and_then(|_| codex_compaction_header_value(headers));
 
@@ -84,6 +98,10 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             session_id: session_id.to_owned(),
             session_final,
             subagent_spawn,
+            retention_ttl_ms,
+            retention_block_start,
+            retention_block_count,
+            inferred_tool_call,
             compaction,
         });
     }
@@ -114,6 +132,10 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
             parent_session_id,
             session_final,
             subagent_spawn,
+            retention_ttl_ms,
+            retention_block_start,
+            retention_block_count,
+            inferred_tool_call,
             compaction,
         });
     }
@@ -148,4 +170,8 @@ pub(crate) fn session_affinity_header_value(headers: &HeaderMap) -> Option<Strin
 fn header_bool(headers: &HeaderMap, header_name: &str) -> Option<bool> {
     let value = borrowed_header_value(headers, header_name)?;
     dynamo_runtime::config::parse_bool_opt(value)
+}
+
+fn header_u64(headers: &HeaderMap, header_name: &str) -> Option<u64> {
+    borrowed_header_value(headers, header_name)?.parse().ok()
 }

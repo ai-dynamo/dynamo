@@ -43,7 +43,9 @@ use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
 #[cfg(target_os = "linux")]
-use dynamo_kv_hint_policy_example::{FixedRetention, SessionKvHintPolicy};
+use dynamo_kv_hint_policy_example::{
+    RetentionConfig, RetentionTrigger, SessionKvHintPolicy,
+};
 
 use super::local_model::ModelRuntimeConfig;
 use super::model_card::ModelDeploymentCard;
@@ -1091,7 +1093,6 @@ pub fn run_input<'p>(
 fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>> {
     const ENABLED: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY";
     const MODE: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_POLICY_MODE";
-    const TTL: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_TTL_SECONDS";
     const PRIORITY: &str = "DYN_EXPERIMENTAL_SESSION_KV_HINT_RETENTION_PRIORITY";
 
     if std::env::var_os(ENABLED).is_none() {
@@ -1099,42 +1100,37 @@ fn experimental_session_kv_hint_policy() -> PyResult<Option<SessionKvHintPolicy>
     }
 
     let mode = std::env::var(MODE).unwrap_or_else(|_| "combined".to_string());
-    let (retain_on_spawn, evict_final_roots) = match mode.as_str() {
-        "retain" => (true, false),
-        "evict" => (false, true),
-        "combined" => (true, true),
+    let (retention_trigger, evict_final_roots) = match mode.as_str() {
+        "retain" => (Some(RetentionTrigger::SubagentSpawn), false),
+        "inferred-tool-retain" => (Some(RetentionTrigger::InferredToolCall), false),
+        "all-retain" => (
+            Some(RetentionTrigger::SubagentSpawnOrInferredToolCall),
+            false,
+        ),
+        "evict" => (None, true),
+        "combined" => (Some(RetentionTrigger::SubagentSpawn), true),
+        "all-retain-and-evict" => (
+            Some(RetentionTrigger::SubagentSpawnOrInferredToolCall),
+            true,
+        ),
         _ => {
             return Err(PyValueError::new_err(format!(
-                "invalid {MODE} value {mode:?}; expected retain, evict, or combined"
+                "invalid {MODE} value {mode:?}; expected retain, inferred-tool-retain, all-retain, evict, combined, or all-retain-and-evict"
             )));
         }
     };
 
-    let ttl_seconds = if retain_on_spawn {
-        let value = std::env::var(TTL)
-            .map_err(|_| PyValueError::new_err(format!("{TTL} is required in {mode} mode")))?;
-        Some(
-            value.parse::<f64>().map_err(|error| {
-                PyValueError::new_err(format!("invalid {TTL} value {value:?}: {error}"))
-            })?,
-        )
-    } else {
-        None
-    };
-    let fixed_retention = if let Some(ttl_seconds) = ttl_seconds {
+    let retention = if let Some(trigger) = retention_trigger {
         let priority = std::env::var(PRIORITY)
             .unwrap_or_else(|_| "10".to_string())
             .parse::<u64>()
             .map_err(|error| PyValueError::new_err(format!("invalid {PRIORITY} value: {error}")))?;
-        Some(FixedRetention {
-            priority,
-            ttl_seconds,
-        })
+        Some(RetentionConfig { priority, trigger })
     } else {
         None
     };
 
-    SessionKvHintPolicy::new(fixed_retention, evict_final_roots)
+    SessionKvHintPolicy::new(retention, evict_final_roots)
         .map(Some)
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }

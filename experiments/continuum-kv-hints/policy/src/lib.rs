@@ -17,32 +17,46 @@ use dynamo_llm::{
 const ACTION_VERSION: &str = "1.0";
 
 #[derive(Clone, Copy, Debug)]
-pub struct FixedRetention {
+pub struct RetentionConfig {
     pub priority: u64,
-    pub ttl_seconds: f64,
+    pub trigger: RetentionTrigger,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RetentionTrigger {
+    SubagentSpawn,
+    InferredToolCall,
+    SubagentSpawnOrInferredToolCall,
+}
+
+impl RetentionTrigger {
+    fn matches(self, subagent_spawn: bool, inferred_tool_call: bool) -> Option<&'static str> {
+        match self {
+            Self::SubagentSpawn if subagent_spawn => Some("subagent_spawn"),
+            Self::InferredToolCall if inferred_tool_call => Some("inferred_tool_call"),
+            Self::SubagentSpawnOrInferredToolCall if subagent_spawn => Some("subagent_spawn"),
+            Self::SubagentSpawnOrInferredToolCall if inferred_tool_call => {
+                Some("inferred_tool_call")
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Applies sparse lifecycle actions to session-addressed KV.
 pub struct SessionKvHintPolicy {
-    spawn_retention: Option<FixedRetention>,
+    retention: Option<RetentionConfig>,
     evict_final_roots: bool,
     next_message_id: AtomicU64,
 }
 
 impl SessionKvHintPolicy {
     pub fn new(
-        spawn_retention: Option<FixedRetention>,
+        retention: Option<RetentionConfig>,
         evict_final_roots: bool,
     ) -> Result<Self, KvHintPolicyError> {
-        if spawn_retention
-            .is_some_and(|retain| !retain.ttl_seconds.is_finite() || retain.ttl_seconds <= 0.0)
-        {
-            return Err(KvHintPolicyError::new(
-                "retention ttl_seconds must be finite and positive",
-            ));
-        }
         Ok(Self {
-            spawn_retention,
+            retention,
             evict_final_roots,
             next_message_id: AtomicU64::new(0),
         })
@@ -55,9 +69,13 @@ impl SessionKvHintPolicy {
         action_type: &str,
         mut payload: BTreeMap<String, serde_json::Value>,
         block_hashes: impl IntoIterator<Item = u64>,
+        include_current_request: bool,
     ) -> KvHint {
         payload.insert("execute_at".into(), "request_completion".into());
-        payload.insert("include_current_request".into(), true.into());
+        payload.insert(
+            "include_current_request".into(),
+            include_current_request.into(),
+        );
         payload.insert(
             "block_hashes".into(),
             block_hashes
@@ -82,13 +100,10 @@ impl SessionKvHintPolicy {
 
 pub fn register(
     frontend: HttpFrontend,
-    spawn_retention: Option<FixedRetention>,
+    retention: Option<RetentionConfig>,
     evict_final_roots: bool,
 ) -> Result<HttpFrontend, KvHintPolicyError> {
-    Ok(frontend.kv_hint_policy(SessionKvHintPolicy::new(
-        spawn_retention,
-        evict_final_roots,
-    )?))
+    Ok(frontend.kv_hint_policy(SessionKvHintPolicy::new(retention, evict_final_roots)?))
 }
 
 impl KvHintPolicy for SessionKvHintPolicy {
@@ -125,34 +140,65 @@ impl KvHintPolicy for SessionKvHintPolicy {
                 "kv.evict",
                 BTreeMap::new(),
                 block_hashes,
+                true,
             )));
         }
 
-        let Some(retain) = self
-            .spawn_retention
-            .filter(|_| agent.subagent_spawn == Some(true))
-        else {
+        let Some((retain, retention_reason, ttl_ms)) = self.retention.and_then(|retain| {
+            retain
+                .trigger
+                .matches(
+                    agent.subagent_spawn == Some(true),
+                    agent.inferred_tool_call == Some(true),
+                )
+                .zip(agent.retention_ttl_ms.filter(|ttl_ms| *ttl_ms > 0))
+                .map(|(reason, ttl_ms)| (retain, reason, ttl_ms))
+        }) else {
             return Ok(None);
         };
+        let ttl_seconds = ttl_ms as f64 / 1000.0;
+        let request_block_range = agent
+            .retention_block_start
+            .zip(agent.retention_block_count)
+            .filter(|(_, count)| *count > 0);
+        let (block_hashes, include_current_request) = if request_block_range.is_some() {
+            (Vec::new(), false)
+        } else {
+            (block_hashes, true)
+        };
+        let lineage_count = context
+            .session_lineage
+            .map_or(0, |lineage| lineage.lineages().len());
         tracing::info!(
             target: "continuum_kv_hints",
             session_id = %agent.session_id,
             worker_id = context.selected_worker.worker_id,
             lineage_block_count = block_hashes.len(),
+            lineage_count,
             action_type = "kv.retain",
             priority = retain.priority,
-            ttl_seconds = retain.ttl_seconds,
+            ttl_seconds,
+            ttl_source = "request",
+            retention_reason,
+            request_block_start = request_block_range.map(|range| range.0),
+            request_block_count = request_block_range.map(|range| range.1),
             "Emitting request-completion KV hint"
         );
+        let mut payload = BTreeMap::from([
+            ("priority".into(), retain.priority.into()),
+            ("ttl_seconds".into(), ttl_seconds.into()),
+        ]);
+        if let Some((start, count)) = request_block_range {
+            payload.insert("current_request_block_start".into(), start.into());
+            payload.insert("current_request_block_count".into(), count.into());
+        }
         Ok(Some(self.hint(
             &agent.session_id,
             context.selected_worker.worker_id,
             "kv.retain",
-            BTreeMap::from([
-                ("priority".into(), retain.priority.into()),
-                ("ttl_seconds".into(), retain.ttl_seconds.into()),
-            ]),
+            payload,
             block_hashes,
+            include_current_request,
         )))
     }
 }
@@ -223,9 +269,45 @@ mod tests {
     #[test]
     fn spawn_retention_emits_priority_and_ttl() {
         let policy = SessionKvHintPolicy::new(
-            Some(FixedRetention {
+            Some(RetentionConfig {
                 priority: 3,
-                ttl_seconds: 2.5,
+                trigger: RetentionTrigger::SubagentSpawn,
+            }),
+            false,
+        )
+        .unwrap();
+        let agent = AgentContext::builder()
+            .session_id("session-1".to_string())
+            .subagent_spawn(true)
+            .retention_ttl_ms(2500)
+            .build()
+            .unwrap();
+        let lineage = SessionLineageView::new(vec![vec![
+            ExternalSequenceBlockHash(11),
+            ExternalSequenceBlockHash(12),
+        ]]);
+
+        let hint = policy
+            .evaluate(&context(&agent, Some(&lineage)))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(hint.actions[0].action_type, "kv.retain");
+        assert_eq!(hint.actions[0].payload["priority"], 3);
+        assert_eq!(hint.actions[0].payload["ttl_seconds"], 2.5);
+        assert_eq!(
+            hint.actions[0].payload["block_hashes"],
+            serde_json::json!(["11", "12"])
+        );
+        assert_eq!(hint.actions[0].payload["include_current_request"], true);
+    }
+
+    #[test]
+    fn spawn_without_oracle_ttl_emits_no_retention() {
+        let policy = SessionKvHintPolicy::new(
+            Some(RetentionConfig {
+                priority: 3,
+                trigger: RetentionTrigger::SubagentSpawn,
             }),
             false,
         )
@@ -236,29 +318,30 @@ mod tests {
             .build()
             .unwrap();
 
-        let hint = policy.evaluate(&context(&agent, None)).unwrap().unwrap();
-
-        assert_eq!(hint.actions[0].action_type, "kv.retain");
-        assert_eq!(hint.actions[0].payload["priority"], 3);
-        assert_eq!(hint.actions[0].payload["ttl_seconds"], 2.5);
+        assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
     }
 
     #[test]
-    fn ordinary_request_emits_no_retention() {
+    fn inferred_tool_call_emits_retention() {
         let policy = SessionKvHintPolicy::new(
-            Some(FixedRetention {
+            Some(RetentionConfig {
                 priority: 3,
-                ttl_seconds: 2.5,
+                trigger: RetentionTrigger::InferredToolCall,
             }),
             false,
         )
         .unwrap();
         let agent = AgentContext::builder()
             .session_id("session-1".to_string())
+            .inferred_tool_call(true)
+            .retention_ttl_ms(2250)
             .build()
             .unwrap();
 
-        assert!(policy.evaluate(&context(&agent, None)).unwrap().is_none());
+        let hint = policy.evaluate(&context(&agent, None)).unwrap().unwrap();
+
+        assert_eq!(hint.actions[0].action_type, "kv.retain");
+        assert_eq!(hint.actions[0].payload["ttl_seconds"], 2.25);
     }
 
     #[test]

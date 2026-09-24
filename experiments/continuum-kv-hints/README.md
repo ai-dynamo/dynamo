@@ -14,7 +14,7 @@ experiments/continuum-kv-hints/
   weka-small-qwen3-0.6b/            small-model WEKA lifecycle policy experiment
 ```
 
-The policy resolves the selected worker's known session lineage into external block hashes. A final session request emits `kv.evict`; an optional fixed-retention configuration emits `kv.retain`. Both actions execute after the carrying request completes and include that request's blocks.
+The policy resolves the selected worker's known session lineage into external block hashes. A final session request emits `kv.evict`; a parent request that spawns a subagent emits `kv.retain` when it carries an oracle pause duration. Both actions execute after the carrying request completes and include that request's blocks.
 
 Run the focused checks from the Dynamo repository root:
 

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_kv_router::{
-    protocols::{ExternalSequenceBlockHash, WorkerWithDpRank},
     SessionPrefixIndexer,
+    protocols::{ExternalSequenceBlockHash, WorkerWithDpRank},
 };
 use serde_json::json;
 
@@ -46,9 +46,11 @@ fn main() {
     let session_1 = lineage(&index, "session-1", worker_1);
     assert_eq!(session_1, vec![chain.clone()]);
 
-    assert!(index
-        .update_session_from_match("session-2", worker_1, chain[2])
-        .unwrap());
+    assert!(
+        index
+            .update_session_from_match("session-2", worker_1, chain[2])
+            .unwrap()
+    );
     let session_2 = lineage(&index, "session-2", worker_1);
     assert_eq!(session_2, vec![chain.clone()]);
     assert_eq!(

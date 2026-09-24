@@ -15,8 +15,11 @@ COPY vllm/v1/kv_hints/ ${VLLM_SITE}/v1/kv_hints/
 
 COPY vllm/v1/core/retained_block_queue.py  ${VLLM_SITE}/v1/core/retained_block_queue.py
 COPY vllm/v1/core/block_pool.py            ${VLLM_SITE}/v1/core/block_pool.py
+COPY vllm/v1/core/kv_cache_coordinator.py  ${VLLM_SITE}/v1/core/kv_cache_coordinator.py
 COPY vllm/v1/core/kv_cache_manager.py      ${VLLM_SITE}/v1/core/kv_cache_manager.py
+COPY vllm/v1/core/kv_cache_utils.py        ${VLLM_SITE}/v1/core/kv_cache_utils.py
 COPY vllm/v1/core/sched/scheduler.py       ${VLLM_SITE}/v1/core/sched/scheduler.py
+COPY vllm/v1/kv_cache_interface.py         ${VLLM_SITE}/v1/kv_cache_interface.py
 
 COPY vllm/v1/engine/__init__.py            ${VLLM_SITE}/v1/engine/__init__.py
 COPY vllm/v1/engine/async_llm.py          ${VLLM_SITE}/v1/engine/async_llm.py
@@ -28,7 +31,9 @@ COPY vllm/v1/kv_offload/base.py           ${VLLM_SITE}/v1/kv_offload/base.py
 COPY vllm/v1/kv_offload/tiering/kvcr/manager.py \
                                            ${VLLM_SITE}/v1/kv_offload/tiering/kvcr/manager.py
 
-COPY vllm/engine/protocol.py              ${VLLM_SITE}/engine/protocol.py
+COPY vllm/config/cache.py                  ${VLLM_SITE}/config/cache.py
+COPY vllm/engine/arg_utils.py              ${VLLM_SITE}/engine/arg_utils.py
+COPY vllm/engine/protocol.py               ${VLLM_SITE}/engine/protocol.py
 COPY vllm/distributed/kv_events.py        ${VLLM_SITE}/distributed/kv_events.py
 COPY vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py \
                                            ${VLLM_SITE}/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py
