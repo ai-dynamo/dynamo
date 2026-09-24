@@ -15,6 +15,9 @@ requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.6.0",
     "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
+    # AISimulate -> google-vizier pulls SQLAlchemy; 2.1.0's sdist has duplicate
+    # normalized extra names that uv rejects while building runtime images.
+    "sqlalchemy!=2.1.0; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
