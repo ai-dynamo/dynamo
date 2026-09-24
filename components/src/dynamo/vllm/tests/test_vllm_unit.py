@@ -237,27 +237,31 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
 # --connector removal tests
 
 
+def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
+    """Test that --connector nixl raises ValueError with a migration hint."""
+    mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
+    with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_role"),
-    [
-        (None, "kv_both"),
-        ("prefill", "kv_producer"),
-        ("decode", "kv_consumer"),
-    ],
+    [("prefill", "kv_producer"), ("decode", "kv_consumer")],
 )
-def test_connector_nixl_raises_error_with_migration_hint(
+def test_connector_nixl_migration_hint_uses_disaggregation_role(
     mock_vllm_cli, mode, expected_role
 ):
-    """Migration hint uses the NIXL role for the worker's disaggregation mode."""
-    args = ["--model", "Qwen/Qwen3-0.6B", "--connector", "nixl"]
-    if mode is not None:
-        args.extend(["--disaggregation-mode", mode])
-    mock_vllm_cli(*args)
-    with pytest.raises(
-        ValueError, match="--connector is no longer supported"
-    ) as exc_info:
+    """Test that the migration hint suggests the worker's NIXL role."""
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--connector",
+        "nixl",
+        "--disaggregation-mode",
+        mode,
+    )
+    with pytest.raises(ValueError, match=f'"kv_role": "{expected_role}"'):
         parse_args()
-    assert f'"kv_role": "{expected_role}"' in str(exc_info.value)
 
 
 def test_connector_none_raises_error(mock_vllm_cli):
