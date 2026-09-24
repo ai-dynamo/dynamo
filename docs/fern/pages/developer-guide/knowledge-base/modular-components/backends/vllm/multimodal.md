@@ -63,6 +63,7 @@ The main multimodal vLLM launchers in this repo are:
 | P/D | CUDA | `disagg_multimodal_p_d.sh` | Prefill/decode separation without a dedicated encoder |
 | E/PD (Encode + PD) | CUDA | `disagg_multimodal_e_pd.sh` | Separate encoder and embedding-cache workflows |
 | E/P/D (Full Disaggregation) | CUDA | `disagg_multimodal_epd.sh` | Separate encode, prefill, and decode workers |
+| Aggregated ASR | CUDA | `agg_asr.sh` | Speech recognition with Qwen3-ASR; see [Speech Recognition (ASR)](#speech-recognition-asr) |
 
 ### Custom Vision Encoders
 
@@ -130,7 +131,7 @@ This launcher sets `--dyn-chat-processor vllm`. The frontend runs vLLM's Hugging
 
 `DYNAMO_MM_TRANSFER` selects the transfer mechanism:
 
-- `shm` (default) uses shared memory for same-node frontend and worker deployments.
+- `shm` (default) uses shared memory for same-node frontend and worker deployments. The frontend and worker must share `/dev/shm`, as processes on one host do. Separate Kubernetes pods do not share it even on the same node; when the worker cannot read the segment, it serves the request without its media.
 - `nixl` uses NIXL for cross-node transfer.
 - `DYNAMO_DISABLE_NIXL_MM=1` disables processed-input transfer and makes the worker process the original media.
 
@@ -356,7 +357,7 @@ bash launch/disagg_multimodal_epd.sh --model Qwen/Qwen3-VL-2B-Instruct --single-
 
 ## Audio Serving
 
-Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded by the backend worker via vLLM's `AudioMediaIO` at native sample rate — vLLM's model-specific processor handles resampling and feature extraction internally. Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
+Dynamo supports `audio_url` requests for audio-capable models. Audio is loaded via vLLM's `AudioMediaIO` at native sample rate, and vLLM resamples it to the rate the model's feature extractor expects before extracting features. vLLM resamples through PyAV, which the Dynamo runtime images do not ship, so audio whose sample rate differs from the model's needs PyAV installed. See [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md). Omni models can handle `image_url`, `video_url`, and `audio_url` in the same request.
 
 ### Aggregated Serving
 
@@ -410,6 +411,86 @@ curl http://localhost:8000/v1/chat/completions \
       "stream": false
     }' | jq
 ```
+
+### Speech Recognition (ASR)
+
+Qwen3-ASR checkpoints such as `Qwen/Qwen3-ASR-1.7B` and `Qwen/Qwen3-ASR-0.6B` transcribe speech sent as an `audio_url` content part to `/v1/chat/completions`. These checkpoints ship `vocab.json` and `merges.txt` but no `tokenizer.json`, which the default Rust frontend needs, so run the frontend with the [Python chat processor](#python-chat-processor) (`--dyn-chat-processor vllm`). The `agg_asr.sh` launcher does this and serves `Qwen/Qwen3-ASR-1.7B` by default:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_asr.sh
+```
+
+Pass `--model Qwen/Qwen3-ASR-0.6B` to serve the smaller checkpoint. The launcher passes any other arguments to the worker.
+
+`Qwen/Qwen3-ASR-1.7B-hf`, the Hugging Face Transformers-format checkpoint, ships a `tokenizer.json` and also runs behind the default Rust frontend, which forwards the audio to the worker:
+
+```bash
+DYN_CHAT_PROCESSOR=dynamo bash launch/agg_asr.sh --model Qwen/Qwen3-ASR-1.7B-hf
+```
+
+**Transcription request:**
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "Qwen/Qwen3-ASR-1.7B",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "audio_url",
+              "audio_url": {
+                "url": "https://raw.githubusercontent.com/yuekaizhang/Triton-ASR-Client/main/datasets/mini_en/wav/1221-135766-0002.wav"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 256
+    }' | jq -r '.choices[0].message.content'
+```
+
+The response names the detected language before an `<asr_text>` tag, followed by the transcript:
+
+```text
+language English<asr_text>Yet these thoughts affected Hester Prynne less with hope than apprehension.
+```
+
+Strip the text up to and including `<asr_text>` to keep only the transcript. With `"stream": true`, the prefix arrives in the first chunks.
+
+The Dynamo runtime images accept audio at the model's 16 kHz rate. Audio at any other rate fails with HTTP 500 until PyAV is installed, and the frontend or worker log shows `ImportError: Please install vllm[audio] for audio support`. With the Python chat processor, the frontend also resamples audio, so install PyAV where both the frontend and the worker run, or convert audio to 16 kHz before sending it:
+
+```bash
+pip install --no-deps 'av>=18.0.0,<19'
+```
+
+Dynamo does not serve `/v1/audio/transcriptions`. Send audio through `/v1/chat/completions` or stream it through `/v1/realtime`.
+
+#### Kubernetes Deployment
+
+[`agg_asr.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_asr.yaml) deploys the same frontend and worker as a DynamoGraphDeployment. The frontend and worker run in separate pods, so the default shared-memory transfer of processed audio cannot reach the worker, and the worker transcribes the prompt without the audio (`language None<asr_text>`). The manifest sets `DYNAMO_DISABLE_NIXL_MM=1` on the frontend so the worker loads and processes the audio itself. `DYNAMO_MM_TRANSFER=nixl` also works across pods and spares the worker a second pass over the audio. With `Qwen/Qwen3-ASR-1.7B-hf` behind the default Rust frontend, the worker always loads the audio, so neither setting applies. To accept audio at other sample rates, run both components from an image with PyAV installed; see [Additional Media Decoders](../../../../../use-cases/multimodal-serving/additional-media-decoders.md#kubernetes).
+
+#### Streaming Transcription
+
+vLLM serves streaming transcription for Qwen3-ASR through its `Qwen3ASRRealtimeGeneration` architecture on `/v1/realtime`. The realtime path does not tokenize in the frontend, so it runs with the default Rust frontend:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_realtime_transcription.sh --model Qwen/Qwen3-ASR-1.7B
+```
+
+Stream a sample clip from a second terminal:
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+python launch/realtime_audio_client.py --session-type transcription \
+  --url ws://localhost:8000/v1/realtime --model Qwen/Qwen3-ASR-1.7B
+```
+
+The session accepts 24 kHz PCM16 input, which the worker resamples to 16 kHz without PyAV. The model transcribes each 5-second segment as it arrives. Each segment's text starts on a new line with its own `language <Language><asr_text>` prefix, and a very short final segment can repeat the previous segment's text.
 
 ## Embedding Cache
 
