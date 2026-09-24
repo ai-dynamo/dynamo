@@ -72,17 +72,3 @@ func validateCyborgReplicas(build *Build, replicas int32) error {
 
 	return nil
 }
-
-// setContainerEnv updates the first matching variable or appends a new one.
-func setContainerEnv(container *corev1.Container, variables ...corev1.EnvVar) {
-variables:
-	for _, variable := range variables {
-		for index := range container.Env {
-			if container.Env[index].Name == variable.Name {
-				container.Env[index] = variable
-				continue variables
-			}
-		}
-		container.Env = append(container.Env, variable)
-	}
-}
