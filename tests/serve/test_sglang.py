@@ -56,6 +56,7 @@ from tests.utils.payloads import (
     ResponsesPayload,
     ResponsesStreamPayload,
     SGLangDisaggRouterMetricsPayload,
+    SGLangSpecDecodeMetricsPayload,
     VideoGenerationPayload,
 )
 from tests.utils.port_utils import allocate_contiguous_ports, deallocate_ports
@@ -152,6 +153,49 @@ sglang_configs = {
             _disable_responses_reasoning(responses_stream_payload_default()),
             guided_decoding_chat_payload_default(),
             metric_payload_default(min_num_requests=6, backend="sglang"),
+        ],
+    ),
+    # Speculative decoding: Qwen3-8B main model with an EAGLE3 draft model
+    # (see launch/agg_spec_decoding.sh). Both repos are ungated.
+    # Nightly-only: the 8B base plus EAGLE3 draft model is intentionally outside pre-merge CI.
+    "aggregated_spec_decoding": SGLangConfig(
+        name="aggregated_spec_decoding",
+        directory=sglang_dir,
+        script_name="agg_spec_decoding.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
+            # and only the base cfg.model is auto-registered, so the draft repo
+            # can't be resolved offline without this.
+            pytest.mark.model("Tengyunw/qwen3_8b_eagle3"),
+            # Measured peak ~20.6 GiB on H200 (8B weights + EAGLE3 draft +
+            # capped KV + CUDA graphs).
+            pytest.mark.profiled_vram_gib(21.0),
+            pytest.mark.requested_sglang_kv_tokens(4096),
+            pytest.mark.timeout(300),  # ~3x ~65s (H200, models pre-cached)
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen3-8B",
+        env={},
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            # 3 x up to 1000 tokens: enough decode steps for a stable tokens/verify ratio.
+            chat_payload_default(),
+            chat_payload(
+                "What is the capital of France? Answer in one word.",
+                repeat_count=1,
+                expected_response=["Paris"],
+                temperature=0.0,
+                max_tokens=16,
+                extra_body={"chat_template_args": {"enable_thinking": False}},
+            ),
+            SGLangSpecDecodeMetricsPayload(
+                body={},
+                repeat_count=1,
+                expected_log=[],
+                expected_response=[],
+                min_num_requests=4,
+            ),
         ],
     ),
     "disaggregated": SGLangConfig(
