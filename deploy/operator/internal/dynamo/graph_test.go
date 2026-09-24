@@ -9784,6 +9784,14 @@ func TestProtectedModelProfileKeepsStableNamespaceAfterOperatorDefaults(t *testi
 	assert.True(t, *podSpec.Containers[0].SecurityContext.RunAsNonRoot)
 	require.NotNil(t, podSpec.Containers[0].SecurityContext.RunAsUser)
 	assert.EqualValues(t, 1000, *podSpec.Containers[0].SecurityContext.RunAsUser)
+
+	t.Log("The init container retains only the capabilities needed to assign private file ownership")
+	initContainer := findInitContainerByName(podSpec, "prepare-model-protection-runtime")
+	require.NotNil(t, initContainer)
+	require.NotNil(t, initContainer.SecurityContext)
+	require.NotNil(t, initContainer.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"ALL"}, initContainer.SecurityContext.Capabilities.Drop)
+	assert.ElementsMatch(t, []corev1.Capability{"CHOWN", "FOWNER"}, initContainer.SecurityContext.Capabilities.Add)
 }
 
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {

@@ -537,7 +537,7 @@ jobs:
     - name: Set up Rust Toolchain Components
       run: rustup component add clippy
     - name: Set up model protection dependencies
-      if: matrix.dir == '.'
+      if: matrix.dir == '.' || matrix.dir == 'lib/bindings/python'
       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libtss2-dev pkg-config
     - name: Run Clippy Checks
       working-directory: ${{ matrix.dir }}
@@ -546,6 +546,10 @@ jobs:
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
       run: cargo clippy --locked --no-deps -p dynamo-model-protection --all-targets --features packager,tpm2 -- -D warnings
+    - name: Lint Python bindings model protection TPM feature
+      if: matrix.dir == 'lib/bindings/python'
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --locked --no-deps --all-targets --features model-protection-tpm2 -- -D warnings
     - name: Run Python bindings AIC feature clippy
       if: matrix.dir == 'lib/bindings/python'
       working-directory: ${{ matrix.dir }}

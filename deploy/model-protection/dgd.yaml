@@ -50,6 +50,7 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
+              add: ["CHOWN", "FOWNER"]
             runAsNonRoot: false
             runAsUser: 0
             seccompProfile:
