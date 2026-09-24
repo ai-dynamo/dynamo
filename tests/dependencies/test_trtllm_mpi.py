@@ -46,7 +46,8 @@ _MPI_LINK = "/opt/dynamo/mpi"
 # Keep in step with the /opt/dynamo/mpi RUN in trtllm_runtime.Dockerfile.
 _EXPECTED_MPI = {"x86_64": "/opt/hpcx/ompi4", "aarch64": "/opt/hpcx/ompi5"}
 
-# Installed with a .pth line only where the image selects Open MPI 5.
+# Installed with a .pth line only where the image selects Open MPI 5. Delete the
+# hook tests together with the hook (see trtllm_runtime.Dockerfile).
 _HOSTNAME_HOOK = "_dynamo_pmix_hostname"
 
 # Variables a running MPI singleton exports to its environment. A child that

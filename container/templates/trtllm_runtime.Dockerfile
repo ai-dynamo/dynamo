@@ -116,26 +116,39 @@ RUN ARCH_ALT=$([ "${TARGETARCH}" = "amd64" ] && echo "x86_64" || echo "aarch64")
 # avoid them that way, because of the libtorch symbol above.
 #
 # First, a singleton cannot MPI_Comm_spawn when the hostname length plus the
-# digits of its pid exceeds 37. The prte daemon it starts closes the
-# connection, and Spawn raises MPI_ERR_UNKNOWN. Measured on arm64 with a 2-digit
-# pid, a 35-character hostname spawns and a 36-character one fails. CI's pod
-# names are longer: ompi5 fails with the arm64 runner's 46-character name and
-# with the amd64 runner's 50-character name, while ompi4 spawns with the
-# 50-character one. A short PMIX_HOSTNAME fixes it, so where ompi5 is selected,
-# a .pth line imports container/deps/trtllm/_dynamo_pmix_hostname.py when
-# Python starts. It sets PMIX_HOSTNAME only for processes that no MPI launcher
-# started, on hosts whose names are longer than 30 characters, so launched
-# ranks keep the real hostname. .dockerignore drops *.pth files, so the RUN
-# writes that line itself.
+# digits of its pid exceeds 37. Open MPI passes the singleton's name,
+# "singleton.<hostname>.<pid>.0", to the prte daemon through a 50-byte print
+# buffer. A longer name is cut short, prte registers the wrong name, and Spawn
+# raises MPI_ERR_UNKNOWN. Measured on arm64 with a 2-digit pid, a 35-character
+# hostname spawns and a 36-character one fails. CI's pod names are longer: ompi5
+# fails with the arm64 runner's 46-character name and with the amd64 runner's
+# 50-character name, while ompi4 spawns with the 50-character one. A short
+# PMIX_HOSTNAME fixes it, so where ompi5 is selected, a .pth line imports
+# container/deps/trtllm/_dynamo_pmix_hostname.py when Python starts. It sets
+# PMIX_HOSTNAME only for processes that no MPI launcher started, on hosts whose
+# names are longer than 30 characters (30 plus the 7 digits of the largest pid
+# is 37), so launched ranks keep the real hostname. A PMIX_HOSTNAME that is
+# already set is left alone, even a long one. .dockerignore drops *.pth files,
+# so the RUN writes that line itself.
 #
 # Second, on the amd64 GPU host above, spawn also depends on the network: UCX
 # tries an address of another host interface (10.42.0.0, a k3s flannel address)
 # and fails while the host's interfaces are visible. In a bridge network (eth0
 # and lo only), or with OMPI_MCA_pml=ob1, ompi5 spawns there.
 #
-# Transitional. Delete this, the ENV entries, the hook and the test's
-# per-architecture expectation when upstream's ompi5 can spawn, and re-measure
-# rather than assume.
+# Transitional, in two parts. Re-measure each part rather than assume.
+# - The hook. open-mpi/ompi#14398 fixes the first defect (v5.0.x backport:
+#   open-mpi/ompi#14409), and Mellanox/ompi's v5.0.x_hpcx branch has had it
+#   since Mellanox/ompi#61. No release had it yet: Open MPI 5.0.11 does not, and
+#   TRT-LLM 1.3.0rc27 and 1.3.0rc28 ship HPC-X v2.50 with Open MPI 5.0.10rc2.
+#   When the base image's /opt/hpcx/VERSION names a later HPC-X, run a spawn
+#   with a 46-character hostname (docker run --hostname) in an image without
+#   the hook. If it passes, delete the hook, its install step here, and its
+#   tests in tests/dependencies/test_trtllm_mpi.py. Tracked in
+#   NVIDIA/TensorRT-LLM#19607.
+# - The amd64 ompi4 selection, the ENV entries and the test's per-architecture
+#   expectation. Delete them only when ompi5 spawns on amd64 without the hook,
+#   both in CI and on a host with the extra interfaces above.
 RUN --mount=type=bind,source=./container/deps/trtllm/_dynamo_pmix_hostname.py,target=/tmp/_dynamo_pmix_hostname.py \
     if [ "${TARGETARCH}" = "amd64" ]; then t=/opt/hpcx/ompi4; else t=/opt/hpcx/ompi5; fi && \
     test -d "$t" && \
