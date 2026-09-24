@@ -52,6 +52,15 @@ impl Store for NATSStore {
         // TODO: Track and delete any owned keys
         // The TTL should ensure NATS does it, but best we do it immediately
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        if self.client.client().connection_state()
+            != async_nats::connection::State::Connected
+        {
+            return Err(StoreError::NATSError("NATS is disconnected".into()));
+        }
+        Ok(())
+    }
 }
 
 impl NATSStore {
