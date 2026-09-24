@@ -27,6 +27,7 @@ from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
+    prefill_dp_rank_kwargs,
     require_reasoning_kwargs,
 )
 from dynamo.sglang._disagg import validate_disagg_parallel_sampling
@@ -586,6 +587,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 context.trace_headers() if self.enable_trace else None
             ),
             routed_dp_rank=routing.get("dp_rank"),
+            prefill_dp_rank=routing.get("prefill_dp_rank"),
             lora_path=self._resolve_lora(request),
             cache_salt=request_cache_salt(request),
         )
@@ -719,6 +721,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                **prefill_dp_rank_kwargs(self.engine, routing.get("prefill_dp_rank")),
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
                 data_parallel_rank=dp_rank,

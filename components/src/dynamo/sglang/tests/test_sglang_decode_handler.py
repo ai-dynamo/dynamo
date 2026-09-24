@@ -2301,3 +2301,77 @@ async def test_supported_sampling_reaches_engine(mode, n):
     assert [output["index"] for output in outputs] == list(range(n))
     assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
     assert all(output["finish_reason"] for output in outputs)
+
+
+def test_prefill_dp_rank_kwargs_follows_engine_signature():
+    from dynamo.sglang._compat import prefill_dp_rank_kwargs
+
+    class Engine:
+        async def async_generate(
+            self, *, bootstrap_room=None, disagg_prefill_dp_rank=None
+        ):
+            pass
+
+    class OlderEngine:
+        async def async_generate(self, *, bootstrap_room=None):
+            pass
+
+    assert prefill_dp_rank_kwargs(Engine(), 3) == {"disagg_prefill_dp_rank": 3}
+    assert prefill_dp_rank_kwargs(Engine(), None) == {}
+    assert prefill_dp_rank_kwargs(OlderEngine(), 3) == {}
+
+
+@pytest.mark.asyncio
+async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
+    handler = _new_decode_handler()
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunk = {
+        "index": 0,
+        "output_ids": [42],
+        "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
+    }
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream([chunk]))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": 1},
+        "stop_conditions": {"max_tokens": 1},
+        "routing": {"dp_rank": 1, "prefill_dp_rank": 3},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 23,
+        },
+    }
+    [output async for output in handler.generate(request, context)]
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs["disagg_prefill_dp_rank"] == 3
+    assert kwargs["data_parallel_rank"] == 1
+
+
+def test_build_native_generate_request_forwards_prefill_dp_rank():
+    native = build_native_generate_request(
+        {"sampling_params": {"max_new_tokens": 1}},
+        input_ids=[7, 8],
+        request_id="internal-request-id",
+        priority=None,
+        bootstrap_host="prefill.internal",
+        bootstrap_port=1234,
+        bootstrap_room=23,
+        routed_dp_rank=1,
+        prefill_dp_rank=3,
+    )
+    assert native.disagg_prefill_dp_rank == 3
