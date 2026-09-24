@@ -36,8 +36,24 @@ pub(super) fn validate_strict_function(function: &FunctionObject) -> Result<()> 
     let Some(schema) = &function.parameters else {
         return Ok(());
     };
-    validate_schema(schema)
-        .map_err(|error| anyhow!("Invalid schema for function '{}': {error}", function.name))
+    validate_schema(schema).map_err(|error| {
+        anyhow!(
+            "Invalid schema for function '{}': {error}",
+            bounded_name(&function.name)
+        )
+    })
+}
+
+// Responses validates strict schemas before the Chat name-length check, so an oversized
+// name must not be echoed whole into the error body and logs.
+fn bounded_name(name: &str) -> String {
+    const MAX: usize = super::validate::MAX_FUNCTION_NAME_LENGTH;
+    if name.chars().count() <= MAX {
+        return name.to_owned();
+    }
+    let mut bounded: String = name.chars().take(MAX).collect();
+    bounded.push_str("...");
+    bounded
 }
 
 fn invalid(path: &str, detail: impl std::fmt::Display) -> anyhow::Error {
@@ -583,6 +599,34 @@ mod tests {
                 strict == Some(true)
             );
         }
+    }
+
+    #[test]
+    fn oversized_function_names_are_bounded_in_diagnostics() {
+        let name = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH + 1000);
+        let error = validate_strict_function(&FunctionObject {
+            name: name.clone(),
+            description: None,
+            parameters: Some(json!({"type": "object"})),
+            strict: Some(true),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains(&name));
+        assert!(error.contains(&format!(
+            "'{}...':",
+            "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH)
+        )));
+        let short = "n".repeat(super::super::validate::MAX_FUNCTION_NAME_LENGTH);
+        let error = validate_strict_function(&FunctionObject {
+            name: short.clone(),
+            description: None,
+            parameters: Some(json!({"type": "object"})),
+            strict: Some(true),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!("'{short}':")));
     }
 
     #[test]
