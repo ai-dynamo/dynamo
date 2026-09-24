@@ -237,8 +237,7 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
 # --connector removal tests
 
 
-def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
-    """Test that --connector nixl raises ValueError with a migration hint."""
+def test_connector_nixl_raises_error_without_mode(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
     with pytest.raises(ValueError, match="--connector is no longer supported"):
         parse_args()
@@ -251,7 +250,6 @@ def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
 def test_connector_nixl_migration_hint_uses_disaggregation_role(
     mock_vllm_cli, mode, expected_role
 ):
-    """Test that the migration hint suggests the worker's NIXL role."""
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",

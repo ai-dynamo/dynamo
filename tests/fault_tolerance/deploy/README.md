@@ -405,9 +405,7 @@ System does NOT recover automatically
 
 #### vLLM Disaggregated Prefill Worker Resilience
 
-vLLM decode workers use the NIXL `kv_consumer` role. If a prefill worker fails, the decode worker processes the full request locally, so no remote NIXL KV handoff is needed.
-
-**Expected Behavior:** Prefill worker failures don't cause request failures - this is vLLM's built-in fault tolerance, not a test issue.
+vLLM decode workers use the NIXL `kv_consumer` role for remote KV transfers. When a prefill worker is unavailable, decode workers can perform prefill locally for requests routed directly to them. Requests already loading remote KV may fail.
 
 ### Summary Results
 

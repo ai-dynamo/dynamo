@@ -268,12 +268,16 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     )
     assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
-    assert "--kv-transfer-config" not in decode_args
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+    )
 
 
 def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     """An explicit connector remains authoritative while worker roles are canonical."""
-    custom_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
+    custom_prefill_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
+    custom_decode_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_buffer_device":"cpu"}'
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",
@@ -281,9 +285,13 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
         image="example/vllm:test",
         prefill_cli_args=[
             "--disaggregation-mode=decode",
-            f"--kv-transfer-config '{custom_kv_config}'",
+            f"--kv-transfer-config '{custom_prefill_kv_config}'",
         ],
-        decode_cli_args=["--disaggregation-mode", "prefill"],
+        decode_cli_args=[
+            "--disaggregation-mode",
+            "prefill",
+            f"--kv-transfer-config '{custom_decode_kv_config}'",
+        ],
     )
 
     prefill_args = next(
@@ -301,10 +309,16 @@ def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert prefill_args.count("--kv-transfer-config") == 1
     assert (
-        prefill_args[prefill_args.index("--kv-transfer-config") + 1] == custom_kv_config
+        prefill_args[prefill_args.index("--kv-transfer-config") + 1]
+        == custom_prefill_kv_config
     )
     assert decode_args.count("--disaggregation-mode") == 1
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
+    assert decode_args.count("--kv-transfer-config") == 1
+    assert (
+        decode_args[decode_args.index("--kv-transfer-config") + 1]
+        == custom_decode_kv_config
+    )
 
 
 def test_build_dgd_config_vllm_disagg_removes_legacy_role_flags() -> None:
