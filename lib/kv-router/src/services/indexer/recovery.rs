@@ -27,11 +27,7 @@ use super::registry::WorkerRegistry;
 /// `DYN_KV_RECOVERY_HTTP_TIMEOUT_MS` for larger clusters.
 const DEFAULT_RECOVERY_HTTP_TIMEOUT_MS: u64 = 30_000;
 const RECOVERY_HTTP_TIMEOUT_ENV: &str = "DYN_KV_RECOVERY_HTTP_TIMEOUT_MS";
-/// Safety ceiling on the accepted `/dump` response body. The whole snapshot is
-/// materialized in memory on both sides today (streaming is a follow-up), so
-/// an unbounded body either OOMs or trips the timeout and then the retry loop.
-/// Fail fast with a clear error instead. Configurable via
-/// `DYN_KV_RECOVERY_MAX_DUMP_BYTES`.
+// Client-side cap on the accepted dump response. 0 = unlimited.
 const DEFAULT_MAX_DUMP_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_DUMP_BYTES_ENV: &str = "DYN_KV_RECOVERY_MAX_DUMP_BYTES";
 
@@ -89,16 +85,8 @@ async fn try_recover_from_peer(
     peer_url: &str,
     registry: &WorkerRegistry,
 ) -> Result<()> {
-    // Pass the accepted budget to the peer so it can reject an over-budget
-    // snapshot with 413 before transmitting it. `0` means no budget
-    // (unbounded). The Content-Length check below remains as receiver defense
-    // in depth for older peers that ignore the query parameter.
     let max_dump_bytes = env_u64(MAX_DUMP_BYTES_ENV, DEFAULT_MAX_DUMP_BYTES);
-    let dump_url = if max_dump_bytes > 0 {
-        format!("{peer_url}/dump?max_bytes={max_dump_bytes}")
-    } else {
-        format!("{peer_url}/dump")
-    };
+    let dump_url = format!("{peer_url}/dump");
     tracing::info!(url = %dump_url, "fetching dump from peer");
 
     let mut resp = client
@@ -111,11 +99,7 @@ async fn try_recover_from_peer(
         anyhow::bail!("peer returned status {}", resp.status());
     }
 
-    // Fail fast on an oversized snapshot before reading the body: the dump is
-    // materialized fully in memory on both sides, so a large body either OOMs
-    // or trips the request timeout and the retry loop. A budget-aware peer
-    // rejects over-budget bodies with 413, so this mainly protects against
-    // older peers that ignore `max_bytes`.
+    // Fail fast on an oversized Content-Length before buffering the body.
     if let Some(len) = resp.content_length()
         && max_dump_bytes > 0
         && len > max_dump_bytes
@@ -148,13 +132,6 @@ async fn try_recover_from_peer(
             // peer's dump land in the matching lower-tier slot rather than the
             // device primary. The peer side retags lower-tier events in
             // `Indexer::dump_events`, so the `storage_tier` here is correct.
-            //
-            // Re-application is idempotent by construction: the radix index
-            // keys blocks by `tokens_hash`, so applying the same (or an
-            // overlapping) peer dump again is a no-op for blocks already
-            // present. A cancelled-then-retried attempt can therefore leave a
-            // partially applied snapshot that the next attempt safely re-applies
-            // on top of, without inflating or duplicating residency state.
             indexer
                 .apply_event_routed(event)
                 .await
@@ -168,12 +145,6 @@ async fn try_recover_from_peer(
             .context("failed to flush peer recovery events")?;
     }
 
-    // An empty dump is a valid recovery. Recovery candidates are restricted to
-    // already-serving peers (see `recovery_peer_urls`), so a zero-event dump
-    // means the serving peer genuinely holds no KV index yet (idle cluster),
-    // not a transient race. Rejecting it would deadlock cold starts and idle
-    // rollouts: the joining replica would wait forever for events that no
-    // serving peer holds.
     tracing::info!(total_events, "applied dump events from peer");
     Ok(())
 }

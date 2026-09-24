@@ -80,20 +80,6 @@ pub struct Selector {
     peer_recovery: Option<PeerRecovery>,
 }
 
-struct ReplicationConfig {
-    client: Client,
-    service_name: String,
-    sync_port: u16,
-    selection_http_port: Option<u16>,
-    self_ip: IpAddr,
-}
-
-/// Deferred peer KV-index recovery. Parameters are resolved at selector
-/// construction, but the recovery itself is deliberately NOT run there:
-/// workers must register (and their ZMQ KV-event listeners subscribe) first,
-/// so the peer dump merges with already-buffered live events instead of
-/// leaving a gap. The EPP router starts worker registration, then calls
-/// [`Selector::start_peer_recovery`].
 struct PeerRecovery {
     client: Client,
     namespace: String,
@@ -103,32 +89,6 @@ struct PeerRecovery {
     self_ip: IpAddr,
     /// Shared with the `/dump` endpoint: 503 until recovery/bootstrap done.
     recovered: Arc<AtomicBool>,
-}
-
-struct StartupCancellation {
-    cancel: CancellationToken,
-    armed: bool,
-}
-
-impl StartupCancellation {
-    fn new(cancel: CancellationToken) -> Self {
-        Self {
-            cancel,
-            armed: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for StartupCancellation {
-    fn drop(&mut self) {
-        if self.armed {
-            self.cancel.cancel();
-        }
-    }
 }
 
 impl Selector {
@@ -167,19 +127,38 @@ impl Selector {
         Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
 
-        let replication = Self::replication(cfg).await?;
+        let cancel = CancellationToken::new();
         let mut builder = SelectionServiceBuilder::new(
             kv_router_config,
             WorkerType::Aggregated,
             policy_registry.with_default_factory(dynamo_custom_policy_builtin::default_factory()),
         )
         .indexer_threads(cfg.selector_threads);
-        if let Some(replication) = &replication {
-            builder = builder.replica_sync(replication.sync_port, Vec::new());
-            if replication.selection_http_port.is_some() {
+
+        // Resolve peer replication before building: the builder needs the sync port and defer flag.
+        let (peer_client, peer_self_ip) = if let Some(peer) = &cfg.peer_replication {
+            let client = Client::try_default()
+                .await
+                .context("building Kubernetes client for EPP peer replication")?;
+            crate::peer_discovery::ensure_peer_service_exists(
+                client.clone(),
+                &cfg.namespace,
+                &peer.service_name,
+            )
+            .await?;
+            let self_ip: IpAddr = peer
+                .pod_ip
+                .parse()
+                .context("POD_IP must be a valid IPv4 or IPv6 address")?;
+            builder = builder.replica_sync(peer.sync_port, Vec::new());
+            if peer.selection_http_port.is_some() {
                 builder = builder.defer_indexer_for_bootstrap();
             }
-        }
+            (Some(client), Some(self_ip))
+        } else {
+            (None, None)
+        };
+
         if let Some(ttl) = cfg.session_affinity_ttl_secs {
             builder = builder.session_affinity(
                 std::time::Duration::try_from_secs_f64(ttl)
@@ -192,51 +171,17 @@ impl Selector {
                 .await
                 .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
         );
-        Self::from_service_with_replication(cfg, service, replication).await
-    }
 
-    async fn replication(cfg: &EppStandaloneConfig) -> Result<Option<ReplicationConfig>> {
-        let Some(peer) = &cfg.peer_replication else {
-            return Ok(None);
-        };
-        let client = Client::try_default()
-            .await
-            .context("building Kubernetes client for EPP peer replication")?;
-        crate::peer_discovery::ensure_peer_service_exists(
-            client.clone(),
-            &cfg.namespace,
-            &peer.service_name,
-        )
-        .await?;
-        let self_ip = peer
-            .pod_ip
-            .parse::<IpAddr>()
-            .context("POD_IP must be a valid IPv4 or IPv6 address")?;
-        Ok(Some(ReplicationConfig {
-            client,
-            service_name: peer.service_name.clone(),
-            sync_port: peer.sync_port,
-            selection_http_port: peer.selection_http_port,
-            self_ip,
-        }))
-    }
-
-    async fn from_service_with_replication(
-        cfg: &EppStandaloneConfig,
-        service: Arc<SelectionService>,
-        replication: Option<ReplicationConfig>,
-    ) -> Result<Self> {
-        let cancel = CancellationToken::new();
-        let mut startup = StartupCancellation::new(cancel.clone());
         let mut peer_recovery = None;
-
-        let peer_ready = if let Some(replication) = replication {
+        let peer_ready = if let (Some(peer), Some(client), Some(self_ip)) =
+            (&cfg.peer_replication, peer_client, peer_self_ip)
+        {
             let recovered = Arc::new(AtomicBool::new(false));
-            if let Some(selection_http_port) = replication.selection_http_port {
+            if let Some(selection_http_port) = peer.selection_http_port {
                 crate::peer_http::spawn(
                     service.clone(),
                     selection_http_port,
-                    replication.self_ip,
+                    self_ip,
                     cancel.clone(),
                     recovered.clone(),
                 )
@@ -244,26 +189,24 @@ impl Selector {
             } else {
                 crate::metrics::set_kv_recovery_state(crate::metrics::KV_RECOVERY_DISABLED);
                 tracing::warn!(
-                    service = %replication.service_name,
+                    service = %peer.service_name,
                     "DYN_EPP_SELECTION_HTTP_PORT is not set; peer KV-index recovery is disabled, \
                      but replica lifecycle synchronization remains active"
                 );
             }
             peer_recovery = Some(PeerRecovery {
-                client: replication.client,
+                client,
                 namespace: cfg.namespace.clone(),
-                service_name: replication.service_name,
-                sync_port: replication.sync_port,
-                selection_http_port: replication.selection_http_port,
-                self_ip: replication.self_ip,
+                service_name: peer.service_name.clone(),
+                sync_port: peer.sync_port,
+                selection_http_port: peer.selection_http_port,
+                self_ip,
                 recovered: recovered.clone(),
             });
             Some(recovered)
         } else {
             None
         };
-
-        startup.disarm();
 
         tracing::info!(
             replicated = peer_ready.is_some(),
@@ -278,32 +221,19 @@ impl Selector {
         })
     }
 
-    /// Start peer discovery and optional KV-index recovery after worker registration.
-    ///
-    /// Subscribe-first ordering: the topology adapter registers workers (their
-    /// ZMQ KV-event listeners begin buffering) before this runs, so the peer
-    /// dump covers past history and the buffered events cover everything after
-    /// it — only an overlap remains, absorbed idempotently. Blocks until
-    /// recovery succeeds or no peer exists (empty bootstrap). When the peer
-    /// configuration lacks `DYN_EPP_SELECTION_HTTP_PORT`, recovery is skipped but peer discovery
-    /// and replica synchronization still start. No-op only when replication is
-    /// disabled.
-    pub(crate) async fn start_peer_recovery(&self) -> Result<()> {
+    pub(crate) async fn run_bootstrap_recovery(&self) -> Result<()> {
         let Some(recovery) = &self.peer_recovery else {
             return Ok(());
         };
         let client = recovery.client.clone();
-        let selection_http_port = recovery.selection_http_port;
         let service = self.service.clone();
         let namespace = recovery.namespace.clone();
         let service_name = recovery.service_name.clone();
-        let replica_sync_port = recovery.sync_port;
+        let sync_port = recovery.sync_port;
         let self_ip = recovery.self_ip.to_string();
         let cancel = self.cancel.clone();
-        match selection_http_port {
+        match recovery.selection_http_port {
             Some(selection_http_port) => {
-                // Recovery needs the indexer listener deferred until the dump
-                // and buffered worker events have been applied.
                 self.service
                     .bootstrap_indexer(|| async move {
                         crate::peer_discovery::spawn(
@@ -311,7 +241,7 @@ impl Selector {
                             service,
                             &namespace,
                             &service_name,
-                            replica_sync_port,
+                            sync_port,
                             Some(selection_http_port),
                             self_ip,
                             cancel,
@@ -321,14 +251,12 @@ impl Selector {
                     .await?;
             }
             None => {
-                // Without selection-http there is no dump listener to defer;
-                // still reconcile peers and keep replica synchronization active.
                 crate::peer_discovery::spawn(
                     client,
                     service,
                     &namespace,
                     &service_name,
-                    replica_sync_port,
+                    sync_port,
                     None,
                     self_ip,
                     cancel,
@@ -342,10 +270,6 @@ impl Selector {
 
     pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
         self.peer_ready.clone()
-    }
-
-    pub(crate) fn peer_recovery_required(&self) -> bool {
-        self.peer_recovery.is_some()
     }
     /// Select a worker for a prompt and book its load in one operation. Takes the
     /// request by value so per-request fields are moved into the core request
