@@ -16,6 +16,12 @@ import pytest
 
 from dynamo.profiler.v2.sweeper_event_plane import SUBJECT_SUFFIX, SweeperEventPublisher
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 
 class FakeEventEmitter:
     """Records every (subject, payload) publish call, in order. Thread-safe."""
