@@ -98,6 +98,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 <ParamField path="minAvailable" type="integer">
   Minimum complete component replicas guaranteed to be gang-scheduled before a shortfall triggers gang termination. Supported only for Grove-backed DGD components, where it defaults to `1`; rejected for non-Grove deployments. Minimum `1` and immutable after creation. Positive `replicas` must be at least this value. Scaling to `0` is allowed and retains `minAvailable` for the next scale-up.
+
+  For LPX components with omitted `replicas`, `minAvailable` sets the initial Grove scaling-group size; subsequent capacity is externally managed.
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">

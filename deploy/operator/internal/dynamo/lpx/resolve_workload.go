@@ -138,11 +138,11 @@ func ResolveWorkload(
 		}
 		projections = projected
 	}
-	scalingGroupReplicas := int32(1)
-	if len(components) == 1 {
-		// A sole component can flatten its replica axis into the outer scaling group.
-		scalingGroupReplicas = ptr.Deref(components[0].Replicas, 1)
-	}
+
+	// The conductor component owns explicit capacity or the initial native seed.
+	conductor := components[len(components)-1]
+	scalingGroupReplicas := ptr.Deref(conductor.Replicas, ptr.Deref(conductor.MinAvailable, 1))
+
 	// Canonical roles expand into default or draft0..draft7 followed by target.
 	digest, err := workloadSetDigest(projections)
 	if err != nil {

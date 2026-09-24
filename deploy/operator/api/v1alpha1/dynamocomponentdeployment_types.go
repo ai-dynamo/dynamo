@@ -50,7 +50,7 @@ type DynamoComponentDeploymentSpec struct {
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
-// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
+// +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == 'lpx') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)",message="componentType is immutable after it is set"
 // +kubebuilder:validation:XValidation:rule="!has(self.lpx) || (has(self.componentType) && self.componentType == 'lpx')",message="lpx may only be set when componentType is lpx"

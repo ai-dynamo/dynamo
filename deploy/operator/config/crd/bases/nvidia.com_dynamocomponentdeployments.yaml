@@ -19713,7 +19713,7 @@ spec:
                 - message: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment
                   rule: '!(has(self.componentType) && self.componentType == ''lpx'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                  rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: componentType is immutable after it is set
@@ -36871,7 +36871,7 @@ spec:
                 - message: eppConfig may only be set when type is epp
                   rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                  rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: type is immutable after it is set

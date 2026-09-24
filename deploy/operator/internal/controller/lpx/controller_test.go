@@ -1163,6 +1163,55 @@ func TestLPXExplicitScaleInDuringSchedulingFailure(t *testing.T) {
 	require.Equal(t, pcs.UID, observedPCS.UID)
 }
 
+func TestLPXNativeMinimumValidatedBeforePublishingPCS(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		shared  bool
+		minimum int32
+	}{
+		{name: "single minimum", minimum: 2},
+		{name: "single maximum", minimum: 2496},
+		{name: "single oversized", minimum: 2497},
+		{name: "shared minimum", shared: true, minimum: 2},
+		{name: "shared maximum", shared: true, minimum: 2496},
+		{name: "shared oversized", shared: true, minimum: 2497},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Start an externally managed workload at the conductor component's minimum")
+			var (
+				child    *v1alpha1.LPXGraphDeployment
+				dgd      *v1beta1.DynamoGraphDeployment
+				registry lpx.ModelRegistry
+			)
+			if tc.shared {
+				child, dgd, registry = newLPXSpecDecodeTestDGD(t)
+			} else {
+				child, dgd, registry = newLPXTestDGD(t, lpx.PipelineSingle)
+			}
+			component := dgd.GetComponentByName("lpx")
+			component.Replicas, component.MinAvailable = nil, ptr.To(tc.minimum)
+			r := newLPXTestReconciler(t, registry, child, dgd)
+
+			t.Log("Apply the existing replica bound before creating any Grove workload")
+			_, reconcileErr := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
+			pcs, err := getPodCliqueSet(t.Context(), r.Client, child)
+			require.NoError(t, err)
+			if tc.minimum > 2496 {
+				require.ErrorContains(t, reconcileErr, "between 0 and 2496")
+				require.Nil(t, pcs)
+			} else {
+				require.NoError(t, reconcileErr)
+				require.NotNil(t, pcs)
+				require.True(t, metav1.IsControlledBy(pcs, child))
+				require.Equal(t, ptr.To(tc.minimum), pcs.Spec.Template.PodCliqueScalingGroupConfigs[0].Replicas)
+			}
+			requests := &lpxv1alpha1.LPUPipelineRequestList{}
+			require.NoError(t, r.List(t.Context(), requests))
+			require.Empty(t, requests.Items, "requests wait for an observed Grove scaling group")
+		})
+	}
+}
+
 func TestLPXExternalScaleRejectsInvalidReplicaCount(t *testing.T) {
 	t.Log("Observe externally managed capacity above the materialization limit")
 	ctx := t.Context()

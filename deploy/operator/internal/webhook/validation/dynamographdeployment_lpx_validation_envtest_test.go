@@ -23,10 +23,11 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
 		{
-			name: "singleton LPX with explicit conductor preserves omitted replicas",
+			name: "singleton LPX preserves omitted replicas with minimum availability above one",
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				component := &dgd.Spec.Components[0]
 				component.Replicas = nil
+				component.MinAvailable = k8sptr.To(int32(2))
 				component.Roles[0].PodTemplate.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "model-storage", MountPath: "/nfs"}}
 				component.Roles[0].PodTemplate.Spec.Volumes = []corev1.Volume{{Name: "model-storage", VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "model-storage"},
@@ -42,27 +43,68 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
-			name: "v1alpha1 LPX preserves omitted replicas on CREATE",
+			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on CREATE",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Replicas = nil
+				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
-			name:          "LPX preserves omitted replicas on UPDATE",
-			oldDeployment: betaLPXDGDForAdmission(nil),
+			name: "LPX preserves omitted replicas with minimum availability above one on UPDATE",
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+			}),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Replicas = nil
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
 		},
 		{
-			name:          "v1alpha1 LPX preserves omitted replicas on UPDATE",
-			oldDeployment: alphaLPXDGDForAdmission(nil),
+			name: "v1alpha1 LPX preserves omitted replicas with minimum availability above one on UPDATE",
+			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Replicas = k8sptr.To(int32(3))
+				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+			}),
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Replicas = nil
+				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
 			}),
 			wantReplicas: map[string]*int32{"lpx": nil},
+		},
+		{
+			name: "LPX rejects explicit replicas below minimum availability",
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components[0].MinAvailable = k8sptr.To(int32(2))
+			}),
+			wantCELErr: "spec.components[0]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+		},
+		{
+			name: "v1alpha1 LPX rejects explicit replicas below minimum availability",
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].MinAvailable = k8sptr.To(int32(2))
+			}),
+			wantCELErr: "spec.services[lpx]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+		},
+		{
+			name: "ordinary components reject omitted replicas with minimum availability above one",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Replicas = nil
+				worker.MinAvailable = k8sptr.To(int32(2))
+			}),
+			wantCELErr: "spec.components[1]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
+		},
+		{
+			name: "v1alpha1 ordinary components reject omitted replicas with minimum availability above one",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Replicas = nil
+				worker.MinAvailable = k8sptr.To(int32(2))
+			}),
+			wantCELErr: "spec.services[worker]: Invalid value: minAvailable must be less than or equal to replicas unless replicas is 0",
 		},
 		{
 			name: "LPX admits nine hybrid replicas with lowered conductor volumes",
