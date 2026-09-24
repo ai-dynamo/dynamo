@@ -88,8 +88,8 @@ func projectSpec(in corev1.PodSpec) corev1.PodSpec {
 		Containers: projectContainers(in.Containers),
 		// GMS Pod replacement requires native init-sidecar identity.
 		InitContainers: projectInitContainers(in.InitContainers),
-		// Topology uses DownwardAPI fields.
-		Volumes: projectVolumes(in.Volumes),
+		// Topology label discovery inspects DownwardAPI label field paths.
+		Volumes: projectTopologyVolumes(in.Volumes),
 	}
 }
 
@@ -121,7 +121,7 @@ func projectInitContainers(in []corev1.Container) []corev1.Container {
 	return nil
 }
 
-func projectVolumes(in []corev1.Volume) []corev1.Volume {
+func projectTopologyVolumes(in []corev1.Volume) []corev1.Volume {
 	out := make([]corev1.Volume, 0, len(in))
 	for i := range in {
 		if in[i].DownwardAPI == nil {
@@ -165,8 +165,8 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 		// Failover, DGDR diagnostics, and Recreate drain barriers require the
 		// lifecycle phase.
 		Phase: in.Phase,
-		// Model endpoint classification requires Ready; Snapshot-aware GMS replacement
-		// requires the public restore outcome.
+		// Model endpoint classification requires Ready; Snapshot-aware GMS
+		// replacement requires the public restore outcome.
 		Conditions: projectConditions(in.Conditions),
 		// DGDR diagnostics inspect container failures.
 		ContainerStatuses: projectContainerStatuses(in.ContainerStatuses),
@@ -178,16 +178,16 @@ func projectStatus(in corev1.PodStatus) corev1.PodStatus {
 func projectConditions(in []corev1.PodCondition) []corev1.PodCondition {
 	out := make([]corev1.PodCondition, 0, len(in))
 	for i := range in {
+		if in[i].Type != corev1.PodReady &&
+			in[i].Type != corev1.PodConditionType(podcontract.RestoredCondition) {
+			continue
+		}
 		condition := corev1.PodCondition{
 			Type:   in[i].Type,
 			Status: in[i].Status,
 		}
-		switch in[i].Type {
-		case corev1.PodReady:
-		case corev1.PodConditionType(podcontract.RestoredCondition):
+		if in[i].Type == corev1.PodConditionType(podcontract.RestoredCondition) {
 			condition.Reason = in[i].Reason
-		default:
-			continue
 		}
 		out = append(out, condition)
 	}
