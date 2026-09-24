@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Optional, get_type_hints
 
 import yaml
-from msgspec import convert
+from msgspec import ValidationError, convert
 
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
@@ -232,9 +232,13 @@ class KvRouterConfigBase(ConfigBase):
         if unknown:
             raise ValueError(f"unknown router setting(s): {sorted(unknown)}")
         types = get_type_hints(KvRouterConfigBase)
-        return {
-            name: convert(value, type=types[name]) for name, value in settings.items()
-        }
+        try:
+            return {
+                name: convert(value, type=types[name])
+                for name, value in settings.items()
+            }
+        except ValidationError as exc:
+            raise ValueError(f"invalid router settings: {exc}") from exc
 
     def apply_router_config(self) -> None:
         self.apply_load_aware_preset()

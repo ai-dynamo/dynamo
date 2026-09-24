@@ -186,13 +186,15 @@ def add_argument(
         # forms, aliases, append/count actions, and custom action behavior.
         action = kwargs.get("action", "store")
         action_type = parser._registry_get("action", action, action)
+        warn = deprecated.warn
 
-        class DeprecatedAction(action_type):
-            def __call__(self, parser, namespace, values, option_string=None):
-                deprecated.warn(option_string or self.dest)
-                super().__call__(parser, namespace, values, option_string)
+        def warn_and_call(self, parser, namespace, values, option_string=None):
+            warn(option_string or self.dest)
+            action_type.__call__(self, parser, namespace, values, option_string)
 
-        kwargs["action"] = DeprecatedAction
+        kwargs["action"] = type(
+            "DeprecatedAction", (action_type,), {"__call__": warn_and_call}
+        )
 
     parser.add_argument(*names, **kwargs)
 
