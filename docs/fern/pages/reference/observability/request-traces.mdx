@@ -89,6 +89,10 @@ feature. Shipped Dynamo Python wheels enable it; local source builds pass
 
 Contains compact replay metadata and, when available, per-request timing and KV-cache metrics. Session headers add session identity, finish metadata, and tool-call metadata. Session identity does not enable sticky routing.
 
+With a Python chat processor, routed requests that start a response stream also emit this record.
+Inputs that cannot be replayed, including multimodal requests, retain timing and routing metadata
+but omit `request.replay`. This path does not yet add session or parsed finish-reason metadata.
+
 ### `request_payload`
 
 Contains the OpenAI `/v1/chat/completions` client request and, when available, its response. Dynamo
@@ -154,6 +158,9 @@ internal IDs while loading the original trace; it does not create an intermediat
 Context-free replay rows must represent one model request. Dynamo skips requests with `n > 1`,
 `best_of > 1`, prompt embeddings, multimodal inputs, or no usable tracker and KV cache block size.
 Session context does not bypass these checks.
+
+For Python chat processors, those requests can still produce metadata-only `request_end` rows. They
+cannot be loaded as replay requests without `request.replay`.
 
 DynoSim accepts `dynamo.request.trace.v1` JSONL and JSONL.GZ directly, derives the trace block size,
 and rejects mixed session-aware and context-free trace sets.
