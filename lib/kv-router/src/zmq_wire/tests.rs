@@ -411,6 +411,8 @@ fn shared_cache_metadata_types_do_not_change_gpu_event_acceptance() {
     let KvCacheEventData::Stored(baseline) = baseline.event.data else {
         panic!("expected Stored");
     };
+    // Each malformed value has a different serde type, so the untagged
+    // `ProvenanceField::Unknown` fallback is checked against every type, not one.
     for (field, values) in [
         (
             "lora_id",

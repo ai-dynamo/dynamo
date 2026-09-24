@@ -529,6 +529,7 @@ impl ConcurrentRadixTree {
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
+                            // No provenance map here; see `compressed_radix::dump_event`.
                             shared_cache_eligible: false,
                             parent_hash,
                             start_position: None,

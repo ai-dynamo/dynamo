@@ -48,6 +48,8 @@ fn dump_event(
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                // Concurrent trees keep no provenance. Only the worker's single-threaded
+                // `RadixTree` dump feeds a shared-cache observer, and it restores eligibility.
                 shared_cache_eligible: false,
                 parent_hash,
                 start_position: None,
