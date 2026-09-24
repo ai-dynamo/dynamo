@@ -460,7 +460,6 @@ def test_router_decisions_sglang_disagg(
             "gpu_start_index": 1,
             "disaggregation_mode": "decode",
         },
-        # See test_router_decisions_sglang_disagg_eagle.
         test_kwargs={"enable_bootstrap": True},
     )
 
