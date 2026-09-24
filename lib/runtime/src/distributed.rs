@@ -170,16 +170,10 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        Self::new_with_sidecar_status(runtime, config, None).await
+        Self::build(runtime, config).await
     }
 
-    /// Reuse the sidecar's HTTP listener, which is bound before runtime connections.
-    /// Ordinary workers continue to construct their system server in `new`.
-    pub async fn new_with_sidecar_status(
-        runtime: Runtime,
-        config: DistributedConfig,
-        sidecar_status: Option<&system_status_server::SidecarStatusServer>,
-    ) -> Result<Self> {
+    async fn build(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
@@ -352,16 +346,7 @@ impl DistributedRuntime {
         }
 
         // Handle system status server initialization
-        if let Some(server) = sidecar_status {
-            server.attach(
-                Arc::new(distributed_runtime.clone()),
-                distributed_runtime.discovery_metadata.clone(),
-            )?;
-            distributed_runtime
-                .system_status_server
-                .set(server.info())
-                .map_err(|_| anyhow::anyhow!("system status server already initialized"))?;
-        } else if let Some(cancel_token) = cancel_token {
+        if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
             let host = config.system_host.clone();
             let port = config.system_port as u16;
@@ -434,6 +419,25 @@ impl DistributedRuntime {
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
         let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
+    }
+
+    /// Discovery metadata shared with the status server for the /metadata endpoint.
+    /// Only present when the Kubernetes discovery backend is active.
+    pub fn discovery_metadata(
+        &self,
+    ) -> Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>> {
+        self.discovery_metadata.clone()
+    }
+
+    /// Register a pre-started sidecar status server's info so other components can
+    /// locate the listener address. Call this after [`SidecarStatusServer::attach`].
+    pub fn set_system_status_server_info(
+        &self,
+        info: Arc<system_status_server::SystemStatusServerInfo>,
+    ) -> anyhow::Result<()> {
+        self.system_status_server
+            .set(info)
+            .map_err(|_| anyhow::anyhow!("system status server already initialized"))
     }
 
     /// Check configured runtime dependencies, independently of model registration.

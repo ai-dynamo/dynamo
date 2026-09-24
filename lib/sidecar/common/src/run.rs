@@ -51,12 +51,11 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
     let status = SidecarStatusServer::start(&config, shutdown.clone()).await?;
     let startup = async {
         let distributed = DistributedConfig::try_from_settings()?;
-        let drt = DistributedRuntime::new_with_sidecar_status(
-            runtime.clone(),
-            distributed,
-            status.as_ref(),
-        )
-        .await?;
+        let drt = DistributedRuntime::new(runtime.clone(), distributed).await?;
+        if let Some(ref server) = status {
+            server.attach(Arc::new(drt.clone()), drt.discovery_metadata())?;
+            drt.set_system_status_server_info(server.info())?;
+        }
         tracing::info!("Sidecar runtime connected; discovering engine metadata");
         // Keep engine discovery failures distinct from runtime/Worker failures
         // for embedded launchers' existing error contracts.

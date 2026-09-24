@@ -12,20 +12,23 @@ use std::sync::{
 use std::time::Duration;
 
 use axum::{Router, extract::Request, http::StatusCode, response::IntoResponse, routing::get};
+use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use super::{SystemStatusServerInfo, serve_system_status, system_status_router};
 use crate::{DistributedRuntime, config::RuntimeConfig, discovery::DiscoveryMetadata};
 
-struct ConnectedRuntime {
-    drt: DistributedRuntime,
+type HealthFn = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
+
+struct ConnectedState {
+    health: HealthFn,
     routes: Router,
 }
 
 /// HTTP listener owned by the sidecar process, not by engine initialization.
 pub struct SidecarStatusServer {
-    connected: Arc<OnceLock<ConnectedRuntime>>,
+    connected: Arc<OnceLock<ConnectedState>>,
     info: Arc<SystemStatusServerInfo>,
     stop: CancellationToken,
 }
@@ -39,7 +42,7 @@ impl SidecarStatusServer {
         if !config.system_server_enabled() {
             return Ok(None);
         }
-        let connected = Arc::new(OnceLock::<ConnectedRuntime>::new());
+        let connected = Arc::new(OnceLock::<ConnectedState>::new());
         let readiness_state = connected.clone();
         let readiness_shutdown = shutdown.clone();
         let runtime_routes = connected.clone();
@@ -60,7 +63,7 @@ impl SidecarStatusServer {
                                 .ok_or_else(|| anyhow::anyhow!("runtime initializing"))?;
                             tokio::time::timeout(
                                 Duration::from_secs(1),
-                                state.drt.check_dependencies(),
+                                (state.health)(),
                             )
                             .await
                             .map_err(|_| anyhow::anyhow!("runtime dependency check timed out"))??;
@@ -115,21 +118,22 @@ impl SidecarStatusServer {
         }))
     }
 
-    pub(crate) fn attach(
+    pub fn attach(
         &self,
         drt: Arc<DistributedRuntime>,
         metadata: Option<Arc<tokio::sync::RwLock<DiscoveryMetadata>>>,
     ) -> anyhow::Result<()> {
-        let routes = system_status_router(drt.clone(), metadata)?;
+        let routes = system_status_router(Arc::clone(&drt), metadata)?;
+        let health: HealthFn = Arc::new(move || {
+            let d = Arc::clone(&drt);
+            Box::pin(async move { d.check_dependencies().await })
+        });
         self.connected
-            .set(ConnectedRuntime {
-                drt: (*drt).clone(),
-                routes,
-            })
+            .set(ConnectedState { health, routes })
             .map_err(|_| anyhow::anyhow!("sidecar runtime already attached"))
     }
 
-    pub(crate) fn info(&self) -> Arc<SystemStatusServerInfo> {
+    pub fn info(&self) -> Arc<SystemStatusServerInfo> {
         self.info.clone()
     }
 }
@@ -176,13 +180,13 @@ mod tests {
         assert_eq!(status(&client, &base, "/metrics").await, 503);
 
         let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new_with_sidecar_status(
-            runtime.clone(),
-            DistributedConfig::process_local(),
-            Some(&server),
-        )
-        .await
-        .unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        server
+            .attach(Arc::new(drt.clone()), drt.discovery_metadata())
+            .unwrap();
+        drt.set_system_status_server_info(server.info()).unwrap();
         // Existing worker health/registration state must not control sidecar probes.
         drt.system_health()
             .lock()
@@ -210,13 +214,13 @@ mod tests {
             .unwrap()
             .unwrap();
         let runtime = Runtime::from_current().unwrap();
-        let drt = DistributedRuntime::new_with_sidecar_status(
-            runtime.clone(),
-            DistributedConfig::process_local(),
-            Some(&server),
-        )
-        .await
-        .unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        server
+            .attach(Arc::new(drt.clone()), drt.discovery_metadata())
+            .unwrap();
+        drt.set_system_status_server_info(server.info()).unwrap();
         let base = format!("http://{}", server.info.socket_addr);
         let client = reqwest::Client::new();
         assert_eq!(status(&client, &base, "/health").await, 200);
@@ -283,13 +287,11 @@ mod tests {
             ),
             ..DistributedConfig::process_local()
         };
-        let _drt = DistributedRuntime::new_with_sidecar_status(
-            runtime.clone(),
-            distributed,
-            Some(&server),
-        )
-        .await
-        .unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), distributed).await.unwrap();
+        server
+            .attach(Arc::new(drt.clone()), drt.discovery_metadata())
+            .unwrap();
+        drt.set_system_status_server_info(server.info()).unwrap();
         let base = format!("http://{}", server.info.socket_addr);
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
