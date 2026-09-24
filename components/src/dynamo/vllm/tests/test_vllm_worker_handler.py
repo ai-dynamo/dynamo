@@ -2029,6 +2029,67 @@ class TestRLAdminRouteHardening:
         assert resp["version_declared"] is False
         assert resp["version"] is None
 
+    @staticmethod
+    def _constructed_handler(load_format):
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        config.engine_args.load_format = load_format
+        with patch.object(mod, "VllmEngineMonitor"):
+            return mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
+    @pytest.mark.parametrize("chain", ["RL", " rl "])
+    async def test_modelexpress_rl_startup_declares_the_desired_version(
+        self, monkeypatch, load_format, chain
+    ):
+        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", chain)
+        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", " policy-7 ")
+
+        handler = self._constructed_handler(load_format)
+
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": "policy-7",
+            "version_declared": True,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("load_format", "chain", "desired"),
+        [
+            # The INFERENCE chain ignores the desired version and loads base weights.
+            ("modelexpress", None, "policy-7"),
+            ("modelexpress", "INFERENCE", "policy-7"),
+            ("modelexpress", "RL", None),
+            ("modelexpress", "RL", "  "),
+            # Without the ModelExpress loader, the environment says nothing about weights.
+            ("auto", "RL", "policy-7"),
+        ],
+    )
+    async def test_startup_version_stays_undeclared_without_the_rl_loader(
+        self, monkeypatch, load_format, chain, desired
+    ):
+        for name, value in (
+            ("MX_LOAD_STRATEGY_CHAIN", chain),
+            ("MX_REFIT_DESIRED_VERSION_UID", desired),
+        ):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+
+        handler = self._constructed_handler(load_format)
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize("version", [None, 7, "policy-43"])
     async def test_set_weight_version_declares_without_touching_the_engine(

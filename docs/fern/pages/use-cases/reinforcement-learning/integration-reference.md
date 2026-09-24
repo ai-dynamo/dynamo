@@ -241,6 +241,8 @@ curl http://10.0.0.12:8081/engine/set_weight_version \
 
 The route requires `weight_version` in the body and returns `{"status": "error"}` when it is missing. It neither pauses generation nor invalidates the prefix cache, so a caller that changed the weights must handle both itself.
 
+A worker that loads its initial weights through ModelExpress declares the loaded version at startup. With `--load-format modelexpress` (or `mx`), `MX_LOAD_STRATEGY_CHAIN=RL`, and `MX_REFIT_DESIRED_VERSION_UID` set, ModelExpress fails engine startup unless every rank loaded that version, so the worker starts with `version_declared: true` and `version` set to that UID. With the default `INFERENCE` chain, ModelExpress ignores the desired version and the worker starts undeclared.
+
 ## Framework Compatibility
 
 | Framework | Status | Current Dynamo path | Key boundary |

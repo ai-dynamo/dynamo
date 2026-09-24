@@ -62,6 +62,7 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .constants import MX_LOAD_FORMATS
 from .dp_topology import get_dp_range_for_worker
 from .embedding_worker_processes import (
     EmbeddingEngineCleanupResource,
@@ -99,7 +100,6 @@ SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
     "tool_call_structural_tag_excludes_reasoning"
 )
-MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
 def uses_modelexpress_load_format(config: Config) -> bool:

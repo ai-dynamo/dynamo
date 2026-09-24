@@ -96,7 +96,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -163,6 +163,23 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
 )
 # An object sentinel cannot collide with a caller-supplied version.
 _WEIGHT_VERSION_UNDECLARED: Final = object()
+
+
+def _modelexpress_startup_weight_version(config: Config) -> Any:
+    """Return the weight version ModelExpress installed at startup, if known.
+
+    With a ModelExpress load format and MX_LOAD_STRATEGY_CHAIN=RL, the loader
+    fails engine initialization unless every rank loaded
+    MX_REFIT_DESIRED_VERSION_UID, so a constructed handler serves that version.
+    The default INFERENCE chain ignores the desired version, so any other
+    configuration leaves the version undeclared.
+    """
+    desired = os.environ.get("MX_REFIT_DESIRED_VERSION_UID", "").strip()
+    chain = os.environ.get("MX_LOAD_STRATEGY_CHAIN", "").strip().upper()
+    load_format = getattr(config.engine_args, "load_format", None)
+    if desired and chain == "RL" and load_format in MX_LOAD_FORMATS:
+        return desired
+    return _WEIGHT_VERSION_UNDECLARED
 
 
 def build_prompt_tokens_details(
@@ -1210,7 +1227,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
+        self._weight_version: Any = _modelexpress_startup_weight_version(config)
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
