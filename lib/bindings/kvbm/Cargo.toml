@@ -3,7 +3,7 @@
 
 [patch.crates-io]
 # Keep this independent workspace on the same tokenizer review pin.
-dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "bcf3ebc7bb5d065f004e7f7a3b0c546b28cf80b7" }
+dynamo-tokenizers = { git = "https://github.com/alexeldeib/frontend-crates.git", rev = "27ff7047fac0938e02f94e9ad3e3e53c660cb74c" }
 
 [workspace]
 
