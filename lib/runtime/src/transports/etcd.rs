@@ -215,6 +215,13 @@ impl Client {
         self.primary_lease
     }
 
+    /// Probe etcd connectivity via the maintenance status RPC.
+    /// Returns immediately with no side effects; a missing key is not an error.
+    pub(crate) async fn check_connection(&self) -> anyhow::Result<()> {
+        self.etcd_client().maintenance_client().status().await?;
+        Ok(())
+    }
+
     /// Atomically create a key-value pair if it doesn't already exist.
     ///
     /// Returns:

@@ -126,6 +126,10 @@ pub trait Store: Send + Sync {
     fn connection_id(&self) -> u64;
 
     fn shutdown(&self);
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -243,6 +247,15 @@ impl KeyValueStoreEnum {
             File(x) => x.shutdown(),
         }
     }
+
+    async fn check_connection(&self) -> Result<(), StoreError> {
+        use KeyValueStoreEnum::*;
+        match self {
+            Memory(_) | File(_) => Ok(()),
+            Etcd(x) => x.check_connection().await,
+            Nats(x) => x.check_connection().await,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -290,6 +303,10 @@ impl Manager {
 
     pub fn connection_id(&self) -> u64 {
         self.0.connection_id()
+    }
+
+    pub async fn check_connection(&self) -> Result<(), StoreError> {
+        self.0.check_connection().await
     }
 
     pub async fn load<T: for<'a> Deserialize<'a>>(

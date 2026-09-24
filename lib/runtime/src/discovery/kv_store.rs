@@ -386,13 +386,7 @@ impl Discovery for KVStoreDiscovery {
             !self.cancel_token.is_cancelled(),
             "discovery is shutting down"
         );
-        let bucket = self
-            .store
-            .get_or_create_bucket(INSTANCES_BUCKET, None)
-            .await?;
-        // A point read tests connectivity even before any endpoint is registered.
-        // A missing key is a successful read; no probe records are written.
-        bucket.get(&kv::Key::from("__connectivity_probe__")).await?;
+        self.store.check_connection().await?;
         Ok(())
     }
 
