@@ -28,7 +28,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -96,21 +95,21 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 
-	// Converge the ordinary PCS before rollout or readiness observation.
-	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, source, renderedPodCliqueSet)
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
-	}
+	// An LPX-only graph still reconciles its stable resources.
 	if renderedPodCliqueSet.desired == nil {
-		if syncedPodCliqueSet != nil {
-			return ReconcileResult{State: nvidiacomv1beta1.DGDStatePending, Reason: "RemovingEmptyPodCliqueSet", Message: "Waiting for the removed ordinary workload"}, nil
-		}
 		stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
 		if err != nil {
 			return ReconcileResult{}, err
 		}
 		return checkResourcesReadiness(stableResources), nil
 	}
+
+	// Converge the ordinary PCS before rollout or readiness observation.
+	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, source, renderedPodCliqueSet)
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
+	}
+
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
 	if workerHashTransition.needsCommit() && !pcsWasWritten {
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
@@ -160,28 +159,12 @@ func (r *groveWorkloadsReconciler) Reconcile(
 }
 
 // reconcilePodCliqueSet returns the current PCS and whether it was created or updated.
-// A nil desired PCS retires the observation, retaining it until deletion is observed.
+// The rendered desired PCS must be non-nil.
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rendered *grovePodCliqueSetRender,
 ) (*grovev1alpha1.PodCliqueSet, bool, error) {
-	// Retire only the exact owned observation when no ordinary workload is desired.
-	if rendered.desired == nil {
-		if existing := rendered.existing; existing != nil {
-			if !metav1.IsControlledBy(existing, dgd) {
-				return nil, false, fmt.Errorf("refusing to delete a foreign empty-graph PodCliqueSet %q", existing.Name)
-			}
-			if existing.DeletionTimestamp.IsZero() {
-				uid, version := existing.UID, existing.ResourceVersion
-				if err := r.syncer.Delete(ctx, existing, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}); client.IgnoreNotFound(err) != nil {
-					return nil, false, err
-				}
-			}
-		}
-		return rendered.existing, false, nil
-	}
-
 	// Compose opaque provider fields only at the serialization boundary.
 	desiredProviderObject, err := provideroverride.ComposeGroveOverrides(dgd, rendered.desired)
 	if err != nil {

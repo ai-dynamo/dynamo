@@ -97,7 +97,7 @@ func TestProjectWithoutExternallyManagedComponentsDoesNotMutateSource(t *testing
 			require.Nil(t, ordinary.GetComponentByName(lpxName))
 			require.Len(t, ordinary.Spec.Components, len(source.Spec.Components)-1)
 
-			t.Log("Seed only the projected PCS identity, including the truncated-name case")
+			t.Log("Seed the projected PCS only for mixed graphs, including the truncated-name case")
 			pcsName := dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components)
 			if test.longNames {
 				require.NotEqual(t, source.Name, pcsName)
@@ -115,17 +115,22 @@ func TestProjectWithoutExternallyManagedComponentsDoesNotMutateSource(t *testing
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
-			kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(pcs, clique).Build()
+			builder := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t))
+			if !test.lpxOnly {
+				builder.WithObjects(pcs, clique)
+			}
+			kube := builder.Build()
 
 			t.Log("Render and observe restarts against that same ordinary PCS")
 			renderer := newGroveWorkloadRenderer(kube, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
 			rendered, err := renderer.Render(t.Context(), source, ordinary, nil, nil, false)
 			require.NoError(t, err)
-			require.NotNil(t, rendered.existing)
-			require.Equal(t, pcsName, rendered.existing.Name)
 			if test.lpxOnly {
+				require.Nil(t, rendered.existing)
 				require.Nil(t, rendered.desired)
 			} else {
+				require.NotNil(t, rendered.existing)
+				require.Equal(t, pcsName, rendered.existing.Name)
 				require.Equal(t, pcsName, rendered.desired.Name)
 			}
 			remaining := resolveCompositeGroveRestartProgress(t.Context(), source, ordinary,
@@ -857,15 +862,4 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.Equal(t, v1alpha1.LPXReadyReasonFailed, failed.Reason)
 	require.Contains(t, failed.Message, "storage volume mount is missing")
 	require.Equal(t, v1beta1.ComponentCheckpointStatus{CheckpointName: friendlyCheckpointName}, result.Status.Checkpoints["prefill"])
-
-	t.Log("Removing the last ordinary component deletes its PCS without disturbing the child")
-	source.Spec.Components = source.Spec.Components[:1]
-	for range 2 {
-		_, err = program.workloads.Reconcile(t.Context(), source, projectWithoutExternallyManagedComponents(source), nil, nil)
-		require.NoError(t, err)
-		require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), key, pcs)))
-	}
-	stored := &v1alpha1.LPXGraphDeployment{}
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
-	require.Equal(t, child, stored)
 }
