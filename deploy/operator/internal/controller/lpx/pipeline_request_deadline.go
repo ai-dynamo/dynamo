@@ -7,9 +7,7 @@ package lpx
 
 import (
 	"context"
-	"fmt"
 	"maps"
-	"math"
 	"slices"
 	"time"
 
@@ -164,9 +162,9 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 	manageReplicas bool,
 ) error {
 	// Use the observed capacity to decide which ordinals are safe to remove.
-	replicas, removed, err := expiredPipelineRequestSuffix(requests, expired, pcsg.Spec.Replicas)
-	if err != nil || len(removed) == 0 {
-		return err
+	replicas, removed := expiredPipelineRequestSuffix(requests, expired, pcsg.Spec.Replicas)
+	if len(removed) == 0 {
+		return nil
 	}
 
 	// Persist the lower PCSG count before asynchronous LPR/pod cleanup starts.
@@ -185,27 +183,18 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 // evidence for the next reconciliation. An interior failure blocks all
 // scale-down so a healthy higher ordinal is never removed.
 // For four replicas, expiry at {2,3} removes that suffix; {0,3} removes nothing.
+// All requests must already be validated and target the same scaling group.
 func expiredPipelineRequestSuffix(
 	requests []*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 	replicas int32,
-) (int32, []*lpxv1alpha1.LPUPipelineRequest, error) {
+) (int32, []*lpxv1alpha1.LPUPipelineRequest) {
 	if len(expired) == 0 {
-		return replicas, nil, nil
-	}
-	groupName, _, err := pipelineRequestScalingGroupTarget(expired[0])
-	if err != nil {
-		return 0, nil, err
+		return replicas, nil
 	}
 	failedReplicas := make(map[int64]struct{}, len(expired))
 	for _, request := range expired {
-		name, replica, err := pipelineRequestScalingGroupTarget(request)
-		if err != nil {
-			return 0, nil, err
-		}
-		if name != groupName {
-			return 0, nil, fmt.Errorf("expired LPX requests target different scaling groups")
-		}
+		replica := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex
 		failedReplicas[replica] = struct{}{}
 	}
 
@@ -221,7 +210,7 @@ func expiredPipelineRequestSuffix(
 	// Any hole blocks all cleanup, even a separate expired trailing suffix.
 	for replica := range failedReplicas {
 		if replica < targetReplicas {
-			return replicas, nil, nil
+			return replicas, nil
 		}
 	}
 
@@ -232,13 +221,7 @@ func expiredPipelineRequestSuffix(
 	siblings := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(requests))
 	failed := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(expired))
 	for _, request := range requests {
-		name, replica, err := pipelineRequestScalingGroupTarget(request)
-		if err != nil {
-			return 0, nil, err
-		}
-		if name != groupName {
-			return 0, nil, fmt.Errorf("LPX requests target different scaling groups")
-		}
+		replica := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex
 
 		// Include LPRs beyond the live count to finish cleanup after an earlier scale write.
 		if replica < targetReplicas {
@@ -250,13 +233,5 @@ func expiredPipelineRequestSuffix(
 			siblings = append(siblings, request)
 		}
 	}
-	return int32(targetReplicas), append(siblings, failed...), nil
-}
-
-func pipelineRequestScalingGroupTarget(request *lpxv1alpha1.LPUPipelineRequest) (string, int64, error) {
-	target := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef
-	if target == nil || target.Name == "" || target.ReplicaIndex < 0 || target.ReplicaIndex >= math.MaxInt32 {
-		return "", 0, fmt.Errorf("LPX request %q lacks a valid scaling group target", request.Name)
-	}
-	return target.Name, target.ReplicaIndex, nil
+	return int32(targetReplicas), append(siblings, failed...)
 }

@@ -282,8 +282,7 @@ func TestExpiredPipelineRequestSuffix(t *testing.T) {
 					expired = append(expired, requests[i])
 				}
 			}
-			replicas, removed, err := expiredPipelineRequestSuffix(requests, expired, tc.replicas)
-			require.NoError(t, err)
+			replicas, removed := expiredPipelineRequestSuffix(requests, expired, tc.replicas)
 			require.Equal(t, tc.wantReplicas, replicas)
 			var names []string
 			for _, request := range removed {
