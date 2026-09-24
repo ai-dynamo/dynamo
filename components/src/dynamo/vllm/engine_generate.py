@@ -236,18 +236,14 @@ def adapt_engine_generate_request(
         except HttpError as exc:
             raise ValueError(str(exc)) from exc
 
-    if sampling_params.stop:
-        raise ValueError(
-            "sampling_params.stop strings are not supported by token-only generation"
-        )
-
     if native_request.kv_transfer_params is not None:
         sampling_params.extra_args = {
             **(sampling_params.extra_args or {}),
             "kv_transfer_params": native_request.kv_transfer_params,
         }
     _apply_kv_hint(sampling_params, request.get("kv_hint"))
-    sampling_params.detokenize = False
+    if not sampling_params.stop:
+        sampling_params.detokenize = False
     max_num_seqs = vllm_config.scheduler_config.max_num_seqs
     if sampling_params.n > max_num_seqs:
         raise ValueError(

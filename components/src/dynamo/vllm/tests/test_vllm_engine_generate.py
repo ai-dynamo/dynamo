@@ -177,17 +177,19 @@ def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():
         )
 
 
-def test_tito_adapter_rejects_stop_strings_but_preserves_stop_token_ids():
+def test_tito_adapter_preserves_stop_strings_and_stop_token_ids():
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    with pytest.raises(ValueError, match="stop strings"):
-        adapt_engine_generate_request(
-            _request(sampling_params={"max_tokens": 1, "stop": ["END"]}),
-            enable_multimodal=False,
-            decode_capable=True,
-            vllm_config=_vllm_config(),
-            default_sampling_params={},
-        )
+    adapted = adapt_engine_generate_request(
+        _request(sampling_params={"max_tokens": 1, "stop": ["END"]}),
+        enable_multimodal=False,
+        decode_capable=True,
+        vllm_config=_vllm_config(),
+        default_sampling_params={},
+    )
+    assert adapted is not None
+    assert adapted.sampling_params.stop == ["END"]
+    assert adapted.sampling_params.detokenize is True
 
     adapted = adapt_engine_generate_request(
         _request(sampling_params={"max_tokens": 1, "stop_token_ids": [42]}),
@@ -198,6 +200,7 @@ def test_tito_adapter_rejects_stop_strings_but_preserves_stop_token_ids():
     )
     assert adapted is not None
     assert adapted.sampling_params.stop_token_ids == [42]
+    assert adapted.sampling_params.detokenize is False
 
 
 def test_tito_adapter_builds_preprocessed_image_input_without_reprocessing():
