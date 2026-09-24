@@ -444,7 +444,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::*;
-    use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+    use axum::{Router, extract::State, routing::get};
     use dynamo_kv_router::WorkerType;
     use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
     use std::sync::atomic::AtomicUsize;
@@ -860,7 +860,6 @@ mod tests {
         server.abort();
         service.shutdown().await;
     }
-
 
     /// Shared driver for the churn-behavior tests: drives
     /// `recover_initial_index_with_attempt` with a scripted recover closure.

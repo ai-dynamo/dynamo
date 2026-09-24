@@ -133,13 +133,18 @@ impl EppRouter {
         if peer_ready.is_some() {
             reflector.wait_until_ready().await?;
             for worker in reflector.ready_workers() {
-                if let Err(e) = selector.service.upsert_worker(worker_request(worker, &defaults)).await {
+                if let Err(e) = selector
+                    .service
+                    .upsert_worker(worker_request(worker, &defaults))
+                    .await
+                {
                     tracing::warn!(error = %e, "failed to pre-register worker for bootstrap");
                 }
             }
         }
 
-        let _adapter = TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
+        let _adapter =
+            TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
         if peer_ready.is_some() {
             selector.run_bootstrap_recovery().await?;

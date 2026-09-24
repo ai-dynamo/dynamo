@@ -132,7 +132,6 @@ mod tests {
 
     use super::*;
     use crate::epp_standalone_config::RendererProtocol;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 
     fn config() -> EppStandaloneConfig {
         EppStandaloneConfig {
@@ -229,5 +228,4 @@ mod tests {
 
         drop(adapter);
     }
-
 }
