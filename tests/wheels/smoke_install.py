@@ -271,6 +271,11 @@ def create_venv(python_spec: str) -> Path:
     return venv_dir / "bin" / "python"
 
 
+# For the pinned aisimulate 0.12.0 release, the public index carries only a placeholder
+# sdist whose build backend downloads the real wheel; use NVIDIA's binary instead.
+AISIMULATE_FIND_LINKS = "https://pypi.nvidia.com/aisimulate/"
+
+
 def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) -> None:
     # --find-links only registers search paths; nixl is pulled from nixl/ only when a
     # requirement (e.g. kvbm's nixl[cu12]) resolves to it, not installed on its own.
@@ -278,7 +283,24 @@ def pip_install(venv_python: Path, wheelhouse: Path, requirements: list[str]) ->
     for path in (wheelhouse, wheelhouse / "nixl"):
         if path.exists():
             find_links.extend(["--find-links", str(path)])
-    run([str(venv_python), "-m", "pip", "install", *find_links, *requirements])
+    # Planner and framework runtime wheelhouses stage their own aisimulate wheel. Offer
+    # NVIDIA's index only when that staged wheel is absent: pip ranks equal candidates
+    # without regard to where they came from, so registering both risks installing the
+    # remote copy in place of the artifact the image actually ships.
+    if not find_wheels(wheelhouse, "aisimulate"):
+        find_links.extend(["--find-links", AISIMULATE_FIND_LINKS])
+    run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--only-binary",
+            "aisimulate",
+            *find_links,
+            *requirements,
+        ]
+    )
 
 
 def pip_check(venv_python: Path) -> None:
@@ -406,7 +428,7 @@ package_root = Path(aiconfigurator_core.__file__).resolve().parent
 assert (package_root / "model_configs/Qwen--Qwen3-32B_config.json").is_file()
 assert (package_root / "systems/h200_sxm.yaml").is_file()
 parquet_files = list(
-    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.19.0/*.parquet")
+    (package_root / "systems/data/h200_sxm").glob("*/vllm/0.24.0/*.parquet")
 )
 assert parquet_files
 for path in parquet_files:
@@ -419,7 +441,7 @@ model = RustForwardPassPerfModel.from_native(
         "model_name": "Qwen/Qwen3-32B",
         "system_name": "h200_sxm",
         "backend": "vllm",
-        "backend_version": "0.19.0",
+        "backend_version": "0.24.0",
         "kv_block_size": None,
         "tp_size": 1,
         "pp_size": 1,

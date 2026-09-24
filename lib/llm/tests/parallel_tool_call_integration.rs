@@ -29,6 +29,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
                     "You MUST use two tools in parallel to resolve the user request: call get_current_weather for each city AND call is_holiday_today to check if today is a holiday. Do not answer without using both tools.".to_string()
                 ),
                 name: None,
+                tools: None,
             }
         ),
         dynamo_protocols::types::ChatCompletionRequestMessage::User(
@@ -94,6 +95,7 @@ fn create_mock_chat_completion_request() -> NvCreateChatCompletionRequest {
         thinking: None,
         media_io_kwargs: None,
         return_tokens_as_token_ids: None,
+        thinking_token_budget: None,
         unsupported_fields: Default::default(),
     }
 }

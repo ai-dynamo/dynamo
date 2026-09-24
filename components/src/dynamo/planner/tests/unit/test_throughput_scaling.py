@@ -544,3 +544,57 @@ def test_engine_rps_recommendation_is_independent_of_sidecar_cost(
     )
 
     assert replicas == 3
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode", "disagg", "agg"])
+@pytest.mark.parametrize("model_ready", [False, True])
+def test_startup_cancellation_requires_a_throughput_estimate(mode, model_ready):
+    estimate = 1 if model_ready else None
+    state = _disagg_state(
+        1,
+        1,
+        estimate,
+        estimate,
+        enable_load_scaling=False,
+        min_gpus=-1,
+        max_gpus=-1,
+    )
+    state._config.mode = mode
+    state.observe_worker_counts(
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=1,
+            prefill_scaling_in_progress=mode in ("prefill", "disagg"),
+            decode_scaling_in_progress=mode != "prefill",
+            pending_num_prefill=1 if mode in ("prefill", "disagg") else 0,
+            pending_num_decode=1 if mode != "prefill" else 0,
+        )
+    )
+    if mode == "agg":
+        state.update_capabilities(
+            WorkerCapabilities(
+                decode=EngineCapabilities(
+                    gpu_cost_per_replica=1,
+                    max_num_batched_tokens=4096,
+                )
+            )
+        )
+        state._agg_regression = SimpleNamespace(
+            find_engine_capacity_rps=lambda **_kwargs: (
+                SimpleNamespace(rps=1.0, ttft_ms=1.0, itl_ms=1.0, eligible=True)
+                if model_ready
+                else None
+            )
+        )
+        decision = state._throughput_agg(1.0, 1.0, 1.0)
+    elif mode == "disagg":
+        decision = state._throughput_disagg(1.0, 1.0, 1.0)
+    else:
+        decision = state._throughput_single(1.0, 1.0, 1.0, mode)
+
+    if model_ready:
+        assert decision is not None
+        assert (decision.num_prefill if mode == "prefill" else decision.num_decode) == 1
+    else:
+        assert decision is None
+        assert state.diagnostics().throughput_decision_reason == "model_not_ready"

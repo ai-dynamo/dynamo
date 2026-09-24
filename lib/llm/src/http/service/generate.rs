@@ -20,6 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use serde::Serialize;
@@ -36,6 +37,7 @@ use super::openai::{
 };
 use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+use crate::protocols::common::preprocessed_mm_identifier;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
 use crate::protocols::openai::generate::{
@@ -188,6 +190,17 @@ fn generate_cancelled_response() -> Response {
     )
 }
 
+/// Caller-supplied deadline elapsed before the engine produced a stream: HTTP
+/// 429 with a `Cancelled` metric label, the same contract as the OpenAI and
+/// SGLang generate surfaces.
+fn generate_deadline_exceeded_response() -> Response {
+    generate_error_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "deadline_exceeded",
+        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
+    )
+}
+
 fn generate_unavailable_response() -> Response {
     generate_error_response(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -300,8 +313,9 @@ fn intersecting_mm_ranges<'a>(
 
 /// Build the routing-only token sequence used by vLLM KV events for multimodal
 /// prompts. The caller-provided `features` object remains opaque to execution;
-/// this projection reads only the hashes and placeholder ranges required to
-/// make request-side KV hashes match worker-side event hashes.
+/// this projection derives content-bound identities from the inline kwargs and
+/// combines them with placeholder ranges so request-side KV hashes match
+/// worker-side event hashes.
 fn generate_mm_routing_info(
     request: &GenerateRequest,
     kv_cache_block_size: u32,
@@ -326,10 +340,15 @@ fn generate_mm_routing_info(
         .get("mm_placeholders")
         .and_then(serde_json::Value::as_object)
         .ok_or("features.mm_placeholders must be a JSON object")?;
+    let kwargs_data = features
+        .get("kwargs_data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("features.kwargs_data must be a JSON object")?;
 
     if mm_hashes
         .keys()
         .chain(mm_placeholders.keys())
+        .chain(kwargs_data.keys())
         .any(|modality| modality != "image")
     {
         return Err("exact /generate MM routing currently supports image placeholders only");
@@ -338,28 +357,48 @@ fn generate_mm_routing_info(
         return Err("KV cache block size must be non-zero");
     }
 
-    let (hashes, placeholders) = match (mm_hashes.get("image"), mm_placeholders.get("image")) {
-        (None, None) => return Ok(None),
-        (Some(hashes), Some(placeholders)) => (
+    let (hashes, placeholders, kwargs) = match (
+        mm_hashes.get("image"),
+        mm_placeholders.get("image"),
+        kwargs_data.get("image"),
+    ) {
+        (None, None, None) => return Ok(None),
+        (Some(hashes), Some(placeholders), Some(kwargs)) => (
             hashes
                 .as_array()
                 .ok_or("features.mm_hashes.image must be an array")?,
             placeholders
                 .as_array()
                 .ok_or("features.mm_placeholders.image must be an array")?,
+            kwargs
+                .as_array()
+                .ok_or("features.kwargs_data.image must be an array")?,
         ),
-        _ => return Err("image hashes and placeholders must both be present"),
+        _ => return Err("image hashes, placeholders, and kwargs_data must all be present"),
     };
-    if hashes.len() != placeholders.len() {
-        return Err("image hashes and placeholders must have equal lengths");
+    if hashes.len() != placeholders.len() || hashes.len() != kwargs.len() {
+        return Err("image hashes, placeholders, and kwargs_data must have equal lengths");
     }
 
     let mut ranges: Vec<MmPlaceholderRange> = Vec::with_capacity(hashes.len());
-    for (hash, placeholder) in hashes.iter().zip(placeholders) {
-        let hash = hash
+    for ((producer_hash, placeholder), encoded_kwargs) in
+        hashes.iter().zip(placeholders).zip(kwargs)
+    {
+        producer_hash
             .as_str()
-            .and_then(dynamo_kv_router::protocols::hash_mm_identifier)
+            .filter(|hash| !hash.is_empty())
             .ok_or("multimodal hashes must be non-empty strings")?;
+        let raw_kwargs = BASE64_STANDARD
+            .decode(
+                encoded_kwargs
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .ok_or("multimodal kwargs_data must contain non-empty base64 strings")?,
+            )
+            .map_err(|_| "multimodal kwargs_data must contain valid base64")?;
+        let identifier = preprocessed_mm_identifier("image", &raw_kwargs);
+        let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+            .ok_or("content-derived multimodal identifier must not be empty")?;
         let placeholder = placeholder
             .as_object()
             .ok_or("multimodal placeholders must be JSON objects")?;
@@ -583,14 +622,13 @@ fn preprocessed_from_generate_with_tracker(
         .project_output_options()
         .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
-    // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
-    // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
-    // tower/connector LoRA is enabled for an adapter request, fall back to
-    // token-only routing because vLLM scopes the MM identity by that adapter.
-    let mm_routing = if tower_connector_lora_enabled && lora_name.is_some() {
+    // The sidecar protocol does not expose whether tower/connector LoRA is
+    // active, so conservatively treat every adapter's MM identity as scoped.
+    let mm_routing = if lora_name.is_some() {
         tracing::debug!(
             target: "mm_routing",
-            "tower/connector LoRA is active; using token-only multimodal routing"
+            tower_connector_lora_enabled,
+            "LoRA request uses token-only multimodal routing"
         );
         None
     } else {
@@ -1011,17 +1049,23 @@ async fn generate_dispatch(
     let stream = match generate_result {
         Ok(stream) => stream,
         Err(error) => {
+            // Deadline is checked before overload so a chain carrying both
+            // markers keeps the deadline outcome, matching the OpenAI surface.
+            let deadline_exceeded = super::metrics::request_deadline_exceeded(error.as_ref());
             let was_cancelled = request_context.is_killed()
                 || super::metrics::request_was_cancelled(error.as_ref());
             let was_rejected = super::metrics::request_was_rejected(error.as_ref());
             let was_unavailable = super::metrics::request_was_unavailable(error.as_ref());
-            inflight_guard.mark_error(if was_cancelled {
+            inflight_guard.mark_error(if deadline_exceeded || was_cancelled {
                 ErrorType::Cancelled
             } else if was_rejected || was_unavailable {
                 ErrorType::Unavailable
             } else {
                 ErrorType::Internal
             });
+            if deadline_exceeded {
+                return generate_deadline_exceeded_response();
+            }
             if was_cancelled {
                 return generate_cancelled_response();
             }
@@ -1209,6 +1253,8 @@ pub(crate) mod tests {
 
     struct CancelledEngine;
 
+    struct DeadlineEngine;
+
     struct MetricEngine;
 
     /// Fails dispatch the way an addressed worker that no longer serves the instance does.
@@ -1248,6 +1294,26 @@ pub(crate) mod tests {
             Err(dynamo_runtime::error::DynamoError::builder()
                 .error_type(dynamo_runtime::error::ErrorType::Cancelled)
                 .message("backend cancelled before opening a stream")
+                .build()
+                .into())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for DeadlineEngine
+    {
+        async fn generate(
+            &self,
+            _request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            Err(dynamo_runtime::error::DynamoError::builder()
+                .error_type(dynamo_runtime::error::ErrorType::DeadlineExceeded)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("router.queue_deadline_exceeded")
+                        .unwrap(),
+                )
+                .message("router deadline exceeded before stream start")
                 .build()
                 .into())
         }
@@ -1843,7 +1909,7 @@ pub(crate) mod tests {
             .as_object_mut()
             .and_then(|object| object.remove("token_ids"))
             .expect("token_ids in client request");
-        assert_eq!(preprocessed.token_ids, vec![1, 2]);
+        assert_eq!(preprocessed.token_ids.as_slice(), &[1, 2]);
         assert_eq!(
             preprocessed
                 .tracker
@@ -1869,7 +1935,7 @@ pub(crate) mod tests {
                     {"offset": 2, "length": 3},
                     {"offset": 7, "length": 2}
                 ]},
-                "kwargs_data": {"image": ["opaque-a", "opaque-b"]}
+                "kwargs_data": {"image": ["b3BhcXVlLWE=", "b3BhcXVlLWI="]}
             }
         });
         let request: GenerateRequest =
@@ -1884,8 +1950,18 @@ pub(crate) mod tests {
         )
         .expect("build request");
 
-        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xaaaaaaaaaaaaaaaa);
-        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(0xbbbbbbbbbbbbbbbb);
+        let hash_a = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-a",
+        ))
+        .expect("content-derived hash");
+        let hash_b = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image",
+            b"opaque-b",
+        ))
+        .expect("content-derived hash");
+        let pad_a = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_a);
+        let pad_b = dynamo_kv_router::protocols::pad_value_for_mm_hash(hash_b);
         let mm = preprocessed
             .mm_routing_info
             .as_ref()
@@ -1898,8 +1974,8 @@ pub(crate) mod tests {
         assert_eq!(mm.expanded_prompt_len, 10);
 
         assert_eq!(
-            preprocessed.token_ids,
-            vec![10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
+            preprocessed.token_ids.as_slice(),
+            &[10, 11, 12, 12, 12, 15, 16, 12, 12, 19]
         );
         let envelope = preprocessed
             .extra_args
@@ -1913,49 +1989,40 @@ pub(crate) mod tests {
                 .as_ref()
                 .and_then(|extra| extra.get("dynamo_mm_routing_hashes")),
             Some(&serde_json::json!([
-                format!("{}{}", "a".repeat(16), "0".repeat(48)),
-                format!("{}{}", "b".repeat(16), "0".repeat(48))
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-a"),
+                crate::protocols::common::preprocessed_mm_routing_hash("image", b"opaque-b")
             ]))
         );
 
         // A frontend-approved, marker-form hash must produce the same KV hash
-        // on the request and event paths, including ordinary language-only LoRA.
+        // on the request and event paths.
         let mm_identifier = "1234567890abcdef".repeat(4);
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [10, 99, 99, 20],
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": [mm_identifier.clone()]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["cm91dGluZy1h"]}
             }
         }))
         .expect("deserialize request");
         let preprocessed = preprocessed_from_generate(
             request,
-            "adapter-a",
+            "test-model",
             None,
             "resolved-request",
-            routing_metadata(4, false, Some("adapter-a")),
+            routing_metadata(4, false, None),
         )
-        .expect("build LoRA request");
+        .expect("build request");
         let routing = preprocessed
             .mm_routing_info
             .as_ref()
-            .expect("language-only LoRA keeps exact MM routing");
-        assert_eq!(
-            preprocessed
-                .routing
-                .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
+            .expect("base request keeps exact MM routing");
         let request_hashes = dynamo_kv_router::protocols::compute_block_hash_for_seq(
             &routing.routing_token_ids,
             4,
-            dynamo_kv_router::protocols::BlockHashOptions {
-                lora_name: Some("adapter-a"),
-                ..Default::default()
-            },
+            dynamo_kv_router::protocols::BlockHashOptions::default(),
         );
         let marked_identifier = preprocessed
             .extra_args
@@ -1983,7 +2050,6 @@ pub(crate) mod tests {
             7,
             &[10, 99, 99, 20],
             dynamo_kv_router::zmq_wire::StoredBlockOptions {
-                lora_name: Some("adapter-a"),
                 mm_extra_info: Some(event_mm_info),
                 image_token_id: Some(99),
                 ..Default::default()
@@ -2005,15 +2071,18 @@ pub(crate) mod tests {
                     "offset": 1,
                     "length": 3,
                     "is_embed": [true, false, true]
-                }]}
+                }]},
+                "kwargs_data": {"image": ["c3BhcnNl"]}
             }
         }))
         .expect("deserialize request");
         let routing = generate_mm_routing_info(&request, 5)
             .expect("valid sparse MM routing metadata")
             .expect("MM routing projection");
-        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(mm_identifier)
-            .expect("non-empty identifier");
+        let mm_hash = dynamo_kv_router::protocols::hash_mm_identifier(&preprocessed_mm_identifier(
+            "image", b"sparse",
+        ))
+        .expect("content-derived identifier");
         let pad = dynamo_kv_router::protocols::pad_value_for_mm_hash(mm_hash);
         assert_eq!(routing.info.routing_token_ids, vec![10, pad, 42, pad, 20]);
 
@@ -2023,7 +2092,8 @@ pub(crate) mod tests {
                 serde_json::json!([10, 99, 42, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]}
+                    "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "mixed multimodal placeholder spans require is_embed",
             ),
@@ -2032,7 +2102,8 @@ pub(crate) mod tests {
                 serde_json::json!([99, 10, 99, 99, 20]),
                 serde_json::json!({
                     "mm_hashes": {"image": ["image-0"]},
-                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]}
+                    "mm_placeholders": {"image": [{"offset": 2, "length": 2}]},
+                    "kwargs_data": {"image": ["c3BhcnNl"]}
                 }),
                 "image tokens must be covered by multimodal placeholder ranges",
             ),
@@ -2044,7 +2115,8 @@ pub(crate) mod tests {
                     "mm_placeholders": {"image": [
                         {"offset": 1, "length": 3, "is_embed": [true, false, true]},
                         {"offset": 5, "length": 1}
-                    ]}
+                    ]},
+                    "kwargs_data": {"image": ["c3BhcnNlLWE=", "c3BhcnNlLWI="]}
                 }),
                 "sparse multimodal layout cannot be normalized exactly by worker events",
             ),
@@ -2153,7 +2225,11 @@ pub(crate) mod tests {
             .expect("invalid routing metadata must not reject execution");
 
             assert!(preprocessed.mm_routing_info.is_none(), "{name}");
-            assert_eq!(preprocessed.token_ids, expected_token_ids, "{name}");
+            assert_eq!(
+                preprocessed.token_ids.as_slice(),
+                expected_token_ids,
+                "{name}"
+            );
             let envelope = preprocessed
                 .extra_args
                 .as_ref()
@@ -2175,7 +2251,8 @@ pub(crate) mod tests {
             "sampling_params": {},
             "features": {
                 "mm_hashes": {"image": ["image-0"]},
-                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]}
+                "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+                "kwargs_data": {"image": ["YmFzZS1pbWFnZQ=="]}
             }
         });
         let base_request: GenerateRequest =
@@ -2193,30 +2270,39 @@ pub(crate) mod tests {
             "the worker setting alone does not activate adapter-scoped MM identity"
         );
 
-        let adapter_request: GenerateRequest =
-            serde_json::from_value(raw.clone()).expect("deserialize adapter request");
-        let adapter = preprocessed_from_generate(
-            adapter_request,
-            "adapter-a",
-            None,
-            "resolved-request",
-            routing_metadata(4, true, Some("adapter-a")),
-        )
-        .expect("build adapter request");
-        assert!(adapter.mm_routing_info.is_none());
-        assert_eq!(
-            adapter
-                .routing
+        for tower_connector_lora_enabled in [false, true] {
+            let adapter_request: GenerateRequest =
+                serde_json::from_value(raw.clone()).expect("deserialize adapter request");
+            let adapter = preprocessed_from_generate(
+                adapter_request,
+                "adapter-a",
+                None,
+                "resolved-request",
+                routing_metadata(4, tower_connector_lora_enabled, Some("adapter-a")),
+            )
+            .expect("build adapter request");
+            assert!(adapter.mm_routing_info.is_none());
+            assert_eq!(
+                adapter
+                    .routing
+                    .as_ref()
+                    .and_then(|routing| routing.lora_name.as_deref()),
+                Some("adapter-a")
+            );
+            assert!(
+                adapter
+                    .extra_args
+                    .as_ref()
+                    .and_then(|extra| extra.get("dynamo_mm_routing_hashes"))
+                    .is_none()
+            );
+            let envelope = adapter
+                .extra_args
                 .as_ref()
-                .and_then(|routing| routing.lora_name.as_deref()),
-            Some("adapter-a")
-        );
-        let envelope = adapter
-            .extra_args
-            .as_ref()
-            .and_then(|extra| extra.get("vllm_tito"))
-            .expect("vllm_tito envelope");
-        assert_eq!(envelope["features"], raw["features"]);
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope");
+            assert_eq!(envelope["features"], raw["features"]);
+        }
     }
 
     #[test]
@@ -2700,6 +2786,39 @@ pub(crate) mod tests {
         .await;
 
         assert_eq!(response.status().as_u16(), 499);
+        assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
+    }
+
+    #[tokio::test]
+    async fn immediate_deadline_exceeded_returns_429_with_cancelled_metric() {
+        let engine: crate::types::openai::generate::GenerateStreamingEngine =
+            Arc::new(DeadlineEngine);
+        let service = HttpService::builder().build().unwrap();
+        let state = service.state_clone();
+
+        let response = generate_dispatch_for_test(
+            engine,
+            dispatch_test_context(),
+            "req-deadline".to_string(),
+            "test-model".to_string(),
+            state.clone(),
+            GenerateResponseOptions::default(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "request deadline exceeded");
+        assert_eq!(body["error"]["type"], "deadline_exceeded");
+        assert_eq!(body["error"]["code"], 429);
+        assert!(
+            !body
+                .to_string()
+                .contains("router deadline exceeded before stream start")
+        );
         assert_cancelled_dispatch_metrics(state.as_ref(), 0, 0);
     }
 
