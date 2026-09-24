@@ -505,6 +505,8 @@ module = [
     "nixl.*",
     "imageio",
     "imageio.*",
+    "imageio_ffmpeg",
+    "imageio_ffmpeg.*",
     "prometheus_api_client",
     "prometheus_api_client.*",
     "aiohttp",

@@ -48,7 +48,7 @@ def shipped_ffmpeg() -> str:
 def quadrant_frames(num_frames: int = 8) -> np.ndarray:
     """``(num_frames, FRAME_SIZE, FRAME_SIZE, 3)`` uint8 RGB quadrant frames."""
     half = FRAME_SIZE // 2
-    frame = np.empty((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
+    frame: np.ndarray = np.empty((FRAME_SIZE, FRAME_SIZE, 3), dtype=np.uint8)
     for index, color in enumerate(QUADRANT_COLORS):
         row, col = divmod(index, 2)
         frame[row * half : (row + 1) * half, col * half : (col + 1) * half] = color
