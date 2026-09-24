@@ -302,7 +302,6 @@ func newTestPipelineRequest(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev
 			Name: name, Namespace: deployment.Namespace, UID: types.UID(name + "-uid"), ResourceVersion: "1",
 			Generation: generation, CreationTimestamp: metav1.NewTime(created),
 			Labels:          map[string]string{deploymentUIDLabel: string(deployment.UID)},
-			Annotations:     map[string]string{deploymentUIDAnnotation: string(deployment.UID)},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pcs, grovev1alpha1.SchemeGroupVersion.WithKind("PodCliqueSet"))},
 		},
 		Spec: lpxv1alpha1.LPUPipelineRequestSpec{ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal},

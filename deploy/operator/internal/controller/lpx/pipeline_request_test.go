@@ -201,6 +201,9 @@ func TestNodeLocalSpecDecodePublishesOneRequestAndAgentCliquePerModelProjection(
 		model := request.Annotations[pipelineRequestModelAnnotation]
 		requestByModel[model] = request
 		require.Equal(t, string(deployment.UID), request.Labels[deploymentUIDLabel])
+		require.Equal(t, deployment.Name, request.Annotations[lpx.DeploymentNameAnnotation])
+		require.NotContains(t, request.Annotations, "lpx.nvidia.com/deployment-uid")
+		require.NotContains(t, request.Annotations, "scheduling.lpu.nvidia.com/dgd-uid")
 		require.Equal(t, model, request.Spec.NodeLocal.Model)
 		require.Equal(t, desired.plan.LPXScalingGroup, request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name)
 	}

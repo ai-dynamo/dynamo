@@ -97,9 +97,8 @@ func RenderLPXWorkloadTemplates(
 }
 
 const (
-	LPXDeploymentUIDAnnotation = dynamolpx.DeploymentUIDAnnotation
-	LPXRestartAnnotation       = "lpx.nvidia.com/restart-id"
-	LPXServingLabel            = "lpx.nvidia.com/serving"
+	LPXRestartAnnotation = "lpx.nvidia.com/restart-id"
+	LPXServingLabel      = "lpx.nvidia.com/serving"
 )
 
 // LPXRestartToken advances only from the DGD's persisted restart selection.

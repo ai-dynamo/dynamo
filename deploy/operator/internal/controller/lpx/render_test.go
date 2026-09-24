@@ -218,8 +218,6 @@ func TestLPXRenderingIncludesDiscoveryServices(t *testing.T) {
 				require.Equal(t, map[string]string{
 					"example.com/description":    "serving",
 					lpx.DeploymentNameAnnotation: child.Name,
-					deploymentUIDAnnotation:      string(child.UID),
-					lpx.DGDUIDAnnotation:         string(dgd.UID),
 				}, service.Annotations)
 				require.Equal(t, string(child.UID), service.Labels[deploymentUIDLabel])
 				require.Equal(t, consts.KubeLabelValueTrue, service.Labels[consts.KubeLabelDynamoDiscoveryEnabled])
@@ -399,7 +397,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 				group.Annotations[lpx.WorkloadDigestAnnotation] = mutatedValue
 			}
 			for _, resource := range firstResources {
-				resource.GetAnnotations()[deploymentUIDAnnotation] = mutatedValue
+				resource.GetAnnotations()[lpx.DeploymentNameAnnotation] = mutatedValue
 				switch resource := resource.(type) {
 				case *corev1.ConfigMap:
 					resource.Data["rendered-only"] = mutatedValue
@@ -426,8 +424,8 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	dgd.Labels = map[string]string{"project": "inference", "unrelated": "ignored"}
 	dgd.Annotations["kai.scheduler/topology"] = "source-topology"
 	dgd.Spec.Annotations = map[string]string{
-		"kai.scheduler/topology": "explicit-topology",
-		lpx.DGDUIDAnnotation:     "stale",
+		"kai.scheduler/topology":     "explicit-topology",
+		lpx.DeploymentNameAnnotation: "stale",
 	}
 	child.Annotations[dynamo.LPXRestartAnnotation] = restartToken
 	dgd.Generation++
@@ -462,8 +460,9 @@ func TestLPXRenderingMetadata(t *testing.T) {
 		annotationMaps = append(annotationMaps, resource.GetAnnotations())
 	}
 	for _, annotations := range annotationMaps {
-		require.Equal(t, string(metav1.GetControllerOf(child).UID), annotations[lpx.DGDUIDAnnotation])
-		require.Equal(t, string(child.UID), annotations[deploymentUIDAnnotation])
+		require.Equal(t, child.Name, annotations[lpx.DeploymentNameAnnotation])
+		require.NotContains(t, annotations, "lpx.nvidia.com/deployment-uid")
+		require.NotContains(t, annotations, "scheduling.lpu.nvidia.com/dgd-uid")
 		require.NotContains(t, annotations, "lpx.nvidia.com/deployment-generation")
 		require.NotContains(t, annotations, "lpx.nvidia.com/input-revision")
 	}

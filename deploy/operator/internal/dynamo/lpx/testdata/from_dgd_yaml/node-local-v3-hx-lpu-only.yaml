@@ -13,8 +13,6 @@ immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: node-local-v3-hx-lpu-only-d43c-lpu-f8b027cf29abf6cd
@@ -23,8 +21,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:4de325afa19b861c0592d5037388b4e878bdc0f2991f5d75ef485a933ae7e868
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
@@ -38,10 +34,8 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:1e4755073877623d76538089043ad7083626cab5bead93415d0147ba1a1023d1
-        scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ec01dbdeee5b9996f1f162f6645e7f8352ac96673e4b6279adca22638f5e5f95
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
@@ -188,9 +182,7 @@ spec:
         roleName: agt
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: f8b027cf29abf6cdbab73060b6697b18f7107df8c993859d94073d6012107d12
-        scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ec01dbdeee5b9996f1f162f6645e7f8352ac96673e4b6279adca22638f5e5f95
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -384,8 +376,6 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v3-hx-lpu-only
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        scheduling.lpu.nvidia.com/dgd-uid: 33333333-3333-4333-8333-333333333333
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:ec01dbdeee5b9996f1f162f6645e7f8352ac96673e4b6279adca22638f5e5f95
       cliqueNames:
       - cond

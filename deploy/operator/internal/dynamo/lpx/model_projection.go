@@ -17,12 +17,8 @@ import (
 const (
 	// DeploymentNameAnnotation routes rendered-object events to their LPXGraphDeployment.
 	DeploymentNameAnnotation = "lpx.nvidia.com/deployment-name"
-	// DeploymentUIDAnnotation records the owning LPXGraphDeployment UID on rendered objects.
-	DeploymentUIDAnnotation = "lpx.nvidia.com/deployment-uid"
 	// WorkloadDigestAnnotation records the immutable Dynamo workload projection digest on rendered objects.
 	WorkloadDigestAnnotation = "scheduling.lpu.nvidia.com/dynamo-workload-digest"
-	// DGDUIDAnnotation records the source DGD UID on rendered objects.
-	DGDUIDAnnotation = "scheduling.lpu.nvidia.com/dgd-uid"
 	// WorkloadModeAnnotation records the projected LPX workload mode on rendered objects.
 	WorkloadModeAnnotation = "scheduling.lpu.nvidia.com/workload-mode"
 )

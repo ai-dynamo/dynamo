@@ -85,9 +85,7 @@ func resolvePipelineRequests(
 						deploymentUIDLabel:                        string(deployment.UID),
 					},
 					Annotations: map[string]string{
-						lpx.DGDUIDAnnotation:                         string(dgdOwner.UID),
 						lpx.DeploymentNameAnnotation:                 deployment.Name,
-						deploymentUIDAnnotation:                      string(deployment.UID),
 						pipelineRequestModelAnnotation:               projection.Model(),
 						lpx.WorkloadDigestAnnotation:                 projection.Digest().String(),
 						lpxv1alpha1.CompilerSnapshotDigestAnnotation: projection.CompilerSnapshotDigest(),

@@ -19,14 +19,10 @@ import (
 	lpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-const (
-	deploymentUIDAnnotation = dynamo.LPXDeploymentUIDAnnotation
-	deploymentUIDLabel      = deploymentUIDAnnotation
-)
+const deploymentUIDLabel = "lpx.nvidia.com/deployment-uid"
 
 // resolveWorkloads resolves every component group and finalizes its resource names.
 // deployment and dgd must be non-nil; dgd must have passed admission.
@@ -167,18 +163,11 @@ func (r *graphReconciler) renderPodCliqueSet(
 
 // stampDeploymentIdentity propagates stable ownership labels and annotations, never DGD revision.
 func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grovev1alpha1.PodCliqueSet, resources []client.Object) {
-	// The initial DGD lookup validated this controller owner; rendering trusts that observation.
-	dgdOwner := metav1.GetControllerOf(deployment)
-	identity := map[string]string{
-		lpx.DeploymentNameAnnotation: deployment.Name,
-		deploymentUIDAnnotation:      string(deployment.UID),
-		lpx.DGDUIDAnnotation:         string(dgdOwner.UID),
-	}
 	stamp := func(annotations *map[string]string) {
 		if *annotations == nil {
 			*annotations = make(map[string]string)
 		}
-		maps.Copy(*annotations, identity)
+		(*annotations)[lpx.DeploymentNameAnnotation] = deployment.Name
 	}
 	stampOwnerLabel := func(object client.Object) {
 		labels := object.GetLabels()

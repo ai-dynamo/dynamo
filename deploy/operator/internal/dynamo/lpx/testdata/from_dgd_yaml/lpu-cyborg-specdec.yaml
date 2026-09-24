@@ -21,8 +21,6 @@ immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
@@ -34,8 +32,6 @@ immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: lpu-cyborg-specdec-5f16-target-decode-32805b2198371ed2
@@ -53,8 +49,6 @@ immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
   name: lpu-cyborg-specdec-5f16-target-lpu-355e8ac6768c54e3
@@ -63,8 +57,6 @@ metadata:
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-    lpx.nvidia.com/deployment-uid: lpx-render-uid
-    scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
     scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:31a0ee5e56b73e39b7c7b2c93678df6bf858dedaa77350422c3f557fbdb7d5ad
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
@@ -78,10 +70,8 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
@@ -164,9 +154,7 @@ spec:
         roleName: draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -250,10 +238,8 @@ spec:
         - draft-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 355e8ac6768c54e3ee778e2044a7498390f64c82034bbc4cc3dafa0ef4031877
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:a70fcf7def9c874b1634097fef306b97a4af1103842c80b3516dcf6bda30ad59
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
         scheduling.lpu.nvidia.com/model: default
         scheduling.lpu.nvidia.com/role: agent
@@ -338,9 +324,7 @@ spec:
         roleName: target-agt
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
         nvidia.com/extra-resources-hash: 32805b2198371ed2ff837e4776e3e59448937c6274efe6602681e42f78f14d41
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
@@ -456,8 +440,6 @@ spec:
     podCliqueScalingGroups:
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
       cliqueNames:
       - draft-cond
@@ -467,8 +449,6 @@ spec:
       replicas: 1
     - annotations:
         lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
-        lpx.nvidia.com/deployment-uid: lpx-render-uid
-        scheduling.lpu.nvidia.com/dgd-uid: 22222222-2222-4222-8222-222222222222
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
       cliqueNames:
       - target-agt
