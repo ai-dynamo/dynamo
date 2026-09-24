@@ -339,7 +339,7 @@ impl
                                         if tail.stop_trigger.is_none() {
                                             flushed.push_str(&decoder.flush_jailed().unwrap_or_default());
                                             flushed.push_str(data.text.as_deref().unwrap_or_default());
-                                        } else if !matches!(data.finish_reason, Some(FinishReason::Error(_))) {
+                                        } else if !matches!(data.finish_reason, Some(FinishReason::Error(_) | FinishReason::Cancelled)) {
                                             data.finish_reason = Some(FinishReason::Stop);
                                             data.stop_reason = match &tail.stop_trigger {
                                                 Some(StopTrigger::HiddenStopSequenceDetected(seq)
@@ -510,7 +510,12 @@ impl
                     // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
                     // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
                     // which we don't want to propagate to `data.finish_reason`.
-                    if finish_reason.is_some() {
+                    if finish_reason.is_some()
+                        && !matches!(
+                            data.finish_reason,
+                            Some(FinishReason::Error(_) | FinishReason::Cancelled)
+                        )
+                    {
                         data.finish_reason = finish_reason;
                         data.stop_reason = stop_reason.or(data.stop_reason);
                     }
@@ -1960,6 +1965,102 @@ mod tests {
     }
 
     impl traits::Tokenizer for BufferedOTokenizer {}
+
+    struct BufferedTerminalEngine {
+        finish_reason: FinishReason,
+        bypass: bool,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for BufferedTerminalEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let chunks = vec![
+                Annotated::from_data(LLMEngineOutput {
+                    token_ids: vec![1],
+                    ..Default::default()
+                }),
+                Annotated::from_data(LLMEngineOutput {
+                    text: self.bypass.then(|| "later".to_string()),
+                    finish_reason: Some(self.finish_reason.clone()),
+                    ..Default::default()
+                }),
+            ];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(chunks)),
+                request.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn byte_fallback_terminal_stop_preserves_failure_reason() {
+        for reason in [
+            FinishReason::Error("worker failed".to_string()),
+            FinishReason::Cancelled,
+            FinishReason::Length,
+        ] {
+            for bypass in [false, true] {
+                for include in [false, true] {
+                    let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(BufferedOTokenizer);
+                    let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+                    let request = PreprocessedRequest::builder()
+                        .model("test-model".to_string())
+                        .token_ids(vec![])
+                        .stop_conditions(StopConditions {
+                            stop: Some(vec!["o".to_string()]),
+                            ..Default::default()
+                        })
+                        .sampling_options(SamplingOptions {
+                            include_stop_str_in_output: Some(include),
+                            ..Default::default()
+                        })
+                        .output_options(OutputOptions::default())
+                        .build()
+                        .unwrap();
+                    let engine: ServerStreamingEngine<
+                        PreprocessedRequest,
+                        Annotated<LLMEngineOutput>,
+                    > = Arc::new(BufferedTerminalEngine {
+                        finish_reason: reason.clone(),
+                        bypass,
+                    });
+                    let outputs =
+                        Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+                            .await
+                            .unwrap()
+                            .collect::<Vec<_>>()
+                            .await;
+                    assert_eq!(outputs.len(), 2);
+                    assert!(outputs[0].data.as_ref().unwrap().finish_reason.is_none());
+                    let terminal = outputs[1].data.as_ref().unwrap();
+                    let failed = matches!(reason, FinishReason::Error(_) | FinishReason::Cancelled);
+                    let expected_reason = if failed {
+                        reason.clone()
+                    } else {
+                        FinishReason::Stop
+                    };
+                    assert_eq!(
+                        terminal.finish_reason,
+                        Some(expected_reason),
+                        "{reason:?}, bypass={bypass}, include={include}"
+                    );
+                    assert_eq!(
+                        terminal.stop_reason,
+                        (!failed).then(|| StopReason::String("o".to_string()))
+                    );
+                    assert_eq!(
+                        terminal.text.as_deref().unwrap_or_default(),
+                        if include { "o" } else { "" }
+                    );
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn byte_fallback_flushes_on_bare_eof_and_decoded_terminal() {
