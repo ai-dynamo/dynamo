@@ -148,13 +148,27 @@ KV_EVENTS_PD_OVERRIDE=""
 KV_EVENTS_PD_FOUND=false
 # Last occurrence wins, matching what argparse hands vLLM.
 for i in "${!EXTRA_PD_ARGS[@]}"; do
-    case "${EXTRA_PD_ARGS[$i]}" in
+    # Normalize only the option name; JSON values must reach vLLM unchanged.
+    KV_EVENTS_PD_OPTION="${EXTRA_PD_ARGS[$i]%%=*}"
+    KV_EVENTS_PD_OPTION="${KV_EVENTS_PD_OPTION//_/-}"
+    case "$KV_EVENTS_PD_OPTION" in
         --kv-events-config)
-            KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$((i + 1))]:-}"
+            if [[ "${EXTRA_PD_ARGS[$i]}" == *=* ]]; then
+                KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$i]#*=}"
+            else
+                KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$((i + 1))]:-}"
+            fi
             KV_EVENTS_PD_FOUND=true
             ;;
-        --kv-events-config=*)
-            KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$i]#--kv-events-config=}"
+        --kv-events-config.*)
+            # vLLM assembles dotted options after whole JSON options. Do not
+            # validate one config while the engine uses another.
+            if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+                echo "Refusing dotted --kv-events-config options under DYN_MANAGED_PORTS." \
+                     "Use --kv-events-config JSON with endpoint tcp://*:${KV_PORT_PD}" \
+                     "reserved on DYN_VLLM_KV_EVENT_PORT2 instead." >&2
+                exit 1
+            fi
             KV_EVENTS_PD_FOUND=true
             ;;
     esac
