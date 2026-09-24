@@ -332,8 +332,8 @@ func gmsExtraClientContainersError(
 }
 
 func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
-	if backendFramework, err := ParseBackendFramework(parentDGD.Spec.BackendFramework); err == nil {
-		return string(backendFramework), nil
+	if parentDGD.Spec.BackendFramework != "" {
+		return parentDGD.Spec.BackendFramework, nil
 	}
 
 	var detected BackendFramework
@@ -1405,18 +1405,6 @@ const (
 	BackendFrameworkTRTLLM BackendFramework = "trtllm"
 	BackendFrameworkNoop   BackendFramework = "noop"
 )
-
-// ParseBackendFramework converts a string to BackendFramework type.
-// Returns an error if the framework string is not recognized.
-func ParseBackendFramework(framework string) (BackendFramework, error) {
-	bf := BackendFramework(framework)
-	switch bf {
-	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
-		return bf, nil
-	default:
-		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm, noop)", framework)
-	}
-}
 
 // ContainerGPUCount lazily resolves the main container's scalar or DRA-backed
 // GPU count. The same resolver can be shared across all roles of a component.
@@ -3025,7 +3013,11 @@ func determineBackendFramework(
 		}
 	}
 
-	explicitFramework, _ := ParseBackendFramework(explicitBackendFramework)
+	// Get explicit framework
+	var explicitFramework BackendFramework
+	if explicitBackendFramework != "" {
+		explicitFramework = BackendFramework(explicitBackendFramework)
+	}
 
 	// Validate consistency if both detected and explicit exist
 	if detectedFramework != "" && detectedFramework != BackendFrameworkNoop && explicitFramework != "" && detectedFramework != explicitFramework {
