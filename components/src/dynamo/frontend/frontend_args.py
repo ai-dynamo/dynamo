@@ -34,6 +34,42 @@ _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
+def _cpu_quota_count() -> Optional[int]:
+    """Return the cgroup CPU quota rounded down to whole CPUs, if limited."""
+    try:
+        quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            quota_value = int(quota)
+            if quota_value > 0:
+                return max(1, quota_value // int(period))
+        return None
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+
+    try:
+        root = pathlib.Path("/sys/fs/cgroup/cpu")
+        quota = int((root / "cpu.cfs_quota_us").read_text())
+        period = int((root / "cpu.cfs_period_us").read_text())
+        if quota > 0:
+            return max(1, quota // period)
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    return None
+
+
+def _default_sglang_preprocess_workers() -> int:
+    """Leave one effective CPU for the frontend and cap pool size at two."""
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpu_count = os.cpu_count() or 1
+
+    quota_count = _cpu_quota_count()
+    if quota_count is not None:
+        cpu_count = min(cpu_count, quota_count)
+    return min(2, max(0, cpu_count - 1))
+
+
 def validate_model_name(value: str) -> str:
     """Validate that model-name is a non-empty string."""
     if not value or not isinstance(value, str) or len(value.strip()) == 0:
@@ -98,7 +134,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
-    preprocess_workers: int
+    preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
     trust_remote_code: bool
@@ -107,6 +143,15 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.preprocess_workers is None:
+            self.preprocess_workers = (
+                _default_sglang_preprocess_workers()
+                if self.chat_processor == "sglang"
+                else 0
+            )
+        elif self.preprocess_workers < 0:
+            raise ValueError("--dyn-preprocess-workers must be >= 0")
+
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
@@ -656,20 +701,17 @@ class FrontendArgGroup(ArgGroup):
             ),
         )
 
-        add_argument(
-            g,
-            flag_name="--dyn-preprocess-workers",
-            env_var="DYN_PREPROCESS_WORKERS",
-            default=0,
-            dest="preprocess_workers",
+        g.add_argument(
+            "--dyn-preprocess-workers",
+            type=int,
+            default=env_or_default("DYN_PREPROCESS_WORKERS", None, value_type=int),
             help=(
-                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
-                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
-                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "[EXPERIMENTAL] SGLang preprocessing worker processes per model. "
+                "When unset, uses up to 2 workers based on available CPUs, reserving one CPU "
+                "for the frontend. 0 runs preprocessing on the main event loop. "
+                "Nonzero values are supported only with '--dyn-chat-processor sglang'.\n"
+                "env var: DYN_PREPROCESS_WORKERS | default: auto for SGLang, 0 otherwise"
             ),
-            arg_type=int,
         )
 
         add_argument(
