@@ -19,10 +19,10 @@ pytestmark = [
 LAUNCH_UTILS = Path(__file__).parents[2] / "examples/common/launch_utils.sh"
 LAUNCH_DIR = Path(__file__).parents[2] / "examples/backends/vllm/launch"
 
-LABELLED_SCRIPTS = {
-    "disagg_multimodal_epd.sh": ["frontend", "encode", "prefill", "decode"],
-    "disagg_multimodal_p_d.sh": ["frontend", "prefill", "decode"],
-}
+LABELLED_SCRIPTS = (
+    ("disagg_multimodal_epd.sh", ("frontend", "encode", "prefill", "decode")),
+    ("disagg_multimodal_p_d.sh", ("frontend", "prefill", "decode")),
+)
 
 # Stands in for a worker that stays up. Blocks on an fd rather than a timer,
 # so the surviving workers cost no wall-clock time and cannot exit first.
@@ -136,11 +136,39 @@ def test_wait_any_exit_never_names_an_untracked_process() -> None:
     assert f"{UNNAMED} 5" in result.stdout, result.stdout
 
 
-@pytest.mark.parametrize(
-    "script_name,expected_labels", sorted(LABELLED_SCRIPTS.items())
-)
+@pytest.mark.parametrize("exit_code", [0, 7])
+@pytest.mark.parametrize("surviving_worker", [False, True])
+def test_wait_any_exit_reports_worker_that_exited_during_startup(
+    exit_code: int, surviving_worker: bool
+) -> None:
+    """A saved PID retains its status even after Bash drops its job entry.
+
+    Explicitly waiting for the early worker makes this ordering deterministic;
+    Bash allows a second wait by PID to retrieve the saved status. A surviving
+    worker must not hide the early exit, and an empty job table is not an error.
+    """
+    result = _run_script(
+        f"""
+        (exit {exit_code}) & dyn_track_worker early
+        early_pid=$!
+        wait "$early_pid" || :
+        {f"{STAY_UP} & dyn_track_worker later" if surviving_worker else ":"}
+        wait_any_exit
+        """
+    )
+
+    assert result.returncode == exit_code, result.stderr
+    assert f"exited with code {exit_code}" in result.stdout, result.stdout
+    assert "Worker 'later'" not in result.stdout, result.stdout
+    if BASH_NAMES_WORKERS:
+        assert "Worker 'early' (pid" in result.stdout, result.stdout
+    else:
+        assert UNNAMED in result.stdout, result.stdout
+
+
+@pytest.mark.parametrize("script_name,expected_labels", LABELLED_SCRIPTS)
 def test_disagg_multimodal_labels_every_background_process(
-    script_name: str, expected_labels: list[str]
+    script_name: str, expected_labels: tuple[str, ...]
 ) -> None:
     """Keep a label on every process these launch scripts background.
 
@@ -164,4 +192,4 @@ def test_disagg_multimodal_labels_every_background_process(
     # the command it names. A call moved anywhere else keeps both the count
     # and the order below while labelling some other process.
     assert [index for index, _ in labelled] == [index + 1 for index in backgrounded]
-    assert [label for _, label in labelled] == expected_labels
+    assert tuple(label for _, label in labelled) == expected_labels

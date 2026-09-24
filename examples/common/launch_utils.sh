@@ -150,19 +150,36 @@ dyn_track_worker() {
 
 wait_any_exit() {
     trap 'dynamo_reap_and_exit 0' TERM INT
-    if ! jobs -p | grep -q .; then
-        echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
-        exit 1
-    fi
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0
     local _pid=""
-    if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
-        # `-p VAR` reports which child exited but needs bash 5.1+; the file's
-        # floor is 4.3, so fall back to a plain `wait -n` below.
-        wait -n -p _pid || _rc=$?
-    else
-        wait -n || _rc=$?
+    local _candidate_pid
+    # Bash can remove a child that exited during startup from `jobs -p` and
+    # skip it in `wait -n`, while retaining its status for `wait <pid>`.
+    # Check saved PIDs before rejecting an empty job table or waiting again.
+    for _candidate_pid in "${!DYN_TRACKED_WORKERS[@]}"; do
+        if ! kill -0 "$_candidate_pid" 2>/dev/null; then
+            _pid="$_candidate_pid"
+            wait "$_pid" || _rc=$?
+            break
+        fi
+    done
+    if [[ -z "$_pid" ]]; then
+        if ! jobs -p | grep -q .; then
+            echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
+            exit 1
+        fi
+        if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+            # `-p VAR` reports which child exited but needs bash 5.1+; the file's
+            # floor is 4.3, so fall back to a plain `wait -n` below.
+            wait -n -p _pid || _rc=$?
+        else
+            wait -n || _rc=$?
+        fi
+    fi
+    # Keep the generic message on all supported older Bash versions.
+    if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+        _pid=""
     fi
     # A child that had already been reaped before we got here is no longer in
     # the jobs table, and `wait -n` can then return a pid that is still up.
