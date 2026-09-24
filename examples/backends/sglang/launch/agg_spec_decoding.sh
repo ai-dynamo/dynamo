@@ -18,16 +18,8 @@ DRAFT_MODEL="Tengyunw/qwen3_8b_eagle3"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner "Launching Speculative Decoding (1 GPU)" "$MODEL" "$HTTP_PORT"
 
-# ---------------------------
-# 1. Frontend (Ingress)
-# ---------------------------
 python3 -m dynamo.frontend &
 
-
-# ---------------------------
-# 2. Speculative Main Worker
-# ---------------------------
-# This runs the main model with an EAGLE3 draft model for speculative decoding.
 # --enable-metrics exposes sglang:spec_* metrics on the worker system port.
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
 python3 -m dynamo.sglang \

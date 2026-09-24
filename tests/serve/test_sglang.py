@@ -163,6 +163,7 @@ sglang_configs = {
         directory=sglang_dir,
         script_name="agg_spec_decoding.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             # Also predownload the EAGLE3 draft: CI workers run HF_HUB_OFFLINE=True
             # and only the base cfg.model is auto-registered, so the draft repo
