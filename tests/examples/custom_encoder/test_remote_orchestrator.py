@@ -8,7 +8,15 @@ from typing import Any
 
 import pytest
 
-from examples.custom_encoder.remote.orchestrator import ExternalEncoderOrchestrator
+torch = pytest.importorskip("torch", reason="custom encoder tests require torch")
+
+from dynamo.vllm.multimodal_utils.custom_encoder.handoff import (  # noqa: E402
+    ExternalEncoderResult,
+)
+from examples.custom_encoder.remote.orchestrator import (  # noqa: E402
+    DummyClassifier,
+    ExternalEncoderOrchestrator,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -53,6 +61,16 @@ class _Generator:
         return self.completion
 
 
+class _Classifier:
+    def __init__(self, label: str = "class_a") -> None:
+        self.label = label
+        self.encoder_result: Mapping[str, Any] | None = None
+
+    def classify(self, encoder_result: Mapping[str, Any]) -> str:
+        self.encoder_result = encoder_result
+        return self.label
+
+
 async def test_orchestrator_prepares_then_completes_request() -> None:
     prepared_request = {
         "model": "generator-model",
@@ -63,12 +81,15 @@ async def test_orchestrator_prepares_then_completes_request() -> None:
         "token_ids": [7, 8],
         "index": 0,
         "finish_reason": "stop",
+        "engine_data": {"generator": "remote-vllm"},
     }
     handoff = _Handoff(prepared_request)
     generator = _Generator(completion)
+    classifier = _Classifier("class_b")
     orchestrator = ExternalEncoderOrchestrator(
         handoff,
         generator,
+        classifier,
         "generator-model",
     )
     request = {
@@ -79,25 +100,51 @@ async def test_orchestrator_prepares_then_completes_request() -> None:
 
     result = await orchestrator(request, context=context)
 
-    assert result is completion
+    assert result == {
+        **completion,
+        "engine_data": {
+            "generator": "remote-vllm",
+            "classifier_label": "class_b",
+        },
+    }
+    assert result is not completion
     assert handoff.request is request
     assert handoff.target_model == "generator-model"
+    assert classifier.encoder_result is prepared_request["encoder_result"]
     assert generator.request is prepared_request
     assert generator.context is context
 
 
 def test_orchestrator_requires_generator_model_name() -> None:
     with pytest.raises(ValueError, match="generator_model_name"):
-        ExternalEncoderOrchestrator(_Handoff({}), _Generator({}), "")
+        ExternalEncoderOrchestrator(_Handoff({}), _Generator({}), _Classifier(), "")
+
+
+@pytest.mark.parametrize(
+    ("first_feature", "expected_label"),
+    [(1.0, "class_a"), (-1.0, "class_b")],
+)
+def test_dummy_classifier_uses_encoder_features(
+    first_feature: float,
+    expected_label: str,
+) -> None:
+    encoder_result = ExternalEncoderResult.from_artifacts(
+        [torch.tensor([[first_feature, 2.0]], dtype=torch.float32)],
+        image_token_id=99,
+    )
+
+    assert DummyClassifier().classify(encoder_result.to_dict()) == expected_label
 
 
 async def test_orchestrator_forwards_text_only_request_without_encoding() -> None:
     completion = {"token_ids": [5], "index": 0, "finish_reason": "stop"}
     handoff = _Handoff({"unused": True})
     generator = _Generator(completion)
+    classifier = _Classifier()
     orchestrator = ExternalEncoderOrchestrator(
         handoff,
         generator,
+        classifier,
         "generator-model",
     )
     request = {"token_ids": [1, 2, 3]}
@@ -106,16 +153,23 @@ async def test_orchestrator_forwards_text_only_request_without_encoding() -> Non
 
     assert result is completion
     assert handoff.request is None
+    assert classifier.encoder_result is None
     assert generator.request == {"token_ids": [1, 2, 3], "model": "generator-model"}
 
 
 async def test_orchestrator_keeps_non_image_media_on_the_handoff_path() -> None:
-    prepared_request = {"model": "generator-model", "token_ids": [1]}
+    prepared_request = {
+        "model": "generator-model",
+        "token_ids": [1],
+        "encoder_result": {"opaque": "to-the-orchestrator"},
+    }
     handoff = _Handoff(prepared_request)
     generator = _Generator({"token_ids": [2], "index": 0, "finish_reason": "stop"})
+    classifier = _Classifier()
     orchestrator = ExternalEncoderOrchestrator(
         handoff,
         generator,
+        classifier,
         "generator-model",
     )
     request = {"token_ids": [1], "multi_modal_data": {"video_url": [{"Url": "v"}]}}
