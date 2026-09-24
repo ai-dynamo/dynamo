@@ -107,9 +107,9 @@ def test_each_selector_option_has_one_native_source_bundle() -> None:
         for key, body in blocks:
             assert EMBED.search(body), (name, key)
         assert all(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key) for key in ids), name
-        assert all(option["label"] and option["description"] for option in options), (
-            name
-        )
+        assert all(
+            option["label"] and option["description"] for option in options
+        ), name
         assert not re.search(r"</?(?:Tabs?|Accordion(?:Group)?)\b", text), name
         assert text.count("<ExampleSelector") == 1, name
         assert "hide-toc: true" in text, name
@@ -509,7 +509,6 @@ def test_experimental_diffusion_preserves_image_and_cache_requirements(
         assert env["HF_HUB_CACHE"] == mount["mountPath"] + "/hub"
 
 
-
 def diffusion_cards() -> list[tuple[dict[str, str], str]]:
     text = (EXAMPLES / "diffusion-overview.mdx").read_text()
     return [
@@ -570,16 +569,28 @@ def test_diffusion_overview_cards_match_the_dgd_models_and_backends() -> None:
         assert body.count("<a ") == 1
         assert "aria-label=" in body
         assert 'className="dynamo-diffusion-name"' in body
-        (footer,) = re.findall(
-            r'<div className="dynamo-diffusion-card-footer" aria-hidden="true">(.*?)</div>',
-            body,
+        assert "dynamo-diffusion-card-footer" not in body
+        header, _ = body.split('<p className="dynamo-diffusion-model">', 1)
+        (arrow,) = re.findall(
+            r'<span className="dynamo-diffusion-card-arrow" aria-hidden="true">(.*?)</span>',
+            header,
         )
-        assert footer == "<span>↗</span>"
+        assert arrow == "↗"
+        assert body.count('className="dynamo-diffusion-card-arrow"') == 1
+        assert "dynamo-diffusion-experimental" not in header
         (image,) = re.findall(r'<img[^>]+src="([^"]+)"', body)
         assert (page.parent / image).resolve().is_file()
         experimental = "agg_omni_audio" in source.name or "experimental" in source.parts
         assert attributes["data-experimental"] == str(experimental).lower()
-        assert ('className="dynamo-diffusion-experimental"' in body) == experimental
+        (chips,) = re.findall(
+            r'<div className="dynamo-diffusion-chips">(.*?)</div>', body, re.DOTALL
+        )
+        badge = (
+            '<span className="dynamo-diffusion-chip '
+            'dynamo-diffusion-experimental">Experimental</span>'
+        )
+        assert (badge in chips) == experimental
+        assert body.count("dynamo-diffusion-experimental") == int(experimental)
         assert "One GPU" not in body
         assert "Dynamo 1." not in body
         assert "validated" not in body.lower()
@@ -621,11 +632,15 @@ def test_diffusion_catalog_is_server_styled_accessible_and_responsive() -> None:
     assert "EXAMPLES_LAYOUT_CSS" in component
     assert "dangerouslySetInnerHTML" in component
     assert ".dark .dynamo-diffusion" in component
+    assert ".dynamo-diffusion-card-arrow" in component
+    assert "dynamo-diffusion-card-footer" not in component
     assert ":focus-visible" in component
     assert "prefers-reduced-motion" in component
     assert "@media (max-width:" in component
     assert ".dynamo-diffusion-card[hidden] { display: none !important; }" in component
-    assert "<DiffusionCatalogControls>{children}</DiffusionCatalogControls>" in component
+    assert (
+        "<DiffusionCatalogControls>{children}</DiffusionCatalogControls>" in component
+    )
     styles = (FERN / "components/examples-layout.ts").read_text()
     assert ".dynamo-diffusion" in styles
 
