@@ -114,7 +114,8 @@ pub enum WatchEvent {
     /// A key was deleted after the last snapshot.
     Delete(Key),
     /// The full bucket at one moment: the first event of every stream, possibly empty, and again
-    /// after the backend fell behind. It replaces any state held from earlier events.
+    /// after the backend fell behind. It replaces any state held from earlier events. The NATS
+    /// store is the exception: it sends no initial `Resync` and replays existing keys as `Put`.
     Resync(HashMap<Key, bytes::Bytes>),
 }
 
@@ -344,7 +345,8 @@ impl Manager {
     /// Returns a receiver for one snapshot of a bucket, and then for every later change.
     ///
     /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
-    /// bucket is empty.
+    /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
+    /// existing keys as [`WatchEvent::Put`] events.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
@@ -510,6 +512,9 @@ pub trait Bucket: Send + Sync {
     /// The first event is exactly one [`WatchEvent::Resync`] with every existing entry, empty for
     /// an empty bucket. Later events are changes that follow it, or a further `Resync` after the
     /// backend fell behind.
+    ///
+    /// The NATS store is the exception: it sends no initial `Resync` and replays existing keys as
+    /// [`WatchEvent::Put`] events. Discovery does not select it.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
