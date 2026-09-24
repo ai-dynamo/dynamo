@@ -3,10 +3,8 @@ package dynamo
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
-	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
@@ -22,7 +20,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -141,104 +138,6 @@ func ComponentNameBudget(component *v1beta1.DynamoComponentDeploymentSharedSpec)
 	return len(componentName)
 }
 
-func observeComponentPCSGReadiness(
-	ctx context.Context,
-	reader client.Reader,
-	pcs *grovev1alpha1.PodCliqueSet,
-	resourceName,
-	namespace,
-	component string,
-	dgdReplicas *int32,
-) (groveComponentReadiness, error) {
-	logger := log.FromContext(ctx)
-	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-	err := reader.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
-	if err != nil && !errors.IsNotFound(err) {
-		return groveComponentReadiness{}, fmt.Errorf("failed to get PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
-	}
-
-	// A cached group from a previous PCS instance cannot contribute readiness or status.
-	if errors.IsNotFound(err) || pcs == nil || !metav1.IsControlledBy(pcsg, pcs) {
-		status := v1beta1.ComponentReplicaStatus{
-			ComponentKind:  v1beta1.ComponentKindPodCliqueScalingGroup,
-			ComponentNames: []string{resourceName},
-		}
-		return groveComponentReadiness{status: status}.withResult(false, groveResourceNotFoundReason, v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-	}
-
-	// Reuse the native observation while retaining the component's requested capacity for cutover.
-	desiredReplicas := ptr.Deref(dgdReplicas, pcsg.Spec.Replicas)
-	componentReadiness := pcsgReadiness(pcsg, logger)
-	componentReadiness.revision.desiredReplicas = desiredReplicas
-	if !componentReadiness.revision.generationObserved {
-		return componentReadiness, nil
-	}
-
-	if pcsg.Spec.Replicas != desiredReplicas {
-		return componentReadiness.withResult(false, fmt.Sprintf("desired replicas=%d, PodCliqueScalingGroup spec replicas=%d", desiredReplicas, pcsg.Spec.Replicas), v1beta1.DGDReadyReasonUpdating), nil
-	}
-
-	acceptedPCSRevisionHash := getAcceptedPCSRevisionHash(pcs)
-	if acceptedPCSRevisionHash == nil {
-		return componentReadiness.withResult(false, "PodCliqueSet revision is not accepted", v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-	}
-	if pcsg.Status.CurrentPodCliqueSetGenerationHash == nil || *pcsg.Status.CurrentPodCliqueSetGenerationHash != *acceptedPCSRevisionHash {
-		return componentReadiness.withResult(false, "PodCliqueScalingGroup has not applied the current PodCliqueSet generation", v1beta1.DGDReadyReasonUpdating), nil
-	}
-
-	if desiredReplicas == 0 {
-		return componentReadiness.withResult(true, "", ""), nil
-	}
-
-	podCliqueList := &grovev1alpha1.PodCliqueList{}
-	if err := reader.List(
-		ctx,
-		podCliqueList,
-		client.InNamespace(namespace),
-		client.MatchingLabels{grovecommon.LabelPodCliqueScalingGroup: resourceName, commonconsts.KubeLabelDynamoComponent: component},
-	); err != nil {
-		logger.V(1).Info("Failed to get PodCliques for PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
-		return groveComponentReadiness{}, fmt.Errorf("failed to get PodCliques for PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
-	}
-
-	if len(podCliqueList.Items) == 0 {
-		logger.V(2).Info("Failed to find PodCliques for PodCliqueScalingGroup", "resourceName", resourceName)
-		return componentReadiness.withResult(false, groveResourceNotFoundReason, v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-	}
-
-	podCliquesByReplica := make(map[int][]grovev1alpha1.PodClique)
-
-	for _, clique := range podCliqueList.Items {
-		// Matching labels do not establish ownership of a recreated group's children.
-		if !metav1.IsControlledBy(&clique, pcsg) {
-			continue
-		}
-
-		index, err := strconv.Atoi(clique.Labels[grovecommon.LabelPodCliqueScalingGroupReplicaIndex])
-		if err != nil {
-			logger.V(1).Info("Failed to read PodClique metadata", "error", err, "resourceName", clique.Name)
-			return groveComponentReadiness{}, fmt.Errorf("failed to read PodClique metadata %s/%s: %w", namespace, clique.Name, err)
-		}
-		podCliquesByReplica[index] = append(podCliquesByReplica[index], clique)
-	}
-
-	for replica := int32(0); replica < desiredReplicas; replica++ {
-		cliques := podCliquesByReplica[int(replica)]
-		if len(cliques) == 0 {
-			return componentReadiness.withResult(false, fmt.Sprintf("%s: %s", resourceName, v1beta1.DGDReadyReasonSomeResourcesNotReady), v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
-		}
-
-		for i := range cliques {
-			cliqueReadiness := podCliqueReadiness(&cliques[i], logger)
-			if !cliqueReadiness.ready {
-				return componentReadiness.withResult(false, fmt.Sprintf("%s: %s", resourceName, cliqueReadiness.reason), cliqueReadiness.classification), nil
-			}
-		}
-	}
-
-	return componentReadiness, nil
-}
-
 // evaluateGroveComponents is the single per-component evaluation loop shared
 // by all public Grove readiness views.
 //
@@ -266,15 +165,7 @@ func evaluateGroveComponents(
 		var checkErr error
 		resourceName := GroveComponentResourceName(dgd, componentName)
 		if component.UsesPCSG() {
-			componentReadiness, checkErr = observeComponentPCSGReadiness(
-				ctx,
-				reader,
-				pcs,
-				resourceName,
-				dgd.Namespace,
-				componentName,
-				component.Replicas,
-			)
+			componentReadiness, checkErr = observePCSGReadiness(ctx, reader, resourceName, dgd.Namespace, logger)
 		} else {
 			componentReadiness, checkErr = observePodCliqueReadiness(ctx, reader, resourceName, dgd.Namespace, component.Replicas, logger)
 		}
@@ -692,12 +583,7 @@ func observePCSGReadiness(ctx context.Context, reader client.Reader, resourceNam
 		logger.V(1).Info("Failed to get PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
 		return groveComponentReadiness{}, fmt.Errorf("failed to get PodCliqueScalingGroup %s/%s: %w", namespace, resourceName, err)
 	}
-	return pcsgReadiness(pcsg, logger), nil
-}
 
-// pcsgReadiness observes a nonnil native scaling group without mutating it.
-func pcsgReadiness(pcsg *grovev1alpha1.PodCliqueScalingGroup, logger logr.Logger) groveComponentReadiness {
-	resourceName := pcsg.Name
 	desiredReplicas := pcsg.Spec.Replicas
 	availableReplicas := pcsg.Status.AvailableReplicas
 	updatedReplicas := pcsg.Status.UpdatedReplicas
@@ -739,26 +625,26 @@ func pcsgReadiness(pcsg *grovev1alpha1.PodCliqueScalingGroup, logger logr.Logger
 
 	if observedGeneration == nil {
 		logger.V(1).Info("PodCliqueScalingGroup observedGeneration is nil", "resourceName", resourceName)
-		return componentReadiness.withResult(false, groveObservedGenerationNilReason, v1beta1.DGDReadyReasonSomeResourcesNotReady)
+		return componentReadiness.withResult(false, groveObservedGenerationNilReason, v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
 	}
 
 	if *observedGeneration < generation {
 		logger.V(1).Info("PodCliqueScalingGroup spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
-		return componentReadiness.withResult(false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), v1beta1.DGDReadyReasonSomeResourcesNotReady)
+		return componentReadiness.withResult(false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), v1beta1.DGDReadyReasonSomeResourcesNotReady), nil
 	}
 
 	componentReadiness.status.ScheduledReplicas = &scheduledReplicas
 
 	if desiredReplicas == 0 {
 		// No replicas desired, so it's ready.
-		return componentReadiness.withResult(true, "", "")
+		return componentReadiness.withResult(true, "", ""), nil
 	}
 
 	// Fully ready: replicas exist, are updated, and are available. Checked
 	// first so a healthy PCSG is never mis-diagnosed as InsufficientCapacity
 	// when Grove does not populate scheduledReplicas on a ready group.
 	if replicas == desiredReplicas && updatedReplicas == desiredReplicas && availableReplicas == desiredReplicas {
-		return componentReadiness.withResult(true, "", "")
+		return componentReadiness.withResult(true, "", ""), nil
 	}
 
 	// Not ready: the explicit MinAvailableBreached scheduling condition,
@@ -773,26 +659,26 @@ func pcsgReadiness(pcsg *grovev1alpha1.PodCliqueScalingGroup, logger logr.Logger
 		(cond.Reason == groveconstants.ConditionReasonScheduledReplicasBelowMinAvailable ||
 			cond.Reason == legacyConditionReasonInsufficientScheduledPCSGReplicas) {
 		logger.V(1).Info("PodCliqueScalingGroup MinAvailableBreached reports insufficient capacity", "resourceName", resourceName, "reason", cond.Reason, "message", cond.Message)
-		return componentReadiness.withResult(false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), v1beta1.DGDReadyReasonInsufficientCapacity)
+		return componentReadiness.withResult(false, fmt.Sprintf("min-available breached (%s): %s", cond.Reason, cond.Message), v1beta1.DGDReadyReasonInsufficientCapacity), nil
 	}
 	if scheduledReplicas > 0 && scheduledReplicas < desiredReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup partially scheduled", "resourceName", resourceName, "desired", desiredReplicas, "scheduled", scheduledReplicas)
-		return componentReadiness.withResult(false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduledReplicas, desiredReplicas), v1beta1.DGDReadyReasonInsufficientCapacity)
+		return componentReadiness.withResult(false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduledReplicas, desiredReplicas), v1beta1.DGDReadyReasonInsufficientCapacity), nil
 	}
 
 	if desiredReplicas != updatedReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
-		return componentReadiness.withResult(false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), v1beta1.DGDReadyReasonUpdating)
+		return componentReadiness.withResult(false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas), v1beta1.DGDReadyReasonUpdating), nil
 	}
 
 	if replicas != desiredReplicas {
 		logger.V(1).Info("PodCliqueScalingGroup performing rolling update", "resourceName", resourceName, "desired", desiredReplicas, "replicas", replicas)
-		return componentReadiness.withResult(false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), v1beta1.DGDReadyReasonUpdating)
+		return componentReadiness.withResult(false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas), v1beta1.DGDReadyReasonUpdating), nil
 	}
 
 	// Scheduled and rolled out, but not enough available replicas.
 	logger.V(1).Info("PodCliqueScalingGroup not ready", "resourceName", resourceName, "desired", desiredReplicas, "available", availableReplicas)
-	return componentReadiness.withResult(false, fmt.Sprintf("scheduled but available=%d/%d", availableReplicas, desiredReplicas), v1beta1.DGDReadyReasonPodsNotReady)
+	return componentReadiness.withResult(false, fmt.Sprintf("scheduled but available=%d/%d", availableReplicas, desiredReplicas), v1beta1.DGDReadyReasonPodsNotReady), nil
 }
 
 // specToGroveTopologyConstraint converts a deployment-level topology constraint
