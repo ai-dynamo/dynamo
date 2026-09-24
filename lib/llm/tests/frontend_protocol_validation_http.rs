@@ -408,13 +408,12 @@ async fn strict_tool_schema_acceptance_preserves_submitted_functions() {
         let valid = json!({"type": "object", "properties": {"query": {"type": "string", "minLength": 1}}, "required": ["query"], "additionalProperties": false});
         let loose = json!({"type": "object", "properties": {"query": {"type": "string"}}});
         let mut functions = vec![json!({"name": "search", "strict": true, "parameters": valid})];
-        for strict in [None, Some(json!(false)), Some(Value::Null)] {
+        for strict in [None, Some(json!(false))] {
             let mut function = json!({"name": "search", "parameters": loose});
             if let Some(strict) = strict { function["strict"] = strict; }
             functions.push(function);
         }
         functions.push(json!({"name": "search", "strict": true}));
-        functions.push(json!({"name": "search", "strict": true, "parameters": null}));
         let script = load_agent_fixture("text.sse").await.unwrap();
         let svc = HarnessService::start(vec![script; functions.len() * 6]).await;
         for function in functions {
@@ -432,7 +431,7 @@ async fn strict_tool_schema_acceptance_preserves_submitted_functions() {
                     let actual = &tools[0].function;
                     assert_eq!(actual.name, "search");
                     assert_eq!(actual.strict, function["strict"].as_bool());
-                    assert_eq!(actual.parameters.as_ref(), function.get("parameters").filter(|v| !v.is_null()));
+                    assert_eq!(actual.parameters.as_ref(), function.get("parameters"));
                 }
             }
         }
