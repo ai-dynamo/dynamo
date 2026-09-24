@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
@@ -132,14 +132,18 @@ impl EppRouter {
 
         if peer_ready.is_some() {
             reflector.wait_until_ready().await?;
+            // Every initial worker must register (its ZMQ listener buffering)
+            // before the peer dump is fetched; a failure would open an event
+            // gap, so abort startup instead of recovering over it.
             for worker in reflector.ready_workers() {
-                if let Err(e) = selector
+                let worker_id = worker.worker_id;
+                selector
                     .service
                     .upsert_worker(worker_request(worker, &defaults))
                     .await
-                {
-                    tracing::warn!(error = %e, "failed to pre-register worker for bootstrap");
-                }
+                    .with_context(|| {
+                        format!("pre-registering initial worker {worker_id} for bootstrap")
+                    })?;
             }
         }
 
