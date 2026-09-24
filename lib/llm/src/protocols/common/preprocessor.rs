@@ -325,6 +325,10 @@ pub struct PreprocessedRequest {
     /// immutable prompt behind `Arc` makes cloning the token storage constant-time;
     /// paths that append generated tokens use `Arc::make_mut`.
     #[builder(setter(into))]
+    #[serde(
+        serialize_with = "serialize_token_ids",
+        deserialize_with = "deserialize_token_ids"
+    )]
     pub token_ids: Arc<Vec<TokenIdType>>,
 
     /// Base64-encoded PyTorch tensor containing pre-computed embeddings
@@ -521,6 +525,80 @@ pub struct PreprocessedRequest {
 /// The handoff payload is engine-opaque but must be a JSON object at every hop;
 /// reject arrays/scalars here so a non-conforming (e.g. cross-language)
 /// producer fails fast instead of leaking a malformed shape downstream.
+/// `DYN_TOKEN_IDS_AS_BYTES=1`: put `token_ids` on the request plane as one packed
+/// little-endian int32 blob instead of a sequence. On a binary codec (msgpack) the
+/// Python worker then receives `bytes` and never allocates one Python int per
+/// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
+/// (JSON) keep the sequence form. Deserialization accepts both forms.
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    std::env::var("DYN_TOKEN_IDS_AS_BYTES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+});
+
+fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *TOKEN_IDS_AS_BYTES && !serializer.is_human_readable() {
+        let mut buf = Vec::with_capacity(ids.len() * 4);
+        for id in ids.iter() {
+            buf.extend_from_slice(&id.to_le_bytes());
+        }
+        return serializer.serialize_bytes(&buf);
+    }
+    ids.serialize(serializer)
+}
+
+fn deserialize_token_ids<'de, D>(deserializer: D) -> Result<Arc<Vec<TokenIdType>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct TokenIdsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for TokenIdsVisitor {
+        type Value = Vec<TokenIdType>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a sequence of token ids or packed little-endian int32 bytes")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            while let Some(id) = seq.next_element::<TokenIdType>()? {
+                out.push(id);
+            }
+            Ok(out)
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            if v.len() % 4 != 0 {
+                return Err(E::custom(
+                    "packed token_ids byte length is not a multiple of 4",
+                ));
+            }
+            Ok(v.chunks_exact(4)
+                .map(|c| TokenIdType::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        }
+
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            self.visit_bytes(&v)
+        }
+    }
+
+    deserializer.deserialize_any(TokenIdsVisitor).map(Arc::new)
+}
+
 fn deserialize_optional_object<'de, D>(
     deserializer: D,
 ) -> Result<Option<serde_json::Value>, D::Error>
