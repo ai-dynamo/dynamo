@@ -27,9 +27,6 @@ func validateSelectedPropSyncGraph(
 
 	// Reject malformed references across every chain before evaluating relationships between valid members.
 	for chainIndex, chain := range chains {
-		if len(chain) < 2 {
-			return nil, fmt.Errorf("%s %d must contain at least two partition IDs", subject, chainIndex)
-		}
 		for _, partitionID := range chain {
 			if _, present := partitionPositions[partitionID]; !present {
 				return nil, fmt.Errorf("%s %d references missing partition ID %d", subject, chainIndex, partitionID)
@@ -74,9 +71,6 @@ func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
 		return fmt.Errorf("LPU-only runtime requires exactly one selected prop-sync chain, got %d", len(b.SelectedPropSyncChains))
 	}
 	chain := b.SelectedPropSyncChains[0]
-	if len(chain) < 2 {
-		return fmt.Errorf("LPU-only selected prop-sync chain %s must contain at least two partition ids", formatPropSyncChain(chain))
-	}
 
 	// Locate the selected chain in normalized physical partition order.
 	firstSelected := sort.Search(len(b.Partitions), func(index int) bool {

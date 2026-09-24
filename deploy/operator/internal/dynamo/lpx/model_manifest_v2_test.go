@@ -51,6 +51,8 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 		{name: "duplicate LPU partition ID", wantErr: "repeats LPU partition ID 1"},
 		{name: "topology metadata node-count mismatch", wantErr: "deployment.numLpuNodes = 2, but partition extents require 1 LPU nodes"},
 		{name: "partial build", wantErr: "partSelect builds are not supported"},
+		{name: "empty selected prop-sync chain", wantErr: "deployment.selectedPropSyncChains[0] must contain at least two partitionIds"},
+		{name: "singleton selected prop-sync chain", wantErr: "deployment.selectedPropSyncChains[0] must contain at least two partitionIds"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -65,6 +67,10 @@ func TestNormalizeBuildSnapshotRejectsInvalidHXArtifacts(t *testing.T) {
 				fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
 			case "partial build":
 				fixture.partSelect = true
+			case "empty selected prop-sync chain":
+				fixture.selectedPropSyncChains = [][]uint32{{}}
+			case "singleton selected prop-sync chain":
+				fixture.selectedPropSyncChains = [][]uint32{{1}}
 			}
 			snapshot := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 
