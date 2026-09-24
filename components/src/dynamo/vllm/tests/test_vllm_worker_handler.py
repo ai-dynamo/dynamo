@@ -2043,21 +2043,72 @@ class TestRLAdminRouteHardening:
             )
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("load_format", ["modelexpress", "mx"])
-    @pytest.mark.parametrize("chain", ["RL", " rl "])
+    @pytest.mark.parametrize(
+        ("load_format", "raw_chain", "desired"),
+        [
+            ("modelexpress", "RL", "policy-7"),
+            ("mx", " rl ", "policy-8"),
+        ],
+    )
     async def test_modelexpress_rl_startup_declares_the_desired_version(
-        self, monkeypatch, load_format, chain
+        self, monkeypatch, load_format, raw_chain, desired
     ):
-        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", chain)
-        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", " policy-7 ")
+        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", raw_chain)
+        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", f" {desired} ")
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_envs",
+            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_rl_envs",
+            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID=desired),
+            raising=False,
+        )
 
         handler = self._constructed_handler(load_format)
 
         assert await handler.get_weight_version({}) == {
             "status": "ok",
-            "version": "policy-7",
+            "version": desired,
             "version_declared": True,
         }
+
+    @pytest.mark.asyncio
+    async def test_startup_version_stays_undeclared_without_rl_loader_support(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", "RL")
+        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", "policy-7")
+        monkeypatch.setattr(mod, "_modelexpress_envs", None, raising=False)
+        monkeypatch.setattr(mod, "_modelexpress_rl_envs", None, raising=False)
+
+        handler = self._constructed_handler("modelexpress")
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    def test_startup_version_reads_declared_load_format_directly(self, monkeypatch):
+        config = _make_config(enable_multimodal=False)
+        config.engine_args = SimpleNamespace()
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_envs",
+            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_rl_envs",
+            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID="policy-7"),
+            raising=False,
+        )
+
+        with pytest.raises(AttributeError):
+            mod._modelexpress_startup_weight_version(config)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -2067,7 +2118,6 @@ class TestRLAdminRouteHardening:
             ("modelexpress", None, "policy-7"),
             ("modelexpress", "INFERENCE", "policy-7"),
             ("modelexpress", "RL", None),
-            ("modelexpress", "RL", "  "),
             # Without the ModelExpress loader, the environment says nothing about weights.
             ("auto", "RL", "policy-7"),
         ],
@@ -2075,14 +2125,18 @@ class TestRLAdminRouteHardening:
     async def test_startup_version_stays_undeclared_without_the_rl_loader(
         self, monkeypatch, load_format, chain, desired
     ):
-        for name, value in (
-            ("MX_LOAD_STRATEGY_CHAIN", chain),
-            ("MX_REFIT_DESIRED_VERSION_UID", desired),
-        ):
-            if value is None:
-                monkeypatch.delenv(name, raising=False)
-            else:
-                monkeypatch.setenv(name, value)
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_envs",
+            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN=chain or "INFERENCE"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            mod,
+            "_modelexpress_rl_envs",
+            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID=desired),
+            raising=False,
+        )
 
         handler = self._constructed_handler(load_format)
 

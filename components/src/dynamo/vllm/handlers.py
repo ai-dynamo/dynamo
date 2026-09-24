@@ -33,6 +33,15 @@ from typing import (
 
 import numpy as np
 import torch
+
+try:
+    from modelexpress import envs as _modelexpress_envs
+    from modelexpress_rl import envs as _modelexpress_rl_envs
+except ModuleNotFoundError as exc:
+    if exc.name not in {"modelexpress", "modelexpress_rl"}:
+        raise
+    _modelexpress_envs = None
+    _modelexpress_rl_envs = None
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -166,20 +175,25 @@ _WEIGHT_VERSION_UNDECLARED: Final = object()
 
 
 def _modelexpress_startup_weight_version(config: Config) -> Any:
-    """Return the weight version ModelExpress installed at startup, if known.
+    """Return the version enforced by the ModelExpress RL startup loader.
 
-    With a ModelExpress load format and MX_LOAD_STRATEGY_CHAIN=RL, the loader
-    fails engine initialization unless every rank loaded
-    MX_REFIT_DESIRED_VERSION_UID, so a constructed handler serves that version.
-    The default INFERENCE chain ignores the desired version, so any other
-    configuration leaves the version undeclared.
+    ModelExpress releases without the RL startup policy do not expose its
+    configuration module and leave the version undeclared. When the policy is
+    available, its environment modules provide the same parsed values used by
+    the loader. The RL loader fails engine initialization unless every rank
+    loads the desired version, so a subsequently constructed handler serves
+    that version.
     """
-    desired = os.environ.get("MX_REFIT_DESIRED_VERSION_UID", "").strip()
-    chain = os.environ.get("MX_LOAD_STRATEGY_CHAIN", "").strip().upper()
-    load_format = getattr(config.engine_args, "load_format", None)
-    if desired and chain == "RL" and load_format in MX_LOAD_FORMATS:
-        return desired
-    return _WEIGHT_VERSION_UNDECLARED
+    load_format = config.engine_args.load_format
+    if (
+        load_format not in MX_LOAD_FORMATS
+        or _modelexpress_envs is None
+        or _modelexpress_rl_envs is None
+        or _modelexpress_envs.MX_LOAD_STRATEGY_CHAIN != "RL"
+    ):
+        return _WEIGHT_VERSION_UNDECLARED
+    desired = _modelexpress_rl_envs.MX_REFIT_DESIRED_VERSION_UID
+    return desired if desired is not None else _WEIGHT_VERSION_UNDECLARED
 
 
 def build_prompt_tokens_details(
