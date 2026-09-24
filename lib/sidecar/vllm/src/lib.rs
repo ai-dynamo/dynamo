@@ -3,6 +3,11 @@
 
 //! Dynamo sidecar for vLLM's released native gRPC API.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/src/lanes.rs"]
+mod test_support;
+
 mod args;
 mod client;
 mod convert;
@@ -18,3 +23,10 @@ pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+use dynamo_sidecar_testkit::fixtures as unit_fixtures;
+
+#[cfg(test)]
+#[path = "../../testkit/tests/support/fixtures/vllm.rs"]
+mod unit_vllm_fixtures;

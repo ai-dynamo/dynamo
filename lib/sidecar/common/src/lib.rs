@@ -3,6 +3,11 @@
 
 //! Shared infrastructure for Rust sidecars.
 
+#[cfg(test)]
+#[macro_use]
+#[path = "../../testkit/src/lanes.rs"]
+mod test_lanes;
+
 mod args;
 mod endpoint;
 mod error;
@@ -25,3 +30,7 @@ pub use error::{
     protocol_error, status_to_dynamo,
 };
 pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error_chain};
+
+#[cfg(test)]
+#[path = "transport/tests.rs"]
+mod unit_common_transport;

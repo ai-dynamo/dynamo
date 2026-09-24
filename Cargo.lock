@@ -3213,6 +3213,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "dynamo-sidecar-common",
+ "dynamo-sidecar-testkit",
  "futures",
  "prost-types 0.14.3",
  "serde_json",

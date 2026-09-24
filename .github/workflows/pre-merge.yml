@@ -383,6 +383,8 @@ jobs:
   rust-tests:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'
+    env:
+      SIDECAR_TEST_LANE: ${{ github.event_name == 'pull_request' && 'pre-merge' || 'post-merge' }}
     runs-on:
       group: Fastchecker
     strategy:
@@ -434,7 +436,21 @@ jobs:
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      shell: bash
+      run: |
+        if [[ '${{ matrix.dir }}' == '.' ]]; then
+          python3 lib/sidecar/testkit/run.py --workspace-tests --lane "$SIDECAR_TEST_LANE"
+        else
+          cargo test --locked --all-targets
+        fi
+    - name: Run sidecar CPU tests without engines or external networking
+      if: matrix.dir == '.'
+      run: |
+        artifacts=$(mktemp -d)
+        python3 lib/sidecar/testkit/run.py --suite unit --lane "$SIDECAR_TEST_LANE" --export "$artifacts"
+        cp lib/sidecar/testkit/run.py "$artifacts/run.py"
+        docker build -f lib/sidecar/testkit/CPU.Dockerfile -t sidecar-cpu-tests "$artifacts"
+        docker run --rm --network none sidecar-cpu-tests --suite unit --lane "$SIDECAR_TEST_LANE"
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}
