@@ -150,6 +150,7 @@ class ConfigModifierProtocol(Protocol):
         num_gpus_per_node: int | None = None,
     ) -> dict:
         ...
+
     @classmethod
     def set_config_backend_framework(cls, config: dict, backend: str) -> dict:
         ...
@@ -734,6 +735,7 @@ class BaseConfigModifier:
             )
         component.replicas = replicas
         return cfg.model_dump()
+
     @classmethod
     def set_config_backend_framework(cls, config: dict, backend: str) -> dict:
         """Sets the top-level spec.backendFramework once per DGD -- unlike

@@ -147,19 +147,19 @@ def test_backend_framework_is_written_into_the_dgd_spec() -> None:
     for backend in ("vllm", "sglang", "trtllm"):
         candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend=backend, strategy="tp")
         result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
-        assert result.dgd["spec"]["backendFramework"] == backend, (
-            f"{backend}: spec.backendFramework missing or wrong: {result.dgd['spec']}"
-        )
+        assert (
+            result.dgd["spec"]["backendFramework"] == backend
+        ), f"{backend}: spec.backendFramework missing or wrong: {result.dgd['spec']}"
 
 
 def test_backend_framework_set_once_per_dgd_not_per_disagg_role() -> None:
-    """[P3 review fix] The name asserts "once per DGD, not per disagg role"
-    but the body only checked the resulting value -- a bug that called the
+    """The name asserts "once per DGD, not per disagg role", so the test
+    must check more than the resulting value -- a bug that called the
     setter once per role (prefill, then decode) with the same backend would
-    have produced an identical final value and passed silently. Spying on
-    the real classmethod (wraps=, so materialization still runs for real)
-    makes the test check what its name promises: exactly one call for the
-    whole DGD, regardless of how many worker roles it has.
+    produce an identical final value and pass silently. Spying on the real
+    classmethod (wraps=, so materialization still runs for real) makes the
+    test check what its name promises: exactly one call for the whole DGD,
+    regardless of how many worker roles it has.
     """
     from dynamo.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
 
