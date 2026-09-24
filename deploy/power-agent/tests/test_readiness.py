@@ -21,6 +21,7 @@ never see a torn mix and no lock is required.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import socket
 import threading
@@ -41,6 +42,46 @@ def _bare_agent() -> PowerAgent:
     agent.metrics = MagicMock()
     agent._last_good_cycle = 0.0
     return agent
+
+
+@contextlib.contextmanager
+def _readyz_server(agent: PowerAgent):
+    """Run the agent's real readiness server on an ephemeral port.
+
+    Patches `READYZ_PORT` rather than hardcoding 8081 so the test is
+    parallel-safe and cannot collide with anything already bound on the host.
+    `_start_readyz_server` reads the module constant on each call.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    with patch.object(power_agent, "READYZ_PORT", port):
+        server = agent._start_readyz_server()
+    try:
+        yield port
+    finally:
+        # Stop the daemon thread's serve_forever and release the listener, so
+        # the suite does not accumulate one bound port per test.
+        server.shutdown()
+        server.server_close()
+
+
+def _http_get_readyz(port: int, path: str = "/readyz") -> tuple[int, str]:
+    """Issue a real HTTP GET against the readiness server."""
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+        sock.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n".encode()
+        )
+        chunks = []
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+    raw = b"".join(chunks).decode("utf-8")
+    head, _, body = raw.partition("\r\n\r\n")
+    status = int(head.split("\r\n", 1)[0].split(" ")[1])
+    return status, body
 
 
 def _get_readyz(agent: PowerAgent, path: str = "/readyz") -> tuple[str, str]:
@@ -67,8 +108,6 @@ class TestReadinessEndpoint(unittest.TestCase):
         status, body = _get_readyz(agent)
 
         self.assertTrue(status.startswith("503"))
-        # The age in the body is what makes a 503 diagnosable with
-        # `kubectl exec ... curl` and no log access.
         self.assertEqual(body, "not-ready last_good_cycle_age_s=none\n")
 
     def test_ready_immediately_after_a_successful_cycle(self):
@@ -201,14 +240,22 @@ class TestReadinessServer(unittest.TestCase):
 
     def test_serves_with_prometheus_disabled(self):
         """Readiness must not be optional, so it is deliberately NOT served
-        from the Prometheus server, which `--prometheus-port=0` disables."""
+        from the Prometheus server, which `--prometheus-port=0` disables.
+
+        This one goes over a real socket: driving `_readyz_app` directly would
+        not exercise the separate server at all, and the separateness IS the
+        property under test.
+        """
         agent = _bare_agent()
         # prometheus_port=0 → PowerAgentMetrics starts no HTTP server at all.
         agent.metrics = power_agent.PowerAgentMetrics(0)
-
-        self.assertTrue(_get_readyz(agent)[0].startswith("503"))
         agent._last_good_cycle = time.monotonic()
-        self.assertTrue(_get_readyz(agent)[0].startswith("200"))
+
+        with _readyz_server(agent) as port:
+            status, body = _http_get_readyz(port)
+
+        self.assertEqual(status, 200)
+        self.assertTrue(body.startswith("ok last_good_cycle_age_s="))
 
     def test_bind_collision_is_fatal_at_startup(self):
         """A bind failure must propagate out of `run()` uncaught so the process
@@ -217,20 +264,23 @@ class TestReadinessServer(unittest.TestCase):
         full `_shutdown_cleanup` restore sweep on the way out.
 
         The pre-bind uses the WILDCARD address, not loopback: a loopback-only
-        collision with a wildcard bind is kernel-dependent.
+        collision with a wildcard bind is kernel-dependent. The PORT is
+        ephemeral rather than the literal 8081, so the test cannot collide with
+        a real listener on the host and is safe to run in parallel;
+        `_start_readyz_server` reads `READYZ_PORT` on each call.
         """
         agent = _bare_agent()
         agent.reconcile_once = MagicMock(return_value=True)
 
         occupier = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        occupier.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            occupier.bind(("", power_agent.READYZ_PORT))
+            occupier.bind(("", 0))
             occupier.listen(1)
+            port = occupier.getsockname()[1]
 
-            with patch.object(power_agent.signal, "signal"), patch.object(
-                power_agent, "_shutdown_cleanup"
-            ) as cleanup:
+            with patch.object(power_agent, "READYZ_PORT", port), patch.object(
+                power_agent.signal, "signal"
+            ), patch.object(power_agent, "_shutdown_cleanup") as cleanup:
                 with self.assertRaises(OSError):
                     agent.run()
 
@@ -250,6 +300,30 @@ class TestReadinessServer(unittest.TestCase):
                 handler.log_message('"%s" %s %s', "GET /readyz HTTP/1.1", "200", "-")
 
         self.assertEqual(captured.getvalue(), "")
+
+    def test_handler_drops_stalled_connections(self):
+        """The server is single-threaded and `StreamRequestHandler.timeout`
+        defaults to None, so `handle()` would block in `rfile.readline()` for as
+        long as an established client withheld its request line — stalling every
+        kubelet probe behind it and taking the pod NotReady."""
+        self.assertIsNotNone(power_agent._QuietWSGIHandler.timeout)
+        self.assertGreater(power_agent._QuietWSGIHandler.timeout, 0)
+
+    def test_stalled_client_does_not_block_a_later_probe(self):
+        """The behavioural half of the timeout: a connected client that sends
+        nothing must not prevent the next request from being served."""
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        with patch.object(power_agent._QuietWSGIHandler, "timeout", 0.2):
+            with _readyz_server(agent) as port:
+                staller = socket.create_connection(("127.0.0.1", port), timeout=5)
+                try:
+                    status, _ = _http_get_readyz(port)
+                finally:
+                    staller.close()
+
+        self.assertEqual(status, 200)
 
     def test_server_thread_is_a_daemon(self):
         """So it does not hold the process open during shutdown. Readiness keeps
