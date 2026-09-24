@@ -42,14 +42,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_matrix_uses_both_age_directions_without_candidate_controls():
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
+    major, minor = map(int, DEFAULT_RELEASE_LINE.split("."))
+    previous = [releases[f"{major}.{minor - age}"] for age in (1, 2)]
     pairs = version_matrix(
         releases, DEFAULT_RELEASE_LINE, "candidate-fe", "candidate-wk"
     )
     assert [(p.frontend, p.worker) for p in pairs] == [
-        (releases["1.5"]["frontend"], "candidate-wk"),
-        ("candidate-fe", releases["1.5"]["worker"]),
-        (releases["1.4"]["frontend"], "candidate-wk"),
-        ("candidate-fe", releases["1.4"]["worker"]),
+        (previous[0]["frontend"], "candidate-wk"),
+        ("candidate-fe", previous[0]["worker"]),
+        (previous[1]["frontend"], "candidate-wk"),
+        ("candidate-fe", previous[1]["worker"]),
     ]
 
 
@@ -66,12 +68,15 @@ def test_release_catalog_covers_configured_n_minus_one_and_two():
 
 def test_matrix_names_missing_release_catalog_entry():
     releases = json.loads((ROOT / "tests/deploy/n2/releases.json").read_text())
+    major, minor = map(int, DEFAULT_RELEASE_LINE.split("."))
+    missing = f"{major}.{minor - 1}"
+    releases.pop(missing)
 
     with pytest.raises(ValueError) as exc_info:
-        version_matrix(releases, "1.7", "candidate-fe", "candidate-wk")
+        version_matrix(releases, DEFAULT_RELEASE_LINE, "candidate-fe", "candidate-wk")
 
-    assert "release line 1.7" in str(exc_info.value)
-    assert "missing: 1.6" in str(exc_info.value)
+    assert f"release line {DEFAULT_RELEASE_LINE}" in str(exc_info.value)
+    assert f"missing: {missing}" in str(exc_info.value)
 
 
 @pytest.mark.parametrize("scenario", ["chat", "embedding"])
