@@ -560,9 +560,21 @@ def test_router_decisions_sglang_disagg_eagle(
             "max_tokens": 128,
             "temperature": 0.0,
         },
-        # SGLang always takes the bootstrap path: decode can emit its first
-        # token before prefill completion is recorded, so the estimated KV
-        # transfer latency may be 0.
+        # enable_bootstrap=True skips the kv_transfer_estimated_latency_ms > 0
+        # check, which does not hold for SGLang. SGLang disagg always uses the
+        # bootstrap flow:
+        #   1. The router sends the request to a prefill worker.
+        #   2. The prefill worker replies at once with its bootstrap address,
+        #      before prefill has finished.
+        #   3. The router dispatches the request to a decode worker, so
+        #      prefill and decode now run in parallel.
+        #   4. The decode worker pulls the KV cache from the prefill worker and
+        #      emits its first token.
+        #   5. The prefill worker's response stream ends. Only now does the
+        #      router record prefill completion.
+        # The latency is (decode first token time - prefill completion time),
+        # clamped at 0. Steps 4 and 5 race, and when the first token arrives
+        # first the latency is exactly 0, so the > 0 check fails intermittently.
         test_kwargs={"enable_bootstrap": True, "require_kv_hit": True},
         post_check=_assert_decode_workers_speculated,
     )
