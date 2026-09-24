@@ -6,12 +6,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
+import pytest
+
 from dynamo.profiler.sweeper.candidate_selector import (
     ObjectiveSpec,
     ParetoGoal,
     ScalarGoal,
     update_selection,
 )
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
 
 
 @dataclass(frozen=True)
