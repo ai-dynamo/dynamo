@@ -76,6 +76,8 @@ def _make_handler(stage_types=("diffusion",)):
     # BaseOmniHandler.__init__ is mocked out in tests; recreate LoRA state attrs
     # expected by BaseWorkerHandler helpers called by OmniHandler.
     handler._lora_state = LoRAState()
+    handler._paused = False
+    handler._pause_lock = asyncio.Lock()
     handler.loaded_loras = handler._lora_state.loaded_loras
     handler._lora_load_locks = handler._lora_state.lora_load_locks
     handler._lora_load_locks_guard = handler._lora_state.lora_load_locks_guard

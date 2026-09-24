@@ -2619,7 +2619,12 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             return
 
         lock = self._get_lora_lock(lora_request.lora_name)
-        async with lock:
+        async with lock, self._pause_lock:
+            if self._paused:
+                raise RuntimeError(
+                    f"Cannot admit LoRA request '{lora_request.lora_name}' while "
+                    "generation is paused"
+                )
             # The adapter may have been unloaded or reloaded at a different path
             # while this request waited. Look it up again while holding the lock.
             admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)

@@ -85,6 +85,18 @@ def _parallel_config_without(*excluded_fields):
     return dataclasses.make_dataclass("LegacyDiffusionParallelConfig", fields)
 
 
+def test_init_initializes_pause_state():
+    config = _make_config()
+    with (
+        patch.object(BaseOmniHandler, "_build_omni_kwargs", return_value={}),
+        patch("dynamo.vllm.omni.base_handler.AsyncOmni", return_value=MagicMock()),
+    ):
+        handler = BaseOmniHandler(None, config, {})
+
+    assert handler._paused is False
+    assert not handler._pause_lock.locked()
+
+
 class TestDiffusionParallelConfigCoverage:
     def test_all_diffusion_parallel_config_fields_covered(self):
         """Every DiffusionParallelConfig field must be in OmniParallelKwargs, engine_args, or _SKIP_FIELDS.

@@ -511,6 +511,49 @@ async def test_lora_unload_blocks_keep_pause_until_active_request_drains(monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+async def test_lora_admission_waits_for_pause_and_rejects_when_paused():
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
+    pause_started = asyncio.Event()
+    allow_pause = asyncio.Event()
+    generation_started = asyncio.Event()
+
+    async def _pause_generation(**_kwargs):
+        pause_started.set()
+        await allow_pause.wait()
+
+    async def _generate(_lora_request):
+        generation_started.set()
+        yield SimpleNamespace()
+
+    handler.engine_client.pause_generation = AsyncMock(side_effect=_pause_generation)
+    pause_task = asyncio.create_task(handler.pause_generation({"mode": "keep"}))
+    await pause_started.wait()
+
+    admission = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterA"),
+        _generate,
+    )
+    admission_task = asyncio.create_task(anext(admission))
+    await asyncio.sleep(0)
+
+    assert not generation_started.is_set()
+    assert not admission_task.done()
+
+    allow_pause.set()
+    pause_result = await pause_task
+    assert pause_result["status"] == "ok"
+    with pytest.raises(RuntimeError, match="generation is paused"):
+        await admission_task
+
+    assert handler._lora_state.active_requests == {}
+    assert not generation_started.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_legacy_unload_cancellation_does_not_unregister_active_lora(
     monkeypatch,
 ):
