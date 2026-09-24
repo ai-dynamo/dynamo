@@ -166,22 +166,38 @@ def test_wait_any_exit_reports_worker_that_exited_during_startup(
         assert UNNAMED in result.stdout, result.stdout
 
 
-@pytest.mark.parametrize("failure_first", [False, True])
-def test_wait_any_exit_prefers_startup_failure_over_success(
-    failure_first: bool,
-) -> None:
-    workers = [("frontend", 0), ("prefill", 7)]
-    if failure_first:
-        workers.reverse()
-    launch = "\n".join(
-        f"(exit {code}) & dyn_track_worker {label}\n{label}_pid=$!"
-        for label, code in workers
-    )
+def test_wait_any_exit_prefers_startup_failure_over_success(tmp_path: Path) -> None:
+    """Launch order does not determine the associative array's traversal order.
+
+    Assign exit codes after registering both PIDs so the successful child is
+    considered first. Stopping at the first completed child must fail this test.
+    """
+    first_pipe = tmp_path / "first-worker"
+    second_pipe = tmp_path / "second-worker"
+    os.mkfifo(first_pipe)
+    os.mkfifo(second_pipe)
     result = _run_script(
         f"""
-        {launch}
-        wait "$frontend_pid" || :
-        wait "$prefill_pid" || :
+        exec 3<> {shlex.quote(str(first_pipe))}
+        exec 4<> {shlex.quote(str(second_pipe))}
+        (read -r code <&3; exit "$code") & dyn_track_worker first
+        first_pid=$!
+        (read -r code <&4; exit "$code") & dyn_track_worker second
+        second_pid=$!
+        tracked_pids=("${{!DYN_TRACKED_WORKERS[@]}}")
+        if [[ "${{tracked_pids[0]}}" == "$first_pid" ]]; then
+            dyn_track_worker frontend "$first_pid"
+            dyn_track_worker prefill "$second_pid"
+            printf '0\\n' >&3
+            printf '7\\n' >&4
+        else
+            dyn_track_worker frontend "$second_pid"
+            dyn_track_worker prefill "$first_pid"
+            printf '7\\n' >&3
+            printf '0\\n' >&4
+        fi
+        wait "$first_pid" || :
+        wait "$second_pid" || :
         wait_any_exit
         """
     )
