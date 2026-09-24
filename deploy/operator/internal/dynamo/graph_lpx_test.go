@@ -304,7 +304,6 @@ func TestLPXInputRevision(t *testing.T) {
 		{"shared/annotations", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Annotations = map[string]string{"workload": "new"} }},
 		{"shared/environment", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Env = []corev1.EnvVar{{Name: "SHARED", Value: "new"}} }},
 		{"shared/priority", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.PriorityClassName = "inference" }},
-		{"shared/backend", true, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
 		{"shared/topology", true, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "cluster", PackDomain: "rack"}
 		}},
@@ -315,6 +314,7 @@ func TestLPXInputRevision(t *testing.T) {
 			d.Spec.Restart = &v1beta1.Restart{ID: "restart-selected"}
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"decode"}}
 		}},
+		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
 		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
 		{"ignored/ordinary-image", false, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "prefill:next"}}}}

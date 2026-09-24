@@ -128,7 +128,6 @@ type lpxInputRevisionPayload struct {
 	PropagatedAnnotations map[string]string
 	Environment           []corev1.EnvVar `json:"Env"`
 	PriorityClass         string
-	BackendFramework      string
 	TopologyConstraint    *v1beta1.SpecTopologyConstraint
 	RestartToken          string `json:"Restart"`
 	ProviderOverride      *v1beta1.ProviderOverride
@@ -178,7 +177,6 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 		PropagatedAnnotations: annotations,
 		Environment:           dgd.Spec.Env,
 		PriorityClass:         dgd.Spec.PriorityClassName,
-		BackendFramework:      dgd.Spec.BackendFramework,
 		TopologyConstraint:    dgd.Spec.TopologyConstraint,
 		RestartToken:          restart,
 		ProviderOverride:      dgd.Spec.ProviderOverride,
