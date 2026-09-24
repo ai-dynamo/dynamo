@@ -111,13 +111,16 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
 	if currentReplicas != adapter.Spec.Replicas {
-		// Update the component's replicas in DGD.
+		// Use a strategic merge patch to update only the target component's replicas.
+		// This avoids racing with the DGD controller's Status().Update by not touching
+		// the entire DGD object or its resourceVersion.
+		base := dgd.DeepCopy()
 		component.Replicas = &adapter.Spec.Replicas
 
-		if err := r.Update(ctx, dgd); err != nil {
-			logger.Error(err, "Failed to update DGD")
-			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "UpdateFailed", "Update",
-				"Failed to update DGD %s: %v", dgd.Name, err)
+		if err := r.Patch(ctx, dgd, client.MergeFrom(base)); err != nil {
+			logger.Error(err, "Failed to patch DGD")
+			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "PatchFailed", "Patch",
+				"Failed to patch DGD %s: %v", dgd.Name, err)
 			return ctrl.Result{}, err
 		}
 
