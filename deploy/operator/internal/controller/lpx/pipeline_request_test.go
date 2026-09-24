@@ -77,7 +77,6 @@ func TestImplicitV2LPXConductorlessGroveIdentityPublishesRequest(t *testing.T) {
 	deployment, dgd, registry := newLPXTestDGD(t, lpx.PipelineLPX)
 	reconciler, desired := newPreparedLPXTestReconciler(t, registry, ctx, deployment, dgd)
 	require.Empty(t, desired.plan.ConductorTemplate)
-	require.Empty(t, desired.plan.ConductorClique)
 	require.NotEmpty(t, desired.plan.CyborgClique)
 
 	objects := lpxMaterializedObjects(t, reconciler, deployment, dgd, desired)

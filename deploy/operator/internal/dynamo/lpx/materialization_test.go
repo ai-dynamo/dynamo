@@ -60,9 +60,10 @@ func TestPlanMaterializationBounds(t *testing.T) {
 			t.Log("Validate every role's Grove name budget and the last replica's Pod hostnames")
 			lastReplica := plan.ForReplica(plan.Replicas - 1)
 			hostnames := make([]string, 0, test.models+1)
-			if lastReplica.ConductorClique != "" {
+			if plan.ConductorTemplate != "" {
 				require.Equal(t, "cond", plan.ConductorTemplate)
-				hostnames = append(hostnames, materializedPodHostname(lastReplica.ConductorClique, 0))
+				clique := materializedCliqueNameForReplica(plan.LPXScalingGroup, plan.ConductorTemplate, lastReplica.ReplicaIndex)
+				hostnames = append(hostnames, materializedPodHostname(clique, 0))
 				require.LessOrEqual(t, len(pcsName)+len(lpxScalingGroupTemplateName)+len(plan.ConductorTemplate),
 					commonconsts.MaxCombinedGroveResourceNameLength)
 			}
@@ -139,7 +140,8 @@ func TestWorkloadNames(t *testing.T) {
 
 				t.Log("Keep Grove's combined names and the last replica's Pod hostnames valid")
 				last := scoped.ForReplica(scoped.Replicas - 1)
-				require.Empty(t, validation.IsDNS1123Label(materializedPodHostname(last.ConductorClique, 0)))
+				clique := materializedCliqueNameForReplica(scoped.LPXScalingGroup, scoped.ConductorTemplate, last.ReplicaIndex)
+				require.Empty(t, validation.IsDNS1123Label(materializedPodHostname(clique, 0)))
 				require.LessOrEqual(t, len(pcsName)+len(scoped.ScalingGroupTemplate)+len(scoped.ConductorTemplate), commonconsts.MaxCombinedGroveResourceNameLength)
 				for _, agent := range last.Agents {
 					require.LessOrEqual(t, len(pcsName)+len(scoped.ScalingGroupTemplate)+len(agent.TemplateName), commonconsts.MaxCombinedGroveResourceNameLength)

@@ -1772,7 +1772,8 @@ func TestLPXCorrectsTopLevelReplicaDrift(t *testing.T) {
 	extraGroup.Name = grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: pcs.Name, Replica: 1}, desired.plan.ScalingGroupTemplate)
 	extraGroup.UID = types.UID(extraGroup.Name + "-uid")
 	extraGroup.Labels[grovecommon.LabelPodCliqueSetReplicaIndex] = "1"
-	extraClique := getResource[*grovev1alpha1.PodClique](t, objects, desired.plan.ConductorClique).DeepCopy()
+	conductorName := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: 0}, desired.plan.ConductorTemplate)
+	extraClique := getResource[*grovev1alpha1.PodClique](t, objects, conductorName).DeepCopy()
 	extraClique.Name = grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: extraGroup.Name, Replica: 0}, desired.plan.ConductorTemplate)
 	extraClique.UID = types.UID(extraClique.Name + "-uid")
 	extraClique.Labels[grovecommon.LabelPodCliqueSetReplicaIndex] = "1"
@@ -3327,7 +3328,8 @@ func TestIndependentLPXWorkloadsScaleAndReportReadiness(t *testing.T) {
 
 	t.Log("A missing role in the second workload leaves the first workload's readiness intact")
 	clique := &grovev1alpha1.PodClique{}
-	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: child.Namespace, Name: secondPlan.ConductorClique}, clique))
+	conductorName := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: secondPlan.LPXScalingGroup, Replica: int(secondPlan.ReplicaIndex)}, secondPlan.ConductorTemplate)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKey{Namespace: child.Namespace, Name: conductorName}, clique))
 	require.NoError(t, r.Delete(t.Context(), clique))
 	_, err = r.Reconcile(t.Context(), key)
 	require.NoError(t, err)

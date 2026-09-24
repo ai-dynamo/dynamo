@@ -42,7 +42,6 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	require.Equal(t, "test-pcs-0-lpx", plan.LPXScalingGroup)
 	require.Equal(t, "cond", plan.ConductorTemplate)
 	require.Empty(t, plan.CyborgTemplate)
-	require.NotEmpty(t, plan.ConductorClique)
 
 	t.Log("Scale Nova workloads without changing their model or workload digest")
 	for _, replicas := range []int32{2, 10, 12, 123} {

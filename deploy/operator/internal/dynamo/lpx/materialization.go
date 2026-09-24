@@ -49,8 +49,6 @@ type MaterializationPlan struct {
 	ResourcePrefix string
 	// PodCliqueSetName is the actual PCS used for every generated child address.
 	PodCliqueSetName string
-	// ConductorClique is the materialized conductor PodClique name, if present.
-	ConductorClique string
 	// ConductorTemplate is the conductor PodClique template name, if present.
 	ConductorTemplate string
 	// Agents contains the expected materialized Agent identities.
@@ -137,9 +135,6 @@ func (p *MaterializationPlan) ForReplica(index int32) *MaterializationPlan {
 	out.Agents = slices.Clone(p.Agents)
 
 	// Materialize this replica beneath the same Grove scaling-group identity.
-	if p.ConductorTemplate != "" {
-		out.ConductorClique = materializedCliqueNameForReplica(p.LPXScalingGroup, p.ConductorTemplate, index)
-	}
 	for agentIndex, agent := range out.Agents {
 		out.Agents[agentIndex].CliqueName = materializedCliqueNameForReplica(
 			p.LPXScalingGroup,
