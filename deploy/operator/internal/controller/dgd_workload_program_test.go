@@ -174,21 +174,10 @@ func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) 
 						return tt.updateErr
 					},
 				}).
-				WithObjects(&nvidiacomv1beta1.DynamoGraphDeployment{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dgd",
-						Namespace: "default",
-					},
-				}).
 				Build()
 			recorder := events.NewFakeRecorder(1)
-			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, DirectClient: kubeClient, Recorder: recorder}
-			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd",
-					Namespace: "default",
-				},
-			}
+			reconciler := &DynamoGraphDeploymentReconciler{Client: kubeClient, Recorder: recorder}
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			result := newWorkloadProgramResult(dgd)
 			result.Eventf(corev1.EventTypeNormal, "Transition", "transition persisted")
 
@@ -291,13 +280,9 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 				return reconcileErr
 			},
 		}).
-		WithObjects(&nvidiacomv1beta1.DynamoGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
-		}).
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		DirectClient:  kubeClient,
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{},
 	}
@@ -385,7 +370,6 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
-		DirectClient:  kubeClient,
 		Recorder:      events.NewFakeRecorder(10),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: true}},
