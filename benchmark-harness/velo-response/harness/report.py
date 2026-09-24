@@ -48,6 +48,13 @@ def measurements(result):
             out['ethernet_' + bucket + '_percent'] = 100 * packets / eth_rx
     for counter in ('rx_discards_phy', 'tx_discards_phy', 'rx_out_of_buffer', 'RetransSegs'):
         out[counter + '_per_second'] = sum(v for k, v in d.items() if k.endswith('/' + counter)) / seconds
+    rdma_prefixes = tuple({key.split('/counters/', 1)[0] + '/'
+                           for key in n['wire_packets_per_second'] if key.startswith('/rdma/')})
+    for counter in ('port_rcv_errors', 'port_xmit_discards', 'out_of_buffer',
+                    'packet_seq_err', 'local_ack_timeout_err', 'req_transport_retries_exceeded'):
+        out['rdma_' + counter + '_per_second'] = sum(
+            value for key, value in d.items()
+            if key.startswith(rdma_prefixes) and key.endswith('/' + counter)) / seconds
     fe = result['telemetry']['frontend-system-telemetry.jsonl']['processes']
     out['frontend_mean_rss_gib'] = sum(v['rss_bytes']['mean'] for k, v in fe.items() if k.startswith('frontend')) / 2**30
     client = result['telemetry'].get('aiperf-system-telemetry.jsonl', {}).get('processes', {})
