@@ -178,7 +178,6 @@ func stampDeploymentIdentity(deployment *v1alpha1.LPXGraphDeployment, pcs *grove
 		if *annotations == nil {
 			*annotations = make(map[string]string)
 		}
-		delete(*annotations, lpx.DGDGenerationAnnotation)
 		maps.Copy(*annotations, identity)
 	}
 	stampOwnerLabel := func(object client.Object) {

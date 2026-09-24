@@ -17,8 +17,6 @@ import (
 const (
 	// WorkloadDigestAnnotation records the immutable Dynamo workload projection digest on rendered objects.
 	WorkloadDigestAnnotation = "scheduling.lpu.nvidia.com/dynamo-workload-digest"
-	// DGDGenerationAnnotation records the source DGD generation on rendered objects.
-	DGDGenerationAnnotation = "scheduling.lpu.nvidia.com/dgd-generation"
 	// DGDUIDAnnotation records the source DGD UID on rendered objects.
 	DGDUIDAnnotation = "scheduling.lpu.nvidia.com/dgd-uid"
 	// WorkloadModeAnnotation records the projected LPX workload mode on rendered objects.

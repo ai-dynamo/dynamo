@@ -17,7 +17,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -535,7 +534,6 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	updated, err := handoff.Reconcile(t.Context(), source)
 	require.NoError(t, err)
 	require.NotEqual(t, beforeChild.Spec.InputRevision, updated.Spec.InputRevision)
-	require.Equal(t, strconv.FormatInt(source.Generation, 10), updated.Annotations[lpx.DGDGenerationAnnotation])
 	require.Equal(t, beforeChild.Status, updated.Status)
 	// Fake clients do not advance generations; the isolated API test covers that transition.
 	updated.Generation++

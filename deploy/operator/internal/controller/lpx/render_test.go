@@ -434,7 +434,7 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	dgd.Annotations["kai.scheduler/topology"] = "source-topology"
 	dgd.Spec.Annotations = map[string]string{
 		"kai.scheduler/topology": "explicit-topology",
-		lpx.DGDUIDAnnotation:     "stale", lpx.DGDGenerationAnnotation: "stale",
+		lpx.DGDUIDAnnotation:     "stale",
 	}
 	child.Annotations[dynamo.LPXRestartAnnotation] = restartToken
 	dgd.Generation++
@@ -471,7 +471,6 @@ func TestLPXRenderingMetadata(t *testing.T) {
 	for _, annotations := range annotationMaps {
 		require.Equal(t, string(metav1.GetControllerOf(child).UID), annotations[lpx.DGDUIDAnnotation])
 		require.Equal(t, string(child.UID), annotations[deploymentUIDAnnotation])
-		require.NotContains(t, annotations, lpx.DGDGenerationAnnotation)
 		require.NotContains(t, annotations, "lpx.nvidia.com/deployment-generation")
 		require.NotContains(t, annotations, "lpx.nvidia.com/input-revision")
 	}

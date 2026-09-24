@@ -970,7 +970,6 @@ func TestLPXWorkloadOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	afterSelected := resolveLPXTestWorkload(t, r.modelRegistry, t.Context(), child, dgd)
 	afterPCS := renderLPXTestPodCliqueSet(t, t.Context(), r, child, dgd, afterSelected)
 	require.Equal(t, beforePCS, afterPCS)
-	require.NotContains(t, afterPCS.Annotations, lpx.DGDGenerationAnnotation)
 	observed := make(map[string]*lpxv1alpha1.LPUPipelineRequest, len(beforeRequests.Items))
 	for i := range beforeRequests.Items {
 		request := &beforeRequests.Items[i]
@@ -1631,7 +1630,7 @@ func TestLPXReconcileUsesOneInputSnapshot(t *testing.T) {
 								return delegated.Update(ctx, dgd)
 							}
 							require.NoError(t, delegated.Get(ctx, client.ObjectKeyFromObject(child), child))
-							child.Annotations[lpx.DGDGenerationAnnotation] = "999"
+							metav1.SetMetaDataAnnotation(&child.ObjectMeta, "example.com/concurrent-edit", "changed")
 							return delegated.Update(ctx, child)
 						}
 					}
@@ -2653,7 +2652,7 @@ func newLPXTestDeployment(t *testing.T, dgd *v1beta1.DynamoGraphDeployment) *v1a
 	return &v1alpha1.LPXGraphDeployment{
 		TypeMeta: metav1.TypeMeta{APIVersion: v1alpha1.GroupVersion.String(), Kind: "LPXGraphDeployment"},
 		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace, UID: types.UID("lpx-" + string(dgd.UID)), Generation: 1,
-			Annotations:     map[string]string{lpx.DGDGenerationAnnotation: strconv.FormatInt(dgd.Generation, 10)},
+			Annotations:     map[string]string{},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(dgd, v1beta1.DynamoGraphDeploymentGVK)},
 		},
 		Spec: v1alpha1.LPXGraphDeploymentSpec{InputRevision: revision},

@@ -6,12 +6,10 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,7 +61,6 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 	}
 	child.Spec.InputRevision = revision
 	metav1.SetMetaDataAnnotation(&child.ObjectMeta, dynamo.LPXRestartAnnotation, restart)
-	metav1.SetMetaDataAnnotation(&child.ObjectMeta, lpx.DGDGenerationAnnotation, strconv.FormatInt(source.Generation, 10))
 	if exists {
 		err = r.client.Update(ctx, child)
 	} else {
