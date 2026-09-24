@@ -11,6 +11,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -288,8 +289,8 @@ func TestLPXForeignRequestNameIsNeverAdopted(t *testing.T) {
 	}
 }
 
-func TestLPXDeselectionWaitsForParentDeletion(t *testing.T) {
-	t.Log("Keep a published workload while its source removes the LPX component")
+func TestLPXDeletingSourcePreservesPublishedWorkload(t *testing.T) {
+	t.Log("Keep a published workload while the DGD is awaiting its own finalization")
 	child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
 	r, desired := newPreparedLPXTestReconciler(t, registry, t.Context(), child, dgd)
 	objects := lpxMaterializedObjects(t, r, child, dgd, desired)
@@ -298,14 +299,15 @@ func TestLPXDeselectionWaitsForParentDeletion(t *testing.T) {
 	pcs := findLPXTestPodCliqueSet(t, objects)
 	before := getTestPipelineRequest(t, t.Context(), r.Client, child.Namespace, desired.requests[0].Name)
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
-	dgd.Spec.Components = nil
+	commoncontroller.AddFinalizer(dgd)
 	require.NoError(t, r.Update(t.Context(), dgd))
+	require.NoError(t, r.Delete(t.Context(), dgd))
 
-	t.Log("Wait for the parent's deletion and GC without hashing empty LPX inputs or deleting the PCS")
+	t.Log("Stop publication without directly deleting the PCS or its requests")
 	for range 2 {
 		result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 		require.NoError(t, err)
-		require.Zero(t, result, "the source and child watches observe deselection")
+		require.Zero(t, result, "the source and child watches observe deletion")
 	}
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 	require.True(t, pcs.DeletionTimestamp.IsZero())

@@ -116,23 +116,6 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
-	// Removing LPX must not depend on ordinary workloads reconciling successfully.
-	var child *nvidiacomv1alpha1.LPXGraphDeployment
-	var err error
-	if !req.DGD.HasLPXComponent() {
-		child, err = p.lpx.Reconcile(ctx, req.DGD)
-		if err != nil {
-			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
-		}
-
-		// Do not keep reporting retired LPX capacity when ordinary reconciliation fails.
-		for name := range programResult.Status.Components {
-			if req.DGD.GetComponentByName(name) == nil {
-				delete(programResult.Status.Components, name)
-			}
-		}
-	}
-
 	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
@@ -187,6 +170,7 @@ func (p *groveProgram) Reconcile(
 	}
 
 	// Keep LPX creation and updates after ordinary reconciliation and restart selection.
+	var child *nvidiacomv1alpha1.LPXGraphDeployment
 	if req.DGD.HasLPXComponent() {
 		child, err = p.lpx.Reconcile(ctx, req.DGD)
 		if err != nil {
@@ -196,9 +180,6 @@ func (p *groveProgram) Reconcile(
 
 	result = mergeLPXChildStatus(req.DGD, child, result)
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
-	if child != nil && !child.DeletionTimestamp.IsZero() {
-		programResult.RequeueAfter = 5 * time.Second
-	}
 
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
 		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {

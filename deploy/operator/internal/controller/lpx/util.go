@@ -41,7 +41,7 @@ func getDynamoGraphDeployment(ctx context.Context, reader client.Reader, deploym
 		return nil, fmt.Errorf("DynamoGraphDeployment %q no longer has the referenced UID", owner.Name)
 	}
 
-	// The parent deletes the child on deselection; GC owns the remaining workload.
+	// Only an active LPX source authorizes publication; owner GC handles deletion.
 	if !dgd.DeletionTimestamp.IsZero() || !dgd.HasLPXComponent() {
 		return nil, nil
 	}

@@ -22,6 +22,7 @@ type dgdLPXHandoff struct {
 	client client.Client
 }
 
+// Reconcile requires a source that selects LPX.
 func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGraphDeployment) (*v1alpha1.LPXGraphDeployment, error) {
 	child := &v1alpha1.LPXGraphDeployment{}
 	err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child)
@@ -31,12 +32,6 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 	exists := err == nil
 	if exists && !metav1.IsControlledBy(child, source) {
 		return nil, fmt.Errorf("LPXGraphDeployment %q belongs to a different source; adoption is not supported", child.Name)
-	}
-	if !source.HasLPXComponent() {
-		if !exists {
-			return nil, nil
-		}
-		return child, r.deleteChild(ctx, child)
 	}
 	if exists && !child.DeletionTimestamp.IsZero() {
 		return child, nil
@@ -67,12 +62,4 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGra
 		err = r.client.Create(ctx, child)
 	}
 	return child, err
-}
-
-func (r *dgdLPXHandoff) deleteChild(ctx context.Context, child *v1alpha1.LPXGraphDeployment) error {
-	if !child.DeletionTimestamp.IsZero() {
-		return nil
-	}
-	uid, version := child.UID, child.ResourceVersion
-	return client.IgnoreNotFound(r.client.Delete(ctx, child, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}))
 }

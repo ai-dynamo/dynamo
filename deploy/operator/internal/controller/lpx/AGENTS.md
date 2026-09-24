@@ -42,7 +42,8 @@ SPDX-License-Identifier: Apache-2.0
 - LPRs have a controlling PCS owner reference with `blockOwnerDeletion: true`.
   Foreground PCS deletion keeps the owner present until blocking LPRs are gone.
   This is the supported lifecycle, not a guarantee against external orphaning.
-- The parent controller deletes the LPXGD when the DGD no longer selects LPX.
+- Admission prevents removing LPX components or changing them to non-LPX.
+  Deleting the DGD removes its LPXGD through owner garbage collection.
   A missing/deleting DGD or incomplete input handoff stops publication; it does
   not authorize cleanup. A DGD UID mismatch is an error. Disabled integration
   also leaves existing workloads intact.

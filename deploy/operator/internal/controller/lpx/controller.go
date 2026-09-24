@@ -132,7 +132,7 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		return ctrl.Result{}, err
 	}
 
-	// The parent owns deselection/deletion; a cache miss or delayed handoff is not cleanup authority.
+	// A cache miss or delayed handoff is not cleanup authority; owner GC handles deletion.
 	if dgd == nil {
 		setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the matching DynamoGraphDeployment")
 		return ctrl.Result{}, nil

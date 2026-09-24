@@ -668,70 +668,63 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 	}
 }
 
-func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		retainLPX bool
-		childGone bool
-	}{
-		{name: "remove"},
-		{name: "retain", retainLPX: true},
-		{name: "pending child already gone", childGone: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Edit a mixed DGD while ordinary shared-resource reconciliation will fail")
-			child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
-			if test.childGone {
-				require.NoError(t, kube.Delete(t.Context(), child))
-			} else {
-				child.Finalizers = []string{"test.example/child-cleanup"}
-				require.NoError(t, kube.Update(t.Context(), child))
-			}
-			if !test.retainLPX {
-				source.Spec.Components = nil
-			} else {
-				source.Spec.Components[0].Replicas = ptr.To(int32(2))
-			}
-			source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-				ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill,
-			})
-			source.Generation++
-			require.NoError(t, kube.Update(t.Context(), source))
-			source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
-			source.Status.Components = map[string]v1beta1.ComponentReplicaStatus{
-				"lpx": {Replicas: 1}, "prefill": {Replicas: 2},
-			}
-			if test.childGone {
-				source.Status.Components["lpx"] = v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodCliqueScalingGroup}
-			}
-			previousStatus := source.Status.DeepCopy()
-			program := (&DynamoGraphDeploymentReconciler{
-				Client: kube, Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
-				RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
-			}).newGroveProgram()
-
-			t.Log("Preserve the ordinary error while deleting only a deselected child")
-			result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
-			require.ErrorContains(t, err, "RBAC manager not initialized")
-			require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
-			stored := &v1alpha1.LPXGraphDeployment{}
-			if test.childGone {
-				require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored)))
-			} else {
-				require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
-				require.Equal(t, !test.retainLPX, !stored.DeletionTimestamp.IsZero())
-				require.Equal(t, child.Spec, stored.Spec)
-			}
-			require.Equal(t, previousStatus, &source.Status)
-			require.Equal(t, source.Status.Components["prefill"], result.Status.Components["prefill"])
-			if !test.retainLPX {
-				require.NotContains(t, result.Status.Components, "lpx")
-			} else {
-				require.Equal(t, source.Status.Components, result.Status.Components)
-			}
-			require.Equal(t, source.Status.Placement, result.Status.Placement)
-		})
+func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
+	t.Log("Reconcile an ordinary DGD while LPX child reads would fail")
+	source := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "ordinary", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
+			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
+		}}},
 	}
+	childReads := 0
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).WithObjects(source).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, delegated client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, child := obj.(*v1alpha1.LPXGraphDeployment); child {
+					childReads++
+					return apierrors.NewServiceUnavailable("child observation unavailable")
+				}
+				return delegated.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	program := (&DynamoGraphDeploymentReconciler{
+		Client: kube, Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
+	}).newGroveProgram()
+
+	t.Log("Reach the ordinary shared-resource error without depending on an LPX child")
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
+	require.Zero(t, childReads)
+}
+
+func TestLPXHandoffWaitsForSharedResourceReconciliation(t *testing.T) {
+	t.Log("Edit LPX capacity while shared-resource reconciliation will fail")
+	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
+	source.Spec.Components[0].Replicas = ptr.To(int32(2))
+	source.Generation++
+	require.NoError(t, kube.Update(t.Context(), source))
+	source.Status.Placement = &v1beta1.PlacementStatus{Score: ptr.To(0.92), State: v1beta1.PlacementScoreStateReported}
+	source.Status.Components = map[string]v1beta1.ComponentReplicaStatus{"lpx": {Replicas: 1}}
+	previousStatus := source.Status.DeepCopy()
+	program := (&DynamoGraphDeploymentReconciler{
+		Client: kube, Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
+	}).newGroveProgram()
+
+	t.Log("Preserve the child revision and component status while reporting the shared-resource error")
+	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.ErrorContains(t, err, "RBAC manager not initialized")
+	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
+	stored := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
+	require.True(t, stored.DeletionTimestamp.IsZero())
+	require.Equal(t, child.Spec, stored.Spec)
+	require.Equal(t, previousStatus, &source.Status)
+	require.Equal(t, source.Status.Components, result.Status.Components)
+	require.Equal(t, source.Status.Placement, result.Status.Placement)
 }
 
 func TestDGDCheckpointFinalizationLeavesLPXChildToGarbageCollection(t *testing.T) {
