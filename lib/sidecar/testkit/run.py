@@ -95,16 +95,7 @@ def inventory(output, framework):
                 "name": name,
                 "scenario": "::".join(parts[:-1]),
                 "lane": lane,
-                "category": (
-                    "common"
-                    if framework == "common"
-                    else "shared"
-                    if any(
-                        part == "shared" or part.startswith("unit_shared_")
-                        for part in parts
-                    )
-                    else "native"
-                ),
+                "category": "common" if framework == "common" else "native",
             }
         )
     names = [case["name"] for case in cases]

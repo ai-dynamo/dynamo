@@ -8,27 +8,30 @@ stack is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879) (DIS-2941,
 shared CPU foundation), [#15089](https://github.com/ai-dynamo/dynamo/pull/15089)
 (DIS-2942, isolated units), and
 [#15091](https://github.com/ai-dynamo/dynamo/pull/15091) (DIS-2943, additional
-vLLM integration). #15088 is superseded. The foundation is refreshed onto main
+vLLM integration). This draft is a separate alternative to #15089 on the same
+foundation base; the original PR remains unchanged. #15088 is superseded.
+The foundation is refreshed onto main
 `4a0547f8ba2675f14d50e48d6aec53b1bc3cf3e3`; pins remain vLLM 0.29.0 and
 `vllm-proto` 0.3.0. Shared Rust dependencies follow the refreshed base.
 
 ## Coverage at the foundation and unit boundaries
 
 The foundation's four families remain instantiated for both vLLM and SGLang.
-Shared unit bodies in `tests/unit/shared.rs` are instantiated for vLLM; SGLang
-unit setup remains a follow-up. Common production tests run once. The
-reorganized source retains 11 common tests, ten shared vLLM instances and 60
-native cases (81 total), all pre-merge. Native definitions live separately in
-`tests/unit/vllm.rs`; setup and fixtures contain no test cases. Compiled
-collection and execution confirmed this inventory; counts are not a quota.
+This alternative places unit cases beside their production owners: 11 common
+and 70 vLLM cases (81 total), all pre-merge. The ten formerly shared vLLM
+scenarios become ordinary local cases with the same inputs and assertions.
+SGLang units remain follow-up work. Common production tests run once; reusable
+fixtures and shared integration scenarios remain in testkit. Fresh compiled
+collection confirmed exact scenario/lane parity and all 81 exported-runner
+cases passed; counts describe observed coverage, not a quota.
 
-| Requirement / retained assertions | Owning layer | Disposition at #15089 |
+| Requirement / retained assertions | Owning layer | Disposition in this alternative |
 | --- | --- | --- |
 | R09/C4 tokens, terminal placement, length reason, usage and ignored post-terminal replay | #14879 shared streaming scenario in [conformance.rs](tests/conformance.rs) | Preserve both backend enrollments; retain nondefault model/connection setup and native observations. |
 | R11/C6/C7 opening failure, premature EOF, stream read error, exact delivered prefix and remote release | #14879 shared failure scenario | Preserve vLLM `Unknown` versus SGLang `EngineShutdown` EOF expectations and typed injected errors. |
 | R12/R14/C8 cancellation before native submission, while opening and during read; request A cancellation leaves B live | #14879 shared cancellation scenario | Preserve both backend enrollments, independent request controls, cancelled terminal/usage and successful completion of B. |
 | R13 active cleanup, cancelled terminal/usage, remote route release and repeated cleanup | #14879 shared cleanup scenario; vLLM isolated worker units | Move only vLLM's no-I/O before-start/idempotent-cleanup subsection after replacement validation. Preserve SGLang's original subsection and both active-stream checks. |
-| R01–R32 endpoint/configuration, conversion, validation and state transitions | #15089 [isolated units](UNITS.md) | Shared bodies and native exceptions retain mapped assertions; vLLM activated, SGLang/TRT unit setup deferred. |
+| R01–R32 endpoint/configuration, conversion, validation and state transitions | [Local isolated units](UNITS.md) | Common and vLLM cases retain mapped assertions beside production; SGLang/TRT unit setup deferred. |
 | Native request mapping, gRPC rank metadata, discovery/health, connection pool, decode cancellation, opaque handoff, media/Encode, LoRA and RL | Existing [vLLM library tests](../vllm/src/tests.rs) | Preserve transport/runtime assertions. Pure definitions and exact request-field assertions move only to their mapped isolated replacements. |
 | vLLM Mocker streaming/logprobs/usage, opaque prefill/decode, explicit cancellation of active scheduler work, KV relay/indexer | Existing [vLLM Mocker suite](../../mocker/servers/vllm/tests/sidecar.rs) | Retain all four cases at this boundary; replacement deletions belong to #15091. |
 | SGLang Mocker incremental tokens/logprobs/usage, opaque prefill/decode, Abort release, two-request cancellation isolation and shutdown | Existing [SGLang Mocker suite](../../mocker/servers/sglang/tests/sidecar.rs) | Retain all four cases and their distinct assertions. |
@@ -53,14 +56,32 @@ The five potential wire replacements are
 `cancellation_interrupts_pending_response_headers`,
 `sidecar_streams_mocker_tokens_logprobs_and_usage`, and
 `dropping_sidecar_stream_cancels_mocker_work` (which performs explicit stop).
-They remain at #15089. #15091 must map and validate their distinct assertions
-before removing them; moving this work between PRs is not a coverage reduction.
+They remain in #15089 and this alternative. #15091 must map and validate their
+distinct assertions before removing them; moving this work between PRs is not a coverage reduction.
 
 ## Validation and historical evidence
 
-The reorganized suite passed 81 isolated units (11 common, ten shared vLLM,
-60 native), both through the exported runner and in a CPU container with
-networking disabled, read-only root/artifacts and all capabilities dropped.
+Fresh local validation of this alternative confirmed exact parity for all 81
+scenario/lane pairs: 11 common and 70 native vLLM cases, all `pre_merge`. All 81
+exported-runner units and all 121 common/vLLM library tests (13 common, 108 vLLM,
+including those 81 units) passed. Five temporary runner checks also passed,
+including real Rust lane filtering and a synthetic workspace with custom/legacy
+targets. Eight testkit conformance, four SGLang Mocker and four vLLM Mocker tests
+passed. All 81 units also passed in a CPU container with `--network none`,
+`--read-only`, `--cap-drop=ALL`, `--security-opt no-new-privileges` and a read-only
+exported-artifact mount. Common/vLLM/testkit Clippy passed with
+`--all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`, pre-commit on
+all task files (including Black/Ruff), and CODEOWNERS coverage for new paths
+passed. Independent review found no assertion loss across the 81 cases.
+These results do not claim current-head GitHub CI, a full Dynamo workspace run,
+or native-engine/GPU execution.
+
+The following successful results were recorded at the original PR's
+`47ae1fb270` boundary, before relocation. They remain historical evidence.
+
+That baseline passed 81 isolated units (11 common, ten shared vLLM, 60 native),
+both through the exported runner and in a CPU container with networking
+disabled, read-only root/artifacts and all capabilities dropped.
 The full common/vLLM library suites passed 121 cases, including those 81 units.
 Eight testkit conformance, four vLLM Mocker and four SGLang Mocker cases also
 passed. Workspace formatting, runner Black/Ruff checks and targeted
@@ -74,7 +95,7 @@ inventory/export commands, lane semantics and assertion mapping.
 
 The previous `0857c0722e` revision passed the same 81 units with its former
 11 common / 28 shared / 42 native split, as well as the retained suites. That
-historical evidence is separate from the fresh validation above.
+historical evidence is separate from the `47ae1fb270` baseline above.
 
 Historically, on 2026-09-22, foundation `286d6fd5` passed eight conformance and
 eight retained Mocker cases with GPUs hidden. The previous unit boundary

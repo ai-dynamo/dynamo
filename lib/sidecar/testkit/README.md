@@ -18,14 +18,15 @@ and cleanup. Each runs against both frameworks, giving eight registered tests.
 TensorRT-LLM remains outside this increment because it has no corresponding
 Mocker server.
 
-The stack is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879) (this
-foundation), [#15089](https://github.com/ai-dynamo/dynamo/pull/15089) (isolated
-units), then [#15091](https://github.com/ai-dynamo/dynamo/pull/15091) (additional
-vLLM wire coverage and process/native integration). The later increments reuse
-this harness. The unit suite has common scenarios where sharing stays simple,
-alongside backend-specific cases, with vLLM activated first. A follow-up adds
-SGLang unit setup and enrollment. Existing SGLang wire cases and E2E allocation
-remain in place.
+The shared foundation is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879).
+This draft is a separate alternative to
+[#15089](https://github.com/ai-dynamo/dynamo/pull/15089), on the same foundation
+base, with unit tests beside the production code they exercise. The original
+PR remains unchanged. Additional vLLM wire, process and native integration
+remain in [#15091](https://github.com/ai-dynamo/dynamo/pull/15091).
+The unit suite covers common code and vLLM; SGLang units remain follow-up work.
+Existing shared integration scenarios, reusable fixtures, SGLang wire cases and
+E2E allocation remain in place.
 
 The testing strategy has two distinct execution paths. Pure unit tests call
 conversion or parsing functions directly. Tests of actual sidecar generation and
@@ -75,13 +76,14 @@ sidecar uses a dev-dependency to share common input builders in its unit tests.
 | `tests/support/{vllm,sglang}.rs` | Start each existing Mocker service, construct its real sidecar, delegate RPCs, and interpret native messages. |
 | `tests/conformance.rs` | Define the four shared scenarios and enroll each backend once, generating its four tests. |
 
-Wire adapters belong to the central integration suite. Isolated units instead
-include test-only sources beneath their production owner with `#[path]`, keeping
-private converters accessible. Shared unit bodies own the inputs, assertions
-and lane declarations; plain backend setup functions call production code.
-Native cases stay separate. Unit tests use neither a Mocker nor a general
-request/response adapter model. Common fixtures are reused through a test-only
-dependency on the testkit library; native fixtures remain test-only sources.
+Wire adapters belong to the central integration suite. Isolated units are
+ordinary `#[cfg(test)]` child modules beside their production owners, keeping
+private converters accessible. Small tests are inline; the larger transport and
+vLLM conversion modules use adjacent test files. Inputs, production calls and
+assertions live together, with no unit source-group macros or backend adapters.
+The only retained unit macro, `sidecar_test!` in `src/lanes.rs`, records each
+case's CI lane. Common fixtures remain a test-only testkit dependency; reusable
+native fixtures remain in `tests/support/fixtures/vllm.rs` for both layers.
 
 ## Request controls and observations
 
@@ -146,7 +148,7 @@ contract.
 
 | Future test | Where to add it | What to reuse or extend |
 |---|---|---|
-| Endpoint/configuration parsing and request conversion | `tests/unit/shared.rs` when simple sharing is possible; otherwise the backend case file | Common inputs, plain setup functions and direct production conversion; no server. |
+| Endpoint/configuration parsing and request conversion | The owning common or backend production module | Common inputs, plain setup functions and direct production conversion; no server. |
 | Shared stream, cancellation, or lifecycle behavior | A new scenario in the central integration suite | Both existing fixtures, per-request controls, and output assertions. |
 | Native malformed responses, logprob metadata, or handoff fields | Framework-specific tests in the central suite, or pure conversion tests | Native message observation and adapter-specific response overrides; keep exact wire fields visible. |
 | Discovery, readiness, or model metadata | Framework-specific service tests | Shared server lifetime; add controlled native discovery/health handlers when their tests are introduced. |
@@ -212,49 +214,46 @@ suite.
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-## Isolated unit framework
+## Isolated units beside production
 
-[#15089](https://github.com/ai-dynamo/dynamo/pull/15089) adds common-code tests,
-shared request/response/model/worker scenarios and native regressions. The case
-files are `tests/unit/shared.rs` and `tests/unit/vllm.rs`. Shared tests, including
-their lane declarations, are defined only in `shared.rs`; their registrations
-are kept out of the native case file.
+This alternative preserves the 81 isolated cases from #15089: 11 common and
+70 vLLM cases. The ten formerly shared vLLM scenarios now live in the vLLM
+modules that own their production calls and assertions. No assertion is removed
+by this relocation, and no SGLang unit coverage is claimed.
 
-`tests/unit/support/mod.rs` contains lane machinery, while
-`tests/unit/support/vllm.rs` supplies small native setup functions. Test-only
-hooks beneath the production owners include the appropriate source groups, so
-private functions remain private. Shared cases use existing production types
-and functions; no capability matrix or observation model is required.
+Common argument, endpoint and error units are inline in `common/src`; transport
+units live in `common/src/transport/tests.rs`, registered once by the common
+crate root to avoid duplicate collection through the two Tonic implementations.
+vLLM model, worker, JSON and LoRA units are inline; request/response cases and
+candidate checks live in `vllm/src/convert/{request_tests,response_tests}.rs`.
+The former `tests/unit/` tree is removed.
 
-Common fixtures, including `minimal_request`, live in `src/fixtures.rs`. Native
-builders live in `tests/support/fixtures/vllm.rs`, outside the unit directory so
-integration tests can use them too. SGLang/TensorRT-LLM case and support files
-will be added only when those unit suites are implemented.
-
-The existing four wire families and both retained Mocker suites remain. Only
-vLLM's before-start/repeated-cleanup wire subsection moves to its isolated
-replacement; SGLang's checks remain.
-
-Every governed unit declares its earliest CI lane with `sidecar_test!`:
+`src/lanes.rs` retains the small lane macro unchanged, included by both crate
+roots. Every governed unit declares its earliest CI lane with `sidecar_test!`:
 `pre_merge`, `post_merge` or `nightly`. Later lanes include earlier lanes. All
 current units are `pre_merge`; assigning a future test to `nightly` excludes it
-from pre-merge and post-merge execution. Suite, backend and lane are independent
-runner selections:
+from pre-merge and post-merge execution. Suite, backend and lane remain
+independent runner selections:
 
 ```sh
 python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge --list
 python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge
 ```
 
-The reorganized suite retains 81 test registrations: 11 common, ten shared
-scenarios instantiated for vLLM and 60 native cases. Compiled collection and
-execution confirmed that inventory, including an exported-binary CPU run with
-networking disabled. The retained library and integration suites also passed;
-detailed results and limitations are recorded in [UNITS.md](UNITS.md).
+Common fixtures, including `minimal_request`, remain in `src/fixtures.rs`.
+Native builders remain in `tests/support/fixtures/vllm.rs`, outside unit sources,
+so integration tests can use them too. The existing four wire families and both
+retained Mocker suites remain. Only vLLM's before-start/repeated-cleanup wire
+subsection has its isolated replacement; SGLang's checks remain.
 
-See [UNITS.md](UNITS.md) for the shared/native boundary, layout, lane semantics,
-compiled inventory/export commands and SGLang enrollment requirements.
-[COVERAGE.md](COVERAGE.md) records preserved integration coverage and historical
-execution; [DEVIATIONS.md](DEVIATIONS.md) records changes from the read-only DEP.
-Additional wire, process and native-engine work remains in
-[#15091](https://github.com/ai-dynamo/dynamo/pull/15091).
+Fresh validation preserved all 81 scenario/lane pairs and passed all 81
+exported-runner units, 121 common/vLLM library tests, eight testkit conformance
+and both four-case Mocker suites. All 81 units also passed in a CPU container
+with networking disabled; targeted Clippy, formatting and pre-commit passed.
+The runs at `47ae1fb270` belong to the original shared-unit layout and remain
+historical evidence. These results do not claim GitHub CI, a full Dynamo
+workspace run or native-engine/GPU execution.
+[UNITS.md](UNITS.md) records the source layout, assertion mapping, lane semantics
+and inventory/export commands. [COVERAGE.md](COVERAGE.md) records retained
+integration coverage and revision-specific execution;
+[DEVIATIONS.md](DEVIATIONS.md) records departures from the read-only DEP.

@@ -5,23 +5,8 @@
 
 #[cfg(test)]
 #[macro_use]
-#[path = "../../testkit/tests/unit/support/mod.rs"]
+#[path = "../../testkit/src/lanes.rs"]
 mod test_support;
-
-#[cfg(test)]
-#[macro_use]
-#[path = "../../testkit/tests/unit/shared.rs"]
-mod test_shared;
-
-#[cfg(test)]
-#[macro_use]
-#[path = "../../testkit/tests/unit/support/vllm.rs"]
-mod test_vllm_support;
-
-#[cfg(test)]
-#[macro_use]
-#[path = "../../testkit/tests/unit/vllm.rs"]
-mod test_vllm;
 
 mod args;
 mod client;

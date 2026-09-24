@@ -1245,36 +1245,9 @@ fn normalize_logprob(logprob: f32) -> f64 {
 }
 
 #[cfg(test)]
-mod unit_support {
-    pub(super) mod requests {
-        sidecar_vllm_support!(requests);
-    }
-    pub(super) mod responses {
-        sidecar_vllm_support!(responses);
-    }
-}
+#[path = "convert/request_tests.rs"]
+mod unit_requests;
 
 #[cfg(test)]
-mod unit_native_candidates {
-    sidecar_vllm_tests!(candidates);
-}
-
-#[cfg(test)]
-mod unit_shared_requests {
-    sidecar_shared_tests!(requests);
-}
-
-#[cfg(test)]
-mod unit_native_requests {
-    sidecar_vllm_tests!(requests);
-}
-
-#[cfg(test)]
-mod unit_shared_responses {
-    sidecar_shared_tests!(responses);
-}
-
-#[cfg(test)]
-mod unit_native_responses {
-    sidecar_vllm_tests!(responses);
-}
+#[path = "convert/response_tests.rs"]
+mod unit_responses;
