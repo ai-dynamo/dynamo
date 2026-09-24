@@ -121,7 +121,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="roles" type="[]ComponentRoleSpec">
   Named Pod-producing parts of a compound component, keyed by `name`. Multinode components must contain exactly one `leader` and one `worker`; omitted role counts default to `1` and `multinode.nodeCount - 1`, respectively. Omit the field to retain the implicit leader/worker layout.
 
-  LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Exactly one LPX component in the graph must declare a conductor role with an explicit template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
+  LPX components use `agent` for Agent Pods and `conductor` for the serving runtime. Independent LPX components each declare a conductor role with an explicit template. In a speculative pair, the draft has only an agent role and the target declares both roles. A hybrid engine's GPU runtime uses the conductor template.
 
   Standalone DCD roles cannot use LPX templates or DGD-only provider overrides. See [ComponentRoleSpec](full-api-reference.mdx#componentrolespec).
 </ParamField>
