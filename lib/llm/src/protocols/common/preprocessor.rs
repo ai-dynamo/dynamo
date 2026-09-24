@@ -464,6 +464,18 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
 
+    /// Opaque frontend-derived scope for partitioning backend `ImageLoader`
+    /// URL caches and Dynamo-owned image embedding caches. This does not
+    /// namespace engine KV caches.
+    ///
+    /// This is carried separately from `agent_context` because backends need
+    /// only the opaque cache scope, not agent lifecycle metadata.
+    /// The optional field is safe across rolling upgrades: older readers
+    /// ignore it and newer readers default it when an older frontend omits it.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_cache_scope: Option<String>,
+
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
     #[builder(default)]
