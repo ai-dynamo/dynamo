@@ -143,7 +143,9 @@ def test_scalar_publishes_only_new_best_candidates(
     assert "new best after round 1" in stdout
     assert "new best after round 2" not in stdout
     assert "new best after round 3" in stdout
-    assert (output_dir / "index.json").read_text() == """{
+    assert (
+        (output_dir / "index.json").read_text()
+        == """{
   "artifacts": [
     {
       "path": "qwen.yaml"
@@ -153,6 +155,7 @@ def test_scalar_publishes_only_new_best_candidates(
   "renderer": "direct"
 }
 """
+    )
 
 
 def test_scalar_ctrl_c_preserves_best_known_dgd(monkeypatch, tmp_path, capsys) -> None:

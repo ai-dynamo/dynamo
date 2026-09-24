@@ -20,7 +20,7 @@ import queue
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,9 @@ class SweeperEventPublisher:
             )
         self._run_uid = run_uid
         self._emitter = emitter
-        self._queue: "queue.Queue[_PendingEvent]" = queue.Queue(maxsize=pending_queue_size)
+        self._queue: "queue.Queue[_PendingEvent]" = queue.Queue(
+            maxsize=pending_queue_size
+        )
         self._sequence = 0
         self._sequence_lock = threading.Lock()
         self._dropped_warning_logged = False
@@ -104,7 +106,9 @@ class SweeperEventPublisher:
         if self._thread is not None:
             return
         self._thread = threading.Thread(
-            target=self._drain_loop, name=f"sweeper-event-publisher-{self._run_uid}", daemon=True
+            target=self._drain_loop,
+            name=f"sweeper-event-publisher-{self._run_uid}",
+            daemon=True,
         )
         self._thread.start()
 

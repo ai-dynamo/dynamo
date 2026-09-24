@@ -14,10 +14,7 @@ import time
 
 import pytest
 
-from dynamo.profiler.v2.sweeper_event_plane import (
-    SUBJECT_SUFFIX,
-    SweeperEventPublisher,
-)
+from dynamo.profiler.v2.sweeper_event_plane import SUBJECT_SUFFIX, SweeperEventPublisher
 
 
 class FakeEventEmitter:
@@ -145,7 +142,9 @@ def test_multiple_runs_get_independent_subjects():
     ) as pub_b:
         pub_a.emit("run.completed", {"outcome": "succeeded"})
         pub_b.emit("run.completed", {"outcome": "failed", "error": "boom"})
-        assert _wait_until(lambda: len(emitter_a.published) == 1 and len(emitter_b.published) == 1)
+        assert _wait_until(
+            lambda: len(emitter_a.published) == 1 and len(emitter_b.published) == 1
+        )
 
     assert emitter_a.published[0][0] == "sweeper.run-a.run_completed"
     assert emitter_b.published[0][0] == "sweeper.run-b.run_completed"

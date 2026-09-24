@@ -79,7 +79,9 @@ def test_multiple_subjects_are_independent():
     received_a = received_b = None
     deadline = time.monotonic() + 10.0
     try:
-        while time.monotonic() < deadline and (received_a is None or received_b is None):
+        while time.monotonic() < deadline and (
+            received_a is None or received_b is None
+        ):
             publisher.publish_subject(subject_a, payload_a)
             publisher.publish_subject(subject_b, payload_b)
             if received_a is None:

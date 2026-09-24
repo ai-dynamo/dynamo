@@ -206,7 +206,9 @@ def _start_event_publisher(namespace: str) -> SweeperEventPublisher | None:
         publisher = SweeperEventPublisher(new_run_uid(), emitter)
         publisher.start()
         return publisher
-    except Exception as exc:  # noqa: BLE001 -- fail open: progress events are best-effort
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 -- fail open: progress events are best-effort
         print(
             "dynamo-profiler-sweeper: event plane unavailable, continuing without "
             f"progress events: {exc}",
