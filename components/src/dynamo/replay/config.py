@@ -52,7 +52,18 @@ def lower_canonical_aic_timing(raw: dict[str, Any]) -> None:
     from aisimulate_core.sdk import ForwardPassPerfModelConfig
     from aisimulate_core.sdk.common import resolve_transfer_policy
 
-    config = timing["config"]
+    # Capacity lowering already consumed these controls into num_gpu_blocks.
+    config = {
+        key: value
+        for key, value in timing["config"].items()
+        if key
+        not in {
+            "gpu_memory_utilization",
+            "mem_fraction_static",
+            "free_gpu_memory_fraction",
+            "cuda_graph_reserved_bytes",
+        }
+    }
     fields = {
         "model": "aic_model_path",
         "system": "aic_system",

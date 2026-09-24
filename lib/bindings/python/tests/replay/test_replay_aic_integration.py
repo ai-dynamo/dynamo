@@ -121,7 +121,8 @@ def test_disaggregated_replay_uses_native_aic_engine() -> None:
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_canonical_aic_timing_runs_dynamo_replay(backend):
+@pytest.mark.parametrize("fixed_capacity", [True, False])
+def test_canonical_aic_timing_runs_dynamo_replay(backend, fixed_capacity):
     from aisimulate_core.sdk import ForwardPassPerfModelConfig
 
     from dynamo.replay import run_synthetic_trace_replay
@@ -133,11 +134,15 @@ def test_canonical_aic_timing_runs_dynamo_replay(backend):
         backend=backend,
         worker_type="aggregated",
     ).to_dict()
+    memory_field = (
+        "gpu_memory_utilization" if backend == "vllm" else "mem_fraction_static"
+    )
+    capacity = {"num_gpu_blocks": 1024} if fixed_capacity else {memory_field: 0.8}
     args = DynamoReplayRunner._engine_args(
         {
             "engine_type": backend,
             "enable_chunked_prefill": True,
-            "num_gpu_blocks": 1024,
+            **capacity,
             "timing_model": {"type": "external", "provider": "aic", "config": config},
         }
     )
