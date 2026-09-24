@@ -261,7 +261,7 @@ def update_dynamo_config_with_engine(
             "When using --disaggregation-mode prefill, you must explicitly "
             "provide --kv-transfer-config. Example:\n"
             "  --kv-transfer-config "
-            '\'{"kv_connector":"NixlConnector","kv_role":"kv_both"}\''
+            '\'{"kv_connector":"NixlConnector","kv_role":"kv_producer"}\''
         )
 
     # Clear connector list (no longer used for vLLM)
@@ -563,7 +563,7 @@ def _uses_dynamo_connector(engine_config: AsyncEngineArgs) -> bool:
     return False
 
 
-def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
+def _connector_to_kv_transfer_json(connectors: list[str], nixl_role: str) -> str:
     """Convert a legacy --connector list to the equivalent --kv-transfer-config JSON.
 
     Used in error messages to help users migrate.
@@ -581,7 +581,7 @@ def _connector_to_kv_transfer_json(connectors: list[str]) -> str:
             )
         elif c == "nixl":
             multi_connectors.append(
-                {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+                {"kv_connector": "NixlConnector", "kv_role": nixl_role}
             )
         elif c == "kvbm":
             multi_connectors.append(
@@ -630,9 +630,14 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
+    nixl_role = {
+        DisaggregationMode.PREFILL: "kv_producer",
+        DisaggregationMode.DECODE: "kv_consumer",
+    }.get(dynamo_config.disaggregation_mode, "kv_both")
+
     # Active connectors: show migration path
     if normalized:
-        equiv = _connector_to_kv_transfer_json(normalized)
+        equiv = _connector_to_kv_transfer_json(normalized, nixl_role)
         raise ValueError(
             "--connector is no longer supported for the vLLM backend. "
             "Use --kv-transfer-config instead.\n"
@@ -643,7 +648,7 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
     if env_connector is not None:
         env_values = [v.strip().lower() for v in env_connector.split() if v.strip()]
         if env_values and not all(v in ("none", "null") for v in env_values):
-            equiv = _connector_to_kv_transfer_json(env_values)
+            equiv = _connector_to_kv_transfer_json(env_values, nixl_role)
             raise ValueError(
                 "The DYN_CONNECTOR environment variable is no longer supported "
                 "for the vLLM backend. Use --kv-transfer-config instead.\n"

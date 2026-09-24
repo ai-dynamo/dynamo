@@ -43,7 +43,9 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-DEFAULT_VLLM_KV_TRANSFER_CONFIG = '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+DEFAULT_VLLM_KV_TRANSFER_CONFIG = (
+    '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
+)
 
 
 def _get_valued_arg(args: list[str], key: str) -> str | None:

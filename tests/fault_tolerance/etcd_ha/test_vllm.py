@@ -107,10 +107,11 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:
+            nixl_role = "kv_producer" if mode == WorkerMode.PREFILL else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(build_nixl_kv_transfer_config()),
+                    json.dumps(build_nixl_kv_transfer_config(nixl_role)),
                 ]
             )
 

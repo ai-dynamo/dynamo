@@ -229,7 +229,7 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
             "--disaggregation-mode",
             "decode",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
         ]
     )
 
@@ -242,7 +242,7 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
     assert "--disaggregation-mode" not in converted_args
     assert not any(arg.startswith("--disaggregation-mode=") for arg in converted_args)
     assert converted_args[converted_args.index("--kv-transfer-config") + 1] == (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
     )
 
 
@@ -264,7 +264,7 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     assert prefill_args[prefill_args.index("--disaggregation-mode") + 1] == "prefill"
     assert (
         prefill_args[prefill_args.index("--kv-transfer-config") + 1]
-        == '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+        == '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
     )
     assert decode_args[decode_args.index("--tensor-parallel-size") + 1] == "4"
     assert decode_args[decode_args.index("--disaggregation-mode") + 1] == "decode"
@@ -274,7 +274,7 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
 def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     """An explicit connector remains authoritative while worker roles are canonical."""
     custom_kv_config = (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both","kv_buffer_device":"cpu"}'
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
     )
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(

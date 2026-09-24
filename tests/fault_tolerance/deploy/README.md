@@ -405,7 +405,7 @@ System does NOT recover automatically
 
 #### vLLM Disaggregated Prefill Worker Resilience
 
-vLLM decode workers use `--kv-connector-role kv_both` by default, allowing them to handle both prefill and decode operations. When a prefill worker fails, decode workers automatically take over prefill requests, resulting in 100% success rate with minimal impact.
+vLLM decode workers use the NIXL `kv_consumer` role. If a prefill worker fails, the decode worker processes the full request locally, so no remote NIXL KV handoff is needed.
 
 **Expected Behavior:** Prefill worker failures don't cause request failures - this is vLLM's built-in fault tolerance, not a test issue.
 
