@@ -34,11 +34,14 @@ pub use config::{
     is_enabled, policy,
 };
 pub(crate) use integration::{
-    build_request_end_trace_state, finish_reason_metadata_handle, wrap_chat_request_end_stream,
+    build_request_end_trace_state, finish_reason_metadata_handle,
+    output_sequence_hash_capture_handle, wrap_chat_request_end_stream,
     wrap_completion_request_end_stream,
 };
 pub(crate) use record::{publish_tool_record, validate_tool_record};
-pub(crate) use replay::replay_metrics;
+pub(crate) use replay::{
+    SharedOutputSequenceHashCapture, output_sequence_hash_capture, replay_metrics,
+};
 pub use sink::{ActiveInput, TraceShutdownReport, shutdown_workers};
 pub use types::{
     ChoiceFinishReasonMetadata, FinishReasonMetadata, RequestReplayMetrics,
@@ -60,6 +63,8 @@ pub async fn init_from_env_with_shutdown(shutdown: CancellationToken) -> anyhow:
     }
 
     config::mark_capture_inactive();
+
+    replay::init_hash_key()?;
 
     if policy.tool_events_zmq_endpoint.is_some()
         && policy.emit_tool_records()
