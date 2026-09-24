@@ -1119,6 +1119,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if let Some(cached) = signal.cached_tokens {
+                            native_timing.record_prefix_cache_result(prompt_tokens_count, cached);
                             cached_prefix_tokens = Some(cached);
                         }
 
