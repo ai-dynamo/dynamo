@@ -840,6 +840,21 @@ mod tests {
         prefill_timing.record_prefix_cache_result(512, 384);
         prefill_timing.record_tokens(1);
         prefill_timing.record_normal_completion();
+        // The non-prefill request above emitted one TTFT and one E2E sample,
+        // and no ITL (only one token recorded). Prefill must not add any
+        // latency samples, only cache counters.
+        assert_eq!(
+            histogram_count(&registry, "vllm:time_to_first_token_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&registry, "vllm:inter_token_latency_seconds"),
+            0
+        );
+        assert_eq!(
+            histogram_count(&registry, "vllm:e2e_request_latency_seconds"),
+            1
+        );
 
         let running = gather_family(&registry, "vllm:num_requests_running");
         assert_eq!(running.get_field_type(), MetricType::GAUGE);
