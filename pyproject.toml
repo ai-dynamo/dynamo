@@ -14,6 +14,13 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
+    # STALE PIN: this branch (feature-sweeper-dgds) was forked before
+    # upstream/main bumped this to aisimulate==0.12.0. dgd_output_adapter's
+    # write() below is verified against the real 0.12.0
+    # aisimulate.sweeper.result.SweepResult schema (SweepResult.selected_candidates,
+    # SweepRunProvenance.config), which is not necessarily present on this
+    # old dev pin. Bump this to match upstream/main before relying on CI
+    # here to exercise the real schema this adapter now assumes.
     "aisimulate==0.1.0.dev1; python_version < '3.13'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
@@ -133,8 +140,16 @@ sglang_tests = "dynamo.sglang.tests.conftest"
 [project.entry-points."aisimulate.output_adapters"]
 "dgd" = "dynamo.profiler.sweeper.dgd_output_adapter:DgdOutputAdapter"
 
-[project.entry-points."aisimulate.runner_factories"]
-"dynamo" = "dynamo.profiler.sweeper.stack_provider:create_stack"
+# aisimulate.runner_factories for "dynamo" is already registered on
+# upstream/main (dynamo.replay.simulation:DynamoReplayRunnerFactory,
+# confirmed via `git show upstream/main:pyproject.toml`); this branch's own
+# registration of stack_provider.create_stack() under the same key would
+# conflict with that when merged, so the entry-point registration is
+# removed here. stack_provider.py itself is NOT dead code -- it's imported
+# directly by dynamo.profiler.sweeper's __init__.py, by
+# tests/sweeper/run_cases.py, and has its own unit tests
+# (tests/unit/sweeper/test_stack_provider.py) -- so the module stays; only
+# this entry-point declaration goes.
 
 [dependency-groups]
 docs = [

@@ -191,9 +191,10 @@ class DgdOutputAdapter:
         result: Any,
         output_dir: Path,
     ) -> Sequence[str | Path]:
-        # result.candidates/.workload are inferred, not confirmed against a
-        # real SweepResult class -- verify these two attribute names first
-        # if this adapter ever misbehaves against a real aisimulate build.
-        candidates = result.candidates
-        workload = getattr(result, "workload", None)
+        # Confirmed against the real aisimulate.sweeper.result.SweepResult:
+        # .candidates is the full retained ledger (including non-feasible
+        # records with score=None), not the active selection, and SweepResult
+        # carries no top-level `workload` attribute at all.
+        candidates = result.selected_candidates
+        workload = result.provenance.config["workload"]
         return render_and_write_dgds(candidates, workload, config, output_dir)

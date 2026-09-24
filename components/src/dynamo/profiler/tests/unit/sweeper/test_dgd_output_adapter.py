@@ -17,6 +17,7 @@ try:
         DgdOutputAdapter,
         DgdOutputConfigError,
     )
+    from dynamo.profiler.sweeper.renderers import CandidateMaterializationError
 except ImportError as exc:
     pytest.skip(f"Skip (missing dependency): {exc}", allow_module_level=True)
 
@@ -34,10 +35,15 @@ class _FakeCandidate:
         )
 
 
+class _FakeProvenance:
+    def __init__(self, workload):
+        self.config = {"workload": workload}
+
+
 class _FakeSweepResult:
     def __init__(self, candidates, workload=None):
-        self.candidates = candidates
-        self.workload = workload
+        self.selected_candidates = candidates
+        self.provenance = _FakeProvenance(workload)
 
 
 _CANDIDATE_CONFIG = {
@@ -89,9 +95,6 @@ def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
 
     assert len(paths) == 1
     path = Path(paths[0])
-    # [P3] Neither of these two lines was checked before -- a mutation run
-    # found the scalar filename and the workload plumbing could both change
-    # silently with all 52 tests staying green.
     assert path.stem == "qwen"
     assert not path.is_absolute()
     assert ".." not in path.parts
@@ -102,12 +105,10 @@ def test_write_returns_relative_paths_that_exist(tmp_path: Path) -> None:
 def test_write_passes_the_result_workload_through_to_the_renderer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """[P3] The existing workload="qwen-workload" argument above pins
-    nothing: _DGD_CONFIG uses the "direct" renderer, whose render() takes
-    workload as an unused `_workload` parameter, so a mutation to
-    workload=None left every adapter test green. Spy on render_dgd itself
-    (renderer-agnostic) to actually pin the value SweepResult.workload is
-    passed through with."""
+    """Pins the value SweepResult.workload is passed through with, via a spy
+    on render_dgd itself (renderer-agnostic) rather than relying on the
+    "direct" renderer's render(), whose unused `_workload` parameter would
+    let a mutation to workload=None pass silently."""
     from dynamo.profiler.sweeper import dgd_output_adapter as mod
 
     seen = []
@@ -169,6 +170,14 @@ def test_scalar_config_picks_the_best_candidate_when_multiple_are_given(
 
     assert len(paths) == 1
     assert Path(paths[0]).stem == "qwen"
+
+    result = _FakeSweepResult([high, low], workload="qwen-workload")
+
+    paths = adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
+
+    assert len(paths) == 1
+    assert Path(paths[0]).stem == "qwen"
+    assert "nvidia.com/gpu: '4'" in (tmp_path / paths[0]).read_text()
 
 
 def test_scalar_selection_breaks_score_ties_on_fewer_gpus(tmp_path: Path) -> None:
@@ -236,3 +245,37 @@ def test_name_prefix_rejects_path_escaping_values(tmp_path: Path) -> None:
         config = dict(_DGD_CONFIG, name=None, name_prefix=escaping_prefix)
         with pytest.raises(DgdOutputConfigError, match="single path component"):
             adapter.write(config, result=result, output_dir=tmp_path)
+
+
+def test_scalar_with_no_candidates_raises_materialization_error(tmp_path: Path) -> None:
+    """Empty-list guard: a scalar run with no candidates must raise
+    CandidateMaterializationError, not crash inside _best_candidate's max()
+    on an empty sequence."""
+    adapter = DgdOutputAdapter()
+    result = _FakeSweepResult([], workload="qwen-workload")
+
+    with pytest.raises(
+        CandidateMaterializationError, match="nothing to pick a scalar winner from"
+    ):
+        adapter.write(_DGD_CONFIG, result=result, output_dir=tmp_path)
+
+
+def test_pareto_all_candidates_failing_keeps_the_real_cause(tmp_path: Path) -> None:
+    """When every Pareto candidate fails to materialize, the raised
+    CandidateMaterializationError must chain the real underlying cause,
+    not just be visible via the stderr skip messages."""
+    adapter = DgdOutputAdapter()
+    bad_a = _FakeCandidate(
+        dict(_CANDIDATE_CONFIG, backend="unsupported"), score=10.0, used_gpus=8
+    )
+    bad_b = _FakeCandidate(
+        dict(_CANDIDATE_CONFIG, backend="unsupported", tp=2), score=8.0, used_gpus=2
+    )
+    result = _FakeSweepResult([bad_a, bad_b], workload="qwen-workload")
+    config = dict(_DGD_CONFIG, name=None, name_prefix="pareto")
+
+    with pytest.raises(
+        CandidateMaterializationError, match="no candidate could be rendered"
+    ) as exc_info:
+        adapter.write(config, result=result, output_dir=tmp_path)
+    assert exc_info.value.__cause__ is not None
