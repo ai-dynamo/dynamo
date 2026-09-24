@@ -61,8 +61,8 @@ neither has a `__main__.py`.
 | `frontend/` | The API gateway: OpenAI-compatible HTTP and KServe gRPC endpoints. Carries a configuration-boundary rule in [`frontend/AGENTS.md`](frontend/AGENTS.md). |
 | `vllm/`, `sglang/`, `trtllm/` | Backends for vLLM, SGLang, and TensorRT-LLM. Each `README.md` points at the backend documentation; `sglang/` carries its own agent file. |
 | `triton/` | Triton backend; runnable with `python3 -m dynamo.triton`. Its `README.md` points at the backend documentation. |
-| `tokenspeed/` | A further backend built on the same `LLMEngine` contract. |
-| `common/` | Shared library code for everything above: the backend framework, protocols, configuration, HTTP helpers, LoRA, multimodal, snapshot, and storage. `common/backend/` has its own agent file describing the `Worker`/`BaseEngine` lifecycle every engine implements. |
+| `tokenspeed/` | A further backend, built on the `LLMEngine` contract in `common/backend/`. |
+| `common/` | Shared library code for everything above: the backend framework, protocols, configuration, HTTP helpers, LoRA, multimodal, snapshot, and storage. `common/backend/` has its own agent file describing the `Worker`/`BaseEngine` lifecycle for unified-backend engines. `tokenspeed/` and the sample engines implement it. `vllm/`, `sglang/`, `trtllm/`, and `triton/` do not. |
 | `experimental/` | Experimental library APIs for unary endpoint adapters and LLM completion helpers; no `__main__.py`. |
 
 ### Routing
