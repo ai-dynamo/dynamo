@@ -42,7 +42,7 @@ import signal
 import threading
 import time
 from typing import Callable, Optional
-from wsgiref.simple_server import WSGIRequestHandler, make_server
+from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
 import managed_state
 from actuator import Actuator, DcgmActuator, NvmlActuator, _GpuIdentityMismatch
@@ -1317,6 +1317,13 @@ class _QuietWSGIHandler(WSGIRequestHandler):
     that is ~8,600 lines per node per day of pure noise in the agent's logs.
     """
 
+    # Drop idle/stalled connections. The readiness server is single-threaded and
+    # `StreamRequestHandler.timeout` defaults to None, so `handle()` blocks in
+    # `rfile.readline()` for as long as an established client withholds its
+    # request line — one such connection would stall every kubelet probe behind
+    # it and take the pod NotReady.
+    timeout = 5
+
     def log_message(self, format, *args):  # noqa: A002 - base-class signature
         pass
 
@@ -1501,7 +1508,9 @@ class PowerAgent:
         identity, a failed PID snapshot, a failed release, a failed pod list, a
         failed device-count refresh) sets it False. This is what `/readyz`
         publishes, so no enforcement failure may be silently absorbed. A GPU
-        that is merely idle is never written and contributes nothing either way.
+        that is merely idle is never written and contributes nothing either way,
+        but a cycle that discovered NO GPUs at all is a failure: it cannot know
+        what it was required to do.
 
         Two things are deliberately OUTSIDE the fold. The persistence-only
         retries below each retry a durable record whose hardware write and
@@ -1543,10 +1552,6 @@ class PowerAgent:
         # previous cycle BEFORE listing pods, so it retries even during a
         # Kubernetes API outage (the retry touches only the state volume, not
         # the apiserver).
-        #
-        # Persistence-only: deliberately NOT folded into `ok` (see the
-        # docstring). Their failures already log and are visible in the
-        # `_pending_*` set sizes.
         _flush_pending_retirements()
         _flush_pending_acquisitions()
 
@@ -1586,6 +1591,22 @@ class PowerAgent:
                 "Could not refresh GPU count this cycle; using last-known %d: %s",
                 self.device_count,
                 e,
+            )
+            ok = False
+
+        if self.device_count == 0:
+            # An empty topology is not a cycle with nothing to do — it is a
+            # cycle that cannot know what it was required to do. The agent runs
+            # on GPU nodes by nodeSelector, and `DcgmActuator.device_count`
+            # documents the concrete way this happens: an agent that connected
+            # before the hostengine finished enumerating GPUs. Reporting
+            # enforcement here would publish a 200 for a node whose caps are
+            # entirely unmanaged, which is the exact failure this endpoint
+            # exists to surface.
+            logger.error(
+                "No GPUs discovered this cycle; the agent is enforcing nothing "
+                "on this node. Reporting the cycle as unsuccessful until "
+                "discovery returns devices."
             )
             ok = False
 
@@ -1817,8 +1838,8 @@ class PowerAgent:
         start_response(status, [("Content-Type", "text/plain; charset=utf-8")])
         return [body.encode("utf-8")]
 
-    def _start_readyz_server(self) -> None:
-        """Bind and serve `/readyz` on a daemon thread.
+    def _start_readyz_server(self) -> WSGIServer:
+        """Bind and serve `/readyz` on a daemon thread; return the server.
 
         A bind failure propagates: the caller runs this BEFORE `run()`'s `try`,
         so the process exits and the pod enters CrashLoopBackOff rather than
@@ -1826,6 +1847,10 @@ class PowerAgent:
         it does not hold the process open at shutdown — readiness keeps serving
         through the termination grace period, which is what `reconcile_once`'s
         shutdown-fold rule is for.
+
+        The return value is unused in production — the daemon thread owns the
+        server for the process lifetime. It exists so tests can shut a server
+        down rather than leak a listener per test.
         """
         server = make_server(
             "", READYZ_PORT, self._readyz_app, handler_class=_QuietWSGIHandler
@@ -1834,6 +1859,7 @@ class PowerAgent:
             target=server.serve_forever, name="readyz", daemon=True
         ).start()
         logger.info("Readiness endpoint serving on :%d/readyz", READYZ_PORT)
+        return server
 
     def run(self) -> None:
         """Main reconcile loop. Blocks until SIGTERM, then cleans up once.
@@ -1852,10 +1878,6 @@ class PowerAgent:
             RECONCILE_INTERVAL_S,
         )
 
-        # Outside the `try` on purpose: a bind failure must escape uncaught so
-        # the process exits. Starting it inside would send a never-enforcing
-        # agent through the full `_shutdown_cleanup` restore sweep on the way
-        # out.
         self._start_readyz_server()
 
         try:

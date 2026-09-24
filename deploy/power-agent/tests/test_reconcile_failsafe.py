@@ -399,6 +399,25 @@ class TestCycleEnforcementBoolean(unittest.TestCase):
         self.assertIs(agent.reconcile_once(), False)
         self.assertEqual(agent._reconcile_gpu.call_count, 5)
 
+    def test_zero_discovered_gpus_returns_false(self):
+        """An empty topology is not a cycle with nothing to do — it is a cycle
+        that cannot know what it was required to do.
+
+        The agent runs on GPU nodes by nodeSelector, and
+        `DcgmActuator.device_count` documents the concrete way discovery comes
+        back empty: an agent that connected before the hostengine finished
+        enumerating GPUs. Without this, the GPU loop simply never runs, the fold
+        stays at its initial True, and `/readyz` publishes a 200 for a node
+        whose caps are entirely unmanaged — the exact failure the endpoint
+        exists to surface.
+        """
+        agent = self._agent(device_count=0)
+        agent._actuator.device_count.return_value = 0
+        agent._reconcile_gpu = MagicMock()
+
+        self.assertIs(agent.reconcile_once(), False)
+        agent._reconcile_gpu.assert_not_called()
+
     # --- the fold must not short-circuit --------------------------------
 
     def test_failure_on_gpu_zero_still_reconciles_every_later_gpu(self):
