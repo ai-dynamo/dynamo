@@ -39,7 +39,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 	t.Log("Render the generated Agent endpoints")
 	plan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 	require.NoError(t, err)
-	initial, err := workload.RenderCyborgConfigMap(plan)
+	initial, err := workload.renderCyborgConfigMap(plan)
 	require.NoError(t, err)
 
 	t.Log("Verify every workload replica addresses only its own Agents")
@@ -48,7 +48,7 @@ func TestRenderSelectedCyborgConfigMapServerNames(t *testing.T) {
 			workload.scalingGroupReplicas = replicas
 			scaledPlan, err := workload.PlanNodeLocalMaterialization("test-dgd")
 			require.NoError(t, err)
-			configMap, err := workload.RenderCyborgConfigMap(scaledPlan)
+			configMap, err := workload.renderCyborgConfigMap(scaledPlan)
 			require.NoError(t, err)
 			require.Equal(t, initial, configMap)
 			require.True(t, *configMap.Immutable)
@@ -105,7 +105,7 @@ func TestRenderCyborgConfigMapPreservesProjectedEndpoints(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, projection.RequestSpec(plan, "agents").Partitions, test.partitions)
 			require.Equal(t, 2*test.partitions, projection.agentReplicas)
-			configMap, err := workload.RenderCyborgConfigMap(plan)
+			configMap, err := workload.renderCyborgConfigMap(plan)
 			require.NoError(t, err)
 			prefix := lpxScalingGroupTemplateName + "-${GROVE_PCSG_INDEX}-" + plan.Agents[0].TemplateName + "-"
 			servers := make([]string, len(test.wantOffsets))

@@ -30,8 +30,6 @@ const StageLabel = "lpx.nvidia.com/stage"
 
 // RenderInput contains the fresh stage templates and runtime settings consumed by rendering.
 type RenderInput struct {
-	// CyborgConfigMap is rendered before the user's Cyborg defaults are merged.
-	CyborgConfigMap *corev1.ConfigMap
 	// MinAvailable is the minimum number of complete workload replicas in the gang.
 	MinAvailable *int32
 	// Stages contains an independently merged LPU template for every projected stage.
@@ -110,7 +108,10 @@ func RenderNodeLocal(
 		extraResources  []client.Object
 	)
 	if v2HybridRuntime {
-		cyborgConfigMap = input.CyborgConfigMap
+		cyborgConfigMap, err = workload.renderCyborgConfigMap(plan)
+		if err != nil {
+			return nil, err
+		}
 		// Preserve the legacy graph order: Cyborg config first, LPU config last.
 		extraResources = []client.Object{cyborgConfigMap, configMap}
 	} else {

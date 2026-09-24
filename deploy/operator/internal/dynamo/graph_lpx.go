@@ -307,12 +307,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		role.Replicas = ptr.To(replicas)
 		role.MinAvailable = nil
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
-		if workload.BuildFamily() == dynamolpx.BuildFamilyXT {
-			input.CyborgConfigMap, err = workload.RenderCyborgConfigMap(plan)
-			if err != nil {
-				return nil, err
-			}
-		}
 		gpu := p
 		gpu.component = role
 		gpu.componentName = component.ComponentName

@@ -12,10 +12,10 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// RenderCyborgConfigMap renders the XT hybrid Agent endpoints.
+// renderCyborgConfigMap renders the XT hybrid Agent endpoints.
 // The workload and plan must be non-nil, validated, and describe the selected hybrid model.
 // The workload and plan are not mutated. The caller assigns the returned ConfigMap's namespace.
-func (w *Workload) RenderCyborgConfigMap(plan *MaterializationPlan) (*corev1.ConfigMap, error) {
+func (w *Workload) renderCyborgConfigMap(plan *MaterializationPlan) (*corev1.ConfigMap, error) {
 	build := &w.modelProjections[0].configuredBuild
 
 	// Cyborg supplies the PCS prefix; startup supplies this workload's Grove index.
