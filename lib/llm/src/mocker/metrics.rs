@@ -164,10 +164,9 @@ impl NativeMockerMetrics {
         is_prefill: bool,
         start: Instant,
     ) -> NativeRequestTiming {
-        if is_prefill {
-            return NativeRequestTiming::disabled(start);
-        }
-
+        // Prefill workers disable latency timing (they emit no tokens), but they
+        // still own the prefix-cache bookkeeping for their prompt, so bind the
+        // cache counters rather than returning a fully disabled timing.
         let Some(model_name) = self.ensure_model_name(model_name).await else {
             return NativeRequestTiming::disabled(start);
         };
@@ -183,15 +182,17 @@ impl NativeMockerMetrics {
                     .get(&dp_rank)
                     .map(|handles| {
                         (
-                            Some(handles.request_metrics.clone()),
+                            (!is_prefill).then(|| handles.request_metrics.clone()),
                             handles.prefix_cache_queries_total.clone(),
                             handles.prefix_cache_hits_total.clone(),
                         )
                     })
                     .unwrap_or((None, None, None)),
-                Some(NativeMetricHandles::Sglang(handles)) => {
-                    (Some(handles.request_metrics.clone()), None, None)
-                }
+                Some(NativeMetricHandles::Sglang(handles)) => (
+                    (!is_prefill).then(|| handles.request_metrics.clone()),
+                    None,
+                    None,
+                ),
                 None => (None, None, None),
             }
         };
@@ -831,6 +832,14 @@ mod tests {
             .request_timing("llama", 0, false, Instant::now())
             .await;
         miss_timing.record_prefix_cache_result(64, 0);
+        // A prefill worker keeps latency timing disabled but still records the
+        // prefix-cache result for its prompt.
+        let mut prefill_timing = metrics
+            .request_timing("llama", 1, true, Instant::now())
+            .await;
+        prefill_timing.record_prefix_cache_result(512, 384);
+        prefill_timing.record_tokens(1);
+        prefill_timing.record_normal_completion();
 
         let running = gather_family(&registry, "vllm:num_requests_running");
         assert_eq!(running.get_field_type(), MetricType::GAUGE);
@@ -857,11 +866,11 @@ mod tests {
         );
         assert_eq!(
             counter_value(&registry, "vllm:prefix_cache_queries_total"),
-            320.0
+            832.0
         );
         assert_eq!(
             counter_value(&registry, "vllm:prefix_cache_hits_total"),
-            128.0
+            512.0
         );
         assert_eq!(
             gather_family(&registry, "vllm:time_to_first_token_seconds").get_field_type(),
