@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Aggregated speech recognition (ASR) with Qwen3-ASR.
+#
+# - The frontend runs vLLM's chat processor because the original Qwen3-ASR
+#   checkpoints ship no tokenizer.json for the Rust preprocessor.
+# - The frontend and worker run in separate pods, so processed audio features
+#   cannot be handed over through shared memory. DYNAMO_DISABLE_NIXL_MM=1 makes
+#   the frontend forward the audio URL and the worker load and process it.
+# - The stock image accepts audio at the model's 16 kHz rate. Resampling other
+#   rates needs PyAV in both images; see the additional media decoders guide.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg-asr
+spec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --dyn-chat-processor
+          - vllm
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          env:
+          - name: DYNAMO_DISABLE_NIXL_MM
+            value: "1"
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+    replicas: 1
+    type: frontend
+  - name: worker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - Qwen/Qwen3-ASR-1.7B
+          - --enable-multimodal
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              # Increase this value for larger models.
+              ephemeral-storage: 10Gi
+          workingDir: /workspace/examples/backends/vllm
+    replicas: 1
+    type: worker
