@@ -940,7 +940,6 @@ mod tests {
             .await
             .unwrap();
         let entries = bucket.entries().await.unwrap();
-        // A watch starts with one snapshot that uses the same full-path keys.
         let mut events = bucket.watch().await.unwrap();
         let snapshot = tokio::time::timeout(Duration::from_secs(2), events.next())
             .await

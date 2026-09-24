@@ -42,7 +42,6 @@ pub(super) enum DaemonState {
 /// The instances the daemon has joined from the cluster, by instance id.
 pub(super) type ListState = Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>;
 
-/// What the daemon publishes: the list state, the event broadcast, and its own state.
 pub(super) struct DaemonOutputs {
     pub(super) list_state: ListState,
     pub(super) event_tx: broadcast::Sender<DiscoveryEvent>,
@@ -607,7 +606,6 @@ mod tests {
 
     #[tokio::test]
     async fn event_loop_reports_ready_after_both_initial_lists_with_the_state_written() {
-        // A ready pod in container mode, and the CR its main container publishes.
         let target = super::super::utils::KubeDiscoveryTarget::Container(
             TEST_POD_NAME.to_string(),
             "main".to_string(),
@@ -672,7 +670,6 @@ mod tests {
             }
         });
 
-        // One reflector done is not enough: the join table cannot hold every instance yet.
         readiness_tx.send(ReadinessEvent::Rebuild).await.unwrap();
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -687,7 +684,6 @@ mod tests {
         .await
         .expect("both initial lists must make the daemon ready")
         .unwrap();
-        // Ready followed the write, so the instance is visible now.
         let listed: Vec<_> = list_state
             .read()
             .await

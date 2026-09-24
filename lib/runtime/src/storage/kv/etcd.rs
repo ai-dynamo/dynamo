@@ -376,7 +376,6 @@ mod concurrent_create_tests {
             bucket.insert(&existing, "1".into(), 0).await.unwrap();
 
             let mut events = bucket.watch().await.unwrap();
-            // The snapshot holds the full etcd key, the same shape as `entries()`.
             let first = events.next().await.unwrap();
             let WatchEvent::Resync(snapshot) = first else {
                 panic!("expected the initial resync, got {first:?}");

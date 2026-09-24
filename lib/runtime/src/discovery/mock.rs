@@ -308,7 +308,6 @@ impl Discovery for MockDiscovery {
             for event in events {
                 yield Ok(event);
             }
-            // The snapshot closes the establishment burst.
             yield Ok(DiscoveryEvent::Resync(known_instances.values().cloned().collect()));
 
             while let Some(instances) = changes.recv().await {
@@ -406,7 +405,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
-        // The snapshot predates the unregister.
         assert_eq!(
             contract::next(&mut stream).await,
             DiscoveryEvent::Resync(vec![instance.clone()])

@@ -39,7 +39,6 @@ const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const WATCH_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const WATCH_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const WATCH_RESYNC_GET_TIMEOUT: Duration = Duration::from_secs(10);
-/// Watch events buffered between the etcd stream and a slow consumer.
 const WATCH_CHANNEL_CAPACITY: usize = 32;
 
 /// ETCD Client
@@ -524,7 +523,6 @@ impl Client {
 
         let (tx, rx) = mpsc::channel(WATCH_CHANNEL_CAPACITY);
 
-        // Send the snapshot before returning so it is immediately available to consumers
         if let Some(kvs) = existing_kvs {
             tracing::trace!(
                 count = kvs.len(),

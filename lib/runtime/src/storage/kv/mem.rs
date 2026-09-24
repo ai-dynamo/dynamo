@@ -374,7 +374,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Every watch opened on an empty bucket, so each starts with an empty snapshot.
         for watcher in [&mut a_first, &mut a_second, &mut b] {
             assert_eq!(
                 watcher.next().await.unwrap(),
@@ -402,7 +401,6 @@ mod tests {
             .await
             .unwrap();
         let mut watcher = bucket.watch().await.unwrap();
-        // The existing key arrives in one snapshot, bucket-relative, before any put.
         assert_eq!(
             watcher.next().await.unwrap(),
             WatchEvent::Resync(HashMap::from([(

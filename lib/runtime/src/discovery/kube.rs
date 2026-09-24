@@ -475,7 +475,6 @@ impl Discovery for KubeDiscoveryClient {
                     return;
                 }
             }
-            // The snapshot closes the establishment burst.
             if out_tx
                 .send(Ok(DiscoveryEvent::Resync(initial_instances)))
                 .is_err()
@@ -681,8 +680,6 @@ mod tests {
         );
     }
 
-    /// A pending daemon holds `list_and_watch` until `Ready` or the caller's cancellation; a
-    /// daemon that stopped or failed first fails both `list_and_watch` and `list`.
     #[tokio::test]
     async fn list_and_watch_waits_for_ready_unless_cancelled_or_the_daemon_ended() {
         let (client, state_tx) = client_with(&[]);
