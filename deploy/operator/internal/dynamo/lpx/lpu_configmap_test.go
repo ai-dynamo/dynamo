@@ -42,7 +42,6 @@ func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Log("Resolve the same LPU table from Pod identity and preserve each role suffix")
-			require.Equal(t, LPUConfigMapName(root, LPUConfigMapHash(lpu)), lpu.Name)
 			require.Equal(t, root+"-lpu-"+LPUConfigMapHash(lpu)[:16], lpu.Name)
 			require.Equal(t, root+"-decode-"+LPUConfigMapHash(decode)[:16], decode.Name)
 			require.Empty(t, validation.IsDNS1123Subdomain(lpu.Name))

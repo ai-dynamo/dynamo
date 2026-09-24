@@ -20,7 +20,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
-	dynamolpx "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
@@ -272,7 +271,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		if !assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs)) {
 			return
 		}
-		configMap.Name = dynamolpx.LPUConfigMapName(pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash])
+		configMap.Name = fmt.Sprintf("%s-lpu-%.16s", pcs.Name, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash])
 		for _, resource := range []client.Object{pcs, configMap, service} {
 			if assert.NoError(c, env.Client().Get(t.Context(), client.ObjectKeyFromObject(resource), resource)) {
 				assert.Equal(c, metav1.NewControllerRef(child, v1alpha1.LPXGraphDeploymentGVK), metav1.GetControllerOf(resource))

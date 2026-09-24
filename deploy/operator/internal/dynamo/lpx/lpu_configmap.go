@@ -24,12 +24,6 @@ import (
 
 const lpuConfigVolumeName = "config"
 
-// LPUConfigMapName names the immutable runtime table using its Pod-template content hash.
-// The root is the workload resource prefix, including its group when independent workloads share a PCS.
-func LPUConfigMapName(root, configHash string) string {
-	return fmt.Sprintf("%s-lpu-%.16s", root, configHash)
-}
-
 func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
 	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{

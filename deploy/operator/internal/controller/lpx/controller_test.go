@@ -1385,7 +1385,7 @@ func TestLPXMaterializationUsesDGDAndChildIdentity(t *testing.T) {
 	root := dynamo.PCSNameForLPX(child)
 	for _, object := range []client.Object{
 		&grovev1alpha1.PodCliqueSet{ObjectMeta: metav1.ObjectMeta{Name: root, Namespace: child.Namespace}},
-		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: lpx.LPUConfigMapName(root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("%s-lpu-%.16s", root, pcs.Spec.Template.Cliques[0].Annotations[v1alpha1.AnnotationExtraResourcesHash]), Namespace: child.Namespace}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: root + "-serve", Namespace: child.Namespace}},
 	} {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))

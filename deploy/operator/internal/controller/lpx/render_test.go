@@ -635,7 +635,7 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 			}
 		}
 		require.NotEmpty(t, hash)
-		configMap := getResource[*corev1.ConfigMap](t, resources, lpx.LPUConfigMapName(dynamo.PCSNameForLPX(child), hash))
+		configMap := getResource[*corev1.ConfigMap](t, resources, fmt.Sprintf("%s-lpu-%.16s", dynamo.PCSNameForLPX(child), hash))
 		require.NotContains(t, configMap.Data, "model_config.toml")
 		require.NotContains(t, configMap.Data, "datacenter.toml")
 		if partitionData == nil {
