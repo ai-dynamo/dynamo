@@ -552,45 +552,17 @@ shared:
   owners:
   - ops
   - runtime
-# CODEOWNERS is a generated artifact, so co-ownership here is about who may
-# approve it, not who reviews its contents. Every area is listed because under
-# "any one approves" any single team satisfies the gate: without this, adding a
-# file in an uncovered location needs an areas.yaml edit (ops) AND the
-# regenerated CODEOWNERS (process), two approvals to land one file. The
-# artifact cannot drift from the reviewed source -- emit_codeowners.py is a
-# pure function of areas.yaml, and the workflow's regenerate-and-diff step
-# fails on any hand-edit -- so widening approval here costs no safety.
-- glob: CODEOWNERS
-  owners:
-  - process
-  - agents
-  - backend-sglang
-  - backend-trtllm
-  - backend-vllm
-  - diffusion
-  - docs
-  - epp
-  - fault-tolerance
-  - frontend
-  - gms
-  - kv-memory
-  - multimodal
-  - observability
-  - operator
-  - ops
-  - performance
-  - planner
-  - rl
-  - router
-  - runtime
-  - tokenspeed
-  - xpu
-# areas.yaml is the routing decision itself, not a generated artifact, so it
-# does not get the wide list above: nothing stops a rule here from re-routing
-# review authority away from a team, and the strict gate only proves coverage,
-# not that the owner is the right one. Ops and process both hold repo-wide
-# process authority, and under "any one approves" either can unblock a routing
-# change without a third team having to weigh in on paths it does not own.
+# CODEOWNERS stays on the process area alone. GitHub requests every team on
+# the matching line, even when one approval satisfies the gate, so listing
+# every area here pages every codeowner group for a generated-file edit.
+# areas.yaml is already shared by ops and process, so one process review
+# still covers the source and the artifact.
+# areas.yaml is the routing decision itself, not a generated artifact.
+# Nothing stops a rule here from re-routing review authority away from a
+# team, and the strict gate only proves coverage, not that the owner is the
+# right one. Ops and process both hold repo-wide process authority, and
+# under "any one approves" either can unblock a routing change without a
+# third team having to weigh in on paths it does not own.
 - glob: .github/codeowners/areas.yaml
   owners:
   - ops
