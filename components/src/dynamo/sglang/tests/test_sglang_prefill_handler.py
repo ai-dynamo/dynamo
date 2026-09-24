@@ -105,7 +105,7 @@ async def test_prefill_cancellation_waits_for_dispatch_and_drains(
     handler._priority_kwargs = lambda priority: {}
     monkeypatch.setattr(
         "dynamo.sglang.request_handlers.llm.prefill_handler.require_reasoning_kwargs",
-        lambda engine, request: {},
+        lambda *args, **kwargs: {},
     )
     monkeypatch.setattr(
         cancellation, "resolved_server_args", lambda server_args: server_args

@@ -15,6 +15,7 @@ import torch
 from dynamo.common.constants import DisaggregationMode
 from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.protocol import (
+    DisaggSglangMultimodalRequest,
     MultiModalGroup,
     MultiModalInput,
     PreprocessedRequest,
@@ -22,6 +23,7 @@ from dynamo.sglang.protocol import (
     SglangMultimodalRequest,
     StopConditions,
 )
+from dynamo.sglang.request_handlers.multimodal import worker_handler
 from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
     _NVDEC_SHIM_FPS,
     Modality,
@@ -286,8 +288,6 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
 async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
     monkeypatch,
 ):
-    import dynamo.sglang.request_handlers.multimodal.worker_handler as worker_handler
-
     handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
     handler.bootstrap_host = "prefill-host"
     handler.bootstrap_port = 1234
@@ -315,6 +315,135 @@ async def test_multimodal_prefill_releases_embeddings_when_submission_fails(
         await handler._start_prefill_generation(request, 17)
 
     assert released == [23]
+
+
+def _thinking_budget_prefill_request(sampling_params, budget=32):
+    return DisaggSglangMultimodalRequest(
+        request=SglangMultimodalRequest(
+            request=PreprocessedRequest(
+                token_ids=[1, 2, 3],
+                require_reasoning=True,
+                stop_conditions=StopConditions(max_thinking_tokens=budget),
+                sampling_options=SamplingOptions(),
+            )
+        ),
+        sampling_params=sampling_params,
+    )
+
+
+def _thinking_budget_prefill_handler(engine):
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler.enable_trace = False
+    handler.engine = engine
+    handler.config = SimpleNamespace(
+        server_args=SimpleNamespace(
+            enable_strict_thinking=True,
+            reasoning_parser="qwen3",
+            skip_tokenizer_init=False,
+            grammar_backend="xgrammar",
+        )
+    )
+    handler.embeddings_processor = SimpleNamespace(release_embeddings=lambda _: None)
+    return handler
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_overwrites_forwarded_thinking_budget(monkeypatch):
+    captured = {}
+
+    class RecordingEngine:
+        async def async_generate(self, require_reasoning=False, **kwargs):
+            captured.update(kwargs)
+            captured["require_reasoning"] = require_reasoning
+            return iter(())
+
+    async def build_mm_items(request, embeddings_processor):
+        return [], [], None, None
+
+    handler = _thinking_budget_prefill_handler(RecordingEngine())
+    monkeypatch.setattr(worker_handler, "_build_mm_items", build_mm_items)
+    request = _thinking_budget_prefill_request(
+        {"custom_params": {"thinking_budget": -1}, "max_new_tokens": 1}
+    )
+
+    await handler._start_prefill_generation(request, 17)
+
+    assert captured["sampling_params"]["custom_params"] == {"thinking_budget": 32}
+    assert captured["require_reasoning"] is True
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_propagates_invalid_request_errors():
+    handler = MultimodalPrefillWorkerHandler.__new__(MultimodalPrefillWorkerHandler)
+    handler.bootstrap_host = "prefill-host"
+    handler.bootstrap_port = 1234
+    handler._consume_tasks = set()
+    handler._validate_and_parse_disagg_request = lambda request: request
+    handler._generate_bootstrap_room = lambda: 17
+
+    async def reject_request(*_args, **_kwargs):
+        raise InvalidArgument("thinking_token_budget is not supported")
+
+    handler._start_prefill_or_cancel = reject_request
+
+    stream = handler.generate(
+        SimpleNamespace(sampling_params={}), _FakeContext("request-id")
+    )
+    with pytest.raises(InvalidArgument, match="thinking_token_budget"):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_decode_treats_prefill_errors_as_server_failures():
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+
+    async def prefill_error():
+        yield json.dumps(
+            {
+                "finish_reason": "error",
+                "error": "thinking_token_budget is not supported",
+            }
+        )
+
+    async def generate(*_args, **_kwargs):
+        return prefill_error()
+
+    handler.prefill_client = SimpleNamespace(generate=generate)
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=1),
+            sampling_options=SamplingOptions(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="thinking_token_budget"):
+        await handler._get_bootstrap_from_prefill(request, {})
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_custom_logit_processor():
+    handler = _thinking_budget_prefill_handler(SimpleNamespace())
+    request = _thinking_budget_prefill_request(
+        {"custom_logit_processor": "serialized-processor"}
+    )
+
+    with pytest.raises(InvalidArgument, match="custom_logit_processor"):
+        await handler._start_prefill_generation(request, 17)
+
+
+@pytest.mark.asyncio
+async def test_multimodal_prefill_rejects_forwarded_budget_without_canonical_value():
+    handler = _thinking_budget_prefill_handler(SimpleNamespace())
+    request = _thinking_budget_prefill_request(
+        {"custom_params": {"thinking_budget": 32}},
+        budget=None,
+    )
+
+    with pytest.raises(InvalidArgument, match="requires a canonical"):
+        await handler._start_prefill_generation(request, 17)
 
 
 @pytest.mark.asyncio
@@ -773,11 +902,8 @@ async def test_multimodal_prefill_rejects_parallel_sampling_before_generation():
     handler._generate_bootstrap_room = generate_bootstrap_room
 
     stream = handler.generate(request, _FakeContext("request-id"))
-    output = json.loads(await anext(stream))
-
-    assert output["finish_reason"] == "error"
-    assert "disaggregated serving supports only n=1" in output["error"]
-    assert not bootstrap_allocated
-
-    with pytest.raises(StopAsyncIteration):
+    with pytest.raises(
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
         await anext(stream)
+    assert not bootstrap_allocated

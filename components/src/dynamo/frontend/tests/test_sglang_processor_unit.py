@@ -123,6 +123,54 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
         assert sampling["repetition_penalty"] == 1.0
         assert sampling["seed"] is None
 
+    @pytest.mark.parametrize(
+        ("request_data", "expected"),
+        [
+            ({"thinking_token_budget": 32}, 32),
+            ({"thinking_token_budget": 0}, 0),
+            ({"nvext": {"max_thinking_tokens": 16}}, 16),
+        ],
+    )
+    def test_thinking_token_budget_uses_canonical_stop_condition(
+        self, request_data, expected
+    ):
+        result = _build_dynamo_preproc(
+            request_data, [1], "test", None, force_reasoning=True
+        )
+
+        assert result["stop_conditions"]["max_thinking_tokens"] == expected
+        assert result["require_reasoning"] is True
+
+    def test_root_thinking_token_budget_overrides_legacy_nvext(self):
+        result = _build_dynamo_preproc(
+            {
+                "thinking_token_budget": 32,
+                "nvext": {"max_thinking_tokens": 16},
+            },
+            [1],
+            "test",
+            None,
+            force_reasoning=True,
+        )
+
+        assert result["stop_conditions"]["max_thinking_tokens"] == 32
+
+    def test_omitted_thinking_token_budget_does_not_require_reasoning(self):
+        result = _build_dynamo_preproc({}, [1], "test", None)
+
+        assert result["stop_conditions"]["max_thinking_tokens"] is None
+        assert result["require_reasoning"] is False
+
+    def test_thinking_token_budget_rejects_disabled_reasoning(self):
+        with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
+            _build_dynamo_preproc(
+                {"thinking_token_budget": 32},
+                [1],
+                "test",
+                None,
+                force_reasoning=False,
+            )
+
     @pytest.mark.multimodal
     def test_rejects_multimodal_cache_uuid(self):
         request = {
@@ -3356,6 +3404,30 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         )
         assert result.force_reasoning is True
         assert result.reasoning_parser is not None
+
+    def test_qwen3_thinking_budget_rejects_explicit_thinking_opt_out(self, tokenizer):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "chat_template_kwargs": {"enable_thinking": False},
+            "thinking_token_budget": 32,
+        }
+        pre = preprocess_chat_request(
+            request,
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name="qwen3",
+        )
+
+        assert pre.force_reasoning is False
+        with pytest.raises(InvalidArgument, match="requires reasoning to be enabled"):
+            _build_dynamo_preproc(
+                request,
+                pre.prompt_token_ids,
+                MODEL,
+                None,
+                force_reasoning=pre.force_reasoning,
+            )
 
     # Only the explicit case is covered: with no `thinking` key we deliberately
     # do NOT materialize one, so the K3 chat template applies its own default

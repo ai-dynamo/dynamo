@@ -20,6 +20,7 @@ import dynamo.sglang._compat as sglang_compat
 import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     ensure_sglang_tensor_image_size,
@@ -871,6 +872,31 @@ def test_require_reasoning_kwarg_preserves_request_intent(request_data, expected
             return None
 
     assert require_reasoning_kwargs(ReasoningEngine(), request_data) == expected
+
+
+def test_require_reasoning_kwarg_validates_thinking_budget_request():
+    class ReasoningEngine:
+        async def async_generate(self, require_reasoning=False):
+            pass
+
+    assert require_reasoning_kwargs(
+        ReasoningEngine(),
+        {"require_reasoning": True},
+        thinking_budget_requested=True,
+    ) == {"require_reasoning": True}
+
+
+def test_require_reasoning_kwarg_rejects_budget_on_old_engine():
+    class OldEngine:
+        async def async_generate(self, input_ids=None, sampling_params=None):
+            pass
+
+    with pytest.raises(InvalidArgument, match="require_reasoning"):
+        require_reasoning_kwargs(
+            OldEngine(),
+            {"require_reasoning": True},
+            thinking_budget_requested=True,
+        )
 
 
 def test_require_reasoning_kwarg_warns_once_when_dropped(caplog):
