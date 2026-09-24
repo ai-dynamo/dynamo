@@ -352,6 +352,70 @@ spec:
     assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
 
 
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_patch_manifest_sets_backend_framework_from_candidate(
+    monkeypatch, backend: str
+) -> None:
+    """patch_dgd_manifest is the one function both the AIC and direct
+    renderers call for every candidate, so pinning spec.backendFramework
+    here covers both rendering paths from a single test rather than needing
+    an AIC-only fixture. Parametrized across backends to prove the value
+    tracks the candidate, not a hardcoded constant -- see
+    test_patch_manifest_leaves_backend_framework_unset_without_a_backend
+    below for the control that must NOT move.
+    """
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    rendered = """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Worker
+"""
+
+    patched = base_module.patch_dgd_manifest(
+        rendered,
+        _candidate(backend=backend),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    dgd = yaml.safe_load(patched)
+    assert dgd["spec"]["backendFramework"] == backend
+
+
+def test_patch_manifest_leaves_backend_framework_unset_without_a_backend(
+    monkeypatch,
+) -> None:
+    """Control for the mutation test above: an empty backend must leave
+    spec.backendFramework unset entirely. Without this, the assertion above
+    would still pass even if patch_dgd_manifest's `if backend:` guard were
+    deleted and the key were set unconditionally.
+    """
+    monkeypatch.setattr(base_module, "_materialize_dgd", lambda dgd, **_kwargs: dgd)
+    rendered = """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Worker
+"""
+
+    patched = base_module.patch_dgd_manifest(
+        rendered,
+        _candidate(backend=""),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    dgd = yaml.safe_load(patched)
+    assert "backendFramework" not in dgd["spec"]
+
+
 def test_runtime_version_override_is_only_written_when_explicit() -> None:
     rendered = """
 apiVersion: nvidia.com/v1beta1
