@@ -562,7 +562,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				extra.ComponentName = "extra-draft"
 				dgd.Spec.Components = append(dgd.Spec.Components, *extra)
 			}),
-			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair", conductorRoleErr},
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
 			name: "LPX rejects zero draft replicas",
@@ -785,7 +785,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				second.ComponentName = "independent"
 				dgd.Spec.Components = append(dgd.Spec.Components, *second)
 			}),
-			wantWebhookErrs: []string{"spec.components: Forbidden: requires one complete LPX component or a shared draft and target pair", conductorRoleErr},
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 
 		{

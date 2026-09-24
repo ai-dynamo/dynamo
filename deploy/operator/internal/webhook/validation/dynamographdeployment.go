@@ -337,9 +337,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 	if len(spec.Components) == 0 {
 		allErrs = append(allErrs, field.Required(componentsPath, "must have at least one component"))
 	}
-	if lpxComponentCount > 2 && independentEngineCount != lpxComponentCount {
-		allErrs = append(allErrs, field.Forbidden(componentsPath, "requires one complete LPX component or a shared draft and target pair"))
-	}
 	components := componentsByName(spec.Components)
 	hasLPXComponent := lpxComponentCount > 0
 	for i := range spec.Components {
