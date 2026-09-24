@@ -217,8 +217,12 @@ impl Client {
 
     /// Probe etcd connectivity via the maintenance status RPC.
     /// Returns immediately with no side effects; a missing key is not an error.
+    /// A follower can answer this RPC even without quorum, so we also reject
+    /// leader == 0, which indicates no elected leader and means linearizable
+    /// reads will time out.
     pub(crate) async fn check_connection(&self) -> anyhow::Result<()> {
-        self.etcd_client().maintenance_client().status().await?;
+        let resp = self.etcd_client().maintenance_client().status().await?;
+        anyhow::ensure!(resp.leader() != 0, "etcd has no elected leader (quorum lost)");
         Ok(())
     }
 
