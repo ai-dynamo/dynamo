@@ -496,8 +496,9 @@ all later worker changes without requiring a second streaming protocol. Endpoint
 the active recovery request alive while updating the remaining candidates.
 
 If no serving sibling exists, the EPP bootstraps an empty index and continues from worker events and
-optional replay. If serving siblings exist but their dump endpoints are temporarily unreachable,
-the EPP remains `NOT_SERVING` and retries with bounded backoff rather than serving with stale state.
+optional replay. If serving siblings exist but every dump attempt fails, startup fails closed and
+the pod exits — Kubernetes restarts it for another attempt rather than ever serving with stale
+state.
 
 For an upgrade from an image without `GET /dump`, first roll out the new image with
 `DYN_EPP_SELECTION_HTTP_PORT` unset. Replica lifecycle synchronization remains active and recovery is
