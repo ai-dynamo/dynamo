@@ -235,11 +235,6 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment) error {
-	// Wait for the LPX child's cleanup before deleting graph-owned checkpoints.
-	if err := (&dgdLPXHandoff{client: r.Client}).Finalize(ctx, dynamoDeployment); err != nil {
-		return err
-	}
-
 	syncer := newDGDResourceSyncer(r.Client, r.Recorder)
 	return newDGDCheckpointsReconciler(
 		syncer,

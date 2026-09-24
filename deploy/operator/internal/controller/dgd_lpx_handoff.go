@@ -76,18 +76,3 @@ func (r *dgdLPXHandoff) deleteChild(ctx context.Context, child *v1alpha1.LPXGrap
 	uid, version := child.UID, child.ResourceVersion
 	return client.IgnoreNotFound(r.client.Delete(ctx, child, &client.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &version}}))
 }
-
-func (r *dgdLPXHandoff) Finalize(ctx context.Context, source *v1beta1.DynamoGraphDeployment) error {
-	child := &v1alpha1.LPXGraphDeployment{}
-	if err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	if !metav1.IsControlledBy(child, source) {
-		// It is not our dependent; do not delete it and do not wait for it.
-		return nil
-	}
-	if err := r.deleteChild(ctx, child); err != nil {
-		return err
-	}
-	return fmt.Errorf("waiting for LPXGraphDeployment %q to finish cleanup", child.Name)
-}

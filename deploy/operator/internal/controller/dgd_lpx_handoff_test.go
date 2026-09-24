@@ -190,12 +190,6 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 	source.UID = "replacement-source"
 	_, err = handoff.Reconcile(t.Context(), source)
 	require.ErrorContains(t, err, "adoption is not supported")
-
-	t.Log("Do not block finalization on or delete the child owned by the prior source")
-	require.NoError(t, handoff.Finalize(t.Context(), source))
-	stored := &v1alpha1.LPXGraphDeployment{}
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
-	require.True(t, stored.DeletionTimestamp.IsZero())
 }
 
 func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
@@ -740,22 +734,9 @@ func TestLPXRemovalSurvivesOrdinaryReconcileFailure(t *testing.T) {
 	}
 }
 
-func TestLPXChildFinalizationAndDeselectionWaitForCleanup(t *testing.T) {
-	t.Log("Deselect LPX while the child reports unfinished cleanup through its finalizer")
+func TestDGDCheckpointFinalizationLeavesLPXChildToGarbageCollection(t *testing.T) {
+	t.Log("Finalize a DGD while its owned LPX child still exists")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
-	child.Finalizers = []string{"test.example/child-cleanup"}
-	require.NoError(t, kube.Update(t.Context(), child))
-	handoff := &dgdLPXHandoff{client: kube}
-	source.Spec.Components = nil
-	deleting, err := handoff.Reconcile(t.Context(), source)
-	require.NoError(t, err)
-	require.NotNil(t, deleting)
-	require.ErrorContains(t, handoff.Finalize(t.Context(), source), "finish cleanup")
-	stored := &v1alpha1.LPXGraphDeployment{}
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
-	require.False(t, stored.DeletionTimestamp.IsZero())
-
-	t.Log("The outer DGD finalizer must wait for LPX before inspecting checkpoint cleanup")
 	snapshotReads := 0
 	observed := interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
 		List: func(ctx context.Context, delegated client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -766,14 +747,14 @@ func TestLPXChildFinalizationAndDeselectionWaitForCleanup(t *testing.T) {
 		},
 	})
 	parent := &DynamoGraphDeploymentReconciler{Client: observed}
-	require.ErrorContains(t, parent.FinalizeResource(t.Context(), source), "waiting for LPXGraphDeployment")
-	require.Zero(t, snapshotReads)
+	require.NoError(t, parent.FinalizeResource(t.Context(), source))
+	require.Equal(t, 1, snapshotReads)
 
-	t.Log("Finish parent finalization only after the child releases its cleanup finalizer")
-	stored.Finalizers = nil
-	require.NoError(t, kube.Update(t.Context(), stored))
-	require.NoError(t, handoff.Finalize(t.Context(), source))
-	require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored)))
+	t.Log("Leave the child and its owner reference intact for Kubernetes garbage collection")
+	stored := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), stored))
+	require.True(t, stored.DeletionTimestamp.IsZero())
+	require.Equal(t, metav1.GetControllerOf(child), metav1.GetControllerOf(stored))
 }
 
 func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
