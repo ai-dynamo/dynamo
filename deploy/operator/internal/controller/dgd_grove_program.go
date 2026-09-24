@@ -147,11 +147,6 @@ func (p *groveProgram) Reconcile(
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
-	if req.DGD.HasLPXComponent() && !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status) {
-		// Persist the selected restart before delivering its token to the child.
-		programResult.RequeueAfter = time.Nanosecond
-		return programResult, nil
-	}
 
 	result, err := p.workloads.Reconcile(
 		ctx,
@@ -167,6 +162,12 @@ func (p *groveProgram) Reconcile(
 			programResult.Status.Components = result.ComponentStatus
 		}
 		return programResult, fmt.Errorf("failed to reconcile Grove workloads: %w", err)
+	}
+
+	if req.DGD.HasLPXComponent() && !apiequality.Semantic.DeepEqual(req.DGD.Status.Restart, restart.Status) {
+		// Persist the selected restart before delivering its token to the child.
+		programResult.RequeueAfter = time.Nanosecond
+		return programResult, nil
 	}
 
 	// Keep LPX creation and updates after ordinary reconciliation and restart selection.

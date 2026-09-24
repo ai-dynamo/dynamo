@@ -391,7 +391,7 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 }
 
 func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testing.T) {
-	t.Log("Request one parallel restart of two independent LPX workloads and a frontend")
+	t.Log("Create two independent LPX workloads and an already-ready frontend")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 	require.NoError(t, rbacv1.AddToScheme(kube.Scheme()))
 	second := source.Spec.Components[0].DeepCopy()
@@ -401,7 +401,6 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
 	})
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
-	source.Spec.Restart = &v1beta1.Restart{ID: "parallel-restart", Strategy: &v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}}
 	require.NoError(t, kube.Update(t.Context(), source))
 	config := &configv1alpha1.OperatorConfiguration{}
 	config.Namespace.Restricted = source.Namespace
@@ -409,15 +408,46 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 		Client: kube, Config: config, Recorder: events.NewFakeRecorder(100),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
 	}).newGroveProgram()
+	program.workloads.scaler.client = interceptor.NewClient(kube.(client.WithWatch), groveScaleInterceptor(interceptor.Funcs{}, nil))
 
-	t.Log("Persist selection of all three components before publishing their restart")
+	_, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	ordinary := projectWithoutExternallyManagedComponents(source)
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{
+		Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
+	}, pcs))
+	pcs.Generation = 1
+	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
+	require.NoError(t, kube.Update(t.Context(), pcs))
+	frontend := &grovev1alpha1.PodClique{
+		ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(ordinary, "frontend"), Namespace: source.Namespace, Generation: 1},
+		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
+		Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
+	}
+	require.NoError(t, kube.Create(t.Context(), frontend))
+
+	t.Log("Deliver the ordinary restart before persisting selection; LPX still waits for persistence")
+	source.Spec.Restart = &v1beta1.Restart{ID: "parallel-restart", Strategy: &v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}}
+	require.NoError(t, kube.Update(t.Context(), source))
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, []string{"frontend", "lpx", "second"}, result.Status.Restart.InProgress)
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
+	require.Len(t, pcs.Spec.Template.Cliques, 1)
+	require.Equal(t, source.Spec.Restart.ID, pcs.Spec.Template.Cliques[0].Annotations[consts.RestartAnnotation])
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), child))
+	require.Empty(t, child.Annotations[dynamo.LPXRestartAnnotation])
 	source.Status = result.Status
 	require.NoError(t, kube.Status().Update(t.Context(), source))
 
-	t.Log("Deliver the same token to LPX and the ordinary Pod template while every workload is pending")
+	t.Log("Model the API-server generation change and Grove's still-unready replacement")
+	pcs.Generation++
+	require.NoError(t, kube.Update(t.Context(), pcs))
+	frontend.Status.ReadyReplicas = 0
+	require.NoError(t, kube.Update(t.Context(), frontend))
+
+	t.Log("Deliver the same token to LPX while the ordinary restart is pending")
 	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
@@ -425,14 +455,6 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 	require.Equal(t, source.Spec.Restart.ID, child.Annotations[dynamo.LPXRestartAnnotation])
 	require.Empty(t, child.Status.Components)
-	ordinary := projectWithoutExternallyManagedComponents(source)
-	pcs := &grovev1alpha1.PodCliqueSet{}
-	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{
-		Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),
-	}, pcs))
-	require.Len(t, pcs.Spec.Template.Cliques, 1)
-	require.Equal(t, source.Spec.Restart.ID, pcs.Spec.Template.Cliques[0].Annotations[consts.RestartAnnotation])
-	require.Nil(t, pcs.Status.ObservedGeneration)
 	source.Status = result.Status
 	require.NoError(t, kube.Status().Update(t.Context(), source))
 
@@ -465,11 +487,8 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(pcs), pcs))
 	pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 	require.NoError(t, kube.Update(t.Context(), pcs))
-	require.NoError(t, kube.Create(t.Context(), &grovev1alpha1.PodClique{
-		ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(ordinary, "frontend"), Namespace: source.Namespace, Generation: 1},
-		Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
-		Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
-	}))
+	frontend.Status.ReadyReplicas = 1
+	require.NoError(t, kube.Update(t.Context(), frontend))
 	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.RestartPhaseCompleted, result.Status.Restart.Phase)
