@@ -62,7 +62,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
       labels:
-        lpx.nvidia.com/stage: draft
         nvidia.com/dynamo-component: draft
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
@@ -214,7 +213,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
       labels:
-        lpx.nvidia.com/stage: draft
         nvidia.com/dynamo-component: draft
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
@@ -366,7 +364,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxLpuOnly
       labels:
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode
@@ -516,7 +513,6 @@ spec:
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-specdecode

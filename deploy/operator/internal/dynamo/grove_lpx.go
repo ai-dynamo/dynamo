@@ -9,7 +9,7 @@ import (
 	"slices"
 
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -83,7 +83,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 				continue
 			}
 			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(replica)}, template.Name)
-			memberName := template.Labels[lpx.StageLabel]
+			memberName := template.Labels[commonconsts.KubeLabelDynamoComponent]
 
 			// Revision checks precede the pure per-clique readiness calculation.
 			pclq := pclqs[name]

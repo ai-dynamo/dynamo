@@ -41,7 +41,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v3HxStrictHybrid
       labels:
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid
@@ -198,7 +197,6 @@ spec:
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: node-local-v3-hx-hybrid

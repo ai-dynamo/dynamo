@@ -77,7 +77,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
       labels:
-        lpx.nvidia.com/stage: draft
         nvidia.com/dynamo-component: draft
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
@@ -159,7 +158,6 @@ spec:
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: draft
         nvidia.com/dynamo-component: draft
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
@@ -245,7 +243,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
       labels:
-        lpx.nvidia.com/stage: target
         nvidia.com/dynamo-component: target
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
@@ -329,7 +326,6 @@ spec:
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: target
         nvidia.com/dynamo-component: target
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec

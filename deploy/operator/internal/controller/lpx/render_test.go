@@ -99,7 +99,6 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				component := dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent])
 				require.NotNil(t, component)
 				require.True(t, component.IsLPX())
-				require.Equal(t, component.ComponentName, clique.Labels[lpx.StageLabel])
 			}
 
 			t.Log("Render conventional components independently from their ordinary-only input")

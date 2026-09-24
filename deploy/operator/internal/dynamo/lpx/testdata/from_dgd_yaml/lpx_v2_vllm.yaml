@@ -188,7 +188,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
       labels:
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm
@@ -395,7 +394,6 @@ spec:
         scheduling.lpu.nvidia.com/role: cyborg-worker
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: dgd-lpx-v2-vllm

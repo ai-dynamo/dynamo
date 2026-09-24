@@ -25,9 +25,6 @@ import (
 // admission metadata and transport overhead.
 const MaxRenderedPodCliqueSetBytes = 1 << 20
 
-// StageLabel records the authored LPX component association.
-const StageLabel = "lpx.nvidia.com/stage"
-
 // RenderInput contains the fresh stage templates and runtime settings consumed by rendering.
 type RenderInput struct {
 	// MinAvailable is the minimum number of complete workload replicas in the gang.

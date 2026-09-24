@@ -92,7 +92,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(object), object))
 		if clique, ok := object.(*grovev1alpha1.PodClique); ok && clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleCyborgWorker {
 			want := int32(1)
-			if clique.Labels[lpx.StageLabel] == second.ComponentName {
+			if clique.Labels[consts.KubeLabelDynamoComponent] == second.ComponentName {
 				want = 3
 			}
 			require.Equal(t, want, clique.Spec.Replicas)
@@ -160,7 +160,7 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 			if _, ok := original.(*grovev1alpha1.PodCliqueSet); ok {
 				continue
 			}
-			if clique, ok := original.(*grovev1alpha1.PodClique); ok && clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleCyborgWorker && clique.Labels[lpx.StageLabel] == "lpx" {
+			if clique, ok := original.(*grovev1alpha1.PodClique); ok && clique.Annotations[lpxv1alpha1.PodRoleAnnotation] == lpxv1alpha1.PodRoleCyborgWorker && clique.Labels[consts.KubeLabelDynamoComponent] == "lpx" {
 				continue
 			}
 			actual := original.DeepCopyObject().(client.Object)
@@ -2307,7 +2307,7 @@ func TestSpecDecodeStatusCountsCompleteDraftInstances(t *testing.T) {
 				}
 			}
 			firstDraft := pclqs[selected.plan.Agents[0].CliqueName]
-			require.Equal(t, "draft", firstDraft.Labels[lpx.StageLabel])
+			require.Equal(t, "draft", firstDraft.Labels[consts.KubeLabelDynamoComponent])
 
 			t.Log("Make only the first draft incomplete while retaining a fully ready second draft and target")
 			switch scenario {

@@ -124,7 +124,6 @@ spec:
         scheduling.lpu.nvidia.com/role: agent
         scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
       labels:
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: dgd-single-v2
@@ -260,7 +259,6 @@ spec:
         scheduling.lpu.nvidia.com/role: conductor
       labels:
         lpx.nvidia.com/serving: "true"
-        lpx.nvidia.com/stage: lpu
         nvidia.com/dynamo-component: lpu
         nvidia.com/dynamo-component-type: lpx
         nvidia.com/dynamo-graph-deployment-name: dgd-single-v2

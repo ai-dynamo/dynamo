@@ -270,7 +270,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		if err != nil {
 			return nil, fmt.Errorf("rendering %s.agent: rendering selected LPX base pod: %w", component.ComponentName, err)
 		}
-		lpuTemplate.Labels[dynamolpx.StageLabel] = component.ComponentName
 		input.Stages[component.ComponentName] = *lpuTemplate
 		conductor := component.ComponentRole(v1beta1.ComponentRoleLPXConductor)
 		if component != p.component {
@@ -285,7 +284,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 			if err != nil {
 				return nil, fmt.Errorf("rendering %s.conductor: rendering selected LPX base pod: %w", component.ComponentName, err)
 			}
-			input.Conductor.Labels[dynamolpx.StageLabel] = component.ComponentName
 			continue
 		}
 
@@ -318,7 +316,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		}
 
 		clique.Labels[commonconsts.KubeLabelDynamoComponentType] = string(v1beta1.ComponentTypeLPX)
-		clique.Labels[dynamolpx.StageLabel] = component.ComponentName
 		input.Cyborg = clique
 	}
 	return input, nil
