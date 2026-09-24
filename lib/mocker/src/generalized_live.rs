@@ -1651,24 +1651,42 @@ mod tests {
                 max_num_seqs: 8,
                 max_num_batched_tokens: 256,
                 timing_model: TimingModelConfig::Fixed {
-                    prefill_ms: 100.0,
-                    decode_ms: 0.0,
+                    prefill_ms: 0.0,
+                    decode_ms: 100.0,
                 },
                 ..EngineConfig::default()
             },
         );
-        handle
-            .apply_command(SchedulerCommand::new(0, Command::Submit(request(71, 4, 1))))
-            .await
-            .unwrap();
-        assert!(matches!(
-            next_event(&mut events).await,
-            GroupedLiveEvent::CommandApplied { .. }
-        ));
+        // Start real decode work after destination activation. A direct submit
+        // with zero decode time finishes before a mid-pass command can arrive,
+        // leaving that command waiting behind the unacknowledged pass boundary.
+        let active_handoff = HandoffId::from(Uuid::from_u128(71));
+        for command in [
+            Command::ReserveDestination {
+                handoff_id: active_handoff,
+                request: request(71, 4, 1),
+            },
+            Command::ActivateDestination {
+                handoff_id: active_handoff,
+            },
+        ] {
+            handle
+                .apply_command(SchedulerCommand::new(0, command))
+                .await
+                .unwrap();
+            assert!(matches!(
+                next_event(&mut events).await,
+                GroupedLiveEvent::CommandApplied { .. }
+            ));
+        }
         let GroupedLiveEvent::PassStarted(started) = next_event(&mut events).await else {
             panic!("expected grouped pass start");
         };
         let group_duration_ms = started.end_ms - started.started_at_ms;
+        assert_eq!(
+            group_duration_ms, 100.0,
+            "fixture must admit a mid-pass command"
+        );
 
         let handoff_id = HandoffId::from(Uuid::from_u128(72));
         handle

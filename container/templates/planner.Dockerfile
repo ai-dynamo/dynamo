@@ -82,7 +82,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.planner.txt,target=/t
 
 # Copy only the subset of the repository needed for planner/profiler service
 # startup and the component-local planner-family test suites. AI Simulate
-# runtime code comes from the published wheel installed above. The Router
+# runtime code comes from the matching source wheel installed above. The Router
 # adapter, replay bridge, and unified CLI E2E tests also run here because this
 # image installs that wheel.
 COPY --chmod=664 --chown=dynamo:0 pyproject.toml /workspace/pyproject.toml

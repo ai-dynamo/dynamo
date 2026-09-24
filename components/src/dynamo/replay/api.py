@@ -5,10 +5,13 @@
 
 import json
 import os
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, Literal, TypedDict, overload
 
+from packaging.version import InvalidVersion, Version
 from typing_extensions import Unpack
 
+from dynamo import _core
 from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
@@ -104,6 +107,17 @@ def _materialize_offline_report(
 def run_trace_replay(
     trace_files,
     *,
+    replay_spec_json: str,
+    affinity: dict[str, Any] | None = None,
+    **kwargs: Unpack[_TraceReplayOptions],
+) -> str:
+    ...
+
+
+@overload
+def run_trace_replay(
+    trace_files,
+    *,
     replay_mode: Literal["offline"] = "offline",
     **kwargs: Unpack[_TraceReplayOptions],
 ) -> ReplayReport:
@@ -161,12 +175,100 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
-) -> ReplayReport | dict[str, Any]:
+    replay_spec_json=None,
+    affinity=None,
+) -> ReplayReport | dict[str, Any] | str:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
+
+    ``replay_spec_json`` accepts the canonical AISimulate execution payload for
+    static KV-router replay and returns canonical report JSON. The existing
+    Dynamo runner uses this path for conversation affinity and AgentX profiles;
+    traffic, engine and capture controls come exclusively from that payload.
     """
+    if replay_spec_json is not None:
+        if not isinstance(replay_spec_json, str):
+            raise TypeError("replay_spec_json must be a JSON string")
+        if replay_mode != "offline" or router_mode != "kv_router":
+            raise ValueError("canonical replay requires offline kv_router mode")
+        if (
+            _normalize_trace_files(trace_files)
+            or any(
+                value is not None
+                for value in (
+                    extra_engine_args,
+                    prefill_engine_args,
+                    decode_engine_args,
+                    replay_concurrency,
+                    agentic_lanes,
+                    planner_config,
+                    max_sim_time_ms,
+                    report_jsonl_path,
+                    model_name,
+                    sla_ttft_ms,
+                    sla_itl_ms,
+                    sla_e2e_ms,
+                    trace_block_size,
+                    performance_model_metadata,
+                )
+            )
+            or (
+                num_workers != 1
+                or num_prefill_workers != 1
+                or num_decode_workers != 1
+                or arrival_speedup_ratio != 1.0
+                or trace_format != "mooncake"
+                or trace_shared_prefix_ratio != 0.0
+                or trace_num_prefix_groups != 0
+                or capture_per_request
+                or not capture_planner_details
+                or benchmark_granularity != 8
+            )
+        ):
+            raise ValueError(
+                "replay_spec_json owns traffic, engines and capture; legacy "
+                "replay arguments and Planner scaling cannot be combined with it"
+            )
+        compiled_version = getattr(_core, "AISIMULATE_CORE_VERSION", None)
+        replay_api_version = getattr(_core, "AISIMULATE_REPLAY_API_VERSION", None)
+        try:
+            installed_version = version("aisimulate")
+            versions_match = Version(installed_version) == Version(
+                str(compiled_version)
+            )
+        except (PackageNotFoundError, InvalidVersion) as error:
+            raise ValueError(
+                "Dynamo canonical replay requires valid matching AISimulate Python "
+                f"and compiled core versions (compiled={compiled_version}). "
+                "Install matching AISimulate and a Dynamo runtime built with "
+                "--features aic-forward-pass."
+            ) from error
+        if (
+            not versions_match
+            or type(replay_api_version) is not int
+            or replay_api_version != 1
+        ):
+            raise ValueError(
+                "Dynamo canonical replay requires matching AISimulate Python and "
+                "compiled core versions and native replay API 1; "
+                f"installed={installed_version}, compiled={compiled_version}, "
+                f"native_api={replay_api_version}. Install the matching Dynamo "
+                "runtime built with --features aic-forward-pass."
+            )
+        return _run_mocker_trace_replay(
+            [],
+            router_mode=router_mode,
+            router_config=router_config,
+            aic_perf_config=aic_perf_config,
+            replay_spec_json=replay_spec_json,
+            affinity_json=(
+                json.dumps(affinity, allow_nan=False) if affinity is not None else None
+            ),
+        )
+    if affinity is not None:
+        raise ValueError("affinity requires a canonical replay_spec_json payload")
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
     ):

@@ -134,12 +134,25 @@ class PlannerEnginePerfModel:
 
         try:
             options = self._build_options()
+            spec = self._config.aic_perf_model
             self._engine_model = AicCoreEnginePerfModel.best_available(
                 aic_config=self._build_aic_config(),
                 worker_type=self._worker_type,
                 limits=limits,
                 options=options,
                 attention_dp_size=self._attention_dp_size() or 1,
+                regression_identity={
+                    "model": spec.hf_id
+                    if spec is not None
+                    else self._config.model_name or "unbound/online-observations",
+                    # No hardware identity is needed by observation-only regression.
+                    "system": spec.system
+                    if spec is not None
+                    else "online-observations",
+                    "backend": spec.backend
+                    if spec is not None
+                    else self._config.backend,
+                },
             )
             diagnostics = self._engine_diagnostics()
             logger.info(
@@ -243,6 +256,9 @@ class PlannerEnginePerfModel:
         if pick is None:
             return None
         nextn = self._effective_speculative_nextn()
+        # A 1/1 MoE pick is the legacy dense-model default, not an override
+        # of the model's topology. Preserve explicitly configured MoE axes.
+        has_moe_parallelism = pick.moe_tp > 1 or pick.moe_ep > 1
         return {
             "schema_version": 1,
             "model_name": spec.hf_id,
@@ -256,8 +272,8 @@ class PlannerEnginePerfModel:
             ),
             "tp_size": pick.tp,
             "pp_size": pick.pp,
-            "moe_tp_size": pick.moe_tp,
-            "moe_ep_size": pick.moe_ep,
+            "moe_tp_size": pick.moe_tp if has_moe_parallelism else None,
+            "moe_ep_size": pick.moe_ep if has_moe_parallelism else None,
             "attention_dp_size": pick.dp,
             "cp_size": None,
             "weight_dtype": spec.weight_dtype,
@@ -306,6 +322,8 @@ class PlannerEnginePerfModel:
             self._config.max_num_fpm_samples,
             self._config.load_min_observations,
             self._config.fpm_sample_bucket_size,
+            self._config.model_name,
+            self._config.backend,
             aic_key,
         )
 

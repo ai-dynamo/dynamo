@@ -3,7 +3,7 @@
 
 """Planner-owned engine-level queries over AIC forward-pass estimates.
 
-``aiconfigurator_core.sdk.RustForwardPassPerfModel`` owns native AIC
+``aisimulate_core.sdk.RustForwardPassPerfModel`` owns native AIC
 estimation, online correction, and regression fallback. This module owns the
 Dynamo policy above that forward-pass abstraction: queue-drain estimates,
 TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
@@ -11,6 +11,7 @@ TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -18,8 +19,10 @@ from enum import Enum
 from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
+import aisimulate_core
 import msgspec
-from aiconfigurator_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisimulate_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -216,11 +219,34 @@ class AicCoreEnginePerfModel:
         limits: EnginePerfLimits,
         options: dict[str, int],
         attention_dp_size: int,
+        regression_identity: Optional[dict[str, str]] = None,
     ) -> AicCoreEnginePerfModel:
         if aic_config is None:
-            model = AicForwardPassPerfModel.from_regression(options)
+            if regression_identity is None:
+                raise ValueError(
+                    "online regression requires the worker model/backend identity"
+                )
+            if regression_identity["backend"] == "mocker":
+                raise ValueError(
+                    "online regression for mocker requires aic_perf_model with its "
+                    "underlying vllm, sglang, or trtllm backend"
+                )
+            config = ForwardPassPerfModelConfig(
+                **regression_identity,
+                worker_type=worker_type,
+                attention_dp=attention_dp_size,
+                estimation_mode="fpm_regression",
+                estimator_config=json.loads(
+                    aisimulate_core.RustForwardPassPerfModel.legacy_estimator_config(
+                        json.dumps(options)
+                    )
+                ),
+            )
         else:
-            model = AicForwardPassPerfModel.best_available(aic_config, options)
+            config = ForwardPassPerfModelConfig.from_legacy_engine_config(
+                aic_config, worker_type, options, allow_regression=True
+            )
+        model = AicForwardPassPerfModel.best_available(config)
         return cls(
             model=model,
             worker_type=worker_type,

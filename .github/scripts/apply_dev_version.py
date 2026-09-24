@@ -52,7 +52,7 @@ SUBCRATE_CARGO_TARGETS = [
 VERSION_LINE_RE = re.compile(r'^(\s*version\s*=\s*")([^"]+)(")\s*$', re.MULTILINE)
 
 # Root pyproject cross-ref to the separately built runtime wheel. AISimulate is
-# released independently and intentionally remains on its exact published pin.
+# versioned independently and intentionally remains on its exact consumer pin.
 PY_ROOT_PIN_RE = re.compile(r'("ai-dynamo-runtime==)([0-9A-Za-z.!+_-]+)([^"]*")')
 
 

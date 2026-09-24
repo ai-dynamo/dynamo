@@ -34,6 +34,7 @@ fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMoon
     AgenticMooncakeRow {
         request_id: row.request_id,
         play_id: row.play_id,
+        source_play_ordinal: None,
         session_id: row.session_id,
         model: row.model,
         input_length: row.input_length,
@@ -41,6 +42,7 @@ fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMoon
         output_token_ids: row.output_token_ids,
         hash_ids: row.hash_ids,
         not_before_ms: row.not_before_ms,
+        recorded_api_time_ms: None,
         priority: row.priority,
         strict_priority: row.strict_priority,
         policy_class: row.policy_class,

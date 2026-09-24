@@ -3,9 +3,10 @@
 
 use dynamo_custom_policy_builtin::DefaultWorkerSelector;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -22,6 +23,7 @@ use dynamo_kv_router::scheduling::{
     WorkerPlacement,
 };
 use dynamo_kv_router::sequences::topology::WorkerDpRange;
+use dynamo_kv_router::services::selection::affinity::Hold;
 use dynamo_kv_router::{
     ActiveSequencesMultiWorker, RadixTree, RoutingPartitionRef, SchedulingRequest, SequenceRequest,
     SessionContext, TrackingHashAlgorithm, TrackingHashContext, TrackingHashScope,
@@ -46,8 +48,26 @@ use aisimulate_core::replay::{
     ProviderSpec, ReplayAdmissionMetadata, WorkerTopology,
 };
 
+mod affinity;
+use affinity::{ReplayAffinity, ReplayClock};
+pub use affinity::{ReplayAffinityConfig, ReplayAffinityMode};
 mod composition;
 pub(in crate::replay) use composition::{KvReplayComposition, RoundRobinReplayComposition};
+
+#[derive(Default, serde::Serialize)]
+pub(in crate::replay) struct RouterEvidence {
+    #[serde(skip)]
+    capture_decisions: bool,
+    decision_count: u64,
+    decisions_by_role: BTreeMap<&'static str, u64>,
+    decisions: Vec<serde_json::Value>,
+    physical_kv_events: u64,
+    post_dispatch_checks: u64,
+    dispatch_aborts: u64,
+    affinity_hits: u64,
+}
+
+pub(in crate::replay) type SharedRouterEvidence = Arc<Mutex<RouterEvidence>>;
 
 #[derive(Clone, Copy)]
 enum KvEventSummary {
@@ -264,9 +284,18 @@ struct PendingRequest {
     strict_priority: u32,
     policy_class: Option<String>,
     session_id: Option<String>,
+    group_key: Option<String>,
+    affinity_hold: RefCell<Option<Hold>>,
 }
 
 impl PendingRequest {
+    fn release_initialization(&self) {
+        let mut hold = self.affinity_hold.borrow_mut();
+        if matches!(*hold, Some(Hold::Initialize(_))) {
+            hold.take();
+        }
+    }
+
     fn request_id(&self) -> String {
         self.uuid.to_string()
     }
@@ -313,8 +342,20 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            affinity_target: None,
-            pinned_worker: None,
+            affinity_target: self.affinity_hold.borrow().as_ref().and_then(Hold::target),
+            // Replay binds both worker and attention-DP rank. Passing the native
+            // pin keeps selection/eligibility in the existing selector.
+            pinned_worker: self
+                .affinity_hold
+                .borrow()
+                .as_ref()
+                .and_then(Hold::target)
+                .map(|target| {
+                    WorkerWithDpRank::new(
+                        target.worker_id,
+                        target.dp_rank.expect("replay affinity binds a DP rank"),
+                    )
+                }),
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -337,6 +378,10 @@ pub(crate) struct OfflineReplayRouter {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
+    affinity: Option<ReplayAffinity>,
+    evidence: Option<SharedRouterEvidence>,
+    role: &'static str,
+    wakeup_ms: Option<f64>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -344,6 +389,17 @@ pub(in crate::replay) struct KvRouterPlacement {
 }
 
 impl KvRouterPlacement {
+    fn with_affinity_and_evidence(
+        mut self,
+        affinity: Option<ReplayAffinityConfig>,
+        evidence: Option<SharedRouterEvidence>,
+        role: &'static str,
+    ) -> Result<Self> {
+        self.router.affinity = affinity.map(ReplayAffinity::new).transpose()?;
+        self.router.evidence = evidence;
+        self.router.role = role;
+        Ok(self)
+    }
     pub(in crate::replay) fn new_with_selector_seed(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
@@ -480,13 +536,64 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
         Ok(PlacementEffects { decision, released })
     }
 
-    fn observe(&mut self, observation: RouterEventBatch, _now_ms: f64) -> Result<Vec<Placement>> {
+    fn observe(&mut self, observation: RouterEventBatch, now_ms: f64) -> Result<Vec<Placement>> {
+        let _clock = self.router.affinity_clock(now_ms)?;
         let effects = self.router.on_kv_events(observation.0)?;
         Ok(self.placements(effects.admissions))
     }
 
     fn cancel_pending(&mut self, request_id: Uuid) -> bool {
         self.router.cancel_pending(request_id)
+    }
+
+    fn dispatch_committed(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
+        let clock = self.router.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
+        if let Some(affinity) = self.router.affinity.as_mut() {
+            affinity.commit(request_id)?;
+            self.router.wakeup_ms = (self.router.pending_count() > 0).then_some(now_ms);
+        }
+        if let Some(evidence) = &self.router.evidence {
+            evidence
+                .lock()
+                .map_err(|_| anyhow!("routing evidence lock poisoned"))?
+                .post_dispatch_checks += 1;
+        }
+        Ok(())
+    }
+
+    fn dispatch_aborted(&mut self, request_id: Uuid, now_ms: f64) -> Result<()> {
+        let clock = self.router.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
+        // The existing slots booking is provisional until engine dispatch, too.
+        self.router
+            .slots
+            .free(&request_id.to_string(), self.router.decay_now(now_ms))?;
+        if let Some(affinity) = self.router.affinity.as_mut() {
+            affinity.release(request_id);
+            self.router.wakeup_ms = (self.router.pending_count() > 0).then_some(now_ms);
+        }
+        if let Some(evidence) = &self.router.evidence {
+            evidence
+                .lock()
+                .map_err(|_| anyhow!("routing evidence lock poisoned"))?
+                .dispatch_aborts += 1;
+        }
+        Ok(())
+    }
+
+    fn advance_clock(&mut self, now_ms: f64) -> Result<Vec<Placement>> {
+        let clock = self.router.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
+        if self.router.wakeup_ms.take().is_none() {
+            return Ok(Vec::new());
+        }
+        let admissions = self.router.drain_pending(self.router.decay_now(now_ms))?;
+        Ok(self.placements(admissions))
+    }
+
+    fn next_wakeup_ms(&self) -> Option<f64> {
+        self.router.wakeup_ms
     }
 
     fn request_terminal(&mut self, request_id: Uuid, now_ms: f64) -> Result<Vec<Placement>> {
@@ -574,7 +681,22 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
+            affinity: None,
+            evidence: None,
+            role: "aggregated",
+            wakeup_ms: None,
         })
+    }
+
+    fn affinity_clock(&self, now_ms: f64) -> Result<Option<Arc<ReplayClock>>> {
+        let clock = self
+            .affinity
+            .as_ref()
+            .map(|affinity| Arc::clone(&affinity.clock));
+        if let Some(clock) = &clock {
+            clock.advance(now_ms)?;
+        }
+        Ok(clock)
     }
 
     #[cfg(test)]
@@ -612,6 +734,8 @@ impl OfflineReplayRouter {
         session_id: Option<String>,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        let clock = self.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
         let pending =
             self.build_pending_request(request, max_output_tokens, replay_hashes, session_id)?;
         let decay_now = self.decay_now(now_ms);
@@ -632,10 +756,24 @@ impl OfflineReplayRouter {
             }
         };
         let class = self.profile.class(class_index);
-        let should_queue = class.queueing_enabled()
-            && (self.pending.has_backlog(class_index) || self.all_workers_busy(class, decay_now));
+        let affinity_ready = self.affinity.as_ref().map_or(Ok(true), |affinity| {
+            affinity.acquire(&pending, &self.workers_with_configs)
+        })?;
+        let should_queue = !affinity_ready
+            || (class.queueing_enabled()
+                && (self.pending.has_backlog(class_index)
+                    || Self::request_workers_busy(
+                        &self.slots.active_tokens(decay_now),
+                        &self.workers_with_configs,
+                        class,
+                        &pending,
+                    )));
 
         if should_queue {
+            // Queue priority may put a later sibling first (LCFS/WSPT). Only a
+            // selected request may own initialization; otherwise its siblings
+            // could hide the initializer behind a blocked queue head.
+            pending.release_initialization();
             let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&pending));
             let priority_jump = pending.priority_jump;
             let strict_priority = pending.strict_priority;
@@ -673,6 +811,12 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn on_kv_events(&mut self, events: Vec<RouterEvent>) -> Result<RouterEffects> {
+        if let Some(evidence) = &self.evidence {
+            evidence
+                .lock()
+                .map_err(|_| anyhow!("routing evidence lock poisoned"))?
+                .physical_kv_events += events.len() as u64;
+        }
         for event in events {
             let worker_id = event.worker_id;
             let event_id = event.event.event_id;
@@ -692,6 +836,8 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        let clock = self.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
         let decay_now = self.decay_now(now_ms);
         self.slots
             .mark_prefill_completed(&uuid.to_string(), decay_now)
@@ -706,10 +852,15 @@ impl OfflineReplayRouter {
         uuid: Uuid,
         now_ms: f64,
     ) -> Result<RouterEffects> {
+        let clock = self.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
         let decay_now = self.decay_now(now_ms);
         self.slots
             .free(&uuid.to_string(), decay_now)
             .map_err(anyhow::Error::from)?;
+        if let Some(affinity) = self.affinity.as_mut() {
+            affinity.release(uuid);
+        }
         Ok(RouterEffects {
             admissions: self.drain_pending(decay_now)?,
         })
@@ -717,9 +868,18 @@ impl OfflineReplayRouter {
 
     /// Cancel a request that has not yet been assigned to a worker.
     pub(crate) fn cancel_pending(&mut self, uuid: Uuid) -> bool {
+        let clock = self
+            .affinity
+            .as_ref()
+            .map(|affinity| Arc::clone(&affinity.clock));
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
         let before = self.pending.pending_count();
         self.pending.retain(|request| request.uuid != uuid);
-        self.pending.pending_count() != before
+        let removed = self.pending.pending_count() != before;
+        if removed && self.pending.pending_count() > 0 {
+            self.wakeup_ms = clock.as_ref().map(|clock| clock.now_ms());
+        }
+        removed
     }
 
     pub(crate) fn pending_count(&self) -> usize {
@@ -774,6 +934,8 @@ impl OfflineReplayRouter {
     }
 
     pub(crate) fn on_topology_changed(&mut self, now_ms: f64) -> Result<RouterEffects> {
+        let clock = self.affinity_clock(now_ms)?;
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
         if self.workers_with_configs.is_empty() {
             return Ok(RouterEffects::default());
         }
@@ -911,6 +1073,12 @@ impl OfflineReplayRouter {
             priority_jump,
             strict_priority,
             policy_class: request.policy_class.clone(),
+            group_key: self
+                .affinity
+                .as_ref()
+                .map(|affinity| affinity.config.group_key(request, session_id.as_deref()))
+                .transpose()?,
+            affinity_hold: RefCell::new(None),
             session_id,
         })
     }
@@ -987,6 +1155,27 @@ impl OfflineReplayRouter {
             )
             .map_err(anyhow::Error::from)?;
 
+        let hold = request.affinity_hold.into_inner();
+        let binding_reused = hold.as_ref().and_then(Hold::target).is_some();
+        if let (Some(affinity), Some(hold)) = (self.affinity.as_mut(), hold) {
+            affinity.stage(request.uuid, hold, selection.worker.into());
+        }
+        if let Some(evidence) = &self.evidence {
+            let mut evidence = evidence
+                .lock()
+                .map_err(|_| anyhow!("routing evidence lock poisoned"))?;
+            evidence.decision_count += 1;
+            evidence.affinity_hits += u64::from(binding_reused);
+            *evidence.decisions_by_role.entry(self.role).or_default() += 1;
+            if evidence.capture_decisions {
+                evidence.decisions.push(serde_json::json!({
+                    "request_id": request.uuid.to_string(), "role": self.role,
+                    "worker_id": worker_id, "dp_rank": dp_rank,
+                    "group_key": request.group_key, "binding_reused": binding_reused,
+                }));
+            }
+        }
+
         Ok(AdmitOutcome {
             worker_idx,
             overlap_blocks,
@@ -1000,9 +1189,33 @@ impl OfflineReplayRouter {
         loop {
             let active_tokens = self.slots.active_tokens(decay_now);
             let workers = &self.workers_with_configs;
-            let Some(popped) = self.pending.pop_next(|_, class, _| {
-                !Self::all_workers_busy_with(&active_tokens, workers, class)
-            }) else {
+            let affinity = &self.affinity;
+            let mut error = None;
+            let popped = self.pending.pop_next(|_, class, request| {
+                if error.is_some() {
+                    return false;
+                }
+                let ready = affinity
+                    .as_ref()
+                    .map_or(Ok(true), |affinity| affinity.acquire(request, workers));
+                match ready {
+                    Ok(true) => {
+                        !Self::request_workers_busy(&active_tokens, workers, class, request)
+                    }
+                    Ok(false) => false,
+                    Err(cause) => {
+                        error = Some(cause);
+                        false
+                    }
+                }
+            });
+            if let Some(error) = error {
+                return Err(error);
+            }
+            let Some(popped) = popped else {
+                for entry in self.pending.entries() {
+                    entry.payload().release_initialization();
+                }
                 break;
             };
             let request = popped.into_payload();
@@ -1020,9 +1233,32 @@ impl OfflineReplayRouter {
         Ok(admissions)
     }
 
-    fn all_workers_busy(&self, class: &PolicyClassConfig, decay_now: Instant) -> bool {
-        let active_tokens = self.slots.active_tokens(decay_now);
-        Self::all_workers_busy_with(&active_tokens, &self.workers_with_configs, class)
+    fn request_workers_busy(
+        active_tokens: &HashMap<WorkerWithDpRank, usize>,
+        workers: &HashMap<WorkerId, ReplayWorkerConfig>,
+        class: &PolicyClassConfig,
+        request: &PendingRequest,
+    ) -> bool {
+        if let Some(target) = request
+            .affinity_hold
+            .borrow()
+            .as_ref()
+            .and_then(Hold::target)
+        {
+            return workers.get(&target.worker_id).is_none_or(|config| {
+                let worker = WorkerWithDpRank::new(
+                    target.worker_id,
+                    target.dp_rank.expect("replay DP binding"),
+                );
+                class.worker_is_busy(
+                    active_tokens.get(&worker).copied().unwrap_or(0),
+                    config
+                        .max_num_batched_tokens()
+                        .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS),
+                )
+            });
+        }
+        Self::all_workers_busy_with(active_tokens, workers, class)
     }
 
     fn all_workers_busy_with(
@@ -1094,6 +1330,20 @@ impl OfflineReplayRouter {
         })
     }
 }
+
+impl Drop for OfflineReplayRouter {
+    fn drop(&mut self) {
+        let clock = self
+            .affinity
+            .as_ref()
+            .map(|affinity| Arc::clone(&affinity.clock));
+        let _entered = clock.as_ref().map(|clock| clock.runtime.enter());
+        self.pending.retain(|_| false);
+    }
+}
+
+#[cfg(test)]
+mod affinity_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1191,6 +1441,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1209,6 +1460,7 @@ mod tests {
             turn_index: None,
             metadata: Value::Null,
             prompt_token_source: ReplayPromptTokenSource::LengthOnlySynthetic,
+            agentic: None,
         });
 
         let error =

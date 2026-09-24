@@ -330,6 +330,11 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_select_service, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::replay::run_mocker_trace_replay, m)?)?;
+    #[cfg(feature = "aic-forward-pass")]
+    {
+        m.add("AISIMULATE_CORE_VERSION", aisimulate_core::CORE_VERSION)?;
+        m.add("AISIMULATE_REPLAY_API_VERSION", 1_u32)?;
+    }
     m.add_function(wrap_pyfunction!(
         llm::replay::run_mocker_synthetic_trace_replay,
         m

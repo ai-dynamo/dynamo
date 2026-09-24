@@ -40,7 +40,7 @@ slot-tracker = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalo
 select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standalone-selection"]
 # Stable request identities and deterministic replay tie-breaking for parity builds.
 replay-bench = ["dynamo-mocker/replay-bench"]
-aic-forward-pass = ["dep:aisimulate-core"]
+aic-forward-pass = ["dep:aisimulate-core", "dynamo-mocker/python-replay"]
 nvtx = ["dynamo-runtime/nvtx"]
 # Enable in-process MM-aware KV routing
 # (per-image token-count + placeholder expansion + block-level mm_hash).
@@ -59,7 +59,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.12.0", optional = true, features = ["python"] }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "60fd1bb74a78339e7090161866c5e93d299dc65f", version = "=0.13.0", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "9.0.0" }
