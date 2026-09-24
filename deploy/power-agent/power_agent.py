@@ -39,8 +39,10 @@ import logging
 import os
 import re
 import signal
+import socket
 import threading
 import time
+from socketserver import ThreadingMixIn
 from typing import Callable, Optional
 from wsgiref.simple_server import WSGIRequestHandler, WSGIServer, make_server
 
@@ -1309,20 +1311,71 @@ def _resolve_cap_for_gpu(
 # ---------------------------------------------------------------------------
 
 
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Readiness server that handles each connection on its own thread.
+
+    A single-threaded `WSGIServer` accepts and services one connection at a
+    time, so ANY connection that is slow to deliver its request line delays
+    every kubelet probe queued behind it — and a per-operation socket timeout
+    cannot fix that, because it resets on each byte received (a client dribbling
+    one byte per second is never idle long enough to trip it, yet holds the
+    server indefinitely). Serving concurrently is what actually decouples one
+    client's pace from another's; the handler's timeouts then bound how long any
+    single connection can live.
+
+    `daemon_threads` so a connection in flight never holds the process open
+    during shutdown, matching the daemon `serve_forever` thread.
+    """
+
+    daemon_threads = True
+
+
 class _QuietWSGIHandler(WSGIRequestHandler):
-    """WSGI handler that does not log a line per request.
+    """WSGI handler that does not log a line per request, and refuses to be
+    held open indefinitely.
 
     `WSGIRequestHandler` inherits `BaseHTTPRequestHandler.log_message`, which
     writes one line to stderr per request. At the probe's `periodSeconds: 10`
     that is ~8,600 lines per node per day of pure noise in the agent's logs.
     """
 
-    # Drop idle/stalled connections. The readiness server is single-threaded and
-    # `StreamRequestHandler.timeout` defaults to None, so `handle()` blocks in
-    # `rfile.readline()` for as long as an established client withholds its
-    # request line — one such connection would stall every kubelet probe behind
-    # it and take the pod NotReady.
+    # Idle timeout, applied by `StreamRequestHandler.setup()` via
+    # `settimeout`. It bounds how long a connection may go SILENT: the class
+    # default is None, which would block `handle()` in `rfile.readline()`
+    # forever against an established client that sends nothing.
     timeout = 5
+
+    # Absolute lifetime bound, because `timeout` alone is not one: `settimeout`
+    # is per-operation and resets on every byte, so a client trickling its
+    # request line stays under it forever. With threaded serving that no longer
+    # blocks other probes, but it would let such connections (and their threads)
+    # accumulate without limit. The watchdog closes the socket outright, which
+    # makes any blocked read raise and tears the connection down.
+    max_connection_seconds = 15
+
+    def handle(self):
+        watchdog = threading.Timer(
+            self.max_connection_seconds, self._force_close_connection
+        )
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            super().handle()
+        finally:
+            watchdog.cancel()
+
+    def _force_close_connection(self):
+        try:
+            # `shutdown`, not `close`: `StreamRequestHandler` wraps the same
+            # descriptor in `rfile`/`wfile`, and `socket.close()` only drops a
+            # refcount — the fd stays open until those are closed too, so the
+            # peer would see neither EOF nor an error and the blocked read would
+            # not return. `shutdown` tears the connection down immediately.
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            # Already torn down by the normal path; the watchdog lost the race,
+            # which is the common case.
+            pass
 
     def log_message(self, format, *args):  # noqa: A002 - base-class signature
         pass
@@ -1853,7 +1906,11 @@ class PowerAgent:
         down rather than leak a listener per test.
         """
         server = make_server(
-            "", READYZ_PORT, self._readyz_app, handler_class=_QuietWSGIHandler
+            "",
+            READYZ_PORT,
+            self._readyz_app,
+            server_class=_ThreadingWSGIServer,
+            handler_class=_QuietWSGIHandler,
         )
         threading.Thread(
             target=server.serve_forever, name="readyz", daemon=True

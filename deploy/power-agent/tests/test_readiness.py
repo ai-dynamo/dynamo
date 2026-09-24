@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import itertools
 import socket
 import threading
 import time
 import unittest
+from socketserver import ThreadingMixIn
 from unittest.mock import MagicMock, patch
 
 import power_agent
@@ -301,17 +303,30 @@ class TestReadinessServer(unittest.TestCase):
 
         self.assertEqual(captured.getvalue(), "")
 
-    def test_handler_drops_stalled_connections(self):
-        """The server is single-threaded and `StreamRequestHandler.timeout`
-        defaults to None, so `handle()` would block in `rfile.readline()` for as
-        long as an established client withheld its request line — stalling every
-        kubelet probe behind it and taking the pod NotReady."""
+    def test_handler_bounds_both_idle_and_total_connection_time(self):
+        """Two distinct bounds, and the second is not redundant.
+
+        `timeout` is per-operation — `settimeout` resets on every byte received
+        — so it bounds only how long a connection may go SILENT. A client
+        trickling its request line one byte at a time never trips it.
+        `max_connection_seconds` is the absolute bound that does.
+        """
         self.assertIsNotNone(power_agent._QuietWSGIHandler.timeout)
         self.assertGreater(power_agent._QuietWSGIHandler.timeout, 0)
+        self.assertGreater(power_agent._QuietWSGIHandler.max_connection_seconds, 0)
 
-    def test_stalled_client_does_not_block_a_later_probe(self):
-        """The behavioural half of the timeout: a connected client that sends
-        nothing must not prevent the next request from being served."""
+    def test_server_handles_connections_concurrently(self):
+        """The structural fix. A single-threaded server services one connection
+        at a time, so no per-connection timeout can stop a slow client from
+        delaying the probes queued behind it."""
+        self.assertTrue(
+            issubclass(power_agent._ThreadingWSGIServer, ThreadingMixIn),
+            "readiness server must not serialize connections",
+        )
+        self.assertTrue(power_agent._ThreadingWSGIServer.daemon_threads)
+
+    def test_silent_client_does_not_block_a_later_probe(self):
+        """A connected client that sends nothing at all."""
         agent = _bare_agent()
         agent._last_good_cycle = time.monotonic()
 
@@ -324,6 +339,80 @@ class TestReadinessServer(unittest.TestCase):
                     staller.close()
 
         self.assertEqual(status, 200)
+
+    def test_slow_drip_client_does_not_block_a_later_probe(self):
+        """The case the silent-client test misses, and the reason `timeout`
+        alone was not a fix.
+
+        This client stays under the idle timeout INDEFINITELY by sending one
+        byte at a time — a request line followed by an endless run of padding
+        headers — so `settimeout` never fires and the request never completes.
+        On a single-threaded server it holds the accept loop for as long as it
+        likes and every probe behind it times out.
+
+        Verified to discriminate: against a plain `WSGIServer` the probe does
+        not complete at all while this client keeps dripping.
+        """
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        stop = threading.Event()
+
+        def drip(sock):
+            # Never completes the request, and never pauses long enough to look
+            # idle: each byte lands well inside the 0.3s idle timeout.
+            preamble = b"GET /readyz HTTP/1.1\r\nHost: localhost\r\n"
+            stream = itertools.chain(preamble, itertools.cycle(b"X-Pad: 0\r\n"))
+            for byte in stream:
+                if stop.is_set():
+                    return
+                try:
+                    sock.sendall(bytes([byte]))
+                except OSError:
+                    return
+                stop.wait(0.05)
+
+        with patch.object(power_agent._QuietWSGIHandler, "timeout", 0.3):
+            with _readyz_server(agent) as port:
+                dripper = socket.create_connection(("127.0.0.1", port), timeout=5)
+                thread = threading.Thread(target=drip, args=(dripper,), daemon=True)
+                thread.start()
+                try:
+                    # Give the dripper time to be accepted and to keep the
+                    # connection alive well past the idle timeout, which is what
+                    # made the previous fix insufficient.
+                    time.sleep(0.6)
+                    start = time.monotonic()
+                    status, _ = _http_get_readyz(port)
+                    elapsed = time.monotonic() - start
+                finally:
+                    stop.set()
+                    dripper.close()
+                    thread.join(timeout=5)
+
+        self.assertEqual(status, 200)
+        # Served on its own thread, not queued behind the dripper.
+        self.assertLess(elapsed, 2.0)
+
+    def test_watchdog_closes_a_connection_that_outlives_its_bound(self):
+        """The absolute bound is enforced, so slow-drip connections (and their
+        threads) cannot accumulate without limit."""
+        agent = _bare_agent()
+        agent._last_good_cycle = time.monotonic()
+
+        with patch.object(
+            power_agent._QuietWSGIHandler, "max_connection_seconds", 0.3
+        ), patch.object(power_agent._QuietWSGIHandler, "timeout", 5):
+            with _readyz_server(agent) as port:
+                sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+                try:
+                    sock.sendall(b"GET /readyz HTTP/1.1\r\n")  # deliberately partial
+                    # The watchdog closes the socket, so the read returns EOF
+                    # rather than hanging until the idle timeout.
+                    sock.settimeout(5)
+                    self.assertEqual(sock.recv(4096), b"")
+                finally:
+                    sock.close()
 
     def test_server_thread_is_a_daemon(self):
         """So it does not hold the process open during shutdown. Readiness keeps
@@ -346,6 +435,7 @@ class TestReadinessServer(unittest.TestCase):
         args, kwargs = make_server.call_args
         self.assertEqual(args[1], power_agent.READYZ_PORT)
         self.assertIs(kwargs["handler_class"], power_agent._QuietWSGIHandler)
+        self.assertIs(kwargs["server_class"], power_agent._ThreadingWSGIServer)
         self.assertEqual(len(started), 1)
         self.assertTrue(started[0].daemon)
 
