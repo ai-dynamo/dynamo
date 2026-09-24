@@ -143,7 +143,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
         max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
-        extra_args = sglang_args.get("extra_args", [])
+        extra_args = sglang_args.get("extra_args", ())
         # Resolved memory budget, for startup logs (mirrors the command flags).
         mem_budget = (
             f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
@@ -422,14 +422,16 @@ def test_router_decisions_sglang_disagg(
 
 # EAGLE3 speculative decoding: same pair as launch/agg_spec_decoding.sh, both
 # ungated. An 8B base is needed because the test requires a real EAGLE3 draft
-# that accepts tokens, and there is no smaller ungated base+draft pair. Nightly
-# only, on H100-class GPUs: the two prefill workers share GPU0 (peak ~36 GiB).
+# that accepts tokens, and there is no smaller ungated base+draft pair. The two
+# prefill workers share GPU0 (peak ~36 GiB), so the test is marked h100 and runs
+# in the nightly sglang-h100-test lane. Like the other gpu_2 tests here it has no
+# profiled_vram_gib, so it runs in that lane's sequential stage.
 EAGLE_MODEL_NAME = "Qwen/Qwen3-8B"
 EAGLE_DRAFT_MODEL_NAME = "Tengyunw/qwen3_8b_eagle3"
 SGLANG_EAGLE_ARGS: Dict[str, Any] = {
     **SGLANG_ARGS,
     "model": EAGLE_MODEL_NAME,
-    "extra_args": [
+    "extra_args": (
         "--enable-metrics",
         "--speculative-algorithm",
         "EAGLE3",
@@ -441,11 +443,13 @@ SGLANG_EAGLE_ARGS: Dict[str, Any] = {
         "1",
         "--speculative-num-draft-tokens",
         "4",
-    ],
+    ),
 }
 
 
-def _assert_decode_workers_speculated(prefill_workers, decode_workers) -> None:
+def _assert_decode_workers_speculated(
+    prefill_workers: SGLangProcess, decode_workers: SGLangProcess
+) -> None:
     """Assert every decode worker ran EAGLE verify steps and accepted draft tokens."""
     for port in decode_workers._system_ports:
         response = requests.get(f"http://localhost:{port}/metrics", timeout=10)
