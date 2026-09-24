@@ -165,7 +165,7 @@ func decodePropSyncChain(rawIDs capnp.UInt32List, chainPath string) ([]int, erro
 	return partitionIDs, nil
 }
 
-func cleanManifestRelativeBuildPath(field, rawPath string, allowBuildRoot bool) (string, error) {
+func cleanManifestRelativeBuildPath(field, rawPath string) (string, error) {
 	if strings.ContainsAny(rawPath, "\x00\r\n") {
 		return "", fmt.Errorf("%s %q must not contain NUL bytes or line breaks", field, rawPath)
 	}
@@ -177,9 +177,6 @@ func cleanManifestRelativeBuildPath(field, rawPath string, allowBuildRoot bool) 
 		return "", fmt.Errorf("%s %q must be relative and stay within build directory", field, rawPath)
 	}
 	assetPath = filepath.ToSlash(filepath.Clean(assetPath))
-	if assetPath == "." && allowBuildRoot {
-		return assetPath, nil
-	}
 	if assetPath == "." || assetPath == ".." || strings.HasPrefix(assetPath, "../") {
 		return "", fmt.Errorf("%s %q must be relative and stay within build directory", field, rawPath)
 	}

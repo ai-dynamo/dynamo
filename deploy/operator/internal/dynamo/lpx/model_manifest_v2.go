@@ -296,7 +296,7 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 	}
 
 	// Validate shared artifact fields once, after the selected geometry is accepted.
-	partition.PartPath, err = cleanManifestRelativeBuildPath(subject+" path", path, false)
+	partition.PartPath, err = cleanManifestRelativeBuildPath(subject+" path", path)
 	if err != nil {
 		return BuildPartition{}, false, err
 	}
@@ -361,6 +361,5 @@ func runtimeTokenEmbeddingsPathFromManifestV2(artifacts manifestcapnpv2.Artifact
 	return cleanManifestRelativeBuildPath(
 		fmt.Sprintf("%s artifacts.runtimeAssets.tokenEmbeddingsPath", gbuildManifestV2CapnpFile),
 		rawPath,
-		false,
 	)
 }
