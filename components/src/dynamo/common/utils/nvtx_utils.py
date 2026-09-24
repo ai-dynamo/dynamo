@@ -41,9 +41,12 @@ ENABLED: bool = bool(int(os.getenv("DYN_NVTX", "0")))
 if ENABLED:
     try:
         import nvtx as _nvtx_lib
-    except ImportError:
-        # Profiling presets set DYN_NVTX for every launch; an image without the
-        # package must still serve, so degrade to the no-op path.
+    except ModuleNotFoundError as exc:
+        # Only a missing nvtx package degrades to the no-op path: profiling presets
+        # set DYN_NVTX for every launch and an image without the package must still
+        # serve. A broken installation stays visible.
+        if exc.name != "nvtx":
+            raise
         logging.getLogger(__name__).warning(
             "DYN_NVTX=1 but the nvtx package is not installed; NVTX markers are disabled"
         )

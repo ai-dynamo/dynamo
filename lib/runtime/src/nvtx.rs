@@ -107,7 +107,10 @@ pub fn name_current_thread_impl(name: &str) {
 /// Construct with [`dynamo_nvtx_range!`].
 #[cfg(feature = "nvtx")]
 pub struct NvtxRangeGuard {
-    active: bool,
+    // Process-scoped range id: guards outlive `.await`s, so the drop can run on a
+    // different worker thread than the open, where a thread-local push/pop pair
+    // would close an unrelated range.
+    range: Option<i32>,
 }
 
 /// Zero-sized no-op guard used when the `nvtx` feature is off.
@@ -119,11 +122,10 @@ impl NvtxRangeGuard {
     pub fn new(name: &str) -> Self {
         #[cfg(feature = "nvtx")]
         {
-            let active = NVTX_ENABLED.load(Ordering::Relaxed);
-            if active {
-                nvtx::range_push!("{name}");
-            }
-            NvtxRangeGuard { active }
+            let range = NVTX_ENABLED
+                .load(Ordering::Relaxed)
+                .then(|| nvtx::range_start!("{name}"));
+            NvtxRangeGuard { range }
         }
         #[cfg(not(feature = "nvtx"))]
         {
@@ -136,8 +138,8 @@ impl NvtxRangeGuard {
 #[cfg(feature = "nvtx")]
 impl Drop for NvtxRangeGuard {
     fn drop(&mut self) {
-        if self.active {
-            nvtx::range_pop!();
+        if let Some(range) = self.range {
+            nvtx::range_end!(range);
         }
     }
 }
