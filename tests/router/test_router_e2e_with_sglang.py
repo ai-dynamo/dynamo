@@ -10,9 +10,11 @@ import os
 from typing import Any, Dict, Optional
 
 import pytest
+import requests
 
 from tests.router.e2e_harness import (
     ManagedEngineProcessMixin,
+    build_test_payload,
     run_basic_router_test,
     run_disagg_router_decisions_test,
     run_indexers_sync_test,
@@ -22,6 +24,7 @@ from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.payloads import SGLangSpecDecodeMetricsPayload
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     allocate_port,
@@ -94,6 +97,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
                   (see tests/README.md "SGLang KV tokens")
                 - context_length: Maximum sequence length (optional)
                 - disable_cuda_graph: Disable CUDA graphs (default: False)
+                - extra_args: Additional dynamo.sglang CLI flags (optional)
             num_workers: Number of SGLang worker processes
             single_gpu: If True, all workers share GPU 0
             data_parallel_size: If set, enables this many data-parallel ranks per worker process.
@@ -139,6 +143,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
         max_total_tokens = sglang_args.get("max_total_tokens")
         context_length = sglang_args.get("context_length")
         disable_cuda_graph = sglang_args.get("disable_cuda_graph", False)
+        extra_args = sglang_args.get("extra_args", [])
         # Resolved memory budget, for startup logs (mirrors the command flags).
         mem_budget = (
             f"max_total_tokens={max_total_tokens}, mem_frac=0.9"
@@ -207,6 +212,10 @@ class SGLangProcess(ManagedEngineProcessMixin):
             if disaggregation_mode is not None:
                 command.extend(["--disaggregation-mode", disaggregation_mode])
                 command.extend(["--disaggregation-transfer-backend", "nixl"])
+                # The KV bootstrap server binds to --host (default 127.0.0.1),
+                # but dynamo.sglang advertises the auto-detected local IP to
+                # decode workers, so bind all interfaces like launch/disagg.sh.
+                command.extend(["--host", "0.0.0.0"])
 
             if data_parallel_size is not None:
                 # Add DP configuration
@@ -226,6 +235,7 @@ class SGLangProcess(ManagedEngineProcessMixin):
             kv_events_port = self._kv_event_ports[worker_idx * kv_event_rank_span]
             kv_events_config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{kv_events_port}"}}'
             command.extend(["--kv-events-config", kv_events_config])
+            command.extend(extra_args)
 
             # Each SGLang worker needs a unique DYN_SYSTEM_PORT to avoid conflicts.
             # Ports are dynamically allocated for xdist-safe parallel execution.
@@ -372,7 +382,6 @@ def test_router_decisions_sglang_dp(
     )
 
 
-@pytest.mark.skip(reason="Nightly CI failure: https://linear.app/nvidia/issue/DYN-2603")
 @pytest.mark.e2e
 @pytest.mark.model(MODEL_NAME)
 @pytest.mark.gpu_2
@@ -406,6 +415,107 @@ def test_router_decisions_sglang_disagg(
             "gpu_start_index": 1,
             "disaggregation_mode": "decode",
         },
+        # See test_router_decisions_sglang_disagg_eagle.
+        test_kwargs={"enable_bootstrap": True},
+    )
+
+
+# EAGLE3 speculative decoding: same pair as launch/agg_spec_decoding.sh, both
+# ungated. An 8B base is needed because the test requires a real EAGLE3 draft
+# that accepts tokens, and there is no smaller ungated base+draft pair. Nightly
+# only, on H100-class GPUs: the two prefill workers share GPU0 (peak ~36 GiB).
+EAGLE_MODEL_NAME = "Qwen/Qwen3-8B"
+EAGLE_DRAFT_MODEL_NAME = "Tengyunw/qwen3_8b_eagle3"
+SGLANG_EAGLE_ARGS: Dict[str, Any] = {
+    **SGLANG_ARGS,
+    "model": EAGLE_MODEL_NAME,
+    "extra_args": [
+        "--enable-metrics",
+        "--speculative-algorithm",
+        "EAGLE3",
+        "--speculative-draft-model-path",
+        EAGLE_DRAFT_MODEL_NAME,
+        "--speculative-num-steps",
+        "3",
+        "--speculative-eagle-topk",
+        "1",
+        "--speculative-num-draft-tokens",
+        "4",
+    ],
+}
+
+
+def _assert_decode_workers_speculated(prefill_workers, decode_workers) -> None:
+    """Assert every decode worker ran EAGLE verify steps and accepted draft tokens."""
+    for port in decode_workers._system_ports:
+        response = requests.get(f"http://localhost:{port}/metrics", timeout=10)
+        response.raise_for_status()
+        content = response.text
+        SGLangSpecDecodeMetricsPayload(
+            body={},
+            repeat_count=1,
+            expected_log=[],
+            expected_response=[],
+            min_num_requests=4,
+        ).validate(None, content)
+
+
+@pytest.mark.e2e
+@pytest.mark.model(EAGLE_MODEL_NAME)
+@pytest.mark.model(EAGLE_DRAFT_MODEL_NAME)
+@pytest.mark.h100
+@pytest.mark.gpu_2
+@pytest.mark.nightly
+@pytest.mark.requested_sglang_kv_tokens(2048)
+@pytest.mark.parametrize("request_plane", ["nats"], indirect=True)
+# ~3x ~96s (2x H200, models pre-cached); peak ~36 GiB on the shared prefill GPU.
+@pytest.mark.timeout(300)
+def test_router_decisions_sglang_disagg_eagle(
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
+):
+    """EAGLE3 on both prefill and decode workers, behind the KV router.
+
+    On top of the disagg routing checks, this asserts that:
+        * the router predicts a KV hit on each shared-prefix request, i.e. the
+          prefill worker's EAGLE (bigram) KV event hashes match the router's
+        * the decode worker keeps speculating after the KV and EAGLE state
+          transfer, and accepts draft tokens
+    """
+    run_disagg_router_decisions_test(
+        engine_process_cls=SGLangProcess,
+        engine_args_name="sglang_args",
+        engine_args=SGLANG_EAGLE_ARGS,
+        request=request,
+        request_plane=request_plane,
+        model_name=EAGLE_MODEL_NAME,
+        block_size=PAGE_SIZE,
+        num_prefill_workers=2,
+        num_decode_workers=1,
+        prefill_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 0,
+            "disaggregation_mode": "prefill",
+        },
+        decode_process_kwargs={
+            "single_gpu": True,
+            "gpu_start_index": 1,
+            "disaggregation_mode": "decode",
+        },
+        # Enough decode steps for a stable tokens-per-verify ratio.
+        test_payload={
+            **build_test_payload(EAGLE_MODEL_NAME),
+            "max_tokens": 128,
+            "temperature": 0.0,
+        },
+        # SGLang always takes the bootstrap path: decode can emit its first
+        # token before prefill completion is recorded, so the estimated KV
+        # transfer latency may be 0.
+        test_kwargs={"enable_bootstrap": True, "require_kv_hit": True},
+        post_check=_assert_decode_workers_speculated,
     )
 
 
