@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -119,9 +118,6 @@ func LPXRestartToken(source *v1beta1.DynamoGraphDeployment, previous string) str
 	}
 	return previous
 }
-
-// ErrLPXSourcePending means the source and child snapshots await a matching handoff.
-var ErrLPXSourcePending = errors.New("LPXGraphDeployment is waiting for the current source input revision")
 
 // lpxInputRevisionPayload is the normalized source intent hashed for inputRevision.
 // Keep complete selection and rendering inputs so nested role templates and build
