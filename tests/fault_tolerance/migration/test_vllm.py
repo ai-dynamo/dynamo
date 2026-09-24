@@ -308,9 +308,7 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    json.dumps(
-                        {"kv_connector": "NixlConnector", "kv_role": nixl_role}
-                    ),
+                    json.dumps({"kv_connector": "NixlConnector", "kv_role": nixl_role}),
                 ]
             )
 

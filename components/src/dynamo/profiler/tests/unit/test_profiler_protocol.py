@@ -273,9 +273,7 @@ def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
 
 def test_build_dgd_config_vllm_disagg_preserves_explicit_kv_config() -> None:
     """An explicit connector remains authoritative while worker roles are canonical."""
-    custom_kv_config = (
-        '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
-    )
+    custom_kv_config = '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cpu"}'
     modifier = CONFIG_MODIFIERS["vllm"]
     dgd_config = modifier.build_dgd_config(
         mode="disagg",

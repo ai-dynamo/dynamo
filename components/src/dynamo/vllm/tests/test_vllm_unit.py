@@ -320,9 +320,7 @@ def test_connector_to_kv_transfer_json_single():
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(
-        _connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer")
-    )
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
     assert result["kv_role"] == "kv_both"
     nested = result["kv_connector_extra_config"]["connectors"]
