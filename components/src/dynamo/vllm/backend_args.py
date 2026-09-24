@@ -726,6 +726,13 @@ class DynamoVllmConfig(ConfigBase):
             raise ValueError(
                 "--benchmark-hybrid-live-state and --benchmark-randomize-kda-state are mutually exclusive"
             )
+        if self.benchmark_hybrid_live_state and self.benchmark_mode not in (
+            "decode",
+            "agg",
+        ):
+            raise ValueError(
+                "--benchmark-hybrid-live-state requires --benchmark-mode decode or agg"
+            )
         if self.benchmark_randomize_kda_state and self.benchmark_mode not in (
             "decode",
             "agg",

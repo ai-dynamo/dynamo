@@ -5321,6 +5321,17 @@ class InstrumentedScheduler(AsyncScheduler):
             # OOM on some ranks, get skipped, and the group_prepare barrier times out (observed dep4: dozens of
             # measured_decode_context_mismatch skips then "timed out waiting for attention-DP benchmark group_prepare").
             # Keep the grid real-KV only under DP; renumber so published ids stay contiguous and 1-based.
+            # Explicit manifest points carry the contract "measured or rejected with an error": never drop them silently.
+            explicit = [pt for pt in fake_pts if "explicit" in pt.sample_reasons]
+            if explicit:
+                coords = ", ".join(
+                    f"(batch={pt.batch_size}, total_kv_read_tokens={pt.total_kv_read_tokens})" for pt in explicit
+                )
+                raise RuntimeError(
+                    "KVWARM: attention-DP runs measure real-KV points only, and the warm-up plan cannot cover "
+                    f"explicit decode point(s) {coords} (rung depth trimmed by the per-rank pool / slot budget); "
+                    "lower the requested batch or context, or run without attention-DP"
+                )
             logger.warning(
                 "KVWARM: attention-DP (dp_size=%d): dropping %d fake-fallback decode points; grid is real-KV only",
                 self._bench_dp_size, len(fake_pts),
@@ -5329,7 +5340,11 @@ class InstrumentedScheduler(AsyncScheduler):
             renumbered = [replace(pt, benchmark_id=i + 1) for i, pt in enumerate(other_pts + warmed_pts)]
             other_pts = [pt for pt in renumbered if pt.point_type != "decode"]
             warmed_pts = [pt for pt in renumbered if pt.point_type == "decode"]
-            self._bench_expected_points = len(renumbered)
+            # Eager warm-up replicas are executed but their results are discarded (``_bench_save_current_point``):
+            # count only real points, as ``_bench_build_grid`` does.
+            self._bench_expected_points = sum(
+                EAGER_WARMUP_REASON not in pt.sample_reasons for pt in renumbered
+            )
         self._bench_grid = deque(other_pts + warmed_pts + fake_pts)
         self._kvwarm_chain_ids: list = []
         self._kvwarm_chain_prompts: dict = {}
@@ -5353,6 +5368,16 @@ class InstrumentedScheduler(AsyncScheduler):
         e.g. sliding-window and k-pool-tail managers); None for groups whose tables grow with the context."""
         cap = getattr(manager, "_max_admission_blocks_per_request", None)
         return cap if isinstance(cap, int) and cap > 0 else None
+
+    def _kvwarm_circular_table_manager(self, manager) -> bool:
+        """True for admission-capped groups whose block table is a fixed-length circular buffer rather than a
+        position-indexed table (GLM5-Next's k-pool tail: one block per request, excluded from prefix caching).
+        Sliding-window / chunked-local groups are admission-capped too, but keep positional tables with null
+        placeholders for expired positions, so they take the positional path."""
+        if self._kvwarm_admission_cap(manager) is None:
+            return False
+        spec = getattr(manager, "kv_cache_spec", None)
+        return getattr(spec, "participates_in_prefix_caching", True) is False
 
     def _kvwarm_live_state_manager(self, manager) -> bool:
         """Recurrent-state groups served by live-state borrowing (hybrid live-state mode, random mode off)."""
@@ -5381,15 +5406,14 @@ class InstrumentedScheduler(AsyncScheduler):
         need = 0
         for manager in managers:
             bs = int(getattr(manager, "block_size", getattr(self.cache_config, "block_size", 16)))
-            if self._kvwarm_random_state_manager(manager):
+            if self._kvwarm_random_state_manager(manager) or self._kvwarm_live_state_manager(manager):
                 first, end = recurrent_shadow_range(ctx_len, headroom, bs)
                 need += end - first
                 continue
-            tail = -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
-            cap = self._kvwarm_admission_cap(manager)
-            if cap is not None and cap < -(-(ctx_len + 1 + headroom) // bs):
-                tail = cap
-            need += tail
+            if self._kvwarm_circular_table_manager(manager):
+                need += self._kvwarm_admission_cap(manager) or 0
+                continue
+            need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return need
 
     def _kvwarm_shadow_tail_blocks(self, repeats: int) -> int:
@@ -5405,7 +5429,13 @@ class InstrumentedScheduler(AsyncScheduler):
         return sum(
             1
             + -(
-                -(headroom + int(self._kvwarm_random_state_manager(manager)))
+                -(
+                    headroom
+                    + int(
+                        self._kvwarm_random_state_manager(manager)
+                        or self._kvwarm_live_state_manager(manager)
+                    )
+                )
                 // manager.block_size
             )
             for manager in managers
@@ -5804,15 +5834,22 @@ class InstrumentedScheduler(AsyncScheduler):
                 n_shared = ctx_len // bs
                 n_total = -(-(ctx_len + 1 + headroom) // bs)
                 chain_blocks = list(mgr.req_to_blocks[chain_id])
-                cap = self._kvwarm_admission_cap(mgr)
-                if cap is not None and cap < n_total:
-                    # Admission-capped group (e.g. GLM5-Next's k-pool tail: one circularly reused block per request,
-                    # block_size == index_kpool). The chain holds only ``cap`` blocks whatever its depth, and the
-                    # runner's block table for the group has ``cap`` columns, so the shadow shares nothing and forks
-                    # ``cap`` private blocks from the chain's live block(s) instead of walking ctx // bs positions.
+                live_state = self._kvwarm_live_state_manager(mgr) and bool(chain_blocks)
+                if live_state:
+                    # Recurrent state is read at ceil(ctx/bs)-1 and written at the admission and steady positions
+                    # (``recurrent_shadow_range``); at an exact block boundary the read slot is the last SHARED
+                    # entry, which may be a pruned/null checkpoint. Fork the whole read/write span privately.
+                    n_shared, n_total = recurrent_shadow_range(ctx_len, headroom, bs)
+                circular = self._kvwarm_circular_table_manager(mgr) and len(chain_blocks) <= (
+                    self._kvwarm_admission_cap(mgr) or 0
+                )
+                if circular and not live_state:
+                    # Circular fixed-length table (k-pool tail): the chain holds ``cap`` blocks whatever its depth and
+                    # the runner's table for the group has ``cap`` columns, so the shadow shares nothing and forks the
+                    # chain's block(s) instead of walking positional indices.
                     n_shared = 0
-                    n_total = min(cap, len(chain_blocks))
-                    tail_src = chain_blocks[-n_total:] if n_total else []
+                    n_total = len(chain_blocks)
+                    tail_src = list(chain_blocks)
                 else:
                     if n_total > len(chain_blocks):
                         raise RuntimeError(
@@ -5820,13 +5857,13 @@ class InstrumentedScheduler(AsyncScheduler):
                             f"needs {n_total} blocks, has {len(chain_blocks)}"
                         )
                     tail_src = chain_blocks[n_shared:n_total]
-                if self._kvwarm_live_state_manager(mgr) and chain_blocks:
+                if live_state:
                     # Live-state mode for recurrent groups: the state has no per-position history and the only
                     # valid state a chain holds is in its LIVE (last) block. Entries below it are align-mode
                     # retention checkpoints that may already be evicted and recycled; a shadow at ctx << chain
                     # depth forked from chain_blocks[ctx // bs] copies a stale block, its hidden state degenerates
                     # and MoE routing collapses (2-3x too-fast decode steps measured on GLM-5.3-Flash). Fork the
-                    # private tail from the live block instead: a valid, deeper-context state.
+                    # private span from the live block instead: a valid, deeper-context state.
                     tail_src = [chain_blocks[-1]] * len(tail_src)
                 fresh = block_pool.get_new_blocks(len(tail_src))
                 staged.append((mgr, n_shared, chain_blocks[:n_shared], tail_src, fresh))
@@ -5876,13 +5913,12 @@ class InstrumentedScheduler(AsyncScheduler):
             bs = int(
                 getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
             )
-            cap = self._kvwarm_admission_cap(mgr)
             for ctx_len in context_lengths:
-                if self._kvwarm_random_state_manager(mgr):
+                if self._kvwarm_random_state_manager(mgr) or self._kvwarm_live_state_manager(mgr):
                     first, end = recurrent_shadow_range(ctx_len, headroom, bs)
                     need += end - first
-                elif cap is not None and cap < -(-(ctx_len + 1 + headroom) // bs):
-                    need += cap  # admission-capped group: the whole (small) table is private
+                elif self._kvwarm_circular_table_manager(mgr):
+                    need += self._kvwarm_admission_cap(mgr) or 0  # circular table: the whole table is private
                 else:
                     need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return max(0, need - int(free_fn()))
@@ -6164,6 +6200,22 @@ class InstrumentedScheduler(AsyncScheduler):
                 sample_reasons=[*point.sample_reasons, "context_clamped"],
             )
         kvwarm_real = self._kvwarm_covers(point, injected_lengths)
+        if (
+            not kvwarm_real
+            and self._kvwarm_flag_on()
+            and getattr(self, "_bench_dp_size", 1) > 1
+            and self._kvwarm_warm_eligible()
+        ):
+            # Attention-DP grids are real-KV only (``_kvwarm_prepare``); a point reaches here without coverage only
+            # when its rung's stage failed afterwards (group verdict, so every rank sees the same point). Fake
+            # injection is not rank-consistent, so record a skip instead -- explicit points raise in the skip path.
+            logger.warning(
+                "KVWARM: attention-DP point without real-KV coverage (stage failed): skipping %s", point
+            )
+            self._bench_skip_point(point, "stage_failed_under_attention_dp")
+            self._bench_current_point = None
+            self._bench_extra_steps_left = 0
+            return None
         if self._kvwarm_flag_on():
             meta = self._kvwarm_meta_init()
             if kvwarm_real:
@@ -6298,6 +6350,7 @@ class InstrumentedScheduler(AsyncScheduler):
 
             wall_times: list[float] = []
             validation_failure: tuple[int, str] | None = None
+            measured_decode_totals: dict[int, int] = {}
             for result in rank_results:
                 dp_rank = result["dp_rank"]
                 fpms = result.get("fpms")
@@ -6334,6 +6387,21 @@ class InstrumentedScheduler(AsyncScheduler):
                 reason = self._bench_fpm_validation_failure(point, fpm)
                 if reason is not None and validation_failure is None:
                     validation_failure = (dp_rank, reason)
+                if point.point_type == "decode":
+                    measured_decode_totals[dp_rank] = int(
+                        fpm.get("scheduled_requests", {}).get("sum_decode_kv_tokens", -1)
+                    )
+            if (
+                point.point_type == "decode"
+                and validation_failure is None
+                and len(set(measured_decode_totals.values())) > 1
+            ):
+                # Giant fake-KV points may run one batch short of the plan; the normalization below must move every
+                # rank to the SAME coordinate, otherwise the rank artifacts disagree and the merge rejects them.
+                odd = next(
+                    r for r, m in measured_decode_totals.items() if m != measured_decode_totals[rank_results[0]["dp_rank"]]
+                )
+                validation_failure = (odd, "giant_measured_coordinate_mismatch")
 
             if EAGER_WARMUP_REASON in point.sample_reasons:
                 # Warmup replicas are best-effort scaffolding and must be
@@ -6380,9 +6448,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 # measured one token per request short of the declared coordinate. Record the point AT THE MEASURED
                 # coordinate so the artifact stays self-consistent -- the collector re-checks
                 # scheduled.sum_decode_kv_tokens == point.total_kv_read_tokens exactly and fails the whole cell otherwise.
-                measured = {
-                    int(f.get("scheduled_requests", {}).get("sum_decode_kv_tokens", -1)) for f in local_fpms
-                }
+                measured = set(measured_decode_totals.values())
                 if len(measured) == 1:
                     m = measured.pop()
                     if m > 0 and m != point.total_kv_read_tokens:
