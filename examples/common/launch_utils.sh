@@ -153,15 +153,20 @@ wait_any_exit() {
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0
     local _pid=""
-    local _candidate_pid
+    local _candidate_pid _candidate_rc
     # Bash can remove a child that exited during startup from `jobs -p` and
     # skip it in `wait -n`, while retaining its status for `wait <pid>`.
     # Check saved PIDs before rejecting an empty job table or waiting again.
     for _candidate_pid in "${!DYN_TRACKED_WORKERS[@]}"; do
         if ! kill -0 "$_candidate_pid" 2>/dev/null; then
-            _pid="$_candidate_pid"
-            wait "$_pid" || _rc=$?
-            break
+            _candidate_rc=0
+            wait "$_candidate_pid" || _candidate_rc=$?
+            # Associative-array order is arbitrary; a clean exit must not
+            # hide another worker's startup failure.
+            if [[ -z "$_pid" ]] || (( _rc == 0 && _candidate_rc != 0 )); then
+                _pid="$_candidate_pid"
+                _rc=$_candidate_rc
+            fi
         fi
     done
     if [[ -z "$_pid" ]]; then
@@ -177,7 +182,6 @@ wait_any_exit() {
             wait -n || _rc=$?
         fi
     fi
-    # Keep the generic message on all supported older Bash versions.
     if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
         _pid=""
     fi

@@ -166,6 +166,35 @@ def test_wait_any_exit_reports_worker_that_exited_during_startup(
         assert UNNAMED in result.stdout, result.stdout
 
 
+@pytest.mark.parametrize("failure_first", [False, True])
+def test_wait_any_exit_prefers_startup_failure_over_success(
+    failure_first: bool,
+) -> None:
+    workers = [("frontend", 0), ("prefill", 7)]
+    if failure_first:
+        workers.reverse()
+    launch = "\n".join(
+        f"(exit {code}) & dyn_track_worker {label}\n{label}_pid=$!"
+        for label, code in workers
+    )
+    result = _run_script(
+        f"""
+        {launch}
+        wait "$frontend_pid" || :
+        wait "$prefill_pid" || :
+        wait_any_exit
+        """
+    )
+
+    assert result.returncode == 7, result.stderr
+    assert "exited with code 7" in result.stdout, result.stdout
+    assert "Worker 'frontend'" not in result.stdout, result.stdout
+    if BASH_NAMES_WORKERS:
+        assert "Worker 'prefill' (pid" in result.stdout, result.stdout
+    else:
+        assert UNNAMED in result.stdout, result.stdout
+
+
 @pytest.mark.parametrize("script_name,expected_labels", LABELLED_SCRIPTS)
 def test_disagg_multimodal_labels_every_background_process(
     script_name: str, expected_labels: tuple[str, ...]
