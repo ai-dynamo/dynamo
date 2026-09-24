@@ -75,6 +75,7 @@ bash "$ROOT/harness/run_condition.sh" smoke-velo-tcp
 bash "$ROOT/harness/run_condition.sh" smoke-velo-rdma
 bash "$ROOT/harness/run_condition.sh" preflight-velo-rdma
 bash "$ROOT/harness/controller.sh"
+python3 "$ROOT/harness/summarize_environment.py"
 python3 "$ROOT/harness/report.py"
 ```
 
@@ -83,5 +84,15 @@ checks the source revision, overlay, lockfiles and binary before every run.
 Use new run labels after a failed attempt; do not replace its artifacts.
 The saturation preflight uses concurrency 8,192 and per-process worker metrics.
 It is separate from the four-way timing matrix.
+
+`run_condition.sh` stops before a new run when less than 30 minutes remain.
+For a continuation, preserve `manifests/nodes.txt` as
+`manifests/campaign-original-nodes.txt`, queue the same nodes on a normal
+partition, and save the new job ID in `control/continuation-job-id`.
+After the controller exits with status 75 and the previous run is complete,
+release the idle allocation. When the new keeper writes its job ID, run
+`harness/resume_continuation.sh`. It checks the node order, devices, link speeds,
+MTU and frozen build, then resumes only unfinished conditions. Analysis uses
+the allocation ID saved for each run and includes all 16 measured runs.
 
 No default change is part of this work.

@@ -169,7 +169,7 @@ def client_summary(run,start,end):
             counts['measured_cancellations' if inwindow else 'outside_window_cancellations']+=1
         if m.get('error') or m.get('error_code') or r.get('error'):
             counts['measured_errors' if inwindow else 'outside_window_errors']+=1
-            if len(examples)<5:examples.append(m)
+            if len(examples)<5:examples.append(m | {'record_error':r.get('error')})
         output,usage=val('output_token_count'),val('usage_completion_tokens')
         if output is not None and usage is not None and output!=usage:counts['terminal_token_mismatches']+=1
         if inwindow:counts['measurement_completions']+=1
