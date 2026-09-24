@@ -166,12 +166,19 @@ def test_wait_any_exit_reports_worker_that_exited_during_startup(
         assert UNNAMED in result.stdout, result.stdout
 
 
-def test_wait_any_exit_prefers_startup_failure_over_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure_scanned_first", [False, True])
+def test_wait_any_exit_prefers_startup_failure_over_success(
+    tmp_path: Path, failure_scanned_first: bool
+) -> None:
     """Launch order does not determine the associative array's traversal order.
 
-    Assign exit codes after registering both PIDs so the successful child is
-    considered first. Stopping at the first completed child must fail this test.
+    Assign exit codes after registering both PIDs, in both scan orders.
+    Keeping either the first or the last completed child must fail this test.
     """
+    scanned_first, scanned_last = (
+        ("prefill", "frontend") if failure_scanned_first else ("frontend", "prefill")
+    )
+    codes = {"frontend": 0, "prefill": 7}
     first_pipe = tmp_path / "first-worker"
     second_pipe = tmp_path / "second-worker"
     os.mkfifo(first_pipe)
@@ -186,15 +193,15 @@ def test_wait_any_exit_prefers_startup_failure_over_success(tmp_path: Path) -> N
         second_pid=$!
         tracked_pids=("${{!DYN_TRACKED_WORKERS[@]}}")
         if [[ "${{tracked_pids[0]}}" == "$first_pid" ]]; then
-            dyn_track_worker frontend "$first_pid"
-            dyn_track_worker prefill "$second_pid"
-            printf '0\\n' >&3
-            printf '7\\n' >&4
+            dyn_track_worker {scanned_first} "$first_pid"
+            dyn_track_worker {scanned_last} "$second_pid"
+            printf '{codes[scanned_first]}\\n' >&3
+            printf '{codes[scanned_last]}\\n' >&4
         else
-            dyn_track_worker frontend "$second_pid"
-            dyn_track_worker prefill "$first_pid"
-            printf '7\\n' >&3
-            printf '0\\n' >&4
+            dyn_track_worker {scanned_first} "$second_pid"
+            dyn_track_worker {scanned_last} "$first_pid"
+            printf '{codes[scanned_last]}\\n' >&3
+            printf '{codes[scanned_first]}\\n' >&4
         fi
         wait "$first_pid" || :
         wait "$second_pid" || :
