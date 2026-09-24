@@ -585,6 +585,12 @@ def _apply_nvext_cache_salt(request: Dict[str, Any], prompt: Any) -> None:
         if cache_salt:
             prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
             return
+    extra_args = request.get("extra_args")
+    vllm_tito = extra_args.get("vllm_tito") if isinstance(extra_args, dict) else None
+    if isinstance(vllm_tito, dict):
+        cache_salt = vllm_tito.get("cache_salt")
+        if cache_salt:
+            prompt["cache_salt"] = f"{_DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"
 
 
 def _prompt_token_ids_for_engine_data(

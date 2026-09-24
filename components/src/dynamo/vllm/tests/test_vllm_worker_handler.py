@@ -70,6 +70,17 @@ def test_rl_weight_world_size_rejects_unsupported_topologies(parallel_config):
         mod.resolve_rl_weight_world_size(parallel_config)
 
 
+def test_native_generate_cache_salt_applies_to_prefill_prompt():
+    request = {
+        "extra_args": {"vllm_tito": {"cache_salt": "policy-7"}},
+    }
+    prompt = {"prompt_token_ids": [1, 2, 3]}
+
+    mod._apply_nvext_cache_salt(request, prompt)
+
+    assert prompt["cache_salt"] == "dynamo-cache-salt:policy-7"
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
