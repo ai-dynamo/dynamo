@@ -13,6 +13,12 @@ from dynamo.profiler.sweeper.dgdc_reconcile_diff import (
     compute_identity,
 )
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+]
+
 _SPEC_A = {"components": [{"name": "worker", "replicas": 2}], "backendFramework": "trtllm"}
 _SPEC_B = {"components": [{"name": "worker", "replicas": 4}], "backendFramework": "trtllm"}
 
