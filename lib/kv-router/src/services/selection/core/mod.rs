@@ -276,7 +276,7 @@ pub struct SelectionCore {
     listens_for_kv_events: bool,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    worker_selection_policy_factory: WorkerSelectionPolicyFactory,
     host: SelectionHost,
     worker_type: WorkerType,
     cancel_token: CancellationToken,
@@ -327,6 +327,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         cache_config: SelectionCacheConfig,
+        policy_factory: WorkerSelectionPolicyFactory,
     ) -> anyhow::Result<Self> {
         kv_router_config
             .validate_config()
@@ -338,7 +339,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token,
             None,
-            None,
+            policy_factory,
             SelectionHost::default(),
             WorkerType::Aggregated,
             true,
@@ -359,7 +360,7 @@ impl SelectionCore {
         indexer_threads: usize,
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
-        worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+        worker_selection_policy_factory: WorkerSelectionPolicyFactory,
         host: SelectionHost,
         worker_type: WorkerType,
         signal_indexer_ready: bool,
