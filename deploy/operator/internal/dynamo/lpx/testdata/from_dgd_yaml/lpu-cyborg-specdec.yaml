@@ -188,6 +188,10 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_ALLOCATION
+              value: draft-agt
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -200,10 +204,6 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: LPX_ALLOCATION
-              value: draft-agt
-            - name: LPX_MODEL_PATH
-              value: /models/node-local-v2-connected
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP
@@ -276,6 +276,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -288,8 +290,6 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: LPX_MODEL_PATH
-              value: /models/node-local-v2-connected-lpx
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP
@@ -365,6 +365,8 @@ spec:
             - -m
             - dynamo.cyborg
             env:
+            - name: GBUILD_MANIFEST_PATH
+              value: /models/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: DYN_COMPONENT
               value: decode
             - name: DYN_DISCOVERY_BACKEND
@@ -387,8 +389,6 @@ spec:
               value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GBUILD_MANIFEST_PATH
-              value: /models/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: NATS_SERVER
               value: nats-address
             - name: NIXL_TELEMETRY_ENABLE

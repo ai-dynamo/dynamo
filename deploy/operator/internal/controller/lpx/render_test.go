@@ -126,13 +126,6 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				sort.Slice(pcs.Spec.Template.Cliques, func(i, j int) bool {
 					return pcs.Spec.Template.Cliques[i].Name < pcs.Spec.Template.Cliques[j].Name
 				})
-				for _, clique := range pcs.Spec.Template.Cliques {
-					for i := range clique.Spec.PodSpec.Containers {
-						slices.SortFunc(clique.Spec.PodSpec.Containers[i].Env, func(a, b corev1.EnvVar) int {
-							return strings.Compare(a.Name, b.Name)
-						})
-					}
-				}
 				extraResources = append(extraResources, pcs)
 			}
 

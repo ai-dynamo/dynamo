@@ -319,6 +319,10 @@ spec:
             command:
             - /bin/nova
             env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -331,10 +335,6 @@ spec:
               value: inference-engine
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: LPX_ALLOCATION
-              value: agt
-            - name: LPX_MODEL_PATH
-              value: /nfs/llama3_2-1b-lpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: MPI_BTL_TCP_IF_INCLUDE
               value: 192.0.2.0/24
             - name: NATS_SERVER

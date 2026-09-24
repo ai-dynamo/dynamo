@@ -156,6 +156,10 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_ALLOCATION
+              value: agt
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -168,10 +172,6 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: LPX_ALLOCATION
-              value: agt
-            - name: LPX_MODEL_PATH
-              value: /models/node-local-v2-connected
             - name: NATS_SERVER
               value: nats-address
             - name: POD_IP

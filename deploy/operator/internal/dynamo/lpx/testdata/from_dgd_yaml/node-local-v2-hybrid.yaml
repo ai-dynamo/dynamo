@@ -77,6 +77,8 @@ spec:
             command:
             - /opt/dynamo-lpu
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/node-local-v2-connected-lpx
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -97,8 +99,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
-            - name: LPX_MODEL_PATH
-              value: /nfs/node-local-v2-connected-lpx
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -240,6 +240,8 @@ spec:
             - --
             - /opt/gpu-runtime
             env:
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
@@ -266,8 +268,6 @@ spec:
               value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GBUILD_MANIFEST_PATH
-              value: /nfs/node-local-v2-connected-lpx/manifest.v2.capnp.bin
             - name: NATS_SERVER
               value: nats-address
             - name: NIXL_TELEMETRY_ENABLE

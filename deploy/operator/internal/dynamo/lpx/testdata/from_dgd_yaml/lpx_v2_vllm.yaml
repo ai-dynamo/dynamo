@@ -262,6 +262,8 @@ spec:
                 --metadata-file "$(mktemp)" \
                 --readiness-port "${READINESS_PORT}"
             env:
+            - name: LPX_MODEL_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -282,8 +284,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.annotations['scheduling.lpu.nvidia.com/model']
-            - name: LPX_MODEL_PATH
-              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c
             - name: NATS_SERVER
               value: nats-address
             - name: NIC_NAME
@@ -442,6 +442,8 @@ spec:
             - --
             - /usr/local/bin/cyborg
             env:
+            - name: GBUILD_MANIFEST_PATH
+              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: CYBORG_FPGA_GPI_REPLICA_INDEX
               valueFrom:
                 fieldRef:
@@ -468,8 +470,6 @@ spec:
               value: '["generate"]'
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: GBUILD_MANIFEST_PATH
-              value: /nfs/llama3_2-1b-lpu-gpu-v2/build_0m851219t7py3mp8x1j5rg9j8c/manifest.v2.capnp.bin
             - name: GLUE_RDMA_PATH_MTU
               value: "1024"
             - name: NATS_SERVER

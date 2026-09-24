@@ -556,6 +556,12 @@ spec:
             command:
             - /bin/nova
             env:
+            - name: LPX_ALLOCATION
+              value: agt0:agt1:agt2
+            - name: LPX_DRAFT_MODEL_PATH
+              value: /nfs/node-local-v2-connected
+            - name: LPX_TARGET_MODEL_PATH
+              value: /nfs/node-local-v2-connected
             - name: DYN_COMPONENT
               value: lpx
             - name: DYN_DISCOVERY_BACKEND
@@ -568,12 +574,6 @@ spec:
               value: test
             - name: ETCD_ENDPOINTS
               value: etcd-address
-            - name: LPX_ALLOCATION
-              value: agt0:agt1:agt2
-            - name: LPX_DRAFT_MODEL_PATH
-              value: /nfs/node-local-v2-connected
-            - name: LPX_TARGET_MODEL_PATH
-              value: /nfs/node-local-v2-connected
             - name: NATS_SERVER
               value: nats-address
             - name: NOVA_DRAFT_MODEL_PATH
