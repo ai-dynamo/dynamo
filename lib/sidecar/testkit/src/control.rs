@@ -279,3 +279,70 @@ impl<P: Protocol> OpenedRequest<P> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{poll, stream};
+
+    struct TestProtocol;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum Response {
+        Token(u32),
+        Terminal,
+    }
+
+    impl Protocol for TestProtocol {
+        type Request = &'static str;
+        type Response = Response;
+        type Error = &'static str;
+
+        fn request_id(request: &Self::Request) -> &str {
+            request
+        }
+
+        fn record_tokens(response: &Self::Response, tokens: &mut Vec<u32>) -> bool {
+            if let Response::Token(token) = response {
+                tokens.push(*token);
+                true
+            } else {
+                false
+            }
+        }
+
+        fn is_terminal(response: &Self::Response) -> bool {
+            matches!(response, Response::Terminal)
+        }
+
+        fn injected_error(message: &'static str) -> Self::Error {
+            message
+        }
+    }
+
+    #[tokio::test]
+    async fn replay_first_after_terminal_keeps_stream_open() {
+        let control = Controller::<TestProtocol>::default();
+        control.request(
+            "replay",
+            RequestPlan {
+                stream: Some(StreamFault {
+                    at: StreamPoint::Terminal,
+                    action: StreamAction::ReplayFirst,
+                    pause: false,
+                }),
+                ..Default::default()
+            },
+        );
+        let source = stream::iter([Ok(Response::Token(7)), Ok(Response::Terminal)]).boxed();
+        let mut stream = control.open(&"replay").await.unwrap().wrap(source);
+
+        crate::bounded("replayed responses", async {
+            for expected in [Response::Token(7), Response::Terminal, Response::Token(7)] {
+                assert_eq!(stream.next().await, Some(Ok(expected)));
+            }
+        })
+        .await;
+        assert!(poll!(stream.next()).is_pending());
+    }
+}
