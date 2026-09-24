@@ -13,7 +13,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_utils.custom_encoder import ExternalEncoderHandoff
 
 from .config import RemoteEncoderConfig
-from .orchestrator import ExternalEncoderOrchestrator
+from .orchestrator import DummyClassifier, ExternalEncoderOrchestrator
 
 configure_dynamo_logging()
 
@@ -48,6 +48,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         orchestrator = ExternalEncoderOrchestrator(
             handoff,
             LLMUnaryClient(generator_client),
+            DummyClassifier(),
             config.generator_model_name,
         )
         await serve_unary_endpoint(endpoint, orchestrator)
