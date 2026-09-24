@@ -1,0 +1,24 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -445,6 +445,21 @@
+             zmq_sys::zmq_ctx_set(self.raw.ctx, zmq_sys::ZMQ_IO_THREADS as _, value as i32)
+         });
+         Ok(())
++    }
++
++    /// Campaign-only access to the established context socket-capacity setting.
++    pub fn set_max_sockets(&self, value: i32) -> Result<()> {
++        zmq_try!(unsafe {
++            zmq_sys::zmq_ctx_set(self.raw.ctx, zmq_sys::ZMQ_MAX_SOCKETS as _, value)
++        });
++        Ok(())
++    }
++
++    pub fn get_max_sockets(&self) -> Result<i32> {
++        let value = zmq_try!(unsafe {
++            zmq_sys::zmq_ctx_get(self.raw.ctx, zmq_sys::ZMQ_MAX_SOCKETS as _)
++        });
++        Ok(value)
+     }
+ 
+     /// Create a new socket.

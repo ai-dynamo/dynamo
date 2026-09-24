@@ -1,5 +1,8 @@
 # Velo response comparison on Tyche
 
+The [completed September 23 comparison](report/README.md) includes all 16 measured
+runs, packet and end-to-end results, retained errors, source pins, and build hashes.
+
 The adapter is selected with `DYN_RESPONSE_PLANE=velo` and
 `DYN_VELO_RESPONSE_TRANSPORT=tcp|ucx`. UCX requires the `velo-ucx` build feature.
 TCP remains the default response plane. QUIC is unchanged.
