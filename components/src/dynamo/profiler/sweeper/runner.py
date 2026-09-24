@@ -21,6 +21,7 @@ class SweepResult:
 
 
 RoundCallback = Callable[[int, list[Any]], None]
+CandidateCallback = Callable[[Any], None]
 
 
 def _load_sweeper_api() -> tuple[type[Any], type[Any]]:
@@ -55,8 +56,17 @@ def run_sweep(
     *,
     show_progress: bool = True,
     on_round: RoundCallback | None = None,
+    on_candidate: CandidateCallback | None = None,
 ) -> SweepResult:
-    """Execute one validated AI Simulate config using Dynamo Replay."""
+    """Execute one validated AI Simulate config using Dynamo Replay.
+
+    ``aisimulate``'s ``Sweeper.run()`` returns its own schema-versioned
+    ``SweepResult`` (a full candidate ledger plus a scalar top-N or Pareto
+    ``views`` selection), not a directly iterable candidate list. This
+    resolves the active view through the ledger and converts each selected
+    record back to the plain ``Candidate`` shape the rest of this module's
+    callers already expect.
+    """
     _, Sweeper = _load_sweeper_api()
 
     DynamoReplayRunnerFactory = _load_runner_factory()
@@ -64,7 +74,13 @@ def run_sweep(
         runner_factory=DynamoReplayRunnerFactory(),
         show_progress=show_progress,
     )
+    aisim_result = sweeper.run(config, on_round=on_round, on_candidate=on_candidate)
+    by_id = {record.candidate_id: record for record in aisim_result.candidates}
+    selected = [
+        by_id[candidate_id].as_candidate()
+        for candidate_id in aisim_result.selected_candidate_ids
+    ]
     return SweepResult(
         config=config,
-        candidates=list(sweeper.run(config, on_round=on_round)),
+        candidates=selected,
     )

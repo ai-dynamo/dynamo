@@ -54,6 +54,31 @@ def _args(output_dir, *extra: str) -> list[str]:
     ]
 
 
+class _FakeEventPublisher:
+    """Records every emit() call; stands in for SweeperEventPublisher."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+        self.closed = False
+
+    def emit(self, event_type: str, data: dict) -> None:
+        self.events.append((event_type, data))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeCandidateRecord:
+    def __init__(self, *, feasible: bool, payload=None, reason=None) -> None:
+        self.status = SimpleNamespace(value="feasible" if feasible else "infeasible")
+        self._payload = payload or {}
+        self.reason = reason
+
+    def as_candidate(self):
+        payload = self._payload
+        return SimpleNamespace(model_dump=lambda mode="json": payload)
+
+
 def _rendered_dgd(name: str, score: float) -> str:
     return f"""apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
@@ -78,10 +103,15 @@ def test_scalar_publishes_only_new_best_candidates(
 
     monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
 
-    def fake_run_sweep(received_config, *, show_progress, on_round=None):
+    def fake_run_sweep(
+        received_config, *, show_progress, on_round=None, on_candidate=None
+    ):
         assert received_config is config
         assert show_progress is False
         assert on_round is not None
+        # No --dgd-namespace: the event plane is never started, so run_sweep
+        # must still be called (with on_candidate=None) but nothing consumes it.
+        assert on_candidate is None
         on_round(1, [first])
         on_round(2, [first, worse])
         on_round(3, [first, worse, better])
@@ -135,7 +165,7 @@ def test_scalar_ctrl_c_preserves_best_known_dgd(monkeypatch, tmp_path, capsys) -
 
     monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
 
-    def fake_run_sweep(_config, *, show_progress, on_round=None):
+    def fake_run_sweep(_config, *, show_progress, on_round=None, on_candidate=None):
         assert on_round is not None
         on_round(1, [candidate])
         raise KeyboardInterrupt
@@ -166,7 +196,7 @@ def test_unrenderable_new_best_retains_previous_dgd(
 
     monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
 
-    def fake_run_sweep(_config, *, show_progress, on_round=None):
+    def fake_run_sweep(_config, *, show_progress, on_round=None, on_candidate=None):
         assert on_round is not None
         on_round(1, [first])
         on_round(2, [first, unrenderable])
@@ -197,9 +227,12 @@ def test_pareto_writes_prefixed_kustomize_sources(monkeypatch, tmp_path) -> None
 
     monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
 
-    def fake_run_sweep(received_config, *, show_progress, on_round=None):
+    def fake_run_sweep(
+        received_config, *, show_progress, on_round=None, on_candidate=None
+    ):
         assert received_config is config
         assert on_round is None
+        assert on_candidate is None
         return SweepResult(config=config, candidates=candidates)
 
     monkeypatch.setattr(main_module, "run_sweep", fake_run_sweep)
@@ -311,3 +344,226 @@ def test_dgd_name_form_must_match_goal(
         main_module.main(_args(tmp_path, invalid_flag, "qwen"))
 
     assert valid_flag in capsys.readouterr().err
+
+
+def test_event_publisher_is_never_started_without_dgd_namespace(
+    monkeypatch, tmp_path
+) -> None:
+    config = _config(pareto=True)
+    started = []
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module,
+        "_start_event_publisher",
+        lambda namespace: started.append(namespace),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_sweep",
+        lambda *_args, **_kwargs: SweepResult(
+            config=config, candidates=[_Candidate(1.0)]
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "render_dgd",
+        lambda candidate, _workload, _options, *, dgd_name, renderer: _rendered_dgd(
+            dgd_name, candidate.score
+        ),
+    )
+
+    result = main_module.main(_args(tmp_path / "output", "--dgd-name-prefix", "qwen"))
+
+    assert result == 0
+    assert started == []
+
+
+def test_start_event_publisher_fails_open_and_warns(monkeypatch, capsys) -> None:
+    import sys
+
+    # No dynamo.runtime.DistributedRuntime available (e.g. bindings not
+    # built) must never abort the sweep -- only skip progress events.
+    monkeypatch.setitem(sys.modules, "dynamo.runtime", SimpleNamespace())
+
+    publisher = main_module._start_event_publisher("my-namespace")
+
+    assert publisher is None
+    assert "event plane unavailable" in capsys.readouterr().err
+
+
+def test_candidate_event_payload_maps_feasible_and_non_feasible_outcomes() -> None:
+    feasible = _FakeCandidateRecord(feasible=True, payload={"score": 1.5})
+    infeasible = _FakeCandidateRecord(feasible=False, reason="over gpu_budget")
+
+    assert main_module._candidate_event_payload(feasible) == {
+        "outcome": "materialized",
+        "candidate": {"score": 1.5},
+    }
+    assert main_module._candidate_event_payload(infeasible) == {
+        "outcome": "materialization_failed",
+        "error": "over gpu_budget",
+    }
+
+
+def test_combine_round_callbacks_calls_every_active_callback() -> None:
+    calls = []
+
+    def first(round_number, candidates):
+        calls.append(("first", round_number, candidates))
+
+    def second(round_number, candidates):
+        calls.append(("second", round_number, candidates))
+
+    combined = main_module._combine_round_callbacks(first, None, second)
+    combined(1, ["candidate"])
+
+    assert calls == [("first", 1, ["candidate"]), ("second", 1, ["candidate"])]
+    assert main_module._combine_round_callbacks(None, None) is None
+    assert main_module._combine_round_callbacks(first, None) is first
+
+
+def test_scalar_run_emits_round_search_and_run_completed_events(
+    monkeypatch, tmp_path
+) -> None:
+    output_dir = tmp_path / "output"
+    config = _config()
+    candidate = _Candidate(1.5)
+    fake_publisher = _FakeEventPublisher()
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module, "_start_event_publisher", lambda namespace: fake_publisher
+    )
+    monkeypatch.setattr(
+        main_module,
+        "render_dgd",
+        lambda c, _workload, _options, *, dgd_name, renderer: _rendered_dgd(
+            dgd_name, c.score
+        ),
+    )
+
+    def fake_run_sweep(_config, *, show_progress, on_round=None, on_candidate=None):
+        on_round(1, [candidate])
+        on_candidate(_FakeCandidateRecord(feasible=True, payload={"score": 1.5}))
+        on_candidate(_FakeCandidateRecord(feasible=False, reason="over gpu_budget"))
+        return SweepResult(config=config, candidates=[candidate])
+
+    monkeypatch.setattr(main_module, "run_sweep", fake_run_sweep)
+
+    result = main_module.main(
+        _args(output_dir, "--dgd-name", "qwen", "--dgd-namespace", "my-ns")
+    )
+
+    assert result == 0
+    assert ("round.completed", {"round_no": 1, "cumulative_candidates": 1}) in (
+        fake_publisher.events
+    )
+    assert (
+        "search.resolved",
+        {"outcome": "materialized", "candidate": {"score": 1.5}},
+    ) in fake_publisher.events
+    assert (
+        "search.resolved",
+        {"outcome": "materialization_failed", "error": "over gpu_budget"},
+    ) in fake_publisher.events
+    assert fake_publisher.events[-1] == (
+        "run.completed",
+        {"outcome": "succeeded"},
+    )
+    assert fake_publisher.closed is True
+
+
+def test_pareto_run_emits_events_with_no_dgd_publisher_involved(
+    monkeypatch, tmp_path
+) -> None:
+    output_dir = tmp_path / "output"
+    config = _config(pareto=True)
+    candidates = [_Candidate(1.5)]
+    fake_publisher = _FakeEventPublisher()
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module, "_start_event_publisher", lambda namespace: fake_publisher
+    )
+    monkeypatch.setattr(
+        main_module,
+        "render_dgd",
+        lambda c, _workload, _options, *, dgd_name, renderer: _rendered_dgd(
+            dgd_name, c.score
+        ),
+    )
+
+    def fake_run_sweep(_config, *, show_progress, on_round=None, on_candidate=None):
+        assert on_round is not None
+        on_round(1, candidates)
+        return SweepResult(config=config, candidates=candidates)
+
+    monkeypatch.setattr(main_module, "run_sweep", fake_run_sweep)
+
+    result = main_module.main(
+        _args(output_dir, "--dgd-name-prefix", "qwen", "--dgd-namespace", "my-ns")
+    )
+
+    assert result == 0
+    assert ("round.completed", {"round_no": 1, "cumulative_candidates": 1}) in (
+        fake_publisher.events
+    )
+    assert fake_publisher.events[-1] == ("run.completed", {"outcome": "succeeded"})
+
+
+def test_run_completed_reports_failure_on_exception(monkeypatch, tmp_path) -> None:
+    config = _config(pareto=True)
+    fake_publisher = _FakeEventPublisher()
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module, "_start_event_publisher", lambda namespace: fake_publisher
+    )
+    monkeypatch.setattr(
+        main_module,
+        "run_sweep",
+        lambda *_args, **_kwargs: SweepResult(config=config, candidates=[]),
+    )
+
+    result = main_module.main(
+        _args(
+            tmp_path / "output", "--dgd-name-prefix", "qwen", "--dgd-namespace", "my-ns"
+        )
+    )
+
+    assert result == 2
+    outcome_events = [
+        event for event in fake_publisher.events if event[0] == "run.completed"
+    ]
+    assert len(outcome_events) == 1
+    assert outcome_events[0][1]["outcome"] == "failed"
+    assert "no feasible candidate found" in outcome_events[0][1]["error"]
+    assert fake_publisher.closed is True
+
+
+def test_run_completed_reports_interrupted_on_keyboard_interrupt(
+    monkeypatch, tmp_path
+) -> None:
+    config = _config()
+    fake_publisher = _FakeEventPublisher()
+
+    monkeypatch.setattr(main_module, "load_sweep_config", lambda _path: config)
+    monkeypatch.setattr(
+        main_module, "_start_event_publisher", lambda namespace: fake_publisher
+    )
+
+    def fake_run_sweep(_config, *, show_progress, on_round=None, on_candidate=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(main_module, "run_sweep", fake_run_sweep)
+
+    result = main_module.main(
+        _args(tmp_path / "output", "--dgd-name", "qwen", "--dgd-namespace", "my-ns")
+    )
+
+    assert result == 130
+    assert fake_publisher.events[-1] == (
+        "run.completed",
+        {"outcome": "failed", "error": "interrupted"},
+    )

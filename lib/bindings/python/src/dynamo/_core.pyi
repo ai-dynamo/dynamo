@@ -1450,6 +1450,46 @@ class FpmEventSubscriber:
         ...
 
 
+class SweeperEventPublisher:
+    """
+    Publishes Sweeper progress/outcome events onto the Dynamo event plane,
+    per DEP #15073. Lazily creates one underlying event-plane publisher per
+    distinct subject passed to publish_subject (one per Sweeper event type).
+    """
+
+    def __init__(self, endpoint: Endpoint) -> None:
+        """
+        Args:
+            endpoint: Dynamo component endpoint (provides runtime + discovery).
+        """
+        ...
+
+    def publish_subject(self, subject: str, payload: bytes) -> None:
+        """
+        Blocking publish of one pre-serialized envelope onto `subject`.
+        Intended to be called from a background thread, never from a
+        latency-sensitive caller.
+        """
+        ...
+
+    def close(self) -> None:
+        """Release all underlying event-plane publishers."""
+        ...
+
+
+class SweeperEventSubscriber:
+    """
+    Reads Sweeper events back off the event plane. Not required for item 4
+    (emission); included for integration-testing the publisher above.
+    """
+
+    def __init__(self, endpoint: Endpoint) -> None: ...
+
+    def recv(self, subject: str) -> Optional[bytes]:
+        """Blocking receive of the next envelope on `subject`, or None if closed."""
+        ...
+
+
 class HttpService:
     """
     A HTTP service for dynamo applications.
