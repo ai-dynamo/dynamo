@@ -339,3 +339,19 @@ async def test_hicache_publish_failure_preserves_core_capacity(monkeypatch, capl
     assert (
         "Failed to attach native offloading capacity from SGLang HiCache" in caplog.text
     )
+
+
+@pytest.mark.parametrize(
+    "flag, expected", [(False, ["text"]), (True, None), (None, None), ("false", None)]
+)
+def test_input_modalities_only_declare_text_only_models(flag, expected):
+    from dynamo.sglang.register import _get_input_modalities
+
+    engine = SimpleNamespace(
+        tokenizer_manager=SimpleNamespace(
+            model_config=SimpleNamespace(is_multimodal=flag)
+        )
+    )
+    assert _get_input_modalities(engine) == expected
+    assert _get_input_modalities(None) is None
+    assert _get_input_modalities(SimpleNamespace()) is None

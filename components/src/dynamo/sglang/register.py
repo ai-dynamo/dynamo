@@ -57,6 +57,8 @@ from dynamo.sglang.video_routing import publish_sglang_qwen_video_processor_cont
 
 SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY = "sglang_hicache_mooncake"
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+# Mirrors INPUT_MODALITIES_RUNTIME_KEY in lib/llm/src/local_model/runtime_config.rs.
+INPUT_MODALITIES_RUNTIME_KEY = "input_modalities"
 
 
 def _supports_engine_generate(
@@ -107,6 +109,21 @@ def _register_model_source_path(
     if weights:
         return mc.model_path
     return server_args.model_path
+
+
+def _get_input_modalities(engine: Optional[sgl.Engine]) -> Optional[List[str]]:
+    """Declare only models known to reject all media.
+
+    ``is_multimodal`` cannot distinguish image, video and audio support, so
+    leave multimodal capabilities undeclared and let the engine validate them.
+    """
+    if engine is None:
+        return None
+    try:
+        is_multimodal = engine.tokenizer_manager.model_config.is_multimodal
+    except AttributeError:
+        return None
+    return ["text"] if is_multimodal is False else None
 
 
 def _build_media_decoder_and_fetcher():
@@ -557,6 +574,13 @@ async def get_runtime_config(
             logging.warning(
                 f"Failed to attach Mooncake HiCache runtime metadata to registration: {e}"
             )
+
+    input_modalities = _get_input_modalities(engine)
+    if input_modalities is not None:
+        runtime_config.set_engine_specific(
+            INPUT_MODALITIES_RUNTIME_KEY, json.dumps(input_modalities)
+        )
+        logging.info("Published SGLang input modalities: %s", input_modalities)
 
     if engine is None:
         return runtime_config

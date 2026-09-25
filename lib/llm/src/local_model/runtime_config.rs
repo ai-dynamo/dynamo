@@ -124,6 +124,15 @@ pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_towe
 /// to the other engine.
 pub const SGLANG_GENERATE_CAPABILITY: &str = "sglang_generate";
 
+/// Worker-declared input modalities, a JSON array drawn from `"text"`,
+/// `"image"`, `"video"` and `"audio"`.
+///
+/// When present, the frontend rejects media content whose modality is not
+/// listed instead of letting a text-only chat template drop it silently.
+/// Absence declares nothing, so a newer frontend keeps accepting media for
+/// older workers that predate this key.
+pub const INPUT_MODALITIES_RUNTIME_KEY: &str = "input_modalities";
+
 /// Tokenizer backend used by the Rust preprocessor for BPE tokenizer.json models.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -432,6 +441,22 @@ impl ModelRuntimeConfig {
     /// Check whether a runtime capability is explicitly enabled.
     pub(crate) fn supports_runtime_capability(&self, capability: &str) -> bool {
         self.runtime_flag_enabled(capability)
+    }
+
+    /// Whether the worker declared its input modalities without `modality`.
+    ///
+    /// An absent or malformed declaration rejects nothing.
+    pub(crate) fn rejects_input_modality(&self, modality: &str) -> bool {
+        match self.runtime_data.get(INPUT_MODALITIES_RUNTIME_KEY) {
+            Some(serde_json::Value::Array(declared))
+                if declared.iter().all(serde_json::Value::is_string) =>
+            {
+                !declared
+                    .iter()
+                    .any(|value| value.as_str() == Some(modality))
+            }
+            _ => false,
+        }
     }
 
     fn kv_hint_transfer_endpoint_for_dp_rank(&self, dp_rank: u32) -> Option<&str> {
@@ -1172,6 +1197,26 @@ mod tests {
         ] {
             config.runtime_data.insert(CAPABILITY.to_string(), disabled);
             assert!(!config.supports_runtime_capability(CAPABILITY));
+        }
+    }
+
+    #[test]
+    fn input_modalities_reject_only_when_declared_without_modality() {
+        let mut config = ModelRuntimeConfig::default();
+        assert!(!config.rejects_input_modality("image"));
+        for (declared, rejects_image, rejects_text) in [
+            (serde_json::json!(["text"]), true, false),
+            (serde_json::json!(["text", "image"]), false, false),
+            (serde_json::json!([]), true, true),
+            (serde_json::json!("text"), false, false),
+            (serde_json::json!([1]), false, false),
+            (serde_json::json!(["text", 1]), false, false),
+        ] {
+            config
+                .set_engine_specific(INPUT_MODALITIES_RUNTIME_KEY, declared)
+                .unwrap();
+            assert_eq!(config.rejects_input_modality("image"), rejects_image);
+            assert_eq!(config.rejects_input_modality("text"), rejects_text);
         }
     }
 
