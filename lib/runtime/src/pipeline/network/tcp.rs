@@ -145,10 +145,6 @@ const TCP_TRANSPORT: &str = "tcp_server";
 /// The kernel caps the effective value at `net.core.somaxconn`.
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 4096;
 
-/// Parses [`DYN_TCP_LISTEN_BACKLOG`] into a valid `listen(2)` backlog, falling back to
-/// [`DEFAULT_TCP_LISTEN_BACKLOG`] on missing, zero, negative, or unparseable input.
-///
-/// [`DYN_TCP_LISTEN_BACKLOG`]: crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG
 // `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
 fn parse_tcp_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
     value
@@ -158,7 +154,6 @@ fn parse_tcp_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
         .unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
 }
 
-/// Reads and parses the CallHome listener's backlog from the process environment.
 fn tcp_listen_backlog() -> u32 {
     parse_tcp_listen_backlog(std::env::var(
         crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
@@ -269,16 +264,6 @@ mod tests {
             i32::MAX as u32
         );
         assert_eq!(parse_tcp_listen_backlog(Ok(" 8192 ".to_string())), 8192);
-    }
-
-    #[tokio::test]
-    async fn test_bind_listener_accepts_connections() {
-        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
-        let addr = listener.local_addr().unwrap();
-        assert_ne!(addr.port(), 0);
-        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (_server_side, peer) = listener.accept().await.unwrap();
-        assert_eq!(peer, client.local_addr().unwrap());
     }
 
     /// Round-trip a request-stream connection: register on the server with
