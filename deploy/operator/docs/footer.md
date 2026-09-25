@@ -84,24 +84,15 @@ The operator applies different default health probes based on the component type
 
 ### Frontend Components
 
-Frontend components receive the following probe configurations:
+Frontend components receive the following HTTP GET probes on port `http` (8000):
 
-**Liveness Probe:**
-- **Type**: HTTP GET
-- **Path**: `/health`
-- **Port**: `http` (8000)
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+| Probe | Path | Initial delay | Period | Timeout | Failure threshold |
+| --- | --- | --- | --- | --- | --- |
+| Liveness | `/live` | 15 seconds | 10 seconds | 1 second | 3 |
+| Readiness | `/health` | 10 seconds | 10 seconds | 3 seconds | 3 |
+| Startup (runtime 1.6.0 and later) | `/live` | 0 seconds | 10 seconds | 1 second | 30 |
 
-**Readiness Probe:**
-- **Type**: Exec command
-- **Command**: `curl -s http://localhost:${DYNAMO_PORT}/health | jq -e ".status == \"healthy\""`
-- **Initial Delay**: 60 seconds
-- **Period**: 60 seconds
-- **Timeout**: 30 seconds
-- **Failure Threshold**: 10
+The startup probe allows five minutes for the sequential NATS and etcd connection waits and initialization. It also applies to colocated frontends. Older runtimes and images whose runtime version cannot be resolved do not receive a default startup probe. User-specified probes replace these defaults. If you raise `NATS_STARTUP_CONNECT_TIMEOUT_SECONDS` or `ETCD_STARTUP_CONNECT_TIMEOUT_SECONDS`, raise the startup probe allowance to cover the combined connection windows and initialization.
 
 ### Worker Components
 
