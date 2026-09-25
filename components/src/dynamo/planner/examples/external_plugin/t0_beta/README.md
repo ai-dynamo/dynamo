@@ -106,6 +106,8 @@ the default cadence. A restart loses that history. Each forecast batches
 the three signals as independent series and selects the configured quantile
 for one future interval. The default 0.9 quantile provides a configurable
 demand estimate; it is not a capacity or SLO guarantee.
+Idle windows retain the last known mean token lengths; initial idle traffic
+without a known request shape uses the built-in fallback.
 
 During warmup, invalid observations, or an already busy model, the plugin
 returns no prediction and Dynamo uses its built-in predictor. Inference

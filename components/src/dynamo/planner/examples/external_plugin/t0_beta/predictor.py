@@ -96,6 +96,12 @@ class T0Predictor:
             if elapsed > self._interval * 1.5:
                 logger.warning("Traffic sampling gap; restarting t0 history warmup")
                 self._reset_history()
+        if traffic.num_req == 0:
+            if not self._history:
+                return pb.PredictStageResponse(reason="idle_without_history")
+            # No requests means undefined mean lengths, not zero-length requests.
+            # Match the builtin predictor's last-known-shape behavior.
+            sample = (0.0, self._history[-1][1], self._history[-1][2])
         self._history.append(sample)
         self._last_sample = now
         self._last_request_id = request_id

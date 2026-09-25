@@ -53,6 +53,36 @@ class Forecast:
 
 
 @pytest.mark.asyncio
+async def test_idle_windows_keep_last_known_request_shape() -> None:
+    clock = Clock()
+
+    def forecast(
+        history: Sequence[tuple[float, float, float]], quantile: float
+    ) -> tuple[float, float, float]:
+        assert list(history) == [(10.0, 100.0, 20.0), (0.0, 100.0, 20.0)]
+        return (10.0, 100.0, 20.0)
+
+    plugin = predictor.T0Predictor(forecast, min_history=2, clock=clock)
+    await plugin.predict(request(10))
+    clock.now = 60
+    idle = request(0)
+    idle.context.observations.traffic.isl = 0
+    idle.context.observations.traffic.osl = 0
+    result = await plugin.predict(idle)
+    assert result.predictions.predicted_isl == 100
+
+
+@pytest.mark.asyncio
+async def test_idle_startup_waits_for_a_known_request_shape() -> None:
+    plugin = predictor.T0Predictor(Forecast(), min_history=2)
+    idle = request(0)
+    idle.context.observations.traffic.isl = 0
+    idle.context.observations.traffic.osl = 0
+    result = await plugin.predict(idle)
+    assert result.reason == "idle_without_history"
+
+
+@pytest.mark.asyncio
 async def test_old_samples_are_evicted() -> None:
     clock = Clock()
 
