@@ -130,6 +130,56 @@ use super::{
 
 const TCP_TRANSPORT: &str = "tcp_server";
 
+/// Default listen backlog for the CallHome listener.
+///
+/// `tokio::net::TcpListener::bind` passes mio's `LISTEN_BACKLOG_SIZE`, which on Linux
+/// is a hardcoded `128` as of mio 1.2.0. Every response stream is its own CallHome
+/// connection ([`client::TcpClient::create_response_stream`] dials once per request,
+/// with no pooling), so this listener's accept rate scales with in-flight requests.
+///
+/// When the accept queue is full the kernel drops the client's final ACK and falls back
+/// to SYN-ACK retransmission (1s, 3s, 7s, ...), so the symptom is connection latency and,
+/// once `tcp_synack_retries` is exhausted, connection failure. A prompt RST is sent only
+/// when `net.ipv4.tcp_abort_on_overflow=1`, which is not the default.
+///
+/// The kernel caps the effective value at `net.core.somaxconn`.
+const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 4096;
+
+// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
+fn parse_tcp_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
+    value
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|n| (1..=i32::MAX as u32).contains(n))
+        .unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
+}
+
+fn tcp_listen_backlog() -> u32 {
+    parse_tcp_listen_backlog(std::env::var(
+        crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
+    ))
+}
+
+/// Bind the CallHome listener with a configurable backlog.
+///
+/// Mirrors what `tokio::net::TcpListener::bind` does for an already-resolved address
+/// (`SO_REUSEADDR`, bind, listen) except that the backlog comes from
+/// [`DYN_TCP_LISTEN_BACKLOG`] rather than mio's hardcoded value.
+///
+/// [`DYN_TCP_LISTEN_BACKLOG`]: crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG
+pub(crate) fn bind_listener(
+    addr: std::net::SocketAddr,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(tcp_listen_backlog())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpStreamConnectionInfo {
     pub address: String,
@@ -189,6 +239,41 @@ mod tests {
     #[derive(Debug, Clone, Serialize, Deserialize)]
     struct TestMessage {
         foo: String,
+    }
+
+    #[test]
+    fn test_tcp_listen_backlog_env_var() {
+        assert_eq!(
+            parse_tcp_listen_backlog(Err(std::env::VarError::NotPresent)),
+            DEFAULT_TCP_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_tcp_listen_backlog(Ok("0".to_string())),
+            DEFAULT_TCP_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_tcp_listen_backlog(Ok("invalid".to_string())),
+            DEFAULT_TCP_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_tcp_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
+            DEFAULT_TCP_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_tcp_listen_backlog(Ok(i32::MAX.to_string())),
+            i32::MAX as u32
+        );
+        assert_eq!(parse_tcp_listen_backlog(Ok(" 8192 ".to_string())), 8192);
+    }
+
+    #[tokio::test]
+    async fn test_bind_listener_accepts_connections() {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_ne!(addr.port(), 0);
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_server_side, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer, client.local_addr().unwrap());
     }
 
     /// Round-trip a request-stream connection: register on the server with
