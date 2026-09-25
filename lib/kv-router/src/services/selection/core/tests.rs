@@ -2267,7 +2267,7 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     wait_until("scheduler worker registration", || {
         entry
             .scheduler
-            .get_potential_loads(None, 8, HashMap::new(), true)
+            .get_potential_loads(None, 8, Default::default(), true)
             .len()
             == 2
     })
