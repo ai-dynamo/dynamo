@@ -204,6 +204,17 @@ RUN NIXL_LIB_DIR="$(/opt/dynamo/venv/bin/python -c 'import sysconfig; print(sysc
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
+# Bake the build commit into the image config, same as every other runtime image
+# (dynamo_runtime.Dockerfile / vllm_runtime.Dockerfile / sglang_runtime.Dockerfile /
+# trtllm_runtime.Dockerfile / planner.Dockerfile all do this). A downstream CI that
+# passes --build-arg DYNAMO_COMMIT_SHA=<sha> to every image build (so a tool can
+# later inspect a pushed image and recover the exact source commit it came from,
+# without needing git inside the image) got it silently dropped here specifically,
+# because nothing declared a matching ARG to receive it -- this was the one image
+# kind such a build-arg had no effect on.
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
 USER dynamo
 
 ENTRYPOINT ["/epp"]
