@@ -1,22 +1,41 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Validate vLLM #58038's NIXL telemetry completion behavior.
+"""Validate the DeepSeek V4.1 Flash vLLM runtime patch stack.
 
-The pinned nightly reports a transfer as ``DONE`` before vLLM reads its optional
-telemetry.  A missing telemetry record must not turn that completed transfer
-into a failed request.  This exercises the installed wheel, not a source tree.
+The installed pinned-nightly wheel must contain the #58215 DeepSelect sentinel
+bound, #57662's NIXL region geometry key, and #58038's telemetry-completion
+behavior. This deliberately inspects the installed wheel, not a source tree.
 """
 
 from __future__ import annotations
 
+import inspect
 from unittest.mock import MagicMock
 
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
+from vllm.model_executor.kernels.attention.dsa import sparse_mqa_logits
+
+
+def validate_dsa_sentinel_bound() -> None:
+    source = inspect.getsource(sparse_mqa_logits)
+    assert "valid = (c >= 0) & (c < width)" in source
+    assert "        width," in source
+
+
+def validate_nixl_region_key() -> None:
+    source = inspect.getsource(base_worker)
+    assert "region_key = (base_addr, block_len)" in source
+    assert "if region_key in seen_region_keys:" in source
+    assert "seen_region_keys.append(region_key)" in source
 
 
 def main() -> int:
+    validate_dsa_sentinel_bound()
+    validate_nixl_region_key()
+
     worker = object.__new__(NixlBaseConnectorWorker)
     worker.nixl_wrapper = MagicMock()
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
@@ -37,7 +56,7 @@ def main() -> int:
     worker.xfer_stats.record_transfer.assert_not_called()
     worker._log_failure.assert_not_called()
     worker._handle_failed_transfer.assert_not_called()
-    print("NIXL telemetry completion validation passed.")
+    print("DSv4.1 Flash vLLM runtime patch validation passed.")
     return 0
 
 

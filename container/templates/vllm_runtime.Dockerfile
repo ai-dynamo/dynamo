@@ -279,10 +279,15 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     fi
 
 {% if device == "cuda" %}
-# vLLM #58038: NIXL may report a transfer as DONE while its optional telemetry
-# is unavailable. The stock completion path turns that observability exception
-# into a failed KV transfer. Apply the two upstream runtime hunks against the
-# benchmark-pinned nightly and assert their behavioral postcondition.
+# DeepSeek V4.1 Flash runtime patch stack, applied in lexical order:
+# - #58215 bounds DeepSelect's out-of-range sentinel before sparse-index remap.
+# - #58038 keeps unavailable NIXL telemetry from failing a completed transfer.
+# - #57662 preserves distinct NIXL regions when overlaid caches have different
+#   block lengths. It is an upstream PR at ebd21ca746, not yet merged.
+#
+# All three are absent from the benchmark-pinned vLLM nightly. Patch the
+# installed wheel rather than deploying ConfigMap subPath overrides, and assert
+# the installed source plus #58038's behavioral postcondition at build time.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
     --mount=type=bind,source=./container/deps/vllm/validate_patches_runtime.py,target=/tmp/validate_patches_runtime.py,readonly \
     set -eux; \
