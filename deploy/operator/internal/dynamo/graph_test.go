@@ -1995,7 +1995,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
-					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -2608,7 +2607,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
-					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
@@ -3632,7 +3630,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 					Labels: map[string]string{
 						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dynamo-graph-deployment",
 					},
-					Annotations: make(map[string]string),
 				},
 				Spec: grovev1alpha1.PodCliqueSetSpec{
 					Replicas: 1,
