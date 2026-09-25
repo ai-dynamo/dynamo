@@ -18,7 +18,6 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -172,7 +171,6 @@ func podCliquePredicate() predicate.Funcs {
 				return false
 			}
 			return commoncontroller.PodCliqueStatusChangeIsSignificant(oldClique, newClique) ||
-				!ptr.Equal(oldClique.Status.CurrentPodTemplateHash, newClique.Status.CurrentPodTemplateHash) ||
 				oldClique.Generation != newClique.Generation ||
 				!maps.Equal(oldClique.Annotations, newClique.Annotations) ||
 				!maps.Equal(oldClique.Labels, newClique.Labels) ||

@@ -160,7 +160,7 @@ func TestGroveEventPredicates(t *testing.T) {
 }
 
 func TestPodCliquePredicateRoles(t *testing.T) {
-	t.Log("Observe compiled LPX roles and template-hash convergence")
+	t.Log("Observe compiled LPX roles and ignore unused template-hash updates")
 	filter := podCliquePredicate()
 	for _, test := range []struct {
 		role string
@@ -179,7 +179,7 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 			require.Equal(t, test.want, filter.Create(event.CreateEvent{Object: clique}))
 			current := clique.DeepCopy()
 			current.Status.CurrentPodTemplateHash = ptr.To("current-template")
-			require.Equal(t, test.want, filter.Update(event.UpdateEvent{ObjectOld: clique, ObjectNew: current}))
+			require.False(t, filter.Update(event.UpdateEvent{ObjectOld: clique, ObjectNew: current}))
 		})
 	}
 }
