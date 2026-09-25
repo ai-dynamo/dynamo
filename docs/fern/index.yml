@@ -659,6 +659,8 @@ navigation:
                 path: pages/developer-guide/additional-resources/speculative-decoding/overview.md
               - page: Speculative Decoding with vLLM
                 path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-vllm.md
+              - page: Speculative Decoding with SGLang
+                path: pages/developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-sglang.md
 
   - tab: use-cases
     layout:
