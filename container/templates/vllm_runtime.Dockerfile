@@ -100,6 +100,19 @@ RUN apt-get update && \
         libssl3t64 \
         openssl && \
     rm -rf /var/lib/apt/lists/*
+
+# The benchmark-pinned vLLM nightly is based on a CUDA runtime image: it has
+# /usr/local/cuda but deliberately does not ship nvcc. DeepSeek V4.1 Flash's
+# DeepGEMM kernels JIT at model load on GB200, so retain the CUDA 13.0 compiler
+# toolchain (including headers) in the runtime image. This is intentionally a
+# compiler meta-package rather than a symlink or a bare nvcc binary: DeepGEMM
+# invokes the compiler with CUDA headers and its normal host toolchain.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cuda-compiler-13-0 && \
+    test -x /usr/local/cuda/bin/nvcc && \
+    /usr/local/cuda/bin/nvcc --version && \
+    rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
