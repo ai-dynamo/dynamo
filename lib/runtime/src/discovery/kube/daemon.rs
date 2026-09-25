@@ -9,11 +9,14 @@ use k8s_openapi::api::core::v1::Pod;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::{
     Api, Client as KubeClient,
+    api::ListParams,
     runtime::{WatchStreamExt, reflector, watcher, watcher::Config},
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::time::interval;
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -23,6 +26,65 @@ mod state;
 use state::{BatchChanges, CachedCrMetadata, JoinTable, ReadinessIndex, ReadyEntry, StateChange};
 
 const SOURCE_CHANNEL_CAPACITY: usize = 1024;
+
+/// After this many consecutive reflector failures, or this long without a
+/// successful list/watch cycle, escalate the reflector error log from WARN to
+/// ERROR: a watch can keep failing while pods stay Ready, silently leaving
+/// discovery (and thus `/v1/models`) empty with only WARN-level noise.
+const REFLECTOR_ERROR_ESCALATION_FAILURES: u32 = 3;
+const REFLECTOR_ERROR_ESCALATION_AGE: Duration = Duration::from_secs(60);
+
+/// While a reflector's watch keeps failing, poll with a plain `list()` at this
+/// interval so discovery gets eventually-consistent data instead of staying
+/// empty forever; only kicks in after this long without a successful watch cycle.
+const REFLECTOR_FALLBACK_LIST_INTERVAL: Duration = Duration::from_secs(30);
+const REFLECTOR_FALLBACK_LIST_AFTER: Duration = Duration::from_secs(45);
+
+/// Tracks a reflector's watch-stream health so repeated failures can be
+/// escalated and a quiet watch can trigger fallback list polling.
+struct ReflectorHealth {
+    consecutive_failures: u32,
+    last_success: Instant,
+    /// When the current run of consecutive failures began; `None` while
+    /// healthy. Kept separate from `last_success` because apiserver-driven
+    /// relists (`WatchError`) call neither `record_success` nor
+    /// `record_failure`, so `last_success` can also go stale during a long
+    /// idle-but-healthy period. Escalation should only fire for an actual
+    /// failure streak, not for quiet periods.
+    failure_streak_started_at: Option<Instant>,
+}
+
+impl ReflectorHealth {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_success: Instant::now(),
+            failure_streak_started_at: None,
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.last_success = Instant::now();
+        self.failure_streak_started_at = None;
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.failure_streak_started_at.get_or_insert_with(Instant::now);
+    }
+
+    fn is_degraded(&self) -> bool {
+        self.consecutive_failures >= REFLECTOR_ERROR_ESCALATION_FAILURES
+            || self
+                .failure_streak_started_at
+                .is_some_and(|started| started.elapsed() >= REFLECTOR_ERROR_ESCALATION_AGE)
+    }
+
+    fn needs_fallback_list(&self) -> bool {
+        self.last_success.elapsed() >= REFLECTOR_FALLBACK_LIST_AFTER
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReadinessEvent {
@@ -124,20 +186,80 @@ impl DiscoverySource {
                 let (reader, writer) = reflector::store();
                 tracing::info!("Daemon watching EndpointSlices (pod mode)");
 
+                let fallback_api = api.clone();
+                let fallback_list_params = ListParams {
+                    label_selector: labels.label_selector.clone(),
+                    ..ListParams::default()
+                };
+
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
                 tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = endpoint_slice_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
+                    let mut health = ReflectorHealth::new();
+                    let mut fallback_ticker = interval(REFLECTOR_FALLBACK_LIST_INTERVAL);
+                    fallback_ticker.tick().await; // first tick fires immediately
+
+                    loop {
+                        tokio::select! {
+                            res = stream.next() => {
+                                let Some(res) = res else { break };
+                                match res {
+                                    Ok(event) => {
+                                        health.record_success();
+                                        if let Some(event) = endpoint_slice_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(watcher::Error::WatchError(resp)) => {
+                                        // Apiserver-driven relist (e.g. 410 Gone / expired
+                                        // resourceVersion) — expected, not a failure.
+                                        tracing::debug!(
+                                            "EndpointSlice reflector relist triggered by apiserver: {resp}"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        health.record_failure();
+                                        if health.is_degraded() {
+                                            tracing::error!(
+                                                consecutive_failures = health.consecutive_failures,
+                                                seconds_since_success = health.last_success.elapsed().as_secs(),
+                                                "EndpointSlice reflector has failed repeatedly: {e}"
+                                            );
+                                        } else {
+                                            tracing::warn!("EndpointSlice reflector error: {e}");
+                                        }
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("EndpointSlice reflector error: {e}");
+                            _ = fallback_ticker.tick() => {
+                                if health.needs_fallback_list() {
+                                    match fallback_api.list(&fallback_list_params).await {
+                                        Ok(list) => {
+                                            let mut applied = 0usize;
+                                            for slice in &list.items {
+                                                if let Some((object_key, entries)) = endpoint_slice_update(slice) {
+                                                    applied += 1;
+                                                    if events
+                                                        .send(ReadinessEvent::Apply { object_key, entries })
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            tracing::info!(
+                                                applied,
+                                                "EndpointSlice fallback list succeeded (watch has not confirmed success recently)"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("EndpointSlice fallback list also failed: {e}");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -150,20 +272,78 @@ impl DiscoverySource {
                 let (reader, writer) = reflector::store();
                 tracing::info!("Daemon watching Pods (container mode)");
 
+                let fallback_api = api.clone();
+                let fallback_list_params = ListParams {
+                    label_selector: labels.label_selector.clone(),
+                    ..ListParams::default()
+                };
+
                 let stream = reflector(writer, watcher(api, labels)).default_backoff();
                 tokio::spawn(async move {
                     tokio::pin!(stream);
-                    while let Some(res) = stream.next().await {
-                        match res {
-                            Ok(event) => {
-                                if let Some(event) = pod_event(event)
-                                    && events.send(event).await.is_err()
-                                {
-                                    break;
+                    let mut health = ReflectorHealth::new();
+                    let mut fallback_ticker = interval(REFLECTOR_FALLBACK_LIST_INTERVAL);
+                    fallback_ticker.tick().await; // first tick fires immediately
+
+                    loop {
+                        tokio::select! {
+                            res = stream.next() => {
+                                let Some(res) = res else { break };
+                                match res {
+                                    Ok(event) => {
+                                        health.record_success();
+                                        if let Some(event) = pod_event(event)
+                                            && events.send(event).await.is_err()
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(watcher::Error::WatchError(resp)) => {
+                                        tracing::debug!(
+                                            "Pod reflector relist triggered by apiserver: {resp}"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        health.record_failure();
+                                        if health.is_degraded() {
+                                            tracing::error!(
+                                                consecutive_failures = health.consecutive_failures,
+                                                seconds_since_success = health.last_success.elapsed().as_secs(),
+                                                "Pod reflector has failed repeatedly: {e}"
+                                            );
+                                        } else {
+                                            tracing::warn!("Pod reflector error: {e}");
+                                        }
+                                    }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!("Pod reflector error: {e}");
+                            _ = fallback_ticker.tick() => {
+                                if health.needs_fallback_list() {
+                                    match fallback_api.list(&fallback_list_params).await {
+                                        Ok(list) => {
+                                            let mut applied = 0usize;
+                                            for pod in &list.items {
+                                                if let Some((object_key, entries)) = pod_update(pod) {
+                                                    applied += 1;
+                                                    if events
+                                                        .send(ReadinessEvent::Apply { object_key, entries })
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            tracing::info!(
+                                                applied,
+                                                "Pod fallback list succeeded (watch has not confirmed success recently)"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Pod fallback list also failed: {e}");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -237,21 +417,70 @@ impl DiscoveryDaemon {
             self.pod_info.pod_namespace
         );
 
+        let cr_fallback_api = metadata_crs.clone();
         let cr_reflector_stream =
             reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
         tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
-            while let Some(res) = cr_reflector_stream.next().await {
-                match res {
-                    Ok(event) => {
-                        if let Some(event) = cr_event(event)
-                            && cr_tx.send(event).await.is_err()
-                        {
-                            break;
+            let mut health = ReflectorHealth::new();
+            let mut fallback_ticker = interval(REFLECTOR_FALLBACK_LIST_INTERVAL);
+            fallback_ticker.tick().await; // first tick fires immediately
+
+            loop {
+                tokio::select! {
+                    res = cr_reflector_stream.next() => {
+                        let Some(res) = res else { break };
+                        match res {
+                            Ok(event) => {
+                                health.record_success();
+                                if let Some(event) = cr_event(event)
+                                    && cr_tx.send(event).await.is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(watcher::Error::WatchError(resp)) => {
+                                tracing::debug!(
+                                    "DynamoWorkerMetadata CR reflector relist triggered by apiserver: {resp}"
+                                );
+                            }
+                            Err(e) => {
+                                health.record_failure();
+                                if health.is_degraded() {
+                                    tracing::error!(
+                                        consecutive_failures = health.consecutive_failures,
+                                        seconds_since_success = health.last_success.elapsed().as_secs(),
+                                        "DynamoWorkerMetadata CR reflector has failed repeatedly: {e}"
+                                    );
+                                } else {
+                                    tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                                }
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                    _ = fallback_ticker.tick() => {
+                        if health.needs_fallback_list() {
+                            match cr_fallback_api.list(&ListParams::default()).await {
+                                Ok(list) => {
+                                    let mut applied = 0usize;
+                                    for cr in list.items {
+                                        applied += 1;
+                                        if cr_tx.send(CrEvent::Apply(cr)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    tracing::info!(
+                                        applied,
+                                        "DynamoWorkerMetadata CR fallback list succeeded (watch has not confirmed success recently)"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "DynamoWorkerMetadata CR fallback list also failed: {e}"
+                                    );
+                                }
+                            }
+                        }
                     }
                 }
             }
