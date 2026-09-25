@@ -291,7 +291,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
     --mount=type=bind,source=./container/deps/vllm/validate_patches_runtime.py,target=/tmp/validate_patches_runtime.py,readonly \
     set -eux; \
-    python3 -c 'import vllm; assert vllm.__commit_id__ == "g3df4ae153", vllm.__commit_id__'; \
+    python3 -c 'import vllm; expected = "0.29.1rc1.dev452+g3df4ae153"; assert vllm.__version__ == expected, vllm.__version__'; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends patch; \
     site_parent="$(python3 -c 'import pathlib, vllm; print(pathlib.Path(vllm.__file__).resolve().parent.parent)')"; \
