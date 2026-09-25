@@ -27,8 +27,7 @@ func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 
 	ioFPGACount, ioFanoutFactor := runtimeBuild.IOFPGACount, runtimeBuild.IOFanoutFactor
 
-	// Keep physical artifacts in the scheduler projection; the runtime uses resolved partition metadata.
-	runtimeBuild.Partitions = nil
+	// Selected chains are represented by the allocation metadata and connectors below.
 	runtimeBuild.SelectedPropSyncChains = nil
 
 	allocationMetadata, connectors, err := projectV3PropSync(manifestPartitions, selectedPropSyncChains, intent.Pipeline)

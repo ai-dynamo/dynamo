@@ -108,19 +108,12 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 
 	// Accumulate each projection's runtime partitions into the surviving columns.
 	for _, projection := range projections {
-		// Render configured V2 runtime metadata without reapplying scheduler-shape validation to collapsed partitions.
-		partitions := projection.partitions
-		v2Runtime := projection.configuredBuild.Family == BuildFamilyXT &&
-			len(projection.configuredBuild.Partitions) != 0
-		if v2Runtime {
-			partitions = projection.configuredBuild.Partitions
-		}
-
+		// Render runtime partitions, including XT's collapsed prop-sync chains.
 		offset := int64(0)
-		for index, partition := range partitions {
+		for index, partition := range projection.configuredBuild.Partitions {
 			var nodes string
 			var endpointCount int64
-			if v2Runtime {
+			if projection.configuredBuild.Family == BuildFamilyXT {
 				nodeCount := partition.effectiveNodeCount()
 				nodes, endpointCount = strconv.Itoa(nodeCount), int64(nodeCount)
 			} else {
