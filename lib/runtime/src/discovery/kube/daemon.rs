@@ -40,8 +40,6 @@ const REFLECTOR_ERROR_ESCALATION_AGE: Duration = Duration::from_secs(60);
 const REFLECTOR_FALLBACK_LIST_INTERVAL: Duration = Duration::from_secs(30);
 const REFLECTOR_FALLBACK_LIST_AFTER: Duration = Duration::from_secs(45);
 
-/// Tracks a reflector's watch-stream health so repeated failures can be
-/// escalated and a quiet watch can trigger fallback list polling.
 struct ReflectorHealth {
     consecutive_failures: u32,
     last_success: Instant,
@@ -97,12 +95,14 @@ enum ReadinessEvent {
         object_key: String,
     },
     Rebuild,
+    Snapshot(Vec<(String, Vec<(String, ReadyEntry)>)>),
 }
 
 enum CrEvent {
     Apply(DynamoWorkerMetadata),
     Delete(DynamoWorkerMetadata),
     Rebuild,
+    Snapshot(Vec<DynamoWorkerMetadata>),
 }
 
 enum DiscoverySource {
@@ -176,6 +176,7 @@ impl DiscoverySource {
         pod_info: &PodInfo,
         kube_client: KubeClient,
         events: mpsc::Sender<ReadinessEvent>,
+        cancel_token: CancellationToken,
     ) -> Self {
         let labels = Config::default()
             .labels("nvidia.com/dynamo-discovery-backend=kubernetes")
@@ -213,12 +214,23 @@ impl DiscoverySource {
                                             break;
                                         }
                                     }
-                                    Err(watcher::Error::WatchError(resp)) => {
-                                        // Apiserver-driven relist (e.g. 410 Gone / expired
-                                        // resourceVersion) — expected, not a failure.
+                                    Err(watcher::Error::WatchError(resp)) if resp.code == 410 => {
                                         tracing::debug!(
                                             "EndpointSlice reflector relist triggered by apiserver: {resp}"
                                         );
+                                    }
+                                    Err(watcher::Error::WatchError(resp)) => {
+                                        let e = watcher::Error::WatchError(resp);
+                                        health.record_failure();
+                                        if health.is_degraded() {
+                                            tracing::error!(
+                                                consecutive_failures = health.consecutive_failures,
+                                                seconds_since_success = health.last_success.elapsed().as_secs(),
+                                                "EndpointSlice reflector has failed repeatedly: {e}"
+                                            );
+                                        } else {
+                                            tracing::warn!("EndpointSlice reflector error: {e}");
+                                        }
                                     }
                                     Err(e) => {
                                         health.record_failure();
@@ -236,32 +248,32 @@ impl DiscoverySource {
                             }
                             _ = fallback_ticker.tick() => {
                                 if health.needs_fallback_list() {
-                                    match fallback_api.list(&fallback_list_params).await {
-                                        Ok(list) => {
-                                            let mut applied = 0usize;
-                                            for slice in &list.items {
-                                                if let Some((object_key, entries)) = endpoint_slice_update(slice) {
-                                                    applied += 1;
-                                                    if events
-                                                        .send(ReadinessEvent::Apply { object_key, entries })
-                                                        .await
-                                                        .is_err()
-                                                    {
-                                                        return;
-                                                    }
+                                    tokio::select! {
+                                        _ = cancel_token.cancelled() => return,
+                                        res = fallback_api.list(&fallback_list_params) => match res {
+                                            Ok(list) => {
+                                                let snapshot: Vec<_> = list
+                                                    .items
+                                                    .iter()
+                                                    .filter_map(endpoint_slice_update)
+                                                    .collect();
+                                                let len = snapshot.len();
+                                                if events.send(ReadinessEvent::Snapshot(snapshot)).await.is_err() {
+                                                    return;
                                                 }
+                                                tracing::info!(
+                                                    len,
+                                                    "EndpointSlice fallback list succeeded (watch has not confirmed success recently)"
+                                                );
                                             }
-                                            tracing::info!(
-                                                applied,
-                                                "EndpointSlice fallback list succeeded (watch has not confirmed success recently)"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("EndpointSlice fallback list also failed: {e}");
+                                            Err(e) => {
+                                                tracing::warn!("EndpointSlice fallback list also failed: {e}");
+                                            }
                                         }
                                     }
                                 }
                             }
+                            _ = cancel_token.cancelled() => break,
                         }
                     }
                 });
@@ -299,10 +311,23 @@ impl DiscoverySource {
                                             break;
                                         }
                                     }
-                                    Err(watcher::Error::WatchError(resp)) => {
+                                    Err(watcher::Error::WatchError(resp)) if resp.code == 410 => {
                                         tracing::debug!(
                                             "Pod reflector relist triggered by apiserver: {resp}"
                                         );
+                                    }
+                                    Err(watcher::Error::WatchError(resp)) => {
+                                        let e = watcher::Error::WatchError(resp);
+                                        health.record_failure();
+                                        if health.is_degraded() {
+                                            tracing::error!(
+                                                consecutive_failures = health.consecutive_failures,
+                                                seconds_since_success = health.last_success.elapsed().as_secs(),
+                                                "Pod reflector has failed repeatedly: {e}"
+                                            );
+                                        } else {
+                                            tracing::warn!("Pod reflector error: {e}");
+                                        }
                                     }
                                     Err(e) => {
                                         health.record_failure();
@@ -320,32 +345,32 @@ impl DiscoverySource {
                             }
                             _ = fallback_ticker.tick() => {
                                 if health.needs_fallback_list() {
-                                    match fallback_api.list(&fallback_list_params).await {
-                                        Ok(list) => {
-                                            let mut applied = 0usize;
-                                            for pod in &list.items {
-                                                if let Some((object_key, entries)) = pod_update(pod) {
-                                                    applied += 1;
-                                                    if events
-                                                        .send(ReadinessEvent::Apply { object_key, entries })
-                                                        .await
-                                                        .is_err()
-                                                    {
-                                                        return;
-                                                    }
+                                    tokio::select! {
+                                        _ = cancel_token.cancelled() => return,
+                                        res = fallback_api.list(&fallback_list_params) => match res {
+                                            Ok(list) => {
+                                                let snapshot: Vec<_> = list
+                                                    .items
+                                                    .iter()
+                                                    .filter_map(pod_update)
+                                                    .collect();
+                                                let len = snapshot.len();
+                                                if events.send(ReadinessEvent::Snapshot(snapshot)).await.is_err() {
+                                                    return;
                                                 }
+                                                tracing::info!(
+                                                    len,
+                                                    "Pod fallback list succeeded (watch has not confirmed success recently)"
+                                                );
                                             }
-                                            tracing::info!(
-                                                applied,
-                                                "Pod fallback list succeeded (watch has not confirmed success recently)"
-                                            );
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Pod fallback list also failed: {e}");
+                                            Err(e) => {
+                                                tracing::warn!("Pod fallback list also failed: {e}");
+                                            }
                                         }
                                     }
                                 }
                             }
+                            _ = cancel_token.cancelled() => break,
                         }
                     }
                 });
@@ -406,7 +431,12 @@ impl DiscoveryDaemon {
         tracing::info!("Discovery daemon starting");
 
         let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
-        let source = DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
+        let source = DiscoverySource::new(
+            &self.pod_info,
+            self.kube_client.clone(),
+            readiness_tx,
+            self.cancel_token.clone(),
+        );
 
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
@@ -421,6 +451,7 @@ impl DiscoveryDaemon {
         let cr_fallback_api = metadata_crs.clone();
         let cr_reflector_stream =
             reflector(cr_writer, watcher(metadata_crs, Config::default())).default_backoff();
+        let cr_cancel = self.cancel_token.clone();
         tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
             let mut health = ReflectorHealth::new();
@@ -440,10 +471,23 @@ impl DiscoveryDaemon {
                                     break;
                                 }
                             }
-                            Err(watcher::Error::WatchError(resp)) => {
+                            Err(watcher::Error::WatchError(resp)) if resp.code == 410 => {
                                 tracing::debug!(
                                     "DynamoWorkerMetadata CR reflector relist triggered by apiserver: {resp}"
                                 );
+                            }
+                            Err(watcher::Error::WatchError(resp)) => {
+                                let e = watcher::Error::WatchError(resp);
+                                health.record_failure();
+                                if health.is_degraded() {
+                                    tracing::error!(
+                                        consecutive_failures = health.consecutive_failures,
+                                        seconds_since_success = health.last_success.elapsed().as_secs(),
+                                        "DynamoWorkerMetadata CR reflector has failed repeatedly: {e}"
+                                    );
+                                } else {
+                                    tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                                }
                             }
                             Err(e) => {
                                 health.record_failure();
@@ -461,28 +505,30 @@ impl DiscoveryDaemon {
                     }
                     _ = fallback_ticker.tick() => {
                         if health.needs_fallback_list() {
-                            match cr_fallback_api.list(&ListParams::default()).await {
-                                Ok(list) => {
-                                    let mut applied = 0usize;
-                                    for cr in list.items {
-                                        applied += 1;
-                                        if cr_tx.send(CrEvent::Apply(cr)).await.is_err() {
+                            let list_params = ListParams::default();
+                            tokio::select! {
+                                _ = cr_cancel.cancelled() => return,
+                                res = cr_fallback_api.list(&list_params) => match res {
+                                    Ok(list) => {
+                                        let len = list.items.len();
+                                        if cr_tx.send(CrEvent::Snapshot(list.items)).await.is_err() {
                                             return;
                                         }
+                                        tracing::info!(
+                                            len,
+                                            "DynamoWorkerMetadata CR fallback list succeeded (watch has not confirmed success recently)"
+                                        );
                                     }
-                                    tracing::info!(
-                                        applied,
-                                        "DynamoWorkerMetadata CR fallback list succeeded (watch has not confirmed success recently)"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "DynamoWorkerMetadata CR fallback list also failed: {e}"
-                                    );
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "DynamoWorkerMetadata CR fallback list also failed: {e}"
+                                        );
+                                    }
                                 }
                             }
                         }
                     }
+                    _ = cr_cancel.cancelled() => break,
                 }
             }
         });
@@ -562,6 +608,16 @@ fn apply_readiness_event(
             entries,
         } => readiness_index.replace_object(object_key, entries),
         ReadinessEvent::Delete { object_key } => readiness_index.remove_object(&object_key),
+        ReadinessEvent::Snapshot(items) => {
+            let mut next = ReadinessIndex::default();
+            for (object_key, entries) in items {
+                next.replace_object(object_key, entries);
+            }
+            let resolved = next.resolved_entries();
+            join_table.replace_readiness(resolved, changes);
+            *readiness_index = next;
+            return;
+        }
         ReadinessEvent::Rebuild => {
             let next = source.rebuild_index();
             let resolved = next.resolved_entries();
@@ -596,6 +652,24 @@ fn apply_cr_event(
             };
             valid_cr_cache.remove(&cr_key);
             join_table.set_cr(cr_key, None, changes);
+        }
+        CrEvent::Snapshot(items) => {
+            let mut next: HashMap<String, CachedCrMetadata> = HashMap::new();
+            let mut observed: HashSet<String> = HashSet::new();
+            for cr in items {
+                // Use same validation as scan_cr_store via read path
+                if let Some((cr_name, cached)) = read_cr_object(&cr, valid_cr_cache) {
+                    observed.insert(cr_name.clone());
+                    if let Some(cached) = cached {
+                        next.insert(cr_name, cached);
+                    }
+                } else if let Some(name) = cr.metadata.name.clone() {
+                    // nameless CR already handled; fallback: still track observed
+                    observed.insert(name);
+                }
+            }
+            valid_cr_cache.retain(|k, _| observed.contains(k));
+            join_table.replace_crs(next, changes);
         }
         CrEvent::Rebuild => {
             let next = scan_cr_store(cr_reader, valid_cr_cache);
