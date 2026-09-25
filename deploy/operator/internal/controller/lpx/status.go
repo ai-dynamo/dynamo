@@ -194,23 +194,18 @@ func schedulingFailureCoversPipelineRequests(
 // renew starts a new durable fence; otherwise the original failure time and
 // generation survive retries. Reconcile persists this before a later pass deletes LPRs.
 func setSchedulingFailedCondition(deployment *v1alpha1.LPXGraphDeployment, renew bool) {
-	observedGeneration := deployment.Generation
-	prior := meta.FindStatusCondition(deployment.Status.Conditions, schedulingFailedCondition)
-	if prior != nil && prior.Status == metav1.ConditionTrue && !renew {
-		observedGeneration = prior.ObservedGeneration
-	}
-
-	// Even True-to-True renewal needs a fresh timestamp to cover the newly expired cycle.
-	if renew {
-		meta.RemoveStatusCondition(&deployment.Status.Conditions, schedulingFailedCondition)
-	}
-
 	// Aggregate failure and retry authorization have independent condition lifetimes.
 	const message = "An LPX request exceeded its scheduling deadline"
 	setReadyCondition(deployment, v1beta1.DGDStateFailed, message)
+	if !renew {
+		return
+	}
+
+	// Even True-to-True renewal needs a fresh timestamp to cover the newly expired cycle.
+	meta.RemoveStatusCondition(&deployment.Status.Conditions, schedulingFailedCondition)
 	meta.SetStatusCondition(&deployment.Status.Conditions, metav1.Condition{
 		Type: schedulingFailedCondition, Status: metav1.ConditionTrue,
-		ObservedGeneration: observedGeneration, Reason: pipelineRequestDeadlineExceededReason, Message: message,
+		ObservedGeneration: deployment.Generation, Reason: pipelineRequestDeadlineExceededReason, Message: message,
 	})
 }
 
