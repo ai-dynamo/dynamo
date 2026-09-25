@@ -86,6 +86,8 @@ def test_protected_worker_registers_no_mutating_engine_routes():
         for registered in runtime.register_engine_route.call_args_list
     }
     assert routes == {"update/model_taints", "liveness_probe"}
+
+
 def test_register_request_cache_metrics_includes_multimodal_image_loader():
     endpoint = Mock()
     embedding_cache = object()

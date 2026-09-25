@@ -100,12 +100,12 @@ impl PyProtectedModelSession {
     fn model_path(&self) -> PyResult<String> {
         #[cfg(all(target_os = "linux", feature = "model-protection-tpm2"))]
         {
-            return self
+            self
                 .inner
                 .as_ref()
                 .and_then(|session| session.model_path().to_str())
                 .map(str::to_owned)
-                .ok_or_else(config_error);
+                .ok_or_else(config_error)
         }
         #[cfg(not(all(target_os = "linux", feature = "model-protection-tpm2")))]
         Err(config_error())
@@ -125,7 +125,7 @@ impl PyProtectedModelSession {
     fn cancellation(&self) -> PyModelProtectionCancellation {
         #[cfg(all(target_os = "linux", feature = "model-protection-tpm2"))]
         {
-            return PyModelProtectionCancellation(self.cancellation.clone());
+            PyModelProtectionCancellation(self.cancellation.clone())
         }
         #[cfg(not(all(target_os = "linux", feature = "model-protection-tpm2")))]
         PyModelProtectionCancellation(CancellationToken::default())
@@ -152,7 +152,7 @@ impl PyProtectedModelSession {
             })
             .map_err(protection_error)?;
             self.weights_ready = true;
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(all(target_os = "linux", feature = "model-protection-tpm2")))]
         Err(ModelProtectionError::new_err("TPM_UNAVAILABLE"))
@@ -229,7 +229,7 @@ fn prepare_protected_model(
 fn enforce_model_protection_process_policy() -> PyResult<()> {
     #[cfg(all(target_os = "linux", feature = "model-protection-tpm2"))]
     {
-        return enforce_process_persistence_policy().map_err(protection_error);
+        enforce_process_persistence_policy().map_err(protection_error)
     }
     #[cfg(not(all(target_os = "linux", feature = "model-protection-tpm2")))]
     Err(ModelProtectionError::new_err("TPM_UNAVAILABLE"))
