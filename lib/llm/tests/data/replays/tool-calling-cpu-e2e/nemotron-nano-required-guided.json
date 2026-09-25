@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "model": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
+    "deployment": "Dynamo+vLLM 0.24.0",
+    "captured_at": "2026-07-02",
+    "trace_kind": "raw stream reconstructed from captured OpenAI fields and the Nemotron implicit-start wire format"
+  },
+  "request": {
+    "tool_choice": "required",
+    "parallel_tool_calls": false,
+    "chat_template_kwargs": {
+      "enable_thinking": true
+    }
+  },
+  "raw_backend_stream": [
+    {
+      "text": "Okay, the user is asking about the weather in San Francisco and specifically wants me to use the get_weather function. Let me check the tools available. There's a function called get_weather that takes a location parameter. The required parameter is location, which should be a string. Since the user mentioned San Francisco, I need to call get_weather with \"San Francisco\" as the location. I don't see any other parameters needed, and the function doesn't have any other required fields. So I should generate a tool call with the name get_weather and the arguments as {\"location\": \"San Francisco\"}. That should fetch the current weather for them.\n"
+    },
+    {
+      "text": "</think>"
+    },
+    {
+      "text": "[{\"name\":\"get_weather\",\"parameters\":{\"location\":\"San Francisco\"}}]"
+    },
+    {
+      "finish_reason": "stop"
+    }
+  ],
+  "expected": {
+    "reasoning_contains": "the user is asking about the weather in San Francisco",
+    "content": "",
+    "tool_calls": [
+      {
+        "name": "get_weather",
+        "arguments": {
+          "location": "San Francisco"
+        }
+      }
+    ],
+    "finish_reason": "tool_calls"
+  }
+}
