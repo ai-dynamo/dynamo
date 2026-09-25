@@ -1502,7 +1502,7 @@ func mergeExtraPodSpecMainContainer(src *DynamoComponentDeploymentSharedSpec, ma
 	// than allowing mergo to replace the VolumeMounts slice.
 	mainBase.VolumeMounts = append(slices.Clone(main.VolumeMounts), dedicatedVolumeMounts...)
 	if main.Ports != nil {
-		mainBase.Ports = slices.Clone(main.Ports)
+		mainBase.Ports = main.Ports
 	}
 	// StartupProbe has no dedicated v1alpha1 field; take it verbatim.
 	if main.StartupProbe != nil {
