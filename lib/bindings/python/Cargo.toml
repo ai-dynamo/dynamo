@@ -53,6 +53,9 @@ mm-routing = ["dynamo-llm/mm-routing"]
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
 request-trace-s3 = ["dynamo-llm/request-trace-s3"]
+# Enables TPM-backed protected-model materialization. Runtime images opt in;
+# plain-model detection remains available in every wheel.
+model-protection-tpm2 = ["dynamo-model-protection/tpm2"]
 
 [dependencies]
 # AIC perf model: pure-Rust hot-path latency engine. AISimulate owns the
@@ -68,8 +71,10 @@ dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
 dynamo-vllm-sidecar = { path = "../../sidecar/vllm" }
+dynamo-model-protection = { path = "../../model-protection" }
 
 anyhow = { version = "1" }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 bytes = { version = "1" }

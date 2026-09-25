@@ -86,6 +86,7 @@ pub mod errors;
 mod http;
 mod kserve_grpc;
 mod llm;
+mod model_protection;
 mod parsers;
 mod planner;
 mod prometheus_metrics;
@@ -402,6 +403,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     errors::register_exceptions(m)?;
     parsers::add_to_module(m)?;
     backend::add_to_module(m)?;
+    model_protection::add_to_module(m)?;
 
     m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
 

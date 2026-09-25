@@ -20,6 +20,7 @@ package dynamo
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -51,6 +52,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	ptr "k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/yaml"
 )
 
 const testTopologyLabelKey = "topology.kubernetes.io/zone"
@@ -9719,6 +9721,77 @@ func TestWorkerDefaults_WorkerHashSuffixEnvVar(t *testing.T) {
 		assert.NotEqual(t, commonconsts.DynamoNamespaceWorkerSuffixEnvVar, env.Name,
 			"DYN_NAMESPACE_WORKER_SUFFIX should not be set when suffix is empty")
 	}
+}
+
+func TestProtectedModelProfileKeepsStableNamespaceAfterOperatorDefaults(t *testing.T) {
+	t.Log("Load the checked-in protected-model DGD")
+	manifest, err := os.ReadFile("../../../model-protection/dgd.yaml")
+	require.NoError(t, err)
+	var dgd v1beta1.DynamoGraphDeployment
+	require.NoError(t, yaml.Unmarshal(manifest, &dgd))
+	dgd.Namespace = "test"
+
+	t.Log("Render a rollout generation through the operator")
+	dcds, err := GenerateDynamoComponentsDeployments(
+		&dgd,
+		nil,
+		nil,
+		RollingUpdateContext{NewWorkerHash: "rollout"},
+	)
+	require.NoError(t, err)
+	backend := dcds["backend"]
+	frontend := dcds["frontend"]
+	require.NotNil(t, backend)
+	require.NotNil(t, frontend)
+	podSpec, err := GenerateBasePodSpecForController(
+		backend,
+		&mockSecretsRetriever{},
+		&configv1alpha1.OperatorConfiguration{},
+		RoleMain,
+		commonconsts.MultinodeDeploymentTypeGrove,
+		staticContainerGPUCount(1),
+		GenerateBasePodSpecForControllerOptions{},
+	)
+	require.NoError(t, err)
+	frontendPodSpec, err := GenerateBasePodSpecForController(
+		frontend,
+		&mockSecretsRetriever{},
+		&configv1alpha1.OperatorConfiguration{},
+		RoleMain,
+		commonconsts.MultinodeDeploymentTypeGrove,
+		staticContainerGPUCount(0),
+		GenerateBasePodSpecForControllerOptions{},
+	)
+	require.NoError(t, err)
+
+	t.Log("The user override suppresses rollout suffixes and matches the tmpfs mount")
+	require.NotEmpty(t, podSpec.Containers)
+	require.NotEmpty(t, frontendPodSpec.Containers)
+	env := envVarsToMap(podSpec.Containers[0].Env)
+	frontendEnv := envVarsToMap(frontendPodSpec.Containers[0].Env)
+	assert.Equal(t, "protected", env["DYN_NAMESPACE"])
+	assert.Equal(t, "protected", frontendEnv["DYN_NAMESPACE"])
+	assert.Equal(t, "", env[commonconsts.DynamoNamespaceWorkerSuffixEnvVar])
+	assert.Contains(t, env, commonconsts.DynamoNamespaceWorkerSuffixEnvVar)
+	assert.Contains(t, podSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+		Name:      "protected-model-tmpfs",
+		MountPath: "/run/protected-models",
+	})
+	require.NotNil(t, podSpec.AutomountServiceAccountToken)
+	assert.False(t, *podSpec.AutomountServiceAccountToken)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext.RunAsNonRoot)
+	assert.True(t, *podSpec.Containers[0].SecurityContext.RunAsNonRoot)
+	require.NotNil(t, podSpec.Containers[0].SecurityContext.RunAsUser)
+	assert.EqualValues(t, 1000, *podSpec.Containers[0].SecurityContext.RunAsUser)
+
+	t.Log("The init container retains only the capabilities needed to assign private file ownership")
+	initContainer := findInitContainerByName(podSpec, "prepare-model-protection-runtime")
+	require.NotNil(t, initContainer)
+	require.NotNil(t, initContainer.SecurityContext)
+	require.NotNil(t, initContainer.SecurityContext.Capabilities)
+	assert.Equal(t, []corev1.Capability{"ALL"}, initContainer.SecurityContext.Capabilities.Drop)
+	assert.ElementsMatch(t, []corev1.Capability{"CHOWN", "FOWNER"}, initContainer.SecurityContext.Capabilities.Add)
 }
 
 func TestFrontendDefaults_NamespacePrefixEnvVar(t *testing.T) {

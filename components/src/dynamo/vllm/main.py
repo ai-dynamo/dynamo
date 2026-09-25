@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
 import uvloop
+import vllm
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
@@ -23,6 +24,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
+from dynamo._core import ModelProtectionError
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
@@ -83,6 +85,14 @@ from .multimodal_utils.models.nemotron_video_routing import (
 )
 from .multimodal_utils.models.qwen_video_routing import (
     publish_vllm_qwen_video_processor_contract,
+)
+from .protection_bootstrap import (
+    ProtectionBootstrap,
+    install_protected_engine_core_policy,
+    materialize_protected_weights,
+    prepare_model_argv,
+    validate_protected_engine_args,
+    validate_protected_vllm_config,
 )
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
@@ -160,10 +170,39 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     return config.model
 
 
-async def worker(argv: list[str] | None = None) -> None:
+async def worker(
+    argv: list[str] | None = None,
+    protection: ProtectionBootstrap | None = None,
+) -> None:
     if argv is None:
         argv = sys.argv[1:]
+    protection = protection or prepare_model_argv(argv)
+    primary_error: BaseException | None = None
+    try:
+        await _worker(protection.argv, protection)
+    except ModelProtectionError as error:
+        primary_error = error
+        logger.error("model_protection event=startup_failed code=%s", error)
+        raise
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        was_protected = protection.protected
+        try:
+            protection.cleanup()
+        except ModelProtectionError as error:
+            logger.error("model_protection event=cleanup_failed code=%s", error)
+            if primary_error is None:
+                raise
+        else:
+            if was_protected:
+                logger.info("model_protection event=plaintext_cleanup status=complete")
+
+
+async def _worker(argv: list[str], protection: ProtectionBootstrap) -> None:
     config = parse_args(argv)
+    validate_protected_engine_args(config, protection, vllm.__version__)
 
     embedding_process_child = is_embedding_process_child()
     if config.embedding_worker_processes > 1 and os.environ.get(
@@ -179,6 +218,11 @@ async def worker(argv: list[str] | None = None) -> None:
         # Internal endpoint children have identical configuration. Only the
         # owning process writes the requested dump path.
         dump_config(config.dump_config_to, config)
+
+    if protection.protected:
+        config._model_protection_bootstrap = protection
+        logger.info("model_protection event=authorization_verified status=complete")
+        logger.info("model_protection event=metadata_staged status=complete")
 
     # Name the model. Use either the full path (vllm and sglang do the same),
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
@@ -246,6 +290,25 @@ async def worker(argv: list[str] | None = None) -> None:
         shutdown_event,
         pre_shutdown_callback=state_agent_lifecycle.close,
     )
+
+    if protection.protected:
+        configure_multimodal_embedding_cache(
+            config.engine_args,
+            route_to_encoder=config.route_to_encoder,
+            capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            namespace=config.namespace,
+            component=config.component,
+            model_name=get_metrics_model_name(config),
+        )
+        protected_vllm_config = config.engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+        validate_protected_vllm_config(protected_vllm_config, protection)
+        install_protected_engine_core_policy()
+        await materialize_protected_weights(protection, shutdown_event)
+        config._model_protection_vllm_config = protected_vllm_config
+        logger.info("model_protection event=key_release status=complete")
+        logger.info("model_protection event=weights_materialized status=complete")
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(
@@ -663,18 +726,24 @@ def setup_vllm_engine(
             configure_mx_ports(engine_args)
 
     # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
-    configure_multimodal_embedding_cache(
-        engine_args,
-        route_to_encoder=config.route_to_encoder,
-        capacity_gb=config.multimodal_embedding_cache_capacity_gb,
-        namespace=config.namespace,
-        component=config.component,
-        model_name=get_metrics_model_name(config),
-    )
+    if getattr(config, "_model_protection_vllm_config", None) is None:
+        configure_multimodal_embedding_cache(
+            engine_args,
+            route_to_encoder=config.route_to_encoder,
+            capacity_gb=config.multimodal_embedding_cache_capacity_gb,
+            namespace=config.namespace,
+            component=config.component,
+            model_name=get_metrics_model_name(config),
+        )
 
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
-    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    vllm_config = getattr(config, "_model_protection_vllm_config", None)
+    if vllm_config is None:
+        vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    protection = getattr(config, "_model_protection_bootstrap", None)
+    if protection is not None:
+        validate_protected_vllm_config(vllm_config, protection)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -782,19 +851,9 @@ def setup_vllm_engine(
     try:
         runtime_values = get_engine_cache_info(engine_client)
     except BaseException:
-        if embedding_cleanup_resource is not None:
-            try:
-                engine_client.shutdown()
-            except Exception:
-                logger.exception(
-                    "Failed to shut down parent embedding client after startup error"
-                )
-            try:
-                embedding_cleanup_resource.cleanup()
-            except Exception:
-                logger.exception(
-                    "Failed to clean up shared embedding EngineCore after startup error"
-                )
+        _cleanup_failed_engine_start(
+            engine_client, vllm_config, engine_cleanup_resource
+        )
         raise
     vllm_config.cache_config.block_size = runtime_values["block_size"]
 
@@ -805,6 +864,20 @@ def setup_vllm_engine(
         engine_cleanup_resource,
         component_gauges,
     )
+
+
+def _cleanup_failed_engine_start(
+    engine_client: AsyncLLM, vllm_config: VllmConfig, cleanup_resource: Any
+) -> None:
+    try:
+        engine_client.shutdown(timeout=vllm_config.shutdown_timeout)
+    except Exception:
+        logger.exception("Failed to shut down vLLM client after startup error")
+    if cleanup_resource is not None:
+        try:
+            cleanup_resource.cleanup()
+        except Exception:
+            logger.exception("Failed to clean up vLLM startup resource")
 
 
 async def register_vllm_model(
@@ -964,6 +1037,8 @@ async def register_vllm_model(
         # lifecycle registration; embeddings and classify still do not.
         max_gpu_lora_count=_base_model_lora_capacity(config, model_type),
     )
+    if "_model_protection_bootstrap" in config.__dict__:
+        logger.info("model_protection event=serving_ready status=complete")
 
 
 def _base_model_lora_capacity(config: Config, model_type: ModelType) -> int | None:
@@ -1013,9 +1088,5 @@ def get_engine_cache_info(engine: AsyncLLM) -> dict[str, Any]:
         raise
 
 
-def main() -> None:
-    uvloop.run(worker())
-
-
-if __name__ == "__main__":
-    main()
+def main(protection: ProtectionBootstrap | None = None) -> None:
+    uvloop.run(worker(protection=protection))

@@ -116,6 +116,9 @@ ignore:
   - '.clang-format'
   - 'dynamo.code-workspace'
   - 'deploy/*'
+  # Standalone protected-model assets are outside the deploy pipelines.
+  # The DGD example is covered separately by the operator filter.
+  - 'deploy/model-protection/**'
   # Standalone CRD apiVersion converter: classification-only so it satisfies
   # the changed-files coverage check without triggering the operator deploy
   # pipeline (it is excluded from the `deploy` filter below).
@@ -220,6 +223,7 @@ dev_images:
 operator:
   - *ci
   - 'deploy/operator/**'
+  - 'deploy/model-protection/dgd.yaml'
   - 'deploy/operator/.*'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'

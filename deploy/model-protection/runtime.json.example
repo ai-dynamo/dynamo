@@ -1,0 +1,17 @@
+{
+  "license_root": "/runtime/license",
+  "package_trust": {
+    "key_id": "package-signing-v1",
+    "public_key_file": "/runtime/trust/package-public.key"
+  },
+  "license_trust": {
+    "key_id": "license-signing-v1",
+    "public_key_file": "/runtime/trust/license-public.key"
+  },
+  "tpm": {
+    "device_key_handle": "0x81000001",
+    "policy_authority_key_handle": "0x81000002",
+    "policy_authority_key_id": "tpm-policy-v1"
+  },
+  "process_memory_margin_bytes": 8589934592
+}

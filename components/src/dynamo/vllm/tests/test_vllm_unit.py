@@ -640,6 +640,23 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     assert default_sampling_params == {"temperature": 0.7}
 
 
+def test_failed_engine_start_shuts_down_before_resource_cleanup():
+    from dynamo.vllm.main import _cleanup_failed_engine_start
+
+    calls = []
+    engine = Mock()
+    engine.shutdown.side_effect = lambda **_kwargs: calls.append("engine")
+    resource = Mock()
+    resource.cleanup.side_effect = lambda: calls.append("resource")
+
+    _cleanup_failed_engine_start(
+        engine, SimpleNamespace(shutdown_timeout=5.0), resource
+    )
+
+    assert calls == ["engine", "resource"]
+    engine.shutdown.assert_called_once_with(timeout=5.0)
+
+
 # --disaggregation-mode tests
 
 
