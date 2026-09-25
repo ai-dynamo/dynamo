@@ -302,9 +302,6 @@ def prepare_trace_dataset(args, output_dir, logger):
         return requests, trace_dataset_path
 
     # Generate synthetic data based on input dataset
-    # Keep synthesis-only dependencies out of CPU helper-test collection.
-    from prefix_data_generator.synthesizer import Synthesizer
-
     logger.info("Generating synthetic trace data...")
     logger.info(f"  Base dataset: {args.input_dataset}")
     logger.info(f"  Num requests: {args.num_requests if args.num_requests else 'all'}")
@@ -326,6 +323,10 @@ def prepare_trace_dataset(args, output_dir, logger):
         f"  Max OSL: {args.max_osl if args.max_osl else 'no clipping'} (clipping)"
     )
     logger.info(f"  Random seed: {args.seed}")
+
+    # Synthetic generation has optional dependencies absent from slim CPU test images.
+    # Keep the request helpers and trace-file path usable without those dependencies.
+    from prefix_data_generator.synthesizer import Synthesizer
 
     synthesizer = Synthesizer(
         args.input_dataset,

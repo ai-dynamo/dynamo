@@ -9,9 +9,12 @@ lifecycle events: "request received", "http response sent", "request completed".
 The routine per-request lifecycle events ("request received", and "request
 completed" on the success path) are emitted at DEBUG so they do not dominate a
 default-level production log; the fixtures below therefore run with
-`DYN_LOG=debug` to observe them. Abnormal completions stay at ERROR and the
-Axum access log ("http response sent") stays at INFO, both of which remain
-visible at the default level — see `test_agg_lifecycle_absent_at_info_level`.
+`DYN_LOG=debug` to observe them. Frontend error completions stay at ERROR,
+cancelled completions stay at INFO, and the Axum access log ("http response
+sent") stays at INFO. Ingress completion logs are outcome-agnostic and use
+DEBUG for all exits; cancellation and error metrics remain unchanged.
+`test_agg_lifecycle_absent_at_info_level` checks routine lifecycle filtering
+and the retained access log for a successful request.
 
 Tests cover: unary success, streaming success, 404 error, 400 invalid UUID,
 cancellation, frontend-worker trace_id correlation, aggregated deployment,
