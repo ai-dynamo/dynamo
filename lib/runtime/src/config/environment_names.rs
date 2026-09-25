@@ -837,10 +837,9 @@ pub mod tcp_response_stream {
     /// If unset or 0, the OS assigns a free ephemeral port.
     pub const DYN_TCP_RESPONSE_STREAM_PORT: &str = "DYN_TCP_RESPONSE_STREAM_PORT";
 
-    /// Listen backlog of the TCP response stream (CallHome) listener. Default 4096,
-    /// capped by the kernel at `net.core.somaxconn`. Every response stream is its own
-    /// CallHome connection, so this listener's accept rate scales with in-flight
-    /// requests; mio's hardcoded default of 128 is reached well before that.
+    /// Listen backlog of the TCP response stream (CallHome) listener. Defaults to
+    /// 4096, capped by the kernel at `net.core.somaxconn`. Unset, zero, negative, or
+    /// unparseable values fall back to the default.
     pub const DYN_TCP_LISTEN_BACKLOG: &str = "DYN_TCP_LISTEN_BACKLOG";
 
     /// Host or interface for the TCP response stream server and QUIC response listener.

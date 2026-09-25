@@ -145,6 +145,10 @@ const TCP_TRANSPORT: &str = "tcp_server";
 /// The kernel caps the effective value at `net.core.somaxconn`.
 const DEFAULT_TCP_LISTEN_BACKLOG: u32 = 4096;
 
+/// Parses [`DYN_TCP_LISTEN_BACKLOG`] into a valid `listen(2)` backlog, falling back to
+/// [`DEFAULT_TCP_LISTEN_BACKLOG`] on missing, zero, negative, or unparseable input.
+///
+/// [`DYN_TCP_LISTEN_BACKLOG`]: crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG
 // `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
 fn parse_tcp_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
     value
@@ -154,6 +158,7 @@ fn parse_tcp_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
         .unwrap_or(DEFAULT_TCP_LISTEN_BACKLOG)
 }
 
+/// Reads and parses the CallHome listener's backlog from the process environment.
 fn tcp_listen_backlog() -> u32 {
     parse_tcp_listen_backlog(std::env::var(
         crate::config::environment_names::tcp_response_stream::DYN_TCP_LISTEN_BACKLOG,
