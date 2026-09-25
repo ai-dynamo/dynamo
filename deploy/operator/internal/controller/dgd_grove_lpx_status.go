@@ -26,22 +26,20 @@ func mergeLPXChildStatus(
 	if ordinary.ComponentStatus == nil {
 		ordinary.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
 	}
+	current := len(components) > 0 && child != nil && child.DeletionTimestamp.IsZero()
+	observed := current && child.Status.ObservedGeneration == child.Generation
 	for _, component := range components {
+		if observed {
+			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
+				ordinary.ComponentStatus[component.ComponentName] = observedStatus.ComponentReplicaStatus
+				continue
+			}
+		}
 		kind := v1beta1.ComponentKindPodCliqueScalingGroup
 		if component.ComponentRole(v1beta1.ComponentRoleLPXConductor) == nil {
 			kind = v1beta1.ComponentKindPodClique
 		}
 		ordinary.ComponentStatus[component.ComponentName] = v1beta1.ComponentReplicaStatus{ComponentKind: kind}
-	}
-
-	current := len(components) > 0 && child != nil && child.DeletionTimestamp.IsZero()
-	observed := current && child.Status.ObservedGeneration == child.Generation
-	if observed {
-		for _, component := range components {
-			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
-				ordinary.ComponentStatus[component.ComponentName] = observedStatus.ComponentReplicaStatus
-			}
-		}
 	}
 
 	// A current failure is actionable even if reconciliation did not finish.

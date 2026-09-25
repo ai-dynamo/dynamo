@@ -515,6 +515,13 @@ func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	beforeChild := child.DeepCopy()
 	handoff := &dgdLPXHandoff{client: kube}
 
+	t.Log("Retain observed conductor status when the child's draft status is missing")
+	partial := child.DeepCopy()
+	delete(partial.Status.Components, "draft")
+	partialResult := mergeLPXChildStatus(source, partial, ReconcileResult{State: v1beta1.DGDStateSuccessful})
+	require.Equal(t, v1beta1.ComponentReplicaStatus{ComponentKind: v1beta1.ComponentKindPodClique}, partialResult.ComponentStatus["draft"])
+	require.Equal(t, child.Status.Components["lpx"].ComponentReplicaStatus, partialResult.ComponentStatus["lpx"])
+
 	t.Log("Reorder the pair and make five frontend-only edits without changing the child")
 	source.Spec.Components[0], source.Spec.Components[1] = source.Spec.Components[1], source.Spec.Components[0]
 	for edit := range 5 {

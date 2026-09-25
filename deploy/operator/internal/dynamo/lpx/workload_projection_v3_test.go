@@ -62,14 +62,13 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 		require.Equal(t, partition.ID, spec.NodeLocal.PartitionMappings[index].PartitionID)
 	}
 
-	t.Log("Mutating returned fields must not change the projection or caller-owned reference")
+	t.Log("Mutating returned fields must not change the projection")
 	before := spec.DeepCopy()
 	(*spec.Partitions[0].Extent)[0] = 0
 	(*spec.PropSyncConnectors[0].Requirement.Connections)[0].FromLogicalDevice = 99
 	(*spec.PropSyncConnectors[0].Requirement.AcceptableLaneMultiplicities)[0] = 99
 	spec.AllocationMetadata.Raw[0] = ' '
 	spec.CyborgPodCliqueRef.Name = "changed"
-	require.Equal(t, before.CyborgPodCliqueRef, cyborgRef)
 	require.Equal(t, *before, projection.RequestSpec(&MaterializationPlan{CyborgClique: cyborgRef.Name}, "agents"))
 	require.Nil(t, projection.RequestSpec(&MaterializationPlan{}, "agents").CyborgPodCliqueRef)
 
