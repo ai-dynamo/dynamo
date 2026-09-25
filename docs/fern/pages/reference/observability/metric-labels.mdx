@@ -202,9 +202,29 @@ The `dynamo_component_errors_total` counter is labeled with `error_type`, identi
 | `deserialization` | Ingress | Could not parse the incoming request payload. |
 | `invalid_message` | Ingress | Wire-format violation in the incoming message. |
 | `response_stream` | Pre-generate | The worker received the request but could not open the response stream back to the frontend (transport problem before `generate` was called). |
-| `generate` | Engine | The engine's `generate()` itself returned an error. This is the counter that reflects engine/inference failures. |
+| `generate` | Engine setup | The engine's `generate()` returned an error before opening a response stream. |
+| `engine_stream` | Streaming | A typed engine error or untyped error envelope arrived after the response stream opened. Counted at most once per request. Excludes cancellation, explicit worker shutdown, and serialization failures; includes engine crashes. |
+| `serialization` | Streaming | A response could not be serialized, including failures delivered as fallback error frames. |
 | `publish_response` | Streaming | The engine produced response chunks but the worker could not push one back to the frontend. **Also fires on client cancellation** — the frontend disconnecting before the stream finishes — so this counter can be inflated by user-aborted requests. |
 | `publish_final` | Teardown | All response chunks were sent, but the worker could not deliver the final stream-complete marker. The connection died right at the end. |
+
+To measure the fraction of component requests with an engine-stream failure over
+five minutes, group both counters by the same endpoint labels:
+
+```promql
+sum by (dynamo_namespace, dynamo_component, dynamo_endpoint) (
+  rate(dynamo_component_errors_total{error_type="engine_stream"}[5m])
+)
+/
+sum by (dynamo_namespace, dynamo_component, dynamo_endpoint) (
+  rate(dynamo_component_requests_total[5m])
+)
+```
+
+This is a component-request ratio: disaggregated prefill and decode are separate
+requests. It excludes setup failures counted under `generate`. The ratio is
+undefined when the request rate is zero; choose an alert threshold and minimum
+traffic rate appropriate to the endpoint.
 
 ### Stage values
 

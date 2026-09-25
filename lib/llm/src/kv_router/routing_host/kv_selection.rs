@@ -10,7 +10,10 @@ use dynamo_kv_router::{
     protocols::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
-    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility, queue::BookingHandle},
+    scheduling::{
+        AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
+        queue::BookingHandle,
+    },
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -35,6 +38,7 @@ pub(super) struct WorkerSelection {
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) kv_hint: Option<KvHint>,
+    pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 // Transient return value; `Routed` is moved into `WorkerSelection` right away.
@@ -142,6 +146,7 @@ impl RoutingHost {
                 selected_worker_load: admitted.advisory_load,
                 routing_hashes,
                 kv_hint,
+                request_lifecycle: None,
             })),
             FindBestMatchOutcome::QueueRejected { rejection } => {
                 Ok(SelectionOutcome::QueueRejected(rejection))

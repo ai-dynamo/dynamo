@@ -17,12 +17,33 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::error::{DynamoError, ErrorType};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::TokenIdType;
 use dynamo_protocols::types::StopReason;
 
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
+const PREPROCESSED_MM_ID_DOMAIN: &[u8] = b"vllm.grpc.preprocessed-mm.v1";
+
+/// Return a content-bound identity shared by frontend routing and vLLM workers.
+pub fn preprocessed_mm_identifier(modality: &str, raw_kwargs: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(PREPROCESSED_MM_ID_DOMAIN);
+    hasher.update((modality.len() as u64).to_be_bytes());
+    hasher.update(modality.as_bytes());
+    hasher.update((raw_kwargs.len() as u64).to_be_bytes());
+    hasher.update(raw_kwargs);
+    format!("grpc-mm:{:x}", hasher.finalize())
+}
+
+/// Return the KV-event marker for a content-bound preprocessed-media identity.
+pub fn preprocessed_mm_routing_hash(modality: &str, raw_kwargs: &[u8]) -> String {
+    let identifier = preprocessed_mm_identifier(modality, raw_kwargs);
+    let hash = dynamo_kv_router::protocols::hash_mm_identifier(&identifier)
+        .expect("content-derived multimodal identity is non-empty");
+    dynamo_kv_router::zmq_wire::mark_mm_hash_for_extra_key(hash)
+}
 
 pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     let message = message.into();

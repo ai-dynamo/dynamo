@@ -47,6 +47,16 @@ class HttpConnectionError(HttpError):
     """Network-layer failure: DNS, refused, reset, half-close."""
 
 
+class HttpConfigurationError(HttpError):
+    """The deployment is configured so the fetch cannot be made safely.
+
+    An operator fault, not a verdict on the caller's URL, so it must not reach
+    the client as a 4xx. Loaders that convert unknown exceptions into
+    ``ValueError`` have to let this one through: ``py_err_to_dynamo`` maps
+    ``ValueError`` to ``InvalidArgument``, which is a client error.
+    """
+
+
 class HttpStatusError(HttpError):
     """Server responded with a non-2xx status."""
 
@@ -152,7 +162,7 @@ class HttpClient(abc.ABC):
             visited.append(current)
 
             body, redirect_to = await self._fetch_body_or_redirect(
-                current, timeout, max_bytes=max_bytes
+                current, timeout, max_bytes=max_bytes, policy=policy
             )
 
             if redirect_to is None:
@@ -174,13 +184,28 @@ class HttpClient(abc.ABC):
 
     @abc.abstractmethod
     async def _fetch_simple(
-        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
     ) -> bytes:
-        """Backend's native redirect-following GET (no SSRF policy applied)."""
+        """Backend's native redirect-following GET (no SSRF policy applied).
+
+        ``policy`` is not applied to the URL here. It is passed so a backend
+        can honor a request that is stricter than the deployment baseline at
+        connect time; see ``AiohttpClient._connect_allows_private``.
+        """
 
     @abc.abstractmethod
     async def _fetch_body_or_redirect(
-        self, url: str, timeout: float, *, max_bytes: Optional[int] = None
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: Optional[int] = None,
+        policy: Optional[UrlValidationPolicy] = None,
     ) -> tuple[bytes | None, str | None]:
         """Single hop with redirects disabled.
 
