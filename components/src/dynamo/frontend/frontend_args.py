@@ -34,27 +34,109 @@ _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
-def _cpu_quota_count() -> Optional[int]:
-    """Return the cgroup CPU quota rounded down to whole CPUs, if limited."""
-    try:
-        quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
-        if quota != "max":
-            quota_value = int(quota)
-            if quota_value > 0:
-                return max(1, quota_value // int(period))
-        return None
-    except (OSError, ValueError, ZeroDivisionError):
-        pass
+def _mountinfo_path(value: str) -> str:
+    for escape, character in (
+        (r"\040", " "),
+        (r"\011", "\t"),
+        (r"\012", "\n"),
+        (r"\134", "\\"),
+    ):
+        value = value.replace(escape, character)
+    return value
 
+
+def _cpu_quota_count() -> Optional[int]:
+    memberships: dict[str, pathlib.PurePosixPath] = {}
     try:
-        root = pathlib.Path("/sys/fs/cgroup/cpu")
-        quota = int((root / "cpu.cfs_quota_us").read_text())
-        period = int((root / "cpu.cfs_period_us").read_text())
-        if quota > 0:
-            return max(1, quota // period)
-    except (OSError, ValueError, ZeroDivisionError):
-        pass
+        for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3 or not parts[2].startswith("/"):
+                continue
+            if parts[0] == "0" and not parts[1]:
+                memberships["v2"] = pathlib.PurePosixPath(parts[2])
+            elif "cpu" in parts[1].split(","):
+                memberships["v1"] = pathlib.PurePosixPath(parts[2])
+
+        mount_lines = pathlib.Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        mount_lines = []
+
+    ambiguous_mount = False
+    for line in mount_lines:
+        if " - " not in line:
+            continue
+        mount, filesystem = line.split(" - ", 1)
+        fields = mount.split()
+        fs_fields = filesystem.split()
+        if len(fields) < 5 or len(fs_fields) < 3:
+            continue
+        if fs_fields[0] == "cgroup2":
+            version = "v2"
+        elif fs_fields[0] == "cgroup" and "cpu" in fs_fields[2].split(","):
+            version = "v1"
+        else:
+            continue
+        membership = memberships.get(version)
+        if membership is None:
+            continue
+
+        mount_root = pathlib.PurePosixPath(_mountinfo_path(fields[3]))
+        if (
+            ".." in mount_root.parts
+            or ".." in membership.parts
+            or not membership.is_relative_to(mount_root)
+        ):
+            # An inherited mount may not expose the process's cgroup.
+            ambiguous_mount = True
+            continue
+        relative = membership.relative_to(mount_root)
+        root = pathlib.Path(_mountinfo_path(fields[4]))
+        found, quota_count = _quota_in_cgroup_hierarchy(root / relative, root, version)
+        if found:
+            return quota_count
+
+    if ambiguous_mount:
+        return 1  # Unknown effective quota: keep automatic workers disabled.
+
+    for root, version in (
+        (pathlib.Path("/sys/fs/cgroup"), "v2"),
+        (pathlib.Path("/sys/fs/cgroup/cpu"), "v1"),
+        (pathlib.Path("/sys/fs/cgroup/cpu,cpuacct"), "v1"),
+    ):
+        found, quota_count = _quota_in_cgroup_hierarchy(root, root, version)
+        if found:
+            return quota_count
     return None
+
+
+def _quota_in_cgroup_hierarchy(
+    current: pathlib.Path, root: pathlib.Path, version: str
+) -> tuple[bool, Optional[int]]:
+    found = False
+    limit: Optional[int] = None
+    while current.is_relative_to(root):
+        try:
+            if version == "v2":
+                quota_text, period_text = (current / "cpu.max").read_text().split()
+                found = True
+                if quota_text == "max":
+                    quota = -1
+                else:
+                    quota = int(quota_text)
+                period = int(period_text)
+            else:
+                quota = int((current / "cpu.cfs_quota_us").read_text())
+                period = int((current / "cpu.cfs_period_us").read_text())
+                found = True
+            if quota > 0 and period > 0:
+                count = max(1, quota // period)
+                limit = count if limit is None else min(limit, count)
+        except (OSError, ValueError, ZeroDivisionError):
+            pass
+        if current == root:
+            break
+        current = current.parent
+    return found, limit
 
 
 def _default_sglang_preprocess_workers() -> int:
@@ -703,12 +785,15 @@ class FrontendArgGroup(ArgGroup):
 
         g.add_argument(
             "--dyn-preprocess-workers",
+            dest="preprocess_workers",
             type=int,
             default=env_or_default("DYN_PREPROCESS_WORKERS", None, value_type=int),
             help=(
                 "[EXPERIMENTAL] SGLang preprocessing worker processes per model. "
-                "When unset, uses up to 2 workers based on available CPUs, reserving one CPU "
-                "for the frontend. 0 runs preprocessing on the main event loop. "
+                "When unset, selects up to 2 workers per model from visible CPU capacity, "
+                "leaving one CPU out of the per-model calculation. "
+                "Multiple models each create a pool. "
+                "0 runs preprocessing on the main event loop. "
                 "Nonzero values are supported only with '--dyn-chat-processor sglang'.\n"
                 "env var: DYN_PREPROCESS_WORKERS | default: auto for SGLang, 0 otherwise"
             ),

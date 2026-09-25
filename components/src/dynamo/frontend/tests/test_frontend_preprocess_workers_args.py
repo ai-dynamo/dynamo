@@ -129,36 +129,97 @@ def test_cpu_count_falls_back_when_affinity_is_unavailable(
     assert frontend_args._default_sglang_preprocess_workers() == 1
 
 
-@pytest.mark.parametrize(
-    "quota, expected",
-    [("200000 100000", 2), ("150000 100000", 1), ("max 100000", None)],
-)
-def test_cgroup_v2_cpu_quota(
-    monkeypatch: pytest.MonkeyPatch, quota: str, expected: int | None
+def mock_proc_cgroup(
+    monkeypatch: pytest.MonkeyPatch, membership: str, mountinfo: str
 ) -> None:
     original_read_text = Path.read_text
 
     def read_text(path: Path, *args: object, **kwargs: object) -> str:
-        if str(path) == "/sys/fs/cgroup/cpu.max":
-            return quota
+        if str(path) == "/proc/self/cgroup":
+            return membership
+        if str(path) == "/proc/self/mountinfo":
+            return mountinfo
         return original_read_text(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
 
+
+@pytest.mark.parametrize(
+    "parent_quota, child_quota, expected",
+    [
+        ("100000 100000", "max 100000", 1),
+        ("200000 100000", "50000 50000", 1),
+        ("200000 100000", "150000 50000", 2),
+        ("max 100000", "max 100000", None),
+    ],
+)
+def test_cgroup_v2_uses_tightest_visible_quota(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parent_quota: str,
+    child_quota: str,
+    expected: int | None,
+) -> None:
+    root = tmp_path / "cgroup"
+    child = root / "pod" / "container"
+    child.mkdir(parents=True)
+    (child.parent / "cpu.max").write_text(parent_quota)
+    (child / "cpu.max").write_text(child_quota)
+    mock_proc_cgroup(
+        monkeypatch,
+        "0::/pod/container",
+        f"31 24 0:28 / {root} rw - cgroup2 cgroup rw",
+    )
+
     assert frontend_args._cpu_quota_count() == expected
 
 
-def test_cgroup_v1_cpu_quota(monkeypatch: pytest.MonkeyPatch) -> None:
-    values = {
-        "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "200000",
-        "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000",
-    }
-
-    def read_text(path: Path, *args: object, **kwargs: object) -> str:
-        if str(path) == "/sys/fs/cgroup/cpu.max":
-            raise FileNotFoundError
-        return values[str(path)]
-
-    monkeypatch.setattr(Path, "read_text", read_text)
+def test_cgroup_v2_namespaced_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "cgroup mount"
+    root.mkdir()
+    (root / "cpu.max").write_text("200000 100000")
+    encoded_root = str(root).replace(" ", r"\040")
+    mock_proc_cgroup(
+        monkeypatch,
+        "0::/",
+        f"31 24 0:28 / {encoded_root} rw - cgroup2 cgroup rw",
+    )
 
     assert frontend_args._cpu_quota_count() == 2
+
+
+@pytest.mark.parametrize("mount_root", ["/kubepods/pod", "/.."])
+def test_cgroup_ambiguous_mount_is_conservative(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mount_root: str
+) -> None:
+    root = tmp_path / "cgroup"
+    root.mkdir()
+    (root / "cpu.max").write_text("800000 100000")
+    mock_proc_cgroup(
+        monkeypatch,
+        "0::/",
+        f"31 24 0:28 {mount_root} {root} rw - cgroup2 cgroup rw",
+    )
+
+    assert frontend_args._cpu_quota_count() == 1
+
+
+def test_cgroup_v1_uses_ancestor_quota(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "cpu,cpuacct"
+    child = root / "pod" / "container"
+    child.mkdir(parents=True)
+    (child.parent / "cpu.cfs_quota_us").write_text("100000")
+    (child.parent / "cpu.cfs_period_us").write_text("100000")
+    (child / "cpu.cfs_quota_us").write_text("-1")
+    (child / "cpu.cfs_period_us").write_text("100000")
+    mock_proc_cgroup(
+        monkeypatch,
+        "2:cpu,cpuacct:/pod/container",
+        f"31 24 0:28 / {root} rw - cgroup cgroup rw,cpu,cpuacct",
+    )
+
+    assert frontend_args._cpu_quota_count() == 1
