@@ -214,7 +214,7 @@ func addLPUArtifactsFromManifestV2(
 		// Nonempty paths mark LPU artifacts; only metadata-less HX partitions permit the historical doubled node count.
 		if partition.PartPath != "" {
 			partitions = append(partitions, partition)
-			hxDoubleNodeCount = hxDoubleNodeCount && (len(partition.HXExtent) == 0 || compatible)
+			hxDoubleNodeCount = hxDoubleNodeCount && compatible
 		}
 	}
 	// An LPU-only build cannot silently discard packaged CUDA or CPU partitions.
