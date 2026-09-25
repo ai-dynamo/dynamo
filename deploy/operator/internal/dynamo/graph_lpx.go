@@ -295,12 +295,10 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		template, replicas := conductor.PodTemplate, ptr.Deref(conductor.Replicas, minimumReplicas)
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
-		role.Replicas = ptr.To(replicas)
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
 		gpu := p
 		gpu.component = role
-		gpu.componentName = component.ComponentName
-		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: *role.Replicas}
+		gpu.r = ServiceRole{Name: plan.CyborgTemplate, Role: RoleMain, Replicas: replicas}
 		gpuTemplate, err := renderSelectedLPXRole(role, p.dynamoDeployment, alphaComponent, p.operatorConfig, p.secretsRetriever,
 			p.discoveryContext, defaults)
 		if err != nil {
@@ -330,7 +328,6 @@ func lpxRoleComponent(source *v1beta1.DynamoComponentDeploymentSharedSpec, templ
 
 	// Bind source metadata on the independently owned role template.
 	propagateDGDAnnotations(dgd.Annotations, role)
-	role.PodTemplate.Labels[commonconsts.KubeLabelDynamoNamespace] = GetDynamoNamespace(dgd, source)
 	if backend != "" {
 		role.PodTemplate.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = string(backend)
 	}

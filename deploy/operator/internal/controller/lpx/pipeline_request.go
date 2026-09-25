@@ -39,8 +39,9 @@ func (r *graphReconciler) getPipelineRequests(ctx context.Context, pcs *grovev1a
 		return nil, err
 	}
 	requests := make(map[string]*lpxv1alpha1.LPUPipelineRequest)
-	for _, request := range requestList.Items {
-		requests[request.Name] = &request
+	for i := range requestList.Items {
+		request := &requestList.Items[i]
+		requests[request.Name] = request
 	}
 	return requests, nil
 }
