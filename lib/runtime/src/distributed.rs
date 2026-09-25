@@ -178,7 +178,10 @@ impl DistributedRuntime {
         };
 
         let nats_client = match nats_config {
-            Some(nc) => Some(nc.connect().await?),
+            Some(nc) => Some(
+                nc.connect_with_cancellation(runtime.primary_token())
+                    .await?,
+            ),
             None => None,
         };
 
