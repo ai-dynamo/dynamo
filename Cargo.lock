@@ -3100,6 +3100,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-sidecar-testkit"
+version = "1.6.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-sglang-mocker",
+ "dynamo-sglang-sidecar",
+ "dynamo-vllm-mocker",
+ "dynamo-vllm-sidecar",
+ "futures",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic 0.14.6",
+ "tonic-health 0.14.6",
+]
+
+[[package]]
 name = "dynamo-tokenizers"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
