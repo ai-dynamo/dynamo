@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker, metad
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_worker import (
+    NixlPullConnectorWorker,
+)
 from vllm.model_executor.kernels.attention.dsa import sparse_mqa_logits
 
 
@@ -40,6 +43,10 @@ def validate_piecewise_prefix_loading() -> None:
     assert "update_state_after_alloc_for_range" in source
     assert "self._request_load_ranges" in source
     assert metadata.NIXL_CONNECTOR_VERSION == 13
+
+    read_blocks = inspect.signature(NixlPullConnectorWorker._read_blocks).parameters
+    assert read_blocks["load_start_token"].default == 0
+    assert read_blocks["load_end_token"].default == 0
 
 
 def main() -> int:

@@ -1164,10 +1164,10 @@ index 43fbbe0c3c..23f2018234 100644
  
 @@ -402,6 +404,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
          awaiting_kvs: bool,
-     ) -> bool:
-         """Post a READ point-to-point xfer request from a single local worker to
 +        load_start_token: int = 0,
 +        load_end_token: int = 0,
+     ) -> bool:
+         """Post a READ point-to-point xfer request from a single local worker to
          a single remote worker.
  
          Returns True when the read was posted (or was unnecessary), False
