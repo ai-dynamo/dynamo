@@ -71,7 +71,8 @@ impl ReflectorHealth {
 
     fn record_failure(&mut self) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        self.failure_streak_started_at.get_or_insert_with(Instant::now);
+        self.failure_streak_started_at
+            .get_or_insert_with(Instant::now);
     }
 
     fn is_degraded(&self) -> bool {
