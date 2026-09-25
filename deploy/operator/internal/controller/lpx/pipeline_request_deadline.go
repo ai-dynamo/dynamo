@@ -54,7 +54,7 @@ func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineReques
 // pipelineRequestSchedulingStartedAt returns the scheduler's nonzero cycle start,
 // or creation time while waiting for the scheduler. request must be non-nil.
 func pipelineRequestSchedulingStartedAt(request *lpxv1alpha1.LPUPipelineRequest) time.Time {
-	if request.Status == nil || request.Status.SchedulingStartedAt == nil || request.Status.SchedulingStartedAt.IsZero() {
+	if request.Status == nil || request.Status.SchedulingStartedAt.IsZero() {
 		return request.CreationTimestamp.Time
 	}
 	return request.Status.SchedulingStartedAt.Time
