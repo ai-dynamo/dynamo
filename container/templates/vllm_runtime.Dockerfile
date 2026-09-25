@@ -101,19 +101,6 @@ RUN apt-get update && \
         openssl && \
     rm -rf /var/lib/apt/lists/*
 
-# The benchmark-pinned vLLM nightly is based on a CUDA runtime image: it has
-# /usr/local/cuda but deliberately does not ship nvcc. DeepSeek V4.1 Flash's
-# DeepGEMM kernels JIT at model load on GB200, so retain nvcc and its required
-# CUDA development dependencies in the runtime image. Do not install the
-# cuda-compiler meta-package: it additionally pulls cuda-cuxxfilt, which is
-# GPL-3.0-only and unnecessary for DeepGEMM's compilation path.
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        cuda-nvcc-13-0 && \
-    test -x /usr/local/cuda-13.0/bin/nvcc && \
-    test -x /usr/local/cuda/bin/nvcc && \
-    /usr/local/cuda/bin/nvcc --version && \
-    rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility.
@@ -560,6 +547,28 @@ RUN set -eux; \
 # at runtime or it cannot import; set it in the image and ensure the K8s
 # pod/runtimeClass does not drop it.
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+
+# The benchmark-pinned vLLM nightly is based on a CUDA runtime image: it has
+# /usr/local/cuda but deliberately does not ship nvcc. DeepSeek V4.1 Flash's
+# DeepGEMM kernels JIT at model load on GB200, so add the compiler only after
+# every later CUDA/package mutation. Do not install the cuda-compiler
+# meta-package: it additionally pulls cuda-cuxxfilt, which is GPL-3.0-only and
+# unnecessary for DeepGEMM's compilation path. The conditional link handles
+# both base-image layouts: /usr/local/cuda may already resolve to cuda-13.0, or
+# it may resolve elsewhere and require the canonical DeepJIT compiler path.
+RUN set -eux; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cuda-nvcc-13-0; \
+    nvcc=/usr/local/cuda-13.0/bin/nvcc; \
+    test -x "${nvcc}"; \
+    mkdir -p /usr/local/cuda/bin; \
+    if [ "$(readlink -f /usr/local/cuda/bin/nvcc 2>/dev/null || true)" != "$(readlink -f "${nvcc}")" ]; then \
+        ln -sf "${nvcc}" /usr/local/cuda/bin/nvcc; \
+    fi; \
+    test -x /usr/local/cuda/bin/nvcc; \
+    /usr/local/cuda/bin/nvcc --version; \
+    rm -rf /var/lib/apt/lists/*
 {% endif %}
 
 {% if target not in ("dev", "local-dev") and context.vllm.enable_modelexpress == "true" %}
