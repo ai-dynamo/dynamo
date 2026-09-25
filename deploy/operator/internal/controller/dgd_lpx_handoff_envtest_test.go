@@ -233,7 +233,7 @@ func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 		assert.Equal(c, metav1.ConditionFalse, ready.Status)
 		assert.Equal(c, failed.Reason, ready.Reason)
 		assert.Equal(c, failed.Message, ready.Message)
-		assert.NotNil(c, child.Status.ModelDownload)
+		assert.Nil(c, child.Status.ModelDownload)
 	}, 20*time.Second, 50*time.Millisecond)
 
 	t.Log("The rejected publication created neither Grove workloads nor scheduler requests")

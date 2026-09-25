@@ -133,6 +133,38 @@ func TestEnsureModelsDownloadedSharesDeadlineAcrossBuilds(t *testing.T) {
 	}
 }
 
+func TestLocalLPXModelDownloads(t *testing.T) {
+	t.Log("Local builds have no remote-download status or calls")
+	dgd := newModelDownloadDGD(modelDownloadTestLocalBuildID)
+	child := &v1alpha1.LPXGraphDeployment{}
+	registry := newModelDownloadRegistry(t, map[string]bool{modelDownloadTestBuildID: true}, nil)
+	r := &graphReconciler{modelRegistry: registry}
+	for range 2 {
+		result, err := r.reconcileModelDownloads(t.Context(), child, dgd)
+		require.NoError(t, err)
+		require.Zero(t, result)
+		require.Nil(t, child.Status.ModelDownload)
+	}
+	require.Empty(t, registry.calls)
+
+	t.Log("Selecting a remote build still checks its download")
+	dgd.Spec.Components[0].LPX.BuildID = modelDownloadTestBuildID
+	result, err := r.reconcileModelDownloads(t.Context(), child, dgd)
+	require.NoError(t, err)
+	require.Zero(t, result)
+	require.Equal(t, []string{modelDownloadTestBuildID}, registry.calls)
+	require.Equal(t, registry.calls, child.Status.ModelDownload.Builds)
+	require.NotNil(t, child.Status.ModelDownload.LastCheckedAt)
+
+	t.Log("Returning to a local build clears the remote cache without another download check")
+	dgd.Spec.Components[0].LPX.BuildID = modelDownloadTestLocalBuildID
+	result, err = r.reconcileModelDownloads(t.Context(), child, dgd)
+	require.NoError(t, err)
+	require.Zero(t, result)
+	require.Nil(t, child.Status.ModelDownload)
+	require.Equal(t, []string{modelDownloadTestBuildID}, registry.calls)
+}
+
 func TestRunningLPXModelDownloadRefresh(t *testing.T) {
 	tests := []struct {
 		name      string

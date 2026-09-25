@@ -102,10 +102,12 @@ func TestIndependentLPXRoleScalingAndReadiness(t *testing.T) {
 			require.NoError(t, r.Update(t.Context(), clique))
 		}
 	}
-	_, err = r.Reconcile(t.Context(), key)
+	result, err := r.Reconcile(t.Context(), key)
 	require.NoError(t, err)
+	require.Zero(t, result, "ready local builds need no download refresh")
 	require.NoError(t, r.Get(t.Context(), key.NamespacedName, child))
 	require.True(t, meta.IsStatusConditionTrue(child.Status.Conditions, v1alpha1.LPXReadyCondition))
+	require.Nil(t, child.Status.ModelDownload)
 
 	for _, replicas := range []*int32{ptr.To(int32(3)), ptr.To(int32(1)), nil} {
 		t.Log("Change only the first workload's Cyborg count, then wait for its workers")

@@ -464,12 +464,11 @@ func (r *graphReconciler) reconcileReadiness(
 
 	setReadyCondition(deployment, v1beta1.DGDStateSuccessful, readiness.Message)
 
-	delay := modelDownloadRefreshInterval
 	if download := deployment.Status.ModelDownload; download != nil && download.LastCheckedAt != nil {
-		delay = max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))
+		return ctrl.Result{RequeueAfter: max(modelDownloadRequeueAfter, time.Until(download.LastCheckedAt.Add(modelDownloadRefreshInterval)))}
 	}
 
-	return ctrl.Result{RequeueAfter: delay}
+	return ctrl.Result{}
 }
 
 // deleteUnusedConfigMaps runs only after readiness so existing pods keep their

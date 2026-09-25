@@ -96,6 +96,11 @@ func (r *graphReconciler) reconcileModelDownloads(
 		return ctrl.Result{RequeueAfter: modelDownloadRequeueAfter}, nil
 	}
 
+	if len(downloaded) == 0 {
+		deployment.Status.ModelDownload = nil
+		return ctrl.Result{}, nil
+	}
+
 	if len(existingBuilds) == 0 {
 		lastCheckedAt = new(metav1.Now())
 	}
