@@ -354,6 +354,33 @@ def filter_supported_async_generate_kwargs(
     return {key: value for key, value in kwargs.items() if key in supported_kwarg_names}
 
 
+def cache_salt_kwargs(engine: Any, cache_salt: str | None) -> dict[str, Any]:
+    """Preserve cache isolation, rejecting salts an older engine cannot honor."""
+    if not cache_salt:
+        return {}
+    # SGLang 0.5.11 in the XPU image lacks cache_salt. Remove this check when
+    # the XPU pin supports the explicit cache_salt argument (0.5.18+).
+    kwargs = filter_supported_async_generate_kwargs(engine, {"cache_salt": cache_salt})
+    if "cache_salt" not in kwargs:
+        raise ValueError("cache_salt is not supported by the installed SGLang engine")
+    return kwargs
+
+
+def prefill_dp_rank_kwargs(engine: Any, prefill_dp_rank: Any) -> dict[str, Any]:
+    """Hand SGLang's decode the prefill DP rank the router already chose.
+
+    Without ``disagg_prefill_dp_rank`` the decode scheduler parks the request
+    and resolves the rank over HTTP against the prefill bootstrap server, which
+    only learns the room once the prefill scheduler has created its KV sender;
+    the prefill forward cannot start before that round trip completes.
+    """
+    if prefill_dp_rank is None:
+        return {}
+    return filter_supported_async_generate_kwargs(
+        engine, {"disagg_prefill_dp_rank": int(prefill_dp_rank)}
+    )
+
+
 def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[str, Any]:
     """Build the optional SGLang per-request reasoning-gate argument."""
     require_reasoning = bool(request.get("require_reasoning", False))
@@ -368,6 +395,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "ConfigArgumentMerger",
+    "cache_salt_kwargs",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",

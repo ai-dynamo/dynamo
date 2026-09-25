@@ -20,6 +20,11 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     CachedEmbedding,
     MultimodalEmbeddingCacheManager,
 )
+from dynamo.common.multimodal.image_loader import (
+    image_cache_scope_from_request,
+    image_cache_session_scoped_from_env,
+    scope_image_cache_key,
+)
 from dynamo.trtllm.multimodal.cuda_ipc import extract_embeddings_from_handles
 from dynamo.trtllm.multimodal.hasher import MultimodalHasher
 from dynamo.trtllm.multimodal_processor import resolve_mm_processor_kwargs
@@ -134,7 +139,8 @@ async def _fetch_embeddings_with_cache(
 
     Checks cache for each URL. Cached embeddings are reused directly.
     For uncached URLs, sends a single encode request for only those URLs,
-    then caches the results.
+    then caches the results. Session-scoped mode partitions keys by the
+    request's image-cache scope and bypasses the cache when the scope is absent.
 
     Args:
         image_urls: List of image URLs to encode
@@ -172,19 +178,28 @@ async def _fetch_embeddings_with_cache(
     if not mm_kwargs:
         mm_kwargs = None
 
-    def _cache_key(url: str) -> str:
+    cache_scope = image_cache_scope_from_request(request)
+    session_scoped_cache = image_cache_session_scoped_from_env()
+
+    def _cache_key(url: str) -> str | None:
         # JSON-encode the pair rather than concatenating: `url + salt` is ambiguous,
         # so a URL ending in another request's serialized overrides would collide
         # with it and be served the wrong embeddings.
         if mm_kwargs is None:
-            return MultimodalHasher.hash_bytes(url.encode())
-        return MultimodalHasher.hash_bytes(
-            json.dumps([url, mm_kwargs], sort_keys=True, default=str).encode()
+            cache_key = MultimodalHasher.hash_bytes(url.encode())
+        else:
+            cache_key = MultimodalHasher.hash_bytes(
+                json.dumps([url, mm_kwargs], sort_keys=True, default=str).encode()
+            )
+        return scope_image_cache_key(
+            cache_key,
+            cache_scope,
+            session_scoped_cache=session_scoped_cache,
         )
 
     for i, url in enumerate(image_urls):
         url_hash = _cache_key(url)
-        cached = cache.get(url_hash)
+        cached = cache.get(url_hash) if url_hash is not None else None
         if cached is not None:
             embeddings_with_index.append((i, cached.tensor))
         else:
@@ -219,8 +234,9 @@ async def _fetch_embeddings_with_cache(
     new_tensors = await extract_embeddings_from_handles(handles)
 
     # Cache new tensors (reuse hashes computed during cache lookup)
-    for url, url_hash, tensor in zip(uncached_urls, uncached_hashes, new_tensors):
-        cache.set(url_hash, CachedEmbedding(tensor=tensor))
+    for url_hash, tensor in zip(uncached_hashes, new_tensors):
+        if url_hash is not None:
+            cache.set(url_hash, CachedEmbedding(tensor=tensor))
 
     # Add new tensors to our list with their original indices
     for idx, tensor in zip(uncached_indices, new_tensors):
