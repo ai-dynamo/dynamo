@@ -110,6 +110,8 @@ RUN apt-get update && \
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         cuda-nvcc-13-0 && \
+    test -x /usr/local/cuda-13.0/bin/nvcc && \
+    ln -sf /usr/local/cuda-13.0/bin/nvcc /usr/local/cuda/bin/nvcc && \
     test -x /usr/local/cuda/bin/nvcc && \
     /usr/local/cuda/bin/nvcc --version && \
     rm -rf /var/lib/apt/lists/*
