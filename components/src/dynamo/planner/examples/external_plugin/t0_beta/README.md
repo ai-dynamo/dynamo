@@ -102,9 +102,12 @@ intended.
 
 The plugin retains up to 512 regularly spaced observations in memory and
 begins forecasting after 32 valid observations, approximately 32 minutes at
-the default cadence. A restart loses that history. Each forecast batches
-the three signals as independent series and selects the configured quantile
-for one future interval. The default 0.9 quantile provides a configurable
+the default cadence. A restart loses that history. Each forecast puts
+request count, mean input length, and mean output length in the same
+multivariate group, allowing the signals to condition on each other's history.
+It selects the configured marginal quantile for each signal for one future
+interval. These marginal quantiles do not define a joint compute-load quantile.
+The default 0.9 quantile provides a configurable
 demand estimate; it is not a capacity or SLO guarantee.
 Idle windows retain the last known mean token lengths; initial idle traffic
 without a known request shape uses the built-in fallback.

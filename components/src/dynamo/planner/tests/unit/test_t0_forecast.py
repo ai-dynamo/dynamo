@@ -24,25 +24,37 @@ pytestmark = [
 ]
 
 
-def test_local_model_adapter_preserves_signal_order_and_quantile() -> None:
+def test_local_model_adapter_groups_signals_and_preserves_order_and_quantile() -> None:
     torch.manual_seed(42)
     model = T0Forecaster(
         embed_dim=32,
-        num_layers=1,
+        num_layers=2,
         num_heads=2,
         mlp_hidden_dim=64,
         patch_size=4,
-        group_every_n=1,
+        group_every_n=2,
         dropout=0.0,
         quantile_levels=(0.1, 0.5, 0.9),
         scaler_eps_mode="std_clamp",
     ).eval()
-    history = [(10.0, 100.0, 20.0), (20.0, 120.0, 30.0)]
+    history = [
+        (10.0, 100.0, 20.0),
+        (20.0, 120.0, 30.0),
+        (5.0, 130.0, 80.0),
+        (30.0, 90.0, 15.0),
+    ]
     with torch.inference_mode():
         expected = model.predict(
-            torch.tensor([[10.0, 20.0], [100.0, 120.0], [20.0, 30.0]]),
+            torch.tensor(
+                [
+                    [10.0, 20.0, 5.0, 30.0],
+                    [100.0, 120.0, 130.0, 90.0],
+                    [20.0, 30.0, 80.0, 15.0],
+                ]
+            ),
             horizon=1,
             quantile_levels=[0.9],
+            group_ids=torch.zeros(3, dtype=torch.long),
         ).quantiles[:, 0, 0]
     actual = T0Forecast(model)(history, 0.9)
     assert actual == pytest.approx(expected.tolist())

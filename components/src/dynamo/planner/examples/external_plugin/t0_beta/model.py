@@ -13,7 +13,7 @@ from dynamo.planner.examples.external_plugin.t0_beta.predictor import Traffic
 
 
 class T0Forecast:
-    """Batch three independent traffic series and forecast their next interval."""
+    """Forecast the three traffic signals together in one multivariate group."""
 
     def __init__(self, model: T0Forecaster) -> None:
         self._model = model.eval()
@@ -23,7 +23,12 @@ class T0Forecast:
         context: Float[torch.Tensor, "signal time"] = torch.tensor(  # noqa: F722
             history, dtype=torch.float32
         ).T.contiguous()
-        result = self._model.predict(context, horizon=1, quantile_levels=[quantile])
+        result = self._model.predict(
+            context,
+            horizon=1,
+            quantile_levels=[quantile],
+            group_ids=torch.zeros(3, dtype=torch.long),
+        )
         if result.quantiles.shape != (3, 1, 1):
             raise ValueError("Expected t0 quantiles with shape (3, 1, 1)")
         values: Float[torch.Tensor, "3"] = result.quantiles[:, 0, 0]  # noqa: UP037
