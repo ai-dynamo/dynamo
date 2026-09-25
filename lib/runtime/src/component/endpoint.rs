@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use educe::Educe;
@@ -153,16 +153,26 @@ impl EndpointScopedState {
         )
     }
 
-    fn release(self) {
-        if let Some(registration) = self.health_check_registration {
+    fn release(mut self) {
+        self.release_now();
+    }
+
+    fn release_now(&mut self) {
+        if let Some(registration) = self.health_check_registration.take() {
             self.system_health
                 .lock()
                 .release_health_check_target(registration);
         }
-        if let Some(engine) = &self.local_engine {
+        if let Some(engine) = self.local_engine.take() {
             self.registry
-                .remove_registration(&self.endpoint_name, engine);
+                .remove_registration(&self.endpoint_name, &engine);
         }
+    }
+}
+
+impl Drop for EndpointScopedState {
+    fn drop(&mut self) {
+        self.release_now();
     }
 }
 
@@ -186,6 +196,17 @@ impl EndpointConfigBuilder {
 
     /// Start an endpoint and return once its exact discovery instance is callable.
     pub async fn start_with_registration(self) -> Result<StartedEndpoint> {
+        let config = self.build_internal()?;
+        let discovery = config.endpoint.drt().discovery();
+        config.start_with_discovery(discovery).await
+    }
+}
+
+impl EndpointConfig {
+    async fn start_with_discovery(
+        self,
+        discovery: Arc<dyn crate::discovery::Discovery>,
+    ) -> Result<StartedEndpoint> {
         let (
             endpoint,
             handler,
@@ -193,7 +214,7 @@ impl EndpointConfigBuilder {
             graceful_shutdown,
             health_check_payload,
             local_engine,
-        ) = self.build_internal()?.dissolve();
+        ) = self.dissolve();
         let connection_id = endpoint.drt().connection_id();
         let endpoint_id = endpoint.id();
 
@@ -299,8 +320,6 @@ impl EndpointConfigBuilder {
         // Register this endpoint instance in the discovery plane
         // The discovery interface abstracts storage backend (etcd, k8s, etc) and provides
         // consistent registration/discovery across the system.
-        let discovery = endpoint.drt().discovery();
-
         let discovery_spec = crate::discovery::DiscoverySpec::Endpoint {
             namespace: endpoint_id.namespace.clone(),
             component: endpoint_id.component.clone(),
@@ -310,69 +329,60 @@ impl EndpointConfigBuilder {
             request_plane_codec: Some(RequestPlanePayloadCodec::configured()),
         };
 
-        let discovery_instance = match discovery.register(discovery_spec).await {
-            Ok(instance) => instance,
-            Err(e) => {
-                tracing::error!(
-                    %endpoint_id,
-                    error = %e,
-                    "Unable to register service for discovery"
-                );
-                let _ = server
-                    .unregister_endpoint_instance(&endpoint_id, connection_id)
-                    .await;
-                if let Some(tracker) = tracker_clone {
-                    tracker.unregister_endpoint();
-                }
-                scoped_state.release();
-                anyhow::bail!(
-                    "Unable to register service for discovery. Check discovery service status"
-                );
-            }
-        };
-        let instance = match &discovery_instance {
-            crate::discovery::DiscoveryInstance::Endpoint(instance) => instance.clone(),
-            _ => unreachable!("endpoint discovery spec returned a non-endpoint instance"),
-        };
-
-        // Create cleanup task that unregisters on cancellation.
-        let endpoint_name_for_cleanup = endpoint_name_for_task;
-        let server_for_cleanup = server;
+        // Own discovery setup through cleanup: dropping the caller must not
+        // cancel a backend write after it has published an endpoint record.
+        let cancel_on_drop = endpoint_shutdown_token.clone().drop_guard();
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
-        let discovery_for_cleanup = discovery;
-
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+            let discovery_instance = match discovery.register(discovery_spec).await {
+                Ok(instance) => instance,
+                Err(error) => {
+                    tracing::error!(%endpoint_id, %error, "Unable to register service for discovery");
+                    let _ = server
+                        .unregister_endpoint_instance(&endpoint_id, connection_id)
+                        .await;
+                    if let Some(tracker) = tracker_clone {
+                        tracker.unregister_endpoint();
+                    }
+                    scoped_state.release();
+                    return Err(error).context(
+                        "Unable to register service for discovery. Check discovery service status",
+                    );
+                }
+            };
+            let instance = match &discovery_instance {
+                crate::discovery::DiscoveryInstance::Endpoint(instance) => instance.clone(),
+                _ => unreachable!("endpoint discovery spec returned a non-endpoint instance"),
+            };
+            if ready_tx.send(instance).is_err() {
+                cancel_token_for_cleanup.cancel();
+            }
             cancel_token_for_cleanup.cancelled().await;
 
-            if let Err(error) = discovery_for_cleanup.unregister(discovery_instance).await {
+            if let Err(error) = discovery.unregister(discovery_instance).await {
                 tracing::warn!(%error, "Failed to unregister endpoint from discovery");
             }
-
-            tracing::debug!(
-                endpoint = %endpoint_name_for_cleanup,
-                "Unregistering endpoint from request plane server"
-            );
-
-            if let Err(e) = server_for_cleanup
+            if let Err(error) = server
                 .unregister_endpoint_instance(&endpoint_id, connection_id)
                 .await
             {
-                tracing::warn!(
-                    endpoint = %endpoint_name_for_cleanup,
-                    error = %e,
-                    "Failed to unregister endpoint"
-                );
+                tracing::warn!(endpoint = %endpoint_name_for_task, %error, "Failed to unregister endpoint");
             }
-
             if let Some(tracker) = tracker_clone {
-                tracing::debug!("Unregister endpoint from graceful shutdown tracker");
                 tracker.unregister_endpoint();
             }
-
             scoped_state.release();
-
-            anyhow::Ok(())
+            Ok(())
         });
+        let instance = match ready_rx.await {
+            Ok(instance) => instance,
+            Err(_) => {
+                task.await??;
+                anyhow::bail!("Endpoint cleanup task ended before registration completed");
+            }
+        };
+        cancel_on_drop.disarm();
 
         Ok(StartedEndpoint {
             instance,
@@ -954,6 +964,197 @@ mod integration_tests {
             &drt.system_health(),
             "after a failed start",
         );
+    }
+
+    struct GatedDiscovery {
+        inner: Arc<dyn crate::discovery::Discovery>,
+        entered: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl crate::discovery::Discovery for GatedDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(
+            &self,
+            spec: crate::discovery::DiscoverySpec,
+        ) -> Result<crate::discovery::DiscoveryInstance> {
+            self.entered.notify_one();
+            self.proceed.notified().await;
+            if self.fail {
+                anyhow::bail!("injected discovery registration failure");
+            }
+            self.inner.register(spec).await
+        }
+
+        async fn unregister(&self, instance: crate::discovery::DiscoveryInstance) -> Result<()> {
+            self.inner.unregister(instance).await
+        }
+
+        async fn list(
+            &self,
+            query: crate::discovery::DiscoveryQuery,
+        ) -> Result<Vec<crate::discovery::DiscoveryInstance>> {
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: crate::discovery::DiscoveryQuery,
+            cancel: Option<CancellationToken>,
+        ) -> Result<crate::discovery::DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel).await
+        }
+    }
+
+    async fn check_discovery_failure_or_cancellation(fail: bool) {
+        use std::time::Duration;
+        let drt = create_test_drt_async().await;
+        let discovery = Arc::new(GatedDiscovery {
+            inner: drt.discovery(),
+            entered: tokio::sync::Notify::new(),
+            proceed: tokio::sync::Notify::new(),
+            fail,
+        });
+        let engine = stub_engine();
+        let config = drt
+            .namespace("discovery_rollback")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint(ENDPOINT)
+            .endpoint_builder()
+            .handler(handler(false))
+            .health_check_payload(serde_json::json!({}))
+            .register_local_engine(engine.clone())
+            .unwrap()
+            .build_internal()
+            .unwrap();
+        let starting = tokio::spawn({
+            let discovery = discovery.clone();
+            async move { config.start_with_discovery(discovery).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), discovery.entered.notified())
+            .await
+            .unwrap();
+        assert!(drt.local_endpoint_registry().get(ENDPOINT).is_some());
+        // Reaching discovery means the request-plane handler is already installed.
+        // Cancellation must retain ownership of that handler until setup completes.
+        if !fail {
+            starting.abort();
+        }
+        discovery.proceed.notify_one();
+        if fail {
+            let error = starting.await.unwrap().err().expect("discovery must fail");
+            assert!(format!("{error:#}").contains("injected discovery registration failure"));
+        } else {
+            assert!(
+                starting
+                    .await
+                    .err()
+                    .expect("caller was aborted")
+                    .is_cancelled()
+            );
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while drt.local_endpoint_registry().get(ENDPOINT).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("owned cleanup must finish after discovery unblocks");
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after interrupted discovery setup",
+        );
+        assert!(
+            drt.discovery()
+                .list(crate::discovery::DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        // Reusing the exact route fails if cancellation left its handler behind.
+        let restarted = start(
+            &drt,
+            "discovery_rollback",
+            &engine,
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        .unwrap();
+        restarted.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_failure_releases_endpoint_state() {
+        check_discovery_failure_or_cancellation(true).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_discovery_setup_releases_endpoint_state() {
+        check_discovery_failure_or_cancellation(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_nats_start_releases_endpoint_state() {
+        use crate::distributed::DistributedConfig;
+        use std::time::Duration;
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = RequestPlaneMode::Nats;
+        config.nats_config = Some(nats::ClientOptions::default());
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("cancelled_start")
+            .unwrap()
+            .component("backend")
+            .unwrap()
+            .endpoint(ENDPOINT);
+        let server = drt.request_plane_server().await.unwrap();
+        let registry = drt.component_registry().inner.lock().await;
+        let mut starting = Box::pin(
+            endpoint
+                .endpoint_builder()
+                .handler(handler(false))
+                .health_check_payload(serde_json::json!({}))
+                .register_local_engine(stub_engine())
+                .unwrap()
+                .start_with_registration(),
+        );
+        assert!(futures::poll!(starting.as_mut()).is_pending());
+        assert!(drt.local_endpoint_registry().get(ENDPOINT).is_some());
+        drop(starting);
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after cancelling request-plane setup",
+        );
+        drop(registry);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            server.unregister_endpoint_instance(&endpoint.id(), drt.connection_id()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let restarted = start(
+            &drt,
+            "cancelled_start",
+            &stub_engine(),
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        .unwrap();
+        restarted.shutdown().await.unwrap();
     }
 
     async fn check_request_plane_failure_rolls_back(request_plane: RequestPlaneMode) {
