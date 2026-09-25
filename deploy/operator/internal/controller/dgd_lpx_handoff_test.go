@@ -122,13 +122,10 @@ func TestProjectWithoutExternallyManagedComponentsDoesNotMutateSource(t *testing
 			kube := builder.Build()
 
 			t.Log("Render and observe restarts against that same ordinary PCS")
-			renderer := newGroveWorkloadRenderer(kube, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
-			rendered, err := renderer.Render(t.Context(), source, ordinary, nil, nil, false)
-			require.NoError(t, err)
-			if test.lpxOnly {
-				require.Nil(t, rendered.existing)
-				require.Nil(t, rendered.desired)
-			} else {
+			if !test.lpxOnly {
+				renderer := newGroveWorkloadRenderer(kube, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
+				rendered, err := renderer.Render(t.Context(), source, ordinary, nil, nil, false)
+				require.NoError(t, err)
 				require.NotNil(t, rendered.existing)
 				require.Equal(t, pcsName, rendered.existing.Name)
 				require.Equal(t, pcsName, rendered.desired.Name)

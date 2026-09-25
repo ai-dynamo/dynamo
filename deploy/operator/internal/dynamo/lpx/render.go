@@ -73,10 +73,7 @@ func RenderNodeLocal(
 		agentTemplateNames = append(agentTemplateNames, agent.TemplateName)
 	}
 	conductorTemplateName := plan.ConductorTemplate
-	allocation := strings.Join(agentTemplateNames, ",")
-	if projections[0].pipeline == PipelineSpecDecode {
-		allocation = strings.Join(agentTemplateNames, ":")
-	}
+	allocation := strings.Join(agentTemplateNames, ":")
 
 	// The serving component owns conductor metadata and storage independently of model order.
 	conductorStage := workload.ServingComponentName()

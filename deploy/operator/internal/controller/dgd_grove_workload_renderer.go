@@ -84,11 +84,6 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a Kubernetes reader")
 	}
 
-	// An LPX-only graph has no ordinary PodCliqueSet to observe or render.
-	if len(ordinary.Spec.Components) == 0 {
-		return &grovePodCliqueSetRender{renderDeployment: ordinary}, nil
-	}
-
 	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	key := types.NamespacedName{
 		Name:      dynamo.PCSNameForDGD(ordinary.Name, ordinary.Spec.Components),

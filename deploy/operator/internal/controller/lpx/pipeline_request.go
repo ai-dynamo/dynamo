@@ -81,10 +81,6 @@ func resolvePipelineRequests(
 			request := &lpxv1alpha1.LPUPipelineRequest{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: pipelineRequestName(deployment.Name, digest), Namespace: deployment.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgdOwner.Name,
-						deploymentUIDLabel:                        string(deployment.UID),
-					},
 					Annotations: map[string]string{
 						lpx.DeploymentNameAnnotation:                 deployment.Name,
 						pipelineRequestModelAnnotation:               projection.Model(),
@@ -102,6 +98,10 @@ func resolvePipelineRequests(
 
 				requests[request.Name] = currentRequest
 			} else {
+				request.Labels = map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgdOwner.Name,
+					deploymentUIDLabel:                        string(deployment.UID),
+				}
 				requests[request.Name] = request
 				missing = append(missing, request)
 			}

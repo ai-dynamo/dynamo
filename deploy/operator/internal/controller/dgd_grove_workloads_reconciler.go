@@ -76,6 +76,15 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
+	// An LPX-only graph still reconciles its stable resources.
+	if len(ordinary.Spec.Components) == 0 {
+		stableResources, err := r.stableResources.Reconcile(ctx, source, ordinary)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		return checkResourcesReadiness(stableResources), nil
+	}
+
 	logger := log.FromContext(ctx)
 
 	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(source)
@@ -93,15 +102,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
-	}
-
-	// An LPX-only graph still reconciles its stable resources.
-	if renderedPodCliqueSet.desired == nil {
-		stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
-		if err != nil {
-			return ReconcileResult{}, err
-		}
-		return checkResourcesReadiness(stableResources), nil
 	}
 
 	// Converge the ordinary PCS before rollout or readiness observation.
