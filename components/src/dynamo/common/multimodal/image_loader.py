@@ -437,7 +437,8 @@ class ImageLoader:
         *,
         preserve_uuid_slots: Literal[False] = False,
         cache_scope: str | None = None,
-    ) -> list[Image.Image]: ...
+    ) -> list[Image.Image]:
+        ...
 
     @overload
     async def load_image_batch(
@@ -446,7 +447,8 @@ class ImageLoader:
         *,
         preserve_uuid_slots: Literal[True],
         cache_scope: str | None = None,
-    ) -> list[Image.Image | None]: ...
+    ) -> list[Image.Image | None]:
+        ...
 
     async def load_image_batch(
         self,
