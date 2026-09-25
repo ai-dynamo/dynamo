@@ -9840,7 +9840,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarEnvVars      map[string]string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
-		wantSidecarStartupProbe bool
+		wantSidecarStartupProbe *corev1.Probe
 		wantSidecarPorts        bool
 		wantSidecarMounts       []corev1.VolumeMount
 		wantSidecarMountsAbsent []string
@@ -9895,7 +9895,12 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			wantSidecarName:   commonconsts.FrontendSidecarContainerName,
 			wantSidecarImage:  "my-frontend:latest",
 			wantSidecarProbes: true, wantSidecarPorts: true,
-			wantSidecarStartupProbe: true,
+			wantSidecarStartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live", Port: intstr.FromString("http"),
+				}},
+				PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
+			},
 		},
 		{
 			name: "frontendSidecar with envFromSecret",
@@ -10073,12 +10078,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			sidecar := podSpec.Containers[len(podSpec.Containers)-1]
 
 			t.Log("Check that the frontend sidecar uses the parent runtime version for its startup probe")
-			if tt.wantSidecarStartupProbe {
-				require.NotNil(t, sidecar.StartupProbe)
-				assert.Equal(t, int32(30), sidecar.StartupProbe.FailureThreshold)
-			} else {
-				assert.Nil(t, sidecar.StartupProbe)
-			}
+			assert.Equal(t, tt.wantSidecarStartupProbe, sidecar.StartupProbe)
 
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
