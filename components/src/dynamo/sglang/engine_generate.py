@@ -48,6 +48,7 @@ def build_native_generate_request(
     bootstrap_room: int | None = None,
     external_trace_header: dict[str, str] | None = None,
     routed_dp_rank: int | None = None,
+    prefill_dp_rank: int | None = None,
     lora_path: str | None = None,
     cache_salt: str | None = None,
 ) -> GenerateReqInput:
@@ -105,6 +106,11 @@ def build_native_generate_request(
     ):
         if value is not None:
             payload[name] = value
+    if (
+        prefill_dp_rank is not None
+        and "disagg_prefill_dp_rank" in GenerateReqInput.__dataclass_fields__
+    ):
+        payload["disagg_prefill_dp_rank"] = prefill_dp_rank
 
     native_request = _GENERATE_REQUEST_ADAPTER.validate_python(payload)
     _shared_logprobs.validate_sglang_top_logprobs(

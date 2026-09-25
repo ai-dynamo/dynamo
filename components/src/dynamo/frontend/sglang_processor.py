@@ -359,7 +359,7 @@ def _preprocess_worker(
         pre.tool_call_parser,
         pre.reasoning_parser,
         require_reasoning=_guided_output_requires_reasoning(
-            request, pre.force_reasoning, _w_reasoning_parser_name
+            request, pre.force_reasoning, _w_reasoning_parser_name, pre.guided_decoding
         ),
     )
 
@@ -617,7 +617,10 @@ class SglangProcessor:
                 pre.tool_call_parser,
                 pre.reasoning_parser,
                 require_reasoning=_guided_output_requires_reasoning(
-                    request, pre.force_reasoning, self.reasoning_parser_name
+                    request,
+                    pre.force_reasoning,
+                    self.reasoning_parser_name,
+                    pre.guided_decoding,
                 ),
             )
         except PreprocessError as exc:
@@ -849,8 +852,12 @@ class SglangProcessor:
                 cached_tokens = _cached_tokens_from_usage(usage_for_metrics)
                 if cached_tokens is not None:
                     metrics["cached_tokens"] = cached_tokens
-                envelope["event"] = "llm_metrics"
-                envelope["comment"] = [json.dumps(metrics)]
+                # Attach metrics to data when available; otherwise use an annotation.
+                if data := envelope.get("data"):
+                    data["llm_metrics"] = metrics
+                else:
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
 
                 pending_token_ids = []
                 pending_log_probs = None
