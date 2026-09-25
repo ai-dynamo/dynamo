@@ -6075,6 +6075,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		wantArgs         []string
 		wantEnvVars      map[string]string
 		wantErr          bool
+		wantStartupProbe *corev1.Probe
 	}{
 		{
 			name: "frontend with default command",
@@ -6086,6 +6087,45 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			wantArgs:         []string{"-m", "dynamo.frontend"},
 			wantEnvVars: map[string]string{
 				"DYN_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "frontend with runtime 1.6.0",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeFrontend,
+				RuntimeVersionOverride: "1.6.0",
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
+			wantStartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
+					Path: "/live", Port: intstr.FromString("http"),
+				}},
+				PeriodSeconds: 10, TimeoutSeconds: 1, FailureThreshold: 30,
+			},
+		},
+		{
+			name: "frontend with user startup probe",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeFrontend,
+				RuntimeVersionOverride: "1.6.0",
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{
+						Name: commonconsts.MainContainerName,
+						StartupProbe: &corev1.Probe{
+							ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}},
+							PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 90,
+						},
+					},
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantCommand:      []string{"python3"},
+			wantArgs:         []string{"-m", "dynamo.frontend"},
+			wantStartupProbe: &corev1.Probe{
+				ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8000)}},
+				PeriodSeconds: 5, TimeoutSeconds: 2, FailureThreshold: 90,
 			},
 		},
 		{
@@ -6129,6 +6169,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the frontend pod with the selected runtime and user overrides")
 			podSpec, err := GenerateBasePodSpec(
 				betaComponent(t, tt.component),
 				tt.backendFramework,
@@ -6152,7 +6193,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				return
 			}
 
-			// Check command and args
+			t.Log("Check the startup probe, command, and arguments")
+			require.Equal(t, tt.wantStartupProbe, podSpec.Containers[0].StartupProbe)
 			if !reflect.DeepEqual(podSpec.Containers[0].Command, tt.wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
 					podSpec.Containers[0].Command, tt.wantCommand)
@@ -6162,7 +6204,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 					podSpec.Containers[0].Args, tt.wantArgs)
 			}
 
-			// Check environment variables
+			t.Log("Check the frontend environment variables")
 			envVars := make(map[string]string)
 			for _, env := range podSpec.Containers[0].Env {
 				envVars[env.Name] = env.Value
@@ -9798,6 +9840,7 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 		wantSidecarEnvVars      map[string]string
 		wantSidecarEnvFrom      int
 		wantSidecarProbes       bool
+		wantSidecarStartupProbe bool
 		wantSidecarPorts        bool
 		wantSidecarMounts       []corev1.VolumeMount
 		wantSidecarMountsAbsent []string
@@ -9839,6 +9882,20 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 			},
 			wantSidecarProbes: true,
 			wantSidecarPorts:  true,
+		},
+		{
+			name: "frontendSidecar inherits runtime 1.6.0 startup allowance",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:          commonconsts.ComponentTypeWorker,
+				RuntimeVersionOverride: "1.6.0",
+				FrontendSidecar:        &v1alpha1.FrontendSidecarSpec{Image: "my-frontend:latest"},
+			},
+			parentDGDName: "test-dgd", namespace: "test-ns",
+			wantSidecarCount:  2,
+			wantSidecarName:   commonconsts.FrontendSidecarContainerName,
+			wantSidecarImage:  "my-frontend:latest",
+			wantSidecarProbes: true, wantSidecarPorts: true,
+			wantSidecarStartupProbe: true,
 		},
 		{
 			name: "frontendSidecar with envFromSecret",
@@ -10014,6 +10071,14 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 
 			// The frontend sidecar is the last container
 			sidecar := podSpec.Containers[len(podSpec.Containers)-1]
+
+			t.Log("Check that the frontend sidecar uses the parent runtime version for its startup probe")
+			if tt.wantSidecarStartupProbe {
+				require.NotNil(t, sidecar.StartupProbe)
+				assert.Equal(t, int32(30), sidecar.StartupProbe.FailureThreshold)
+			} else {
+				assert.Nil(t, sidecar.StartupProbe)
+			}
 
 			assert.Equal(t, tt.wantSidecarName, sidecar.Name, "sidecar container name")
 			assert.Equal(t, tt.wantSidecarImage, sidecar.Image, "sidecar container image")
