@@ -103,8 +103,7 @@ func (r *lpxRestartProgressResolver) observeRestart(
 	}
 
 	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
-	restart := dynamo.LPXRestartToken(source, child.Annotations[dynamo.LPXRestartAnnotation])
-	revision, err := dynamo.LPXInputRevision(source, restart)
+	revision, err := dynamo.LPXInputRevision(source, source.Spec.Restart.ID)
 	if err != nil || child.Spec.InputRevision != revision {
 		return nil
 	}
