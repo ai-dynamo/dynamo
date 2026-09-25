@@ -309,7 +309,7 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $$(go list ./... | grep -vE '/cmd($$|/)') ./cmd/crd-apply -coverprofile cover.out
 
 .PHONY: envtest
-envtest: setup-envtest yq ## Run envtest-backed operator tests.
+envtest: setup-envtest ## Run envtest-backed operator tests.
 	KUBEBUILDER_ASSETS="$$($(ENVTEST_ASSETS_CMD))" go test $(ENVTEST_PACKAGES)
 
 .PHONY: setup-clustertest

@@ -13,6 +13,7 @@ import (
 
 // mergeLPXChildStatus composes a current LGD observation into the ordinary
 // Grove result. The outer DGD controller remains the only status writer.
+// The result reuses the handoff-owned child's component status.
 func mergeLPXChildStatus(
 	source *v1beta1.DynamoGraphDeployment,
 	child *v1alpha1.LPXGraphDeployment,
@@ -38,7 +39,7 @@ func mergeLPXChildStatus(
 	if observed {
 		for _, component := range components {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
-				ordinary.ComponentStatus[component.ComponentName] = *observedStatus.ComponentReplicaStatus.DeepCopy()
+				ordinary.ComponentStatus[component.ComponentName] = observedStatus.ComponentReplicaStatus
 			}
 		}
 	}

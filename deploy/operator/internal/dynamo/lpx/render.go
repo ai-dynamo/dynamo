@@ -175,7 +175,7 @@ func RenderNodeLocal(
 			podSpec = *podSpec.DeepCopy()
 		}
 
-		annotations := roleAnnotations(template.Annotations, lpxv1alpha1.PodRoleAgent, projection.Digest().String())
+		annotations := roleAnnotations(maps.Clone(template.Annotations), lpxv1alpha1.PodRoleAgent, projection.Digest().String())
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		annotations[lpxv1alpha1.PodModelAnnotation] = projection.model
 		annotations[lpxv1alpha1.CompilerSnapshotDigestAnnotation] = projection.CompilerSnapshotDigest()
@@ -270,12 +270,13 @@ func configureLPURolePods(agentPodSpec, conductorPodSpec *corev1.PodSpec, worklo
 	return nil
 }
 
+// roleAnnotations consumes base, allocating it when nil.
 func roleAnnotations(
 	base map[string]string,
 	role string,
 	workloadDigest string,
 ) map[string]string {
-	annotations := workloadAnnotations(maps.Clone(base), workloadDigest)
+	annotations := workloadAnnotations(base, workloadDigest)
 	// Remove controller-owned role metadata before stamping canonical values.
 	for _, key := range []string{
 		WorkloadModeAnnotation,
