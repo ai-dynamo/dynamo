@@ -3,8 +3,9 @@
 """Validate the DeepSeek V4.1 Flash vLLM runtime patch stack.
 
 The installed pinned-nightly wheel must contain the #58215 DeepSelect sentinel
-bound, #57662's NIXL region geometry key, and #58038's telemetry-completion
-behavior. This deliberately inspects the installed wheel, not a source tree.
+bound, #57662's NIXL region geometry key, #58038's telemetry-completion
+behavior, and #55374's piecewise-prefix load protocol. This deliberately
+inspects the installed wheel, not a source tree.
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from __future__ import annotations
 import inspect
 from unittest.mock import MagicMock
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+from vllm.distributed.kv_transfer.kv_connector.v1 import multi_connector
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker, metadata
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -32,9 +34,18 @@ def validate_nixl_region_key() -> None:
     assert "seen_region_keys.append(region_key)" in source
 
 
+def validate_piecewise_prefix_loading() -> None:
+    source = inspect.getsource(multi_connector)
+    assert "load_policy=range_aware" in source
+    assert "update_state_after_alloc_for_range" in source
+    assert "self._request_load_ranges" in source
+    assert metadata.NIXL_CONNECTOR_VERSION == 13
+
+
 def main() -> int:
     validate_dsa_sentinel_bound()
     validate_nixl_region_key()
+    validate_piecewise_prefix_loading()
 
     worker = object.__new__(NixlBaseConnectorWorker)
     worker.nixl_wrapper = MagicMock()

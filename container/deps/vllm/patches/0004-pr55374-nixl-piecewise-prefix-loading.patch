@@ -1,0 +1,1381 @@
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+index 072018c039..8bba1f275a 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+@@ -79,6 +79,26 @@ CopyBlocksOp = Callable[
+     None,
+ ]
+ 
++
++@dataclass(frozen=True)
++class KVLoadRange:
++    """Half-open absolute token range assigned to one connector.
++
++    A boundary shared by two sources is aligned for both connectors and the
++    scheduler's KV block layout. Only a terminal range may end in a partial
++    scheduler block.
++    """
++
++    start_token: int
++    end_token: int
++    # The terminal range owns any recurrent state at end_token.
++    is_terminal: bool = True
++
++    @property
++    def num_tokens(self) -> int:
++        return self.end_token - self.start_token
++
++
+ logger = init_logger(__name__)
+ 
+ 
+@@ -532,6 +552,41 @@ class KVConnectorBase_V1(ABC):
+         """
+         pass
+ 
++    @property
++    def supports_load_range(self) -> bool:
++        """Whether this connector accepts an explicitly assigned load range.
++
++        MultiConnector only composes children whose lookup results agree on
++        synchronous versus asynchronous loading; otherwise it uses one child.
++        """
++        return False
++
++    @property
++    def load_range_alignment(self) -> int | None:
++        """Additional positive alignment for inter-source boundaries.
++
++        MultiConnector combines this value with the scheduler block size and
++        the neighboring connector's requirement. ``None`` adds no constraint.
++        """
++        return None
++
++    def update_state_after_alloc_for_range(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        load_range: KVLoadRange,
++    ) -> None:
++        """Load an absolute token range into the request's allocated blocks.
++
++        ``blocks`` is the request's complete allocated block table, not a view
++        sliced to ``load_range``. Implementations must locate each KV group's
++        destination blocks from the absolute token offsets. A later
++        ``update_state_after_alloc(request, blocks, 0)`` is allowed and must
++        remain a no-load operation. Load failures follow the
++        ``get_block_ids_with_load_errors`` contract.
++        """
++        raise NotImplementedError
++
+     @abstractmethod
+     def build_connector_meta(
+         self, scheduler_output: SchedulerOutput
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+index a6f0d4cafb..c4f3395d7f 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+@@ -3,6 +3,7 @@
+ import copy
+ from collections.abc import Callable, Iterable
+ from dataclasses import dataclass
++from math import lcm
+ from typing import TYPE_CHECKING, Any, cast
+ 
+ import torch
+@@ -19,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+     KVConnectorRole,
+     KVConnectorTransferResults,
+     KVConnectorWorkerMetadata,
++    KVLoadRange,
+     SupportsHMA,
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+ )
+ from vllm.logger import init_logger
+ from vllm.v1.attention.backend import AttentionMetadata
++from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
+ from vllm.v1.core.sched.output import SchedulerOutput
+ from vllm.v1.outputs import KVConnectorOutput
+ 
+@@ -47,6 +50,7 @@ logger = init_logger(__name__)
+ class MultiKVConnectorMetadata(KVConnectorMetadata):
+     metadata: tuple[KVConnectorMetadata, ...]
+     extra_async_saves: dict[str, int] | None = None
++    pending_async_loads: dict[str, tuple[int, ...]] | None = None
+ 
+ 
+ @dataclass
+@@ -116,7 +120,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
+         metric_types: dict[type[PromMetric], type[PromMetricT]],
+         labelnames: list[str],
+         per_engine_labelvalues: dict[int, list[object]],
+-        prom_metrics: dict[str, KVConnectorPromMetrics],
++        prom_metrics: dict[str, KVConnectorPromMetrics | None],
+     ):
+         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+         self._prom_metrics = prom_metrics
+@@ -124,19 +128,22 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
+     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+         for connector_id, stats_data in transfer_stats_data.items():
+             assert connector_id in self._prom_metrics, (
+-                f"{connector_id} is not contained in the list of registered connectors "
+-                f"with Prometheus metrics support: {self._prom_metrics.keys()}"
++                f"{connector_id} is not a configured connector: "
++                f"{self._prom_metrics.keys()}"
+             )
+-            self._prom_metrics[connector_id].observe(stats_data, engine_idx)
++            if connector_prom := self._prom_metrics[connector_id]:
++                connector_prom.observe(stats_data, engine_idx)
+ 
+ 
+ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+     """A wrapper for using multiple KVConnectors at the same time.
+ 
+-    The current logic is:
+-    - Load KV from the first connector that advertises available tokens from
+-      get_num_new_matched_tokens(), based on the order in the config.
++    The default logic is:
++    - Load KV from the first connector that advertises available tokens.
+     - Save to all connectors.
++
++    With ``load_policy=range_aware``, ordered connectors may load contiguous,
++    non-overlapping ranges of the same prefix.
+     """
+ 
+     @classmethod
+@@ -179,6 +186,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+         )
+ 
++        assert vllm_config.kv_transfer_config is not None
++        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
++        load_policy = extra_config.get("load_policy")
++        if load_policy not in (None, "range_aware"):
++            raise ValueError(f"Unknown MultiConnector load_policy: {load_policy!r}")
++
+         self._connectors: list[KVConnectorBase_V1] = []
+         self._ktc_kv_transfer_config = []
+         for connector_cls, temp_config in self._get_connector_classes_and_configs(
+@@ -187,7 +200,21 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+             self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
+             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
+ 
+-        assert vllm_config.kv_transfer_config is not None
++        self._range_load = load_policy == "range_aware"
++        self._scheduler_block_size = None
++        if self._range_load:
++            if (
++                role == KVConnectorRole.SCHEDULER
++                and kv_cache_config.has_mamba_layers
++                and not all(c.supports_load_range for c in self._connectors)
++            ):
++                raise ValueError(
++                    "MultiConnector range_aware loading with recurrent KV cache "
++                    "groups requires every child connector to support range loads"
++                )
++            self._scheduler_block_size, _ = resolve_kv_cache_block_sizes(
++                kv_cache_config, vllm_config
++            )
+         self._all_support_hma = MultiConnector.all_children_support_hma(
+             vllm_config.kv_transfer_config
+         )
+@@ -199,11 +226,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+         # A mapping from request id to the index of the connector chosen to
+         # load the request from (if any).
+         self._requests_to_connector: dict[str, int] = {}
++        self._request_load_ranges: dict[str, dict[int, KVLoadRange]] = {}
++        self._request_async_loads: dict[str, tuple[int, ...]] = {}
++        self._async_loads_to_send: dict[str, tuple[int, ...]] = {}
++        self._async_load_sources: dict[str, set[int]] = {}
++        self._pending_async_loads: dict[str, set[int]] = {}
+ 
+         # Keeps track of *additional* remaining async saves (beyond 1) to be
+-        # finished per request. Not needed for async loads since we only allow
+-        # a single connector to load.
+-        # Propagated from scheduler to worker side via the connector metadata.
++        # finished per request. Propagated from scheduler to worker side via
++        # the connector metadata.
+         self._extra_async_saves: dict[str, int] = {}
+ 
+     @property
+@@ -269,6 +300,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+         assert isinstance(connector_metadata, MultiKVConnectorMetadata)
+         if connector_metadata.extra_async_saves:
+             self._extra_async_saves.update(connector_metadata.extra_async_saves)
++        if self._range_load and connector_metadata.pending_async_loads:
++            sources = {
++                req_id: set(connector_ids)
++                for req_id, connector_ids in (
++                    connector_metadata.pending_async_loads.items()
++                )
++            }
++            self._async_load_sources.update(sources)
++            self._pending_async_loads.update(
++                {
++                    req_id: set(connector_ids)
++                    for req_id, connector_ids in sources.items()
++                }
++            )
+         for c, cm in zip(self._connectors, connector_metadata.metadata):
+             c.bind_connector_metadata(cm)
+         super().bind_connector_metadata(connector_metadata)
+@@ -337,10 +382,31 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+         self, finished_req_ids: set[str]
+     ) -> KVConnectorTransferResults:
+         results = KVConnectorTransferResults()
+-        for connector in self._connectors:
++        if self._range_load and self._async_load_sources:
++            for req_id in finished_req_ids:
++                self._pending_async_loads.pop(req_id, None)
++                self._async_load_sources.pop(req_id, None)
++
++        for i, connector in enumerate(self._connectors):
+             child_results = connector.get_transfer_results(finished_req_ids)
+-            results.finished_recving.update(child_results.finished_recving)
+             results.failed_recving.update(child_results.failed_recving)
++            if not self._range_load:
++                results.finished_recving.update(child_results.finished_recving)
++            else:
++                for req_id in child_results.finished_recving:
++                    sources = self._async_load_sources.get(req_id)
++                    if sources is not None and i not in sources:
++                        continue
++                    pending = self._pending_async_loads.get(req_id)
++                    if sources is not None and pending is None:
++                        continue
++                    if pending is None:
++                        results.finished_recving.add(req_id)
++                        continue
++                    pending.discard(i)
++                    if not pending:
++                        del self._pending_async_loads[req_id]
++                        results.finished_recving.add(req_id)
+             for req_id in child_results.finished_sending:
+                 extra_pending = self._extra_async_saves.get(req_id)
+                 if extra_pending is None:
+@@ -405,13 +471,42 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+     # ==============================
+     # Scheduler-side methods
+     # ==============================
++    def _effective_load_range_alignment(self, connector: KVConnectorBase_V1) -> int:
++        assert self._scheduler_block_size is not None
++        connector_alignment = connector.load_range_alignment
++        if connector_alignment is None:
++            return self._scheduler_block_size
++        if connector_alignment <= 0:
++            raise ValueError(
++                "Connector load_range_alignment must be positive, got "
++                f"{connector_alignment} for {connector.__class__.__name__}"
++            )
++        return lcm(self._scheduler_block_size, connector_alignment)
++
+     def get_num_new_matched_tokens(
+         self,
+         request: "Request",
+         num_computed_tokens: int,
+     ) -> tuple[int | None, bool]:
+-        to_return = (0, False)
+-        for i, c in enumerate(self._connectors):
++        if not self._range_load:
++            to_return = (0, False)
++            for i, c in enumerate(self._connectors):
++                toks, load_async = c.get_num_new_matched_tokens(
++                    request, num_computed_tokens
++                )
++                if toks is None:
++                    return (None, False)
++                if to_return[0] == 0 and toks > 0:
++                    self._requests_to_connector[request.request_id] = i
++                    to_return = (toks, load_async)
++            return to_return
++
++        req_id = request.request_id
++        self._requests_to_connector.pop(req_id, None)
++        self._request_load_ranges.pop(req_id, None)
++        self._request_async_loads.pop(req_id, None)
++        matches: list[tuple[int, bool]] = []
++        for c in self._connectors:
+             toks, load_async = c.get_num_new_matched_tokens(
+                 request, num_computed_tokens
+             )
+@@ -419,17 +514,126 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+             # we return None to indicate that we are not done yet.
+             if toks is None:
+                 return (None, False)
+-            # The first connector that has new matched tokens will be assigned
+-            # to this request.
+-            if to_return[0] == 0 and toks > 0:
+-                self._requests_to_connector[request.request_id] = i
+-                to_return = (toks, load_async)
+-        return to_return
++            matches.append((toks, load_async))
++
++        covered = num_computed_tokens
++        ranges: dict[int, KVLoadRange] = {}
++        for i, ((toks, load_async), connector) in enumerate(
++            zip(matches, self._connectors)
++        ):
++            endpoint = num_computed_tokens + toks
++            if endpoint <= covered:
++                continue
++            if ranges:
++                if not connector.supports_load_range:
++                    continue
++                alignment = self._effective_load_range_alignment(connector)
++                previous_connector = next(reversed(ranges))
++                previous = self._connectors[previous_connector]
++                if previous.supports_load_range:
++                    alignment = lcm(
++                        alignment,
++                        self._effective_load_range_alignment(previous),
++                    )
++                if covered % alignment:
++                    aligned_covered = covered // alignment * alignment
++                    if not previous.supports_load_range:
++                        return self._select_single_load(req_id, matches)
++                    previous_range = ranges[previous_connector]
++                    if aligned_covered <= previous_range.start_token:
++                        break
++                    ranges[previous_connector] = KVLoadRange(
++                        previous_range.start_token,
++                        aligned_covered,
++                        is_terminal=False,
++                    )
++                    covered = aligned_covered
++            elif (
++                connector.supports_load_range
++                and covered % self._effective_load_range_alignment(connector)
++            ):
++                continue
++            ranges[i] = KVLoadRange(covered, endpoint, is_terminal=False)
++            covered = endpoint
++
++        if not ranges:
++            return self._select_single_load(req_id, matches)
++
++        terminal_connector = next(reversed(ranges))
++        terminal_range = ranges[terminal_connector]
++        ranges[terminal_connector] = KVLoadRange(
++            terminal_range.start_token,
++            terminal_range.end_token,
++            is_terminal=True,
++        )
++
++        if len(ranges) == 1:
++            return self._select_single_load(req_id, matches)
++
++        async_loads = tuple(i for i in ranges if matches[i][1])
++        if async_loads and len(async_loads) != len(ranges):
++            # A range request has one scheduler-level completion state. Mixing
++            # sync and async children can acknowledge tokens that a sync child
++            # has not loaded in the step where the request is parked.
++            return self._select_single_load(req_id, matches)
++
++        longest_single = max(matches, key=lambda match: match[0])
++        if longest_single[0] > covered - num_computed_tokens:
++            return self._select_single_load(req_id, matches)
++
++        self._request_load_ranges[req_id] = ranges
++        if async_loads:
++            self._request_async_loads[req_id] = async_loads
++        return covered - num_computed_tokens, bool(async_loads)
++
++    def _select_single_load(
++        self, request_id: str, matches: list[tuple[int, bool]]
++    ) -> tuple[int, bool]:
++        """Fall back to the connector with the longest complete prefix."""
++        chosen = max(range(len(matches)), key=lambda i: matches[i][0])
++        toks, load_async = matches[chosen]
++        if toks > 0:
++            self._requests_to_connector[request_id] = chosen
++            if load_async:
++                self._request_async_loads[request_id] = (chosen,)
++        return (toks, load_async) if toks > 0 else (0, False)
+ 
+     def update_state_after_alloc(
+         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+     ):
+-        chosen_connector = self._requests_to_connector.get(request.request_id, -1)
++        req_id = request.request_id
++        if self._range_load:
++            load_ranges = self._request_load_ranges.pop(req_id, None)
++            async_loads = self._request_async_loads.pop(req_id, None)
++            if load_ranges is not None:
++                expected_tokens = sum(r.num_tokens for r in load_ranges.values())
++                if num_external_tokens == 0:
++                    load_ranges = None
++                elif num_external_tokens != expected_tokens:
++                    raise ValueError(
++                        "Range load token count changed after lookup: "
++                        f"expected {expected_tokens}, got {num_external_tokens} "
++                        f"for request {req_id}"
++                    )
++            if num_external_tokens > 0 and async_loads:
++                self._async_loads_to_send[req_id] = async_loads
++            if load_ranges is not None:
++                first_connector = next(iter(load_ranges))
++                for i, c in enumerate(self._connectors):
++                    load_range = load_ranges.get(i)
++                    if load_range is None:
++                        c.update_state_after_alloc(request, blocks, 0)
++                    elif i == first_connector and not c.supports_load_range:
++                        c.update_state_after_alloc(
++                            request, blocks, load_range.num_tokens
++                        )
++                    else:
++                        c.update_state_after_alloc_for_range(
++                            request, blocks, load_range
++                        )
++                return
++
++        chosen_connector = self._requests_to_connector.get(req_id, -1)
+         for i, c in enumerate(self._connectors):
+             if i == chosen_connector:
+                 # Forward call to the chosen connector (if any).
+@@ -453,6 +657,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+         if self._extra_async_saves:
+             metadata.extra_async_saves = self._extra_async_saves
+             self._extra_async_saves = {}
++        if self._range_load and self._async_loads_to_send:
++            metadata.pending_async_loads = self._async_loads_to_send
++            self._async_loads_to_send = {}
+         return metadata
+ 
+     def update_connector_output(self, connector_output: KVConnectorOutput):
+@@ -529,6 +736,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+             self._extra_async_saves[request.request_id] = async_saves - 1
+ 
+         self._requests_to_connector.pop(request.request_id, None)
++        self._request_load_ranges.pop(request.request_id, None)
++        self._request_async_loads.pop(request.request_id, None)
++        self._async_loads_to_send.pop(request.request_id, None)
+ 
+         return async_saves > 0, kv_txfer_params
+ 
+@@ -675,7 +885,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+         labelnames: list[str],
+         per_engine_labelvalues: dict[int, list[object]],
+     ) -> KVConnectorPromMetrics:
+-        prom_metrics: dict[str, KVConnectorPromMetrics] = {}
++        prom_metrics: dict[str, KVConnectorPromMetrics | None] = {}
+         seen_classes: set[type] = set()
+         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
+             vllm_config
+@@ -686,8 +896,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
+             connector_prom = connector_cls.build_prom_metrics(
+                 temp_config, metric_types, labelnames, per_engine_labelvalues
+             )
+-            if connector_prom is not None:
+-                prom_metrics[connector_cls.__name__] = connector_prom
++            prom_metrics[connector_cls.__name__] = connector_prom
+         return MultiKVConnectorPromMetrics(
+             vllm_config,
+             metric_types,
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py
+index e264a94aaf..cee0ad9d11 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_scheduler.py
+@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
+ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+     KVConnectorHandshakeMetadata,
+     KVConnectorMetadata,
++    KVLoadRange,
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+     GET_META_MSG,
+@@ -31,11 +32,16 @@ from vllm.logger import init_logger
+ from vllm.platforms import current_platform
+ from vllm.utils.math_utils import cdiv
+ from vllm.utils.network_utils import make_zmq_path
++from vllm.v1.core.kv_cache_utils import (
++    resolve_dcp_kv_block_size,
++    resolve_kv_cache_block_sizes,
++)
+ from vllm.v1.core.sched.output import SchedulerOutput
+ from vllm.v1.kv_cache_interface import (
+     FullAttentionSpec,
+     MambaSpec,
+     SlidingWindowSpec,
++    iter_layer_specs,
+ )
+ 
+ if TYPE_CHECKING:
+@@ -91,15 +97,28 @@ class NixlBaseConnectorScheduler:
+             self.use_host_buffer = (
+                 vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
+             )
++        transfer_specs = tuple(
++            next(iter(iter_layer_specs(group.kv_cache_spec)))
++            for group in kv_cache_config.transfer_groups
++        )
+         self._is_hma_required = (
+             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+             # Also handle unlikely SW-only model case instead of checking num_groups>1.
+-            and any(
+-                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+-                for g in kv_cache_config.transfer_groups
+-            )
++            and any(not isinstance(spec, FullAttentionSpec) for spec in transfer_specs)
+         )
+         self._has_mamba = kv_cache_config.has_mamba_layers
++        self._scheduler_block_size, _ = resolve_kv_cache_block_sizes(
++            kv_cache_config, vllm_config
++        )
++        dcp_size = vllm_config.parallel_config.decode_context_parallel_size
++        self._range_group_block_sizes = tuple(
++            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
++            for group in kv_cache_config.kv_cache_groups
++        )
++        self._range_transfer_group_block_sizes = tuple(
++            resolve_dcp_kv_block_size(group.kv_cache_spec, dcp_size)
++            for group in kv_cache_config.transfer_groups
++        )
+ 
+         logger.info("Initializing NIXL Scheduler %s", engine_id)
+         if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+@@ -113,7 +132,8 @@ class NixlBaseConnectorScheduler:
+         # New requests are added by update_state_after_alloc in
+         # the scheduler. Used to make metadata passed to Worker.
+         self._reqs_need_recv: dict[
+-            ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
++            ReqId,
++            tuple[Request, BlockIds, tuple[int, ...], bool, int, int],
+         ] = {}
+         self._reqs_need_save: dict[ReqId, Request] = {}
+         # Reqs to send and their expiration time
+@@ -133,10 +153,10 @@ class NixlBaseConnectorScheduler:
+         # Gather Sliding Window sizes for each kv cache group (if any) in number of
+         # blocks per KV cache group. This is used to clip the local attention window.
+         sw_sizes_tokens: list[tuple[int, int]] = [
+-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+-            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
++            (spec.sliding_window, spec.block_size)
++            if isinstance(spec, SlidingWindowSpec)
+             else (0, self.block_size)
+-            for g in kv_cache_config.transfer_groups
++            for spec in transfer_specs
+         ]
+         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
+         # account for boundary overlap eg window isn't fully aligned with blocks.
+@@ -148,10 +168,8 @@ class NixlBaseConnectorScheduler:
+         # Trailing scratch slots that mamba managers co-allocate per request
+         # for speculative decoding; None for non-SSM groups.
+         self._ssm_spec_blocks = [
+-            g.kv_cache_spec.num_speculative_blocks
+-            if isinstance(g.kv_cache_spec, MambaSpec)
+-            else None
+-            for g in kv_cache_config.transfer_groups
++            spec.num_speculative_blocks if isinstance(spec, MambaSpec) else None
++            for spec in transfer_specs
+         ]
+         # Only "all" mode keeps a state per block position; the other modes
+         # keep a single running state in the last non-speculative slot.
+@@ -296,6 +314,46 @@ class NixlBaseConnectorScheduler:
+             clipped.append(blocks)
+         return tuple(clipped)
+ 
++    @property
++    def supports_load_range(self) -> bool:
++        return True
++
++    @property
++    def load_range_alignment(self) -> int:
++        return self._scheduler_block_size
++
++    def get_range_block_ids(
++        self,
++        blocks: "KVCacheBlocks",
++        load_range: KVLoadRange,
++    ) -> BlockIds:
++        """Return destination blocks owned by a piecewise load range."""
++        assert load_range.start_token % self._scheduler_block_size == 0
++        block_ids = blocks.get_block_ids()
++        selected: list[list[int]] = []
++        for group, cache_group, block_size in zip(
++            block_ids,
++            self.kv_cache_config.kv_cache_groups,
++            self._range_group_block_sizes,
++            strict=True,
++        ):
++            if any(
++                isinstance(spec, MambaSpec)
++                for spec in iter_layer_specs(cache_group.kv_cache_spec)
++            ):
++                selected.append(list(group) if load_range.is_terminal else [])
++                continue
++            start_block = load_range.start_token // block_size
++            end_block = cdiv(load_range.end_token, block_size)
++            selected.append(list(group[start_block:end_block]))
++        return self.get_exchange_clipped_blocks(tuple(selected))
++
++    def get_range_start_blocks(self, load_range: KVLoadRange) -> tuple[int, ...]:
++        return tuple(
++            load_range.start_token // block_size
++            for block_size in self._range_transfer_group_block_sizes
++        )
++
+     def set_xfer_handshake_metadata(
+         self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+     ) -> None:
+@@ -484,6 +542,8 @@ class NixlBaseConnectorScheduler:
+             block_ids,
+             cached,
+             awaiting_kvs,
++            load_start_token,
++            load_end_token,
+         ) in self._reqs_need_recv.items():
+             assert req.kv_transfer_params is not None
+             meta.add_new_req_to_recv(
+@@ -492,6 +552,8 @@ class NixlBaseConnectorScheduler:
+                 kv_transfer_params=req.kv_transfer_params,
+                 local_num_computed_blocks=cached,
+                 awaiting_kvs=awaiting_kvs,
++                load_start_token=load_start_token,
++                load_end_token=load_end_token,
+             )
+ 
+         if self.use_host_buffer:
+@@ -542,6 +604,14 @@ class NixlBaseConnectorScheduler:
+     ):
+         raise NotImplementedError
+ 
++    def update_state_after_alloc_for_range(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        load_range: KVLoadRange,
++    ) -> None:
++        raise NotImplementedError
++
+     def request_finished(
+         self,
+         request: "Request",
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
+index 0834f06571..c572ce2341 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py
+@@ -54,6 +54,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+     TPMapping,
+     _is_attention_spec,
++    _is_full_attention_spec,
+     _is_ssm_spec,
+     compute_tp_mapping,
+ )
+@@ -75,6 +76,7 @@ from vllm.distributed.parallel_state import (
+ from vllm.logger import init_logger
+ from vllm.platforms import current_platform
+ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
++from vllm.utils.math_utils import cdiv
+ from vllm.utils.network_utils import make_zmq_path
+ from vllm.utils.torch_utils import async_tensor_h2d
+ from vllm.v1.kv_cache_interface import (
+@@ -159,6 +161,8 @@ def _uses_dense_virtual_transfer_pages(
+ class NixlBaseConnectorWorker:
+     """Base implementation of Worker side methods shared by pull and push."""
+ 
++    _prefix_caching_enabled = False
++
+     # Transfer mode included in the NIXL compatibility hash so that a push
+     # (WRITE) connector and a pull (READ) connector never handshake together.
+     # Overridden by NixlPushConnectorWorker.
+@@ -839,6 +843,8 @@ class NixlBaseConnectorWorker:
+             "engine_ttl", 3600.0
+         )
+ 
++        self.block_size = vllm_config.cache_config.block_size
++        self._prefix_caching_enabled = vllm_config.cache_config.enable_prefix_caching
+         self.model_config = vllm_config.model_config
+ 
+         self.use_mla = self.model_config.use_mla
+@@ -2445,13 +2451,35 @@ class NixlBaseConnectorWorker:
+             != self._physical_blocks_per_logical_kv_block
+             and self.vllm_config.cache_config.enable_prefix_caching
+         ):
+-            raise RuntimeError(
++            base_err = (
+                 "Prefix caching with heterogeneous physical_blocks_per_logical "
+-                "is not supported for Mamba hybrid models. "
+-                f"Local: {self._physical_blocks_per_logical_kv_block}, "
+-                f"Remote: {remote_physical_per_logical}. "
+-                "Disable prefix caching with --no-enable-prefix-caching."
++                f"(local: {self._physical_blocks_per_logical_kv_block}, "
++                f"remote: {remote_physical_per_logical}) "
+             )
++            if self.use_host_buffer:
++                raise RuntimeError(
++                    base_err + "requires a supported device-buffer transfer path."
++                )
++            if block_size_ratio != 1:
++                raise RuntimeError(
++                    base_err + "requires matching kernel block sizes. "
++                    f"Local: {self.block_size}, remote: {nixl_agent_meta.block_size}."
++                )
++            if self.dcp_size > 1 or remote_info.remote_dcp_size > 1:
++                raise RuntimeError(
++                    base_err + "is not supported with decode context parallelism."
++                )
++            if any(
++                _is_attention_spec(t) and not _is_full_attention_spec(t)
++                for t in self._group_spec_types
++            ):
++                raise RuntimeError(
++                    base_err + "is not supported with sliding-window attention groups."
++                )
++            if self.vllm_config.cache_config.mamba_cache_mode == "all":
++                raise RuntimeError(
++                    base_err + "requires a non-positional Mamba cache mode."
++                )
+ 
+         if block_size_ratio != 1:
+             # Heterogeneous block sizes transfer at remote-block granularity;
+@@ -2892,8 +2920,7 @@ class NixlBaseConnectorWorker:
+             # transfer clipped. The latter happens either at remote-block
+             # granularity (block_size_ratio > 1) or at kernel-block
+             # granularity, when equal kernel pages meet differing logical
+-            # block sizes and _apply_prefix_caching front-trims to the
+-            # minimum count (hybrid heterogeneous TP).
++            # block sizes and _apply_prefix_caching selects a token window.
+             remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+             block_size_ratio = self.transfer_topo.block_size_ratio(
+                 remote_info.remote_block_size
+@@ -2902,16 +2929,34 @@ class NixlBaseConnectorWorker:
+                 remote_info.remote_physical_blocks_per_logical
+                 != self._physical_blocks_per_logical_kv_block
+             )
+-            if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
++            windowed = (
++                meta.load_end_token > meta.load_start_token
++                and self.dcp_size == 1
++                and remote_info.remote_dcp_size == 1
++            )
++            if (
++                block_size_ratio > 1
++                or self.enable_permute_local_kv
++                or hetero_ppl
++                or windowed
++            ):
+                 for g, local_group in enumerate(meta.local_physical_block_ids):
+                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
+                         continue
+                     # Number of remote-sized sub-blocks the transfer covered;
+                     # everything past this was clipped and must be zeroed.
+-                    covered_sub_blocks = min(
+-                        len(local_group) * block_size_ratio,
+-                        len(meta.remote.block_ids[g]),
+-                    )
++                    if windowed and _is_full_attention_spec(self._group_spec_types[g]):
++                        _, covered_sub_blocks = self._kernel_block_window(
++                            meta.load_start_token,
++                            meta.load_end_token,
++                            block_size_ratio,
++                        )
++                        assert len(local_group) * block_size_ratio >= covered_sub_blocks
++                    else:
++                        covered_sub_blocks = min(
++                            len(local_group) * block_size_ratio,
++                            len(meta.remote.block_ids[g]),
++                        )
+                     block_ids_for_blocksize_post_process[block_size_ratio].append(
+                         (local_group, covered_sub_blocks)
+                     )
+@@ -3362,41 +3407,86 @@ class NixlBaseConnectorWorker:
+             )
+         return decode_block_ids, trimmed_prefill
+ 
++    def _kernel_block_window(
++        self,
++        load_start_token: int,
++        load_end_token: int,
++        block_size_ratio: int = 1,
++    ) -> tuple[int, int]:
++        """Return the remote-granularity block start and transfer count."""
++        assert 0 <= load_start_token <= load_end_token
++        assert block_size_ratio >= 1
++        assert self.block_size % block_size_ratio == 0
++        transfer_block_size = self.block_size // block_size_ratio
++        assert load_start_token % transfer_block_size == 0, (
++            f"Load start {load_start_token} is not aligned to transfer block size "
++            f"{transfer_block_size}"
++        )
++        start = load_start_token // transfer_block_size
++        return start, cdiv(load_end_token, transfer_block_size) - start
++
++    def _slice_attention_to_load_window(
++        self,
++        decode_blocks: list[int],
++        prefill_blocks: list[int],
++        load_start_token: int,
++        load_end_token: int,
++        block_size_ratio: int = 1,
++    ) -> tuple[list[int], list[int]]:
++        start, count = self._kernel_block_window(
++            load_start_token, load_end_token, block_size_ratio
++        )
++        assert len(decode_blocks) >= count
++        assert len(prefill_blocks) >= start + count
++        return decode_blocks[:count], prefill_blocks[start : start + count]
++
+     def _apply_prefix_caching(
+         self,
+         decode_block_ids: BlockIds,
+         prefill_block_ids: BlockIds,
+         decode_physical_per_logical: int,
+         prefill_physical_per_logical: int,
++        load_start_token: int = 0,
++        load_end_token: int = 0,
++        block_size_ratio: int = 1,
+     ) -> tuple[BlockIds, BlockIds]:
+-        """Trim block ID lists so only the uncomputed suffix is transferred.
+-
+-        Inputs are *kernel* (physical) block IDs, already expanded from logical IDs
+-        with each side's physical-per-logical ratio. Both pull and push call this after
+-        that expansion so the trim happens at kernel granularity.
++        """Pair Decode destinations with the same Prefill token window.
+ 
+-        The prefix-cache hit is always on the decode (D) side, so ``decode``
+-        holds only its uncomputed blocks while prefill (P) holds the full
+-        sequence. This is mode-independent: pull passes its own (D) blocks as
+-        ``decode``, push passes the remote D registration as ``decode``.
+-
+-        For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
+-        already-cached prefix blocks are skipped in the transfer.
+-
+-        For Mamba hybrid: SSM groups pair state slots by position and FA
+-        groups end-trim to the uncomputed suffix when physical-per-logical
+-        matches.
++        Inputs are kernel-block IDs. Without an explicit window this preserves
++        the legacy suffix trim. Recurrent-state groups are paired by position.
+         """
+-        # Partial prefix cache hit: just transfer uncomputed blocks.
+-        # Skip mamba groups — their blocks represent full state (conv+ssm),
+-        # not per-token data, so trimming would corrupt the transfer.
+         prefill_block_ids = list(prefill_block_ids)
++        has_window = load_end_token > load_start_token
++        if (
++            self._has_mamba
++            and decode_physical_per_logical != prefill_physical_per_logical
++            and not has_window
++            and self._prefix_caching_enabled
++        ):
++            raise RuntimeError(
++                "Hybrid prefix caching with heterogeneous logical block sizes "
++                "requires an explicit token load range."
++            )
+         if not self._has_mamba:
++            decode_block_ids = list(decode_block_ids)
+             for i, prefill_group in enumerate(prefill_block_ids):
+                 num_decode_blocks = len(decode_block_ids[i])
++                if has_window and _is_full_attention_spec(self._group_spec_types[i]):
++                    decode_block_ids[i], prefill_block_ids[i] = (
++                        self._slice_attention_to_load_window(
++                            decode_block_ids[i],
++                            prefill_group,
++                            load_start_token,
++                            load_end_token,
++                            block_size_ratio,
++                        )
++                    )
++                    continue
+                 assert num_decode_blocks <= len(prefill_group)
+                 if num_decode_blocks < len(prefill_group):
+-                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
++                    prefill_block_ids[i] = (
++                        prefill_group[-num_decode_blocks:] if num_decode_blocks else []
++                    )
+         else:
+             # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
+             # due to logical block rounding.
+@@ -3416,7 +3506,12 @@ class NixlBaseConnectorWorker:
+             for i, prefill_group in enumerate(prefill_block_ids):
+                 num_decode_blocks = len(decode_block_ids[i])
+                 num_prefill_blocks = len(prefill_group)
++                if num_decode_blocks == num_prefill_blocks == 0:
++                    continue
+                 if _is_ssm_spec(self._group_spec_types[i]):
++                    if num_decode_blocks == 0:
++                        prefill_block_ids[i] = []
++                        continue
+                     if num_decode_blocks == num_prefill_blocks:
+                         continue
+                     # Only state-bearing slots reach here, single-state modes
+@@ -3435,12 +3530,24 @@ class NixlBaseConnectorWorker:
+                         prefill_block_ids[i] = prefill_group[-num_blocks:]
+                     else:
+                         decode_block_ids[i] = decode_block_ids[i][:num_blocks]
++                elif has_window and _is_full_attention_spec(self._group_spec_types[i]):
++                    decode_block_ids[i], prefill_block_ids[i] = (
++                        self._slice_attention_to_load_window(
++                            decode_block_ids[i],
++                            prefill_group,
++                            load_start_token,
++                            load_end_token,
++                            block_size_ratio,
++                        )
++                    )
+                 elif (
+                     decode_physical_per_logical == prefill_physical_per_logical
+                     and num_decode_blocks < num_prefill_blocks
+                 ):
+                     # Partial prefix cache hit for FA group.
+-                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
++                    prefill_block_ids[i] = (
++                        prefill_group[-num_decode_blocks:] if num_decode_blocks else []
++                    )
+                 else:
+                     # TODO Handle prefix caching with different block_sizes
+                     # Allocation rounding legitimately leaves up to
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+index ac929f7fcd..6a757b061e 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/connector.py
+@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+     KVConnectorMetadata,
+     KVConnectorRole,
+     KVConnectorTransferResults,
++    KVLoadRange,
+     SupportsHMA,
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+@@ -180,6 +181,29 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
+             request, blocks, num_external_tokens
+         )
+ 
++    @property
++    def supports_load_range(self) -> bool:
++        return bool(
++            self.connector_scheduler and self.connector_scheduler.supports_load_range
++        )
++
++    @property
++    def load_range_alignment(self) -> int | None:
++        if self.connector_scheduler is None:
++            return None
++        return self.connector_scheduler.load_range_alignment
++
++    def update_state_after_alloc_for_range(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        load_range: KVLoadRange,
++    ) -> None:
++        assert self.connector_scheduler is not None
++        self.connector_scheduler.update_state_after_alloc_for_range(
++            request, blocks, load_range
++        )
++
+     def build_connector_meta(
+         self,
+         scheduler_output: SchedulerOutput,
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
+index ca6f30d0cf..7c1a5d66ef 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py
+@@ -48,8 +48,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+ #  10: Add dense virtual transfer pages for compressed MLA caches
+ #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
+ #  12: Add per-region member names for PP push
++#  13: Add explicit token windows to range-load metadata
+ #
+-NIXL_CONNECTOR_VERSION: int = 12
++NIXL_CONNECTOR_VERSION: int = 13
+ 
+ 
+ @dataclass
+@@ -255,6 +256,9 @@ class ReqMeta:
+     # Worker-only, per-region physical pages to zero after a successful pull.
+     # None selects group-based completion; empty lists mean no zeroing.
+     region_blocks_to_zero: BlockIds | None = None
++    # Token range loaded from the remote. An end of 0 means unspecified.
++    load_start_token: int = 0
++    load_end_token: int = 0
+ 
+ 
+ class NixlConnectorMetadata(KVConnectorMetadata):
+@@ -285,6 +289,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
+         kv_transfer_params: dict[str, Any],
+         local_num_computed_blocks: tuple[int, ...] = (),
+         awaiting_kvs: bool = False,
++        load_start_token: int = 0,
++        load_end_token: int = 0,
+     ) -> ReqMeta:
+         return ReqMeta(
+             local_block_ids=local_block_ids,
+@@ -296,6 +302,8 @@ class NixlConnectorMetadata(KVConnectorMetadata):
+             pp_size=kv_transfer_params.get("pp_size", 1),
+             local_num_computed_blocks=local_num_computed_blocks,
+             awaiting_kvs=awaiting_kvs,
++            load_start_token=load_start_token,
++            load_end_token=load_end_token,
+         )
+ 
+     def add_new_req_to_save(
+@@ -315,12 +323,16 @@ class NixlConnectorMetadata(KVConnectorMetadata):
+         kv_transfer_params: dict[str, Any],
+         local_num_computed_blocks: tuple[int, ...] = (),
+         awaiting_kvs: bool = False,
++        load_start_token: int = 0,
++        load_end_token: int = 0,
+     ):
+         req = self._add_new_req(
+             local_block_ids,
+             kv_transfer_params,
+             local_num_computed_blocks,
+             awaiting_kvs,
++            load_start_token,
++            load_end_token,
+         )
+         req.remote = RemoteMeta(
+             block_ids=kv_transfer_params["remote_block_ids"],
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py
+index f283a40d3c..4d20600ec8 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_scheduler.py
+@@ -6,6 +6,7 @@ import time
+ from typing import TYPE_CHECKING, Any
+ 
+ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
++from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+     NixlBaseConnectorScheduler,
+ )
+@@ -108,11 +109,42 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
+     def update_state_after_alloc(
+         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+     ):
++        self._update_state_after_alloc(request, blocks, num_external_tokens)
++
++    def update_state_after_alloc_for_range(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        load_range: KVLoadRange,
++    ) -> None:
++        self._update_state_after_alloc(
++            request, blocks, load_range.num_tokens, load_range
++        )
++
++    def _update_state_after_alloc(
++        self,
++        request: "Request",
++        blocks: "KVCacheBlocks",
++        num_external_tokens: int,
++        load_range: KVLoadRange | None = None,
++    ) -> None:
+         params = request.kv_transfer_params
++        if load_range is not None:
++            load_start_token = load_range.start_token
++            load_end_token = load_range.end_token
++        elif num_external_tokens > 0:
++            # Legacy single-source loads still need an explicit window. A P
++            # engine can serve Store misses and piecewise Store hits in any
++            # order, so transfer semantics cannot be cached per engine.
++            load_start_token = request.num_computed_tokens
++            load_end_token = load_start_token + num_external_tokens
++        else:
++            load_start_token = load_end_token = 0
+         logger.debug(
+             "NIXLConnector update_state_after_alloc: "
+-            "num_external_tokens=%s, kv_transfer_params=%s",
++            "num_external_tokens=%s, load_range=%s, kv_transfer_params=%s",
+             num_external_tokens,
++            load_range,
+             params,
+         )
+ 
+@@ -146,24 +178,28 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
+                     # a full prefix cache hit on the local node. We need to call
+                     # send_notif in _read_blocks to free the memory on the remote node.
+ 
+-                    unhashed_local_block_ids: BlockIds = (
+-                        blocks.get_unhashed_block_ids_all_groups()
+-                        if num_external_tokens > 0
+-                        else ()
+-                    )
+-                    local_block_ids = self.get_exchange_clipped_blocks(
+-                        unhashed_local_block_ids
+-                    )
+-                    # Blocks covered by the local prefix cache, per KV cache group.
+-                    # Each count fixes where that group's DCP slice starts, which the
+-                    # worker needs to line up with the remote's slice.
+-                    local_num_computed_blocks = tuple(
+-                        sum(
+-                            block.block_hash is not None and not block.is_null
+-                            for block in group
++                    if load_range is not None:
++                        local_block_ids = self.get_range_block_ids(blocks, load_range)
++                        local_num_computed_blocks = self.get_range_start_blocks(
++                            load_range
++                        )
++                    else:
++                        unhashed_local_block_ids: BlockIds = (
++                            blocks.get_unhashed_block_ids_all_groups()
++                            if num_external_tokens > 0
++                            else ()
++                        )
++                        local_block_ids = self.get_exchange_clipped_blocks(
++                            unhashed_local_block_ids
++                        )
++                        # Each count fixes where that group's DCP slice starts.
++                        local_num_computed_blocks = tuple(
++                            sum(
++                                block.block_hash is not None and not block.is_null
++                                for block in blocks.blocks[group_id]
++                            )
++                            for group_id in self.kv_cache_config.transfer_group_ids
+                         )
+-                        for group in blocks.blocks
+-                    )
+ 
+                     # Get unhashed blocks to pull from remote. Mind that a full prefix
+                     # cache hit is indicated with an empty list.
+@@ -174,6 +210,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
+                         # Parked in WAITING_FOR_REMOTE_KVS only when there is
+                         # something to pull; a full local hit stays RUNNING.
+                         num_external_tokens > 0,
++                        load_start_token,
++                        load_end_token,
+                     )
+ 
+                 else:
+@@ -225,7 +263,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
+             # To avoid stranding the prefill blocks in the prefill instance,
+             # we must add empty block_ids to _reqs_need_recv so that our
+             # worker side will notify and free blocks in the prefill instance.
+-            self._reqs_need_recv[request.request_id] = (request, [], (), False)
++            self._reqs_need_recv[request.request_id] = (request, [], (), False, 0, 0)
+             params["do_remote_prefill"] = False
+             return False, None
+ 
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
+index 43fbbe0c3c..23f2018234 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/pull_worker.py
+@@ -362,6 +362,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
+                 remote_xfer_side_handle=remote_xfer_side_handle,
+                 expected_consumers=plan.local_consumers,
+                 awaiting_kvs=meta.awaiting_kvs,
++                load_start_token=meta.load_start_token,
++                load_end_token=meta.load_end_token,
+             ):
+                 return
+ 
+@@ -402,6 +404,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
+         awaiting_kvs: bool,
+     ) -> bool:
+         """Post a READ point-to-point xfer request from a single local worker to
++        load_start_token: int = 0,
++        load_end_token: int = 0,
+         a single remote worker.
+ 
+         Returns True when the read was posted (or was unnecessary), False
+@@ -482,6 +486,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
+                     prefill_physical_per_logical=(
+                         remote_info.remote_physical_blocks_per_logical
+                     ),
++                    load_start_token=load_start_token,
++                    load_end_token=load_end_token,
++                    block_size_ratio=block_size_ratio,
+                 )
+ 
+         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_scheduler.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_scheduler.py
+index a007e0c5a3..69ed2b240e 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_scheduler.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_scheduler.py
+@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
+ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+     KVConnectorMetadata,
++    KVLoadRange,
+ )
+ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+     NixlBaseConnectorScheduler,
+@@ -128,14 +129,44 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
+     def update_state_after_alloc(
+         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
+     ):
++        self._update_state_after_alloc(request, blocks, num_external_tokens)
++
++    def update_state_after_alloc_for_range(
++        self,
++        request: Request,
++        blocks: KVCacheBlocks,
++        load_range: KVLoadRange,
++    ) -> None:
++        self._update_state_after_alloc(
++            request, blocks, load_range.num_tokens, load_range
++        )
++
++    def _update_state_after_alloc(
++        self,
++        request: Request,
++        blocks: KVCacheBlocks,
++        num_external_tokens: int,
++        load_range: KVLoadRange | None = None,
++    ) -> None:
+         """In push mode, D stores registration data for the worker to send
+         to P via NIXL notification (deferred to ``build_connector_meta``).
+         """
+         params = request.kv_transfer_params
++        if load_range is not None:
++            load_start_token = load_range.start_token
++            load_end_token = load_range.end_token
++        elif num_external_tokens > 0:
++            # Carry the window for ordinary NIXL loads too: range and
++            # non-range requests share the same remote engine and handshake.
++            load_start_token = request.num_computed_tokens
++            load_end_token = load_start_token + num_external_tokens
++        else:
++            load_start_token = load_end_token = 0
+         logger.debug(
+             "NixlPushConnector update_state_after_alloc: "
+-            "num_external_tokens=%s, kv_transfer_params=%s",
++            "num_external_tokens=%s, load_range=%s, kv_transfer_params=%s",
+             num_external_tokens,
++            load_range,
+             params,
+         )
+ 
+@@ -168,8 +199,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
+             "KV PUSH mode: D node storing registration for request %s",
+             request.request_id,
+         )
+-        local_block_ids: BlockIds = blocks.get_unhashed_block_ids_all_groups()
+-        local_block_ids = self.get_exchange_clipped_blocks(local_block_ids)
++        local_block_ids: BlockIds = (
++            self.get_range_block_ids(blocks, load_range)
++            if load_range is not None
++            else self.get_exchange_clipped_blocks(
++                blocks.get_unhashed_block_ids_all_groups()
++            )
++        )
+ 
+         # ``remote_*`` fields are P's coordinates (from D's perspective).
+         # ``decode_*`` fields are D's own info that P needs for the
+@@ -186,6 +222,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
+             "remote_port": params["remote_port"],
+             "remote_tp_size": params["tp_size"],
+             "remote_pp_size": params.get("pp_size", 1),
++            "load_start_token": load_start_token,
++            "load_end_token": load_end_token,
+         }
+         self._push_registration_deadlines[request.request_id] = (
+             time.perf_counter() + self._push_registration_timeout
+@@ -198,7 +236,14 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
+         # ReqMeta without a KeyError — the actual remote block IDs are
+         # learned by P over the NIXL handshake at WRITE time.
+         params["remote_block_ids"] = ()
+-        self._reqs_need_recv[request.request_id] = (request, local_block_ids, (), False)
++        self._reqs_need_recv[request.request_id] = (
++            request,
++            local_block_ids,
++            (),
++            False,
++            load_start_token,
++            load_end_token,
++        )
+ 
+         # Mark as processed so a re-entry (e.g. preemption + reschedule)
+         # doesn't re-stage the registration.
+@@ -240,7 +285,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
+             # recv so the worker emits a notif that lets P free them.
+             # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
+             params["remote_block_ids"] = ()
+-            self._reqs_need_recv[request.request_id] = (request, [], (), False)
++            self._reqs_need_recv[request.request_id] = (request, [], (), False, 0, 0)
+             params["do_remote_prefill"] = False
+             return False, None
+ 
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_worker.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_worker.py
+index fbe85f46a3..c311ea61e0 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_worker.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/push_worker.py
+@@ -444,7 +444,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
+         decode_engine_id = registration_data["decode_engine_id"]
+         remote_block_ids = registration_data["local_block_ids"]
+         decode_request_id = registration_data["request_id"]
+-
++        load_start_token = registration_data["load_start_token"]
++        load_end_token = registration_data["load_end_token"]
+         # Runs on the background executor; defer the WRITE until it's ready.
+         fut = self._ensure_handshake(
+             decode_engine_id,
+@@ -485,6 +486,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
+             local_block_ids=logical_local,
+             local_physical_block_ids=physical_local,
+             tp_size=self.world_size,
++            load_start_token=load_start_token,
++            load_end_token=load_end_token,
+             remote=RemoteMeta(
+                 block_ids=logical_remote,
+                 host="",
+@@ -609,6 +612,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
+                 remote_request_id=meta.remote.request_id,
+                 local_xfer_side_handle=local_xfer_side_handle,
+                 remote_xfer_side_handle=remote_xfer_side_handle,
++                load_start_token=meta.load_start_token,
++                load_end_token=meta.load_end_token,
+             )
+             if handle is not None:
+                 handles.append(handle)
+@@ -628,6 +633,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
+         remote_request_id: str,
+         local_xfer_side_handle: int,
+         remote_xfer_side_handle: int,
++        load_start_token: int = 0,
++        load_end_token: int = 0,
+     ) -> int | None:
+         """Post a WRITE point-to-point xfer request.
+ 
+@@ -656,14 +663,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
+             logger.warning("No blocks to push for request %s", request_id)
+             return None
+ 
+-        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
+-        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
+-        # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
++        # Pair the registered D range with the same P token window. Legacy
++        # registrations without a window retain the existing suffix trim.
+         remote_block_ids, local_block_ids = self._apply_prefix_caching(
+             decode_block_ids=remote_block_ids,
+             prefill_block_ids=local_block_ids,
+             decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+             prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
++            load_start_token=load_start_token,
++            load_end_token=load_end_token,
++            block_size_ratio=block_size_ratio,
+         )
+ 
+         local_block_ids = list(local_block_ids)
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/tp_mapping.py b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/tp_mapping.py
+index 150fdabe35..76f5271079 100644
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/nixl/tp_mapping.py
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/nixl/tp_mapping.py
+@@ -12,7 +12,12 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
+     BlockIds,
+     TransferTopology,
+ )
+-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec, MambaSpec
++from vllm.v1.kv_cache_interface import (
++    AttentionSpec,
++    FullAttentionSpec,
++    KVCacheSpec,
++    MambaSpec,
++)
+ 
+ # ======================================================================
+ # Data structures
+@@ -33,6 +38,10 @@ def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
+     return issubclass(spec_type, AttentionSpec)
+ 
+ 
++def _is_full_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
++    return issubclass(spec_type, FullAttentionSpec)
++
++
+ def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
+     return issubclass(spec_type, MambaSpec)
+ 

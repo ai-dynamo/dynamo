@@ -284,8 +284,10 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
 # - #58038 keeps unavailable NIXL telemetry from failing a completed transfer.
 # - #57662 preserves distinct NIXL regions when overlaid caches have different
 #   block lengths. It is an upstream PR at ebd21ca746, not yet merged.
+# - #55374 adds NIXL piecewise-prefix loading and range-aware multi-connector
+#   selection. It is an upstream PR at 877a3c671e, not yet merged.
 #
-# All three are absent from the benchmark-pinned vLLM nightly. Patch the
+# All four are absent from the benchmark-pinned vLLM nightly. Patch the
 # installed wheel rather than deploying ConfigMap subPath overrides, and assert
 # the installed source plus #58038's behavioral postcondition at build time.
 RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm-patches,readonly \
