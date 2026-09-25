@@ -103,13 +103,13 @@ RUN apt-get update && \
 
 # The benchmark-pinned vLLM nightly is based on a CUDA runtime image: it has
 # /usr/local/cuda but deliberately does not ship nvcc. DeepSeek V4.1 Flash's
-# DeepGEMM kernels JIT at model load on GB200, so retain the CUDA 13.0 compiler
-# toolchain (including headers) in the runtime image. This is intentionally a
-# compiler meta-package rather than a symlink or a bare nvcc binary: DeepGEMM
-# invokes the compiler with CUDA headers and its normal host toolchain.
+# DeepGEMM kernels JIT at model load on GB200, so retain nvcc and its required
+# CUDA development dependencies in the runtime image. Do not install the
+# cuda-compiler meta-package: it additionally pulls cuda-cuxxfilt, which is
+# GPL-3.0-only and unnecessary for DeepGEMM's compilation path.
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        cuda-compiler-13-0 && \
+        cuda-nvcc-13-0 && \
     test -x /usr/local/cuda/bin/nvcc && \
     /usr/local/cuda/bin/nvcc --version && \
     rm -rf /var/lib/apt/lists/*
