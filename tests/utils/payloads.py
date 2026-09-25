@@ -2163,11 +2163,10 @@ class SGLangSpecDecodeMetricsPayload(SGLangMetricsPayload):
 
     @staticmethod
     def _sum_counter(name: str, content: str) -> float:
-        pattern = rf"^{re.escape(name)}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
-        values = re.findall(pattern, content, re.MULTILINE)
+        values = find_metric_samples(content, name)
         if not values:
             raise AssertionError(f"Metric '{name}' not found in metrics output")
-        return sum(float(v) for v in values)
+        return sum(values)
 
     def validate(self, response: Any, content: str) -> None:
         super().validate(response, content)
