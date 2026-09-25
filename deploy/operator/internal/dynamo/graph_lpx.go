@@ -398,7 +398,7 @@ func renderSelectedLPXRole(
 	}
 
 	// The shared renderer's filesystem-group fallback is not part of the LPX template contract.
-	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext.DeepCopy()
+	basePodSpec.SecurityContext = component.PodTemplate.Spec.SecurityContext
 
 	// LPX supplies the generated config volume after merging; discard only inferred PVCs.
 	explicitVolumes := component.PodTemplate.Spec.Volumes
