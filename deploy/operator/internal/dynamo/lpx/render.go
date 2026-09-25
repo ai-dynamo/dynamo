@@ -128,7 +128,7 @@ func RenderNodeLocal(
 		annotations[v1alpha1.AnnotationExtraResourcesHash] = configHash
 		conductor = &grovev1alpha1.PodCliqueTemplateSpec{
 			Name:        conductorTemplateName,
-			Labels:      maps.Clone(conductorTemplate.Labels),
+			Labels:      conductorTemplate.Labels,
 			Annotations: annotations,
 			Spec: grovev1alpha1.PodCliqueSpec{
 				RoleName:     conductorTemplateName,

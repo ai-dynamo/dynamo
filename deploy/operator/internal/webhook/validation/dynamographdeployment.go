@@ -432,7 +432,6 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			return conductorComponentsPath.Key(spec.Components[index].ComponentName)
 		}
 	}
-	conductorCount := 0
 	for index := range spec.Components {
 		component := &spec.Components[index]
 		if !component.IsLPX() {
@@ -442,13 +441,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			if role.Name != nvidiacomv1beta1.ComponentRoleLPXConductor {
 				continue
 			}
-			conductorCount++
 			if role.PodTemplate == nil {
 				allErrs = append(allErrs, field.Required(componentPath(index).Child("roles").Index(roleIndex).Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
 			}
 		}
 	}
-	if hasLPXComponent && conductorCount != lpxComponentCount && !(lpxComponentCount == 2 && conductorCount == 1) {
+	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
 		allErrs = append(allErrs, field.Forbidden(conductorComponentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
 	}
 
