@@ -2002,8 +2002,24 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
 
-		// Replace the startup probe so user handlers cannot merge with the default HTTP handler.
+		// Validate and replace the complete startup probe so handlers cannot merge with the default.
 		if user.StartupProbe != nil {
+			handlerCount := 0
+			if user.StartupProbe.Exec != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.HTTPGet != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.TCPSocket != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.GRPC != nil {
+				handlerCount++
+			}
+			if handlerCount != 1 {
+				return fmt.Errorf("frontend sidecar %q startupProbe must define exactly one handler", sidecarName)
+			}
 			base.StartupProbe = user.StartupProbe.DeepCopy()
 		}
 

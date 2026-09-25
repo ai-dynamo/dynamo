@@ -134,7 +134,8 @@ func TestClusterDynamoGraphDeploymentToleratesLateNATS(t *testing.T) {
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
 	t.Log("Start the production DGD and DCD controllers with NATS enabled and Kubernetes discovery")
-	natsAddress := fmt.Sprintf("nats://nats.%s.svc.cluster.local:4222", env.Namespace())
+	natsHost := fmt.Sprintf("nats.%s.svc.cluster.local", env.Namespace())
+	natsAddress := fmt.Sprintf("nats://%s:4222", natsHost)
 	operatorConfig := clusterTestRestrictedConfig(env.Namespace())
 	operatorConfig.Infrastructure.NATSAddress = natsAddress
 	env.StartManager(func(mgr ctrl.Manager) error {
@@ -145,10 +146,10 @@ func TestClusterDynamoGraphDeploymentToleratesLateNATS(t *testing.T) {
 		return SetupDynamoComponentDeployment(mgr, DynamoComponentDeploymentSetupOptions{SetupOptions: setupOptions})
 	})
 
-	t.Log("Wait for both main containers to run and record their identities and later start time")
+	t.Log("Wait for both main containers to run and record their identities and start times")
 	podSelector := client.MatchingLabels{commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name}
 	podIDs := make(map[string]types.UID)
-	var laterStart time.Time
+	var earliestStart, laterStart time.Time
 	var frontendPod string
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		pods := &corev1.PodList{}
@@ -161,6 +162,9 @@ func TestClusterDynamoGraphDeploymentToleratesLateNATS(t *testing.T) {
 			require.NotNil(c, status.State.Running)
 			require.Zero(c, status.RestartCount)
 			podIDs[pod.Name] = pod.UID
+			if earliestStart.IsZero() || status.State.Running.StartedAt.Time.Before(earliestStart) {
+				earliestStart = status.State.Running.StartedAt.Time
+			}
 			if status.State.Running.StartedAt.Time.After(laterStart) {
 				laterStart = status.State.Running.StartedAt.Time
 			}
@@ -170,6 +174,11 @@ func TestClusterDynamoGraphDeploymentToleratesLateNATS(t *testing.T) {
 		}
 	}, 2*time.Minute, time.Second)
 	require.NotEmpty(t, frontendPod)
+
+	t.Log("Check that container startup skew leaves time for NATS recovery")
+	if skew := laterStart.Sub(earliestStart); skew >= 15*time.Second {
+		t.Skipf("container start skew %s reaches the 15s test fixture limit", skew)
+	}
 
 	t.Log("Keep NATS unavailable for 60 seconds while both original pods stay unready without restarting")
 	ticker := time.NewTicker(2 * time.Second)
@@ -262,4 +271,5 @@ func TestClusterDynamoGraphDeploymentToleratesLateNATS(t *testing.T) {
 		require.Contains(t, string(logs), field)
 	}
 	require.NotContains(t, string(logs), natsAddress)
+	require.NotContains(t, string(logs), natsHost)
 }
