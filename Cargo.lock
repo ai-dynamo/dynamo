@@ -2411,6 +2411,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "temp-env",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
@@ -2464,9 +2465,17 @@ dependencies = [
 name = "dynamo-custom-policy-builtin"
 version = "1.6.0"
 dependencies = [
+ "async-trait",
+ "criterion",
  "dynamo-kv-router",
+ "fastrand",
+ "parking_lot",
+ "rustc-hash 2.1.2",
  "serde",
  "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2565,6 +2574,7 @@ dependencies = [
  "axum 0.8.4",
  "bytes",
  "dashmap",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
@@ -2629,6 +2639,7 @@ dependencies = [
  "dynamo-truthy",
  "fastrand",
  "flume 0.12.0",
+ "futures-util",
  "indexmap 2.14.0",
  "once_cell",
  "ordered-float 4.6.0",
@@ -2690,6 +2701,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-bench",
+ "dynamo-custom-policy-builtin",
  "dynamo-kv-router",
  "dynamo-memory",
  "dynamo-mocker",
@@ -2805,6 +2817,7 @@ dependencies = [
  "bytes",
  "dashmap",
  "derive_builder",
+ "dynamo-custom-policy-builtin",
  "dynamo-data-gen",
  "dynamo-kv-router",
  "dynamo-tokens",
@@ -2852,9 +2865,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "8.1.0"
+version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e78ad3396a91e388a6ab6e4e9f66236238793076b5d0b80c37671134f54bcfa5"
+checksum = "e316d4d0f5082257f1629ca61973eafc17cee3e6ee0c24f7a55a61beeff40d97"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2892,9 +2905,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.3"
+version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1cdacfc1398779cf173d5ff54438d9f14682f76875b6879853a84cc7d646228"
+checksum = "9ef02e31ca224ca8db24b88a990b7db3eb2b99c77697b0d8ae44feaa32709e38"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2909,9 +2922,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-renderer"
-version = "5.2.0"
+version = "5.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4609cdbd65f8bd15c74f4531c1560d04496e8737dfb6b65b45487644b878963"
+checksum = "06464b1deb9b6e185476e2e4280cbbbc5f16d0d6fd8732ff8b5732d43ec0567b"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3088,9 +3101,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokenizers"
-version = "1.8.1"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed232a9d254149a4e2e14f0a7d77f59bd64161964c0ba55267beea3955650faa"
+checksum = "cd9116db4a17d4ac186a13719b1eea8b41669cec2d95c8c93363869c9163c8aa"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3187,6 +3200,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.22.1",
  "clap",
  "dynamo-backend-common",
  "dynamo-llm",
@@ -3194,6 +3208,7 @@ dependencies = [
  "dynamo-sidecar-common",
  "futures",
  "prost-types 0.14.3",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

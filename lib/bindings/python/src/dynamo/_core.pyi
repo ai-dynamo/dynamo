@@ -339,6 +339,19 @@ class Client:
         """
         ...
 
+    async def wait_for_instances_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            min_count: int,
+            timeout_s: float | None = None,
+        ) -> List[int]:
+        """
+        Wait until at least min_count instances have MDC runtime_data containing the
+        given string value, and return their sorted instance IDs.
+        """
+        ...
+
     async def random(
             self,
             request: JsonLike,

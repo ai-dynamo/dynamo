@@ -8,10 +8,9 @@
 //! a unified multiplexed approach consistent with TCP server.
 
 use super::*;
-use crate::SystemHealth;
 use crate::config::HealthStatus;
 use crate::pipeline::network::ingress::push_endpoint::PushEndpoint;
-use crate::protocols::EndpointId;
+use crate::{SystemHealth, protocols::EndpointId};
 use anyhow::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -211,7 +210,30 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint: &EndpointId, instance_id: u64) -> Result<()> {
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_id = {
+            let mut matches = self.handlers.iter().filter(|entry| {
+                entry.key().0.name == endpoint_name && entry.key().1 == instance_id
+            });
+            let endpoint_id = matches.next().map(|entry| entry.key().0.clone());
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "Ambiguous endpoint {endpoint_name}/{instance_id:x}; use unregister_endpoint_instance"
+            );
+            endpoint_id
+        };
+        if let Some(endpoint_id) = endpoint_id {
+            self.unregister_endpoint_instance(&endpoint_id, instance_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn unregister_endpoint_instance(
+        &self,
+        endpoint: &EndpointId,
+        instance_id: u64,
+    ) -> Result<()> {
         let task = self
             .handlers
             .get(&(endpoint.clone(), instance_id))
@@ -249,7 +271,7 @@ mod tests {
         assert_ne!(
             instance_subject("generate", 0xa),
             instance_subject("generate", 0xb),
-            "two instances of one endpoint name must not share a handler-map key"
+            "two instances of one endpoint name must not share a subject suffix"
         );
     }
 }

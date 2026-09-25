@@ -18,7 +18,7 @@ use crate::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::nats,
+    transports::{nats, tcp},
 };
 
 fn endpoint_device_type() -> Option<DeviceType> {
@@ -202,6 +202,7 @@ impl EndpointConfigBuilder {
         let metrics_labels: Option<Vec<(&str, &str)>> = metrics_labels
             .as_ref()
             .map(|v| v.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect());
+        handler.bind_endpoint(&endpoint);
         // Add metrics to the handler. The endpoint provides additional information to the handler.
         handler.add_metrics(&endpoint, metrics_labels.as_deref())?;
 
@@ -318,7 +319,7 @@ impl EndpointConfigBuilder {
                     "Unable to register service for discovery"
                 );
                 let _ = server
-                    .unregister_endpoint(&endpoint_id, connection_id)
+                    .unregister_endpoint_instance(&endpoint_id, connection_id)
                     .await;
                 if let Some(tracker) = tracker_clone {
                     tracker.unregister_endpoint();
@@ -353,7 +354,7 @@ impl EndpointConfigBuilder {
             );
 
             if let Err(e) = server_for_cleanup
-                .unregister_endpoint(&endpoint_id, connection_id)
+                .unregister_endpoint_instance(&endpoint_id, connection_id)
                 .await
             {
                 tracing::warn!(
@@ -385,7 +386,7 @@ impl EndpointConfigBuilder {
 ///
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
-/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/namespace/component/endpoint_name)
+/// - TCP: Includes instance ID, namespace, component, and endpoint name in the request path
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -412,11 +413,11 @@ fn tcp_transport_type(
     endpoint_id: &EndpointId,
     connection_id: u64,
 ) -> TransportType {
-    let path = crate::pipeline::network::ingress::shared_tcp_endpoint::instance_path(
-        endpoint_id,
-        connection_id,
-    );
-    TransportType::Tcp(format!("{address}/{path}"))
+    // Clients forward the discovered path unchanged; ingress uses the same key.
+    TransportType::Tcp(format!(
+        "{address}/{}",
+        tcp::instance_path(endpoint_id, connection_id)
+    ))
 }
 
 /// Build transport type, ensuring TCP server is initialized when needed.
@@ -955,6 +956,83 @@ mod integration_tests {
         );
     }
 
+    async fn check_request_plane_failure_rolls_back(request_plane: RequestPlaneMode) {
+        use crate::distributed::DistributedConfig;
+
+        let mut config = DistributedConfig::process_local();
+        config.request_plane = request_plane;
+        if request_plane == RequestPlaneMode::Nats {
+            config.nats_config = Some(nats::ClientOptions::default());
+        }
+        let drt = crate::DistributedRuntime::new(crate::Runtime::from_current().unwrap(), config)
+            .await
+            .unwrap();
+        let original_engine = stub_engine();
+        let original = start(
+            &drt,
+            "duplicate",
+            &original_engine,
+            serde_json::json!({"original": true}),
+            false,
+        )
+        .await
+        .unwrap();
+        let original_notifier = drt
+            .system_health()
+            .lock()
+            .get_endpoint_health_check_notifier(ENDPOINT)
+            .unwrap();
+
+        // The handler accepts the notifier, so the duplicate route fails only
+        // after this start has published its engine and health-check target.
+        let error = start(
+            &drt,
+            "duplicate",
+            &stub_engine(),
+            serde_json::json!({"duplicate": true}),
+            false,
+        )
+        .await
+        .err()
+        .expect("the request plane must reject the duplicate route");
+        assert!(
+            error.to_string().contains("already registered"),
+            "{error:#}"
+        );
+        assert!(Arc::ptr_eq(
+            &drt.local_endpoint_registry().get(ENDPOINT).unwrap(),
+            &original_engine,
+        ));
+        {
+            let health = drt.system_health();
+            let health = health.lock();
+            assert_eq!(
+                health.get_health_check_target(ENDPOINT).unwrap().payload,
+                serde_json::json!({"original": true})
+            );
+            assert!(Arc::ptr_eq(
+                &health.get_endpoint_health_check_notifier(ENDPOINT).unwrap(),
+                &original_notifier,
+            ));
+        }
+        original.shutdown().await.unwrap();
+        assert_no_endpoint_state(
+            drt.local_endpoint_registry(),
+            &drt.system_health(),
+            "after duplicate rollback and original shutdown",
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_request_plane_failure_releases_endpoint_state() {
+        check_request_plane_failure_rolls_back(RequestPlaneMode::Tcp).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nats_request_plane_failure_releases_endpoint_state() {
+        check_request_plane_failure_rolls_back(RequestPlaneMode::Nats).await;
+    }
+
     #[tokio::test]
     async fn a_restart_after_shutdown_is_the_one_the_canary_reports_on() {
         let drt = create_test_drt_async().await;
@@ -1082,11 +1160,25 @@ mod integration_tests {
             }
             if pass == 0 {
                 endpoints.remove(1).0.shutdown().await.unwrap();
+                assert_eq!(
+                    drt.system_health()
+                        .lock()
+                        .get_endpoint_health_status(ENDPOINT),
+                    Some(crate::HealthStatus::Ready),
+                    "siblings under other namespaces are still serving this name"
+                );
             }
         }
         for (started, _) in endpoints {
             started.shutdown().await.unwrap();
         }
+        assert_eq!(
+            drt.system_health()
+                .lock()
+                .get_endpoint_health_status(ENDPOINT),
+            Some(crate::HealthStatus::NotReady),
+            "the final handler must withdraw transport readiness"
+        );
     }
 
     #[tokio::test]
@@ -1138,7 +1230,7 @@ mod integration_tests {
                 drop(registering.take());
             }
             let mut unregistering =
-                Box::pin(server.unregister_endpoint(&endpoint_id, drt.connection_id()));
+                Box::pin(server.unregister_endpoint_instance(&endpoint_id, drt.connection_id()));
             assert!(
                 futures::poll!(unregistering.as_mut()).is_pending(),
                 "unregistration must wait for the owned setup task"

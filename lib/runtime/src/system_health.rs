@@ -105,6 +105,8 @@ pub struct HealthCheckRegistration {
 pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: Arc<std::sync::RwLock<HashMap<String, HealthStatus>>>,
+    /// Live request-plane handlers sharing each process-wide health subject.
+    transport_registrations: Arc<parking_lot::Mutex<HashMap<String, usize>>>,
     /// Registrations by subject in insertion order; the last entry is current.
     health_check_targets: Arc<std::sync::RwLock<HashMap<String, Vec<RegisteredHealthCheckTarget>>>>,
     /// Supplies unique registration identities.
@@ -150,6 +152,7 @@ impl SystemHealth {
         SystemHealth {
             system_health: starting_health_status,
             endpoint_health: Arc::new(std::sync::RwLock::new(endpoint_health)),
+            transport_registrations: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             health_check_targets: Arc::new(std::sync::RwLock::new(HashMap::new())),
             next_registration: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             readiness_holds: Arc::new(std::sync::RwLock::new(HashSet::new())),
@@ -182,6 +185,26 @@ impl SystemHealth {
             .contains_key(endpoint);
         if !self.health_check_enabled || !has_health_check_target {
             self.set_endpoint_health_status(endpoint, HealthStatus::Ready);
+        }
+    }
+
+    /// Pair a live transport handler with `unregister_endpoint_transport`.
+    pub(crate) fn register_endpoint_transport(&self, endpoint: &str) {
+        let mut registrations = self.transport_registrations.lock();
+        *registrations.entry(endpoint.to_string()).or_default() += 1;
+        self.set_endpoint_registered(endpoint);
+    }
+
+    /// Preserve readiness until the last same-named transport handler stops.
+    pub(crate) fn unregister_endpoint_transport(&self, endpoint: &str) {
+        let mut registrations = self.transport_registrations.lock();
+        let Some(count) = registrations.get_mut(endpoint) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            registrations.remove(endpoint);
+            self.set_endpoint_health_status(endpoint, HealthStatus::NotReady);
         }
     }
 
@@ -398,6 +421,9 @@ impl SystemHealth {
                     .write()
                     .unwrap()
                     .insert(subject.clone(), HealthStatus::NotReady);
+            }
+            if re_exposed && let Err(error) = self.new_endpoint_tx.send(subject.clone()) {
+                tracing::debug!(%subject, %error, "Health-check manager is not listening for re-exposed target");
             }
             tracing::debug!(
                 "Released one health check registration for endpoint '{subject}'; other \
@@ -764,6 +790,39 @@ mod tests {
             rx.try_recv().ok().as_deref(),
             Some(ENDPOINT),
             "the restart must reach the manager as well as the first registration"
+        );
+    }
+
+    #[test]
+    fn re_exposed_target_is_announced_to_the_health_check_manager() {
+        let health = system_health(true);
+        let mut rx = health.take_new_endpoint_receiver().unwrap();
+        let first = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "first"}),
+        );
+        assert_eq!(rx.try_recv().ok().as_deref(), Some(ENDPOINT));
+        let second = health.register_health_check_target(
+            ENDPOINT,
+            instance(),
+            serde_json::json!({"generation": "second"}),
+        );
+        assert_eq!(rx.try_recv().ok().as_deref(), Some(ENDPOINT));
+        health.release_health_check_target(second);
+        assert_eq!(
+            health.get_health_check_target(ENDPOINT).unwrap().payload,
+            serde_json::json!({"generation": "first"})
+        );
+        assert_eq!(
+            rx.try_recv().ok().as_deref(),
+            Some(ENDPOINT),
+            "the monitor must re-arm using the restored registration's notifier"
+        );
+        health.release_health_check_target(first);
+        assert!(
+            rx.try_recv().is_err(),
+            "a vacated subject has no target to re-arm"
         );
     }
 
