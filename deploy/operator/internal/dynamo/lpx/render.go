@@ -298,12 +298,3 @@ func workloadAnnotations(base map[string]string, digest string) map[string]strin
 	base[WorkloadDigestAnnotation] = digest
 	return base
 }
-
-func appendUnique(existing []string, values ...string) []string {
-	for _, value := range values {
-		if !slices.Contains(existing, value) {
-			existing = append(existing, value)
-		}
-	}
-	return existing
-}

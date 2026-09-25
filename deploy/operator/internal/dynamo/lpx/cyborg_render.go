@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
@@ -54,6 +55,6 @@ func configureHybridCyborg(
 		}
 		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = LPUConfigMapHash(cyborgConfigMap)
 	}
-	cyborg.Spec.StartsAfter = appendUnique(cyborg.Spec.StartsAfter, agentTemplateNames...)
+	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
 }
