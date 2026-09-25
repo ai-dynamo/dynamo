@@ -496,7 +496,11 @@ impl
                     // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
                     // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
                     // which we don't want to propagate to `data.finish_reason`.
-                    if finish_reason.is_some() {
+                    // A failed generation may carry EOS in its final token batch.
+                    // Local stop detection must not turn the worker's error into success.
+                    if finish_reason.is_some()
+                        && !matches!(data.finish_reason, Some(FinishReason::Error(_)))
+                    {
                         data.finish_reason = finish_reason;
                         data.stop_reason = stop_reason.or(data.stop_reason);
                     }
@@ -1990,6 +1994,66 @@ mod tests {
         assert!(
             synthetic_stops.is_empty(),
             "no choice may receive a synthetic successful Stop after a request-level error: {outputs:?}"
+        );
+    }
+
+    struct ErrorWithEosEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for ErrorWithEosEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            // The worker reports an error in the same chunk that ends with EOS (103).
+            let chunks = vec![Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![101, 103],
+                index: Some(0),
+                finish_reason: Some(FinishReason::Error("worker failed".to_string())),
+                ..Default::default()
+            })];
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::iter(chunks)),
+                request.context(),
+            ))
+        }
+    }
+
+    /// Local EOS detection must not overwrite a worker error that arrives in the same chunk.
+    #[tokio::test]
+    async fn backend_keeps_worker_error_when_chunk_also_hits_eos() {
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(ErrorWithEosEngine);
+
+        let stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let outputs: Vec<_> = stream.collect().await;
+
+        let finishes: Vec<_> = outputs
+            .iter()
+            .filter_map(|o| o.data.as_ref())
+            .filter_map(|d| d.finish_reason.clone())
+            .collect();
+        assert_eq!(
+            finishes,
+            vec![FinishReason::Error("worker failed".to_string())],
+            "the worker's error must survive a local EOS stop in the same chunk: {outputs:?}"
         );
     }
 }

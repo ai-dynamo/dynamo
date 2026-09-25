@@ -40,9 +40,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(any(feature = "custom-policy", feature = "select-service"))]
-use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
-use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
+#[cfg(feature = "select-service")]
+use dynamo_kv_router::plugins::RouterPluginRegistry;
+use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::{self as llm_rs};
 
@@ -116,9 +116,6 @@ type PythonBidirectionalIngress = Ingress<
 >;
 
 static INIT: OnceCell<()> = OnceCell::new();
-
-#[cfg(feature = "custom-policy")]
-static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -411,48 +408,47 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-pub(crate) fn worker_selection_policy_factory(
-    config: &KvRouterConfig,
-) -> anyhow::Result<Option<WorkerSelectionPolicyFactory>> {
+pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPlugins> {
     #[cfg(feature = "custom-policy")]
     {
-        Ok(WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
 
     #[cfg(not(feature = "custom-policy"))]
     {
         if let Some(instance) = config.selected_worker_selection_policy_instance()? {
             anyhow::bail!(
-                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked worker-selection policy catalog; rebuild with --features custom-policy"
+                "worker-selection instance {instance:?} is configured, but this Dynamo build has no linked router plugin catalog; rebuild with --features custom-policy"
             );
         }
-        Ok(None)
+        if config.request_classifier_config()?.is_some() {
+            anyhow::bail!(
+                "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
+            );
+        }
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_default_does_not_require_custom_frontend() {
+    let config = KvRouterConfig::default();
+    let registry = dynamo_llm::kv_router::plugins::router_plugin_registry();
+    assert!(registry.resolve(&config).unwrap().is_some());
+    let plugins = router_plugins(&config).unwrap();
+    assert!(plugins.worker_selection().is_some());
+    assert!(!plugins.has_custom_plugins());
 }
 
 #[cfg(feature = "select-service")]
-pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    #[cfg(feature = "custom-policy")]
-    {
-        WORKER_SELECTION_POLICY_REGISTRY
-            .get()
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        WorkerSelectionPolicyRegistry::default()
-    }
+pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
+    dynamo_llm::kv_router::plugins::router_plugin_registry()
 }
 
 #[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = WorkerSelectionPolicyRegistry::default();
+fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)
@@ -460,13 +456,11 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
-    // Embedded selection partitions resolve linked policies from the same registry.
-    dynamo_llm::kv_router::install_worker_selection_policy_registry(registry.clone());
-    WORKER_SELECTION_POLICY_REGISTRY
-        .set(registry)
-        .map_err(|_| {
-            PyRuntimeError::new_err("worker-selection policy registry already installed")
-        })?;
+    if !dynamo_llm::kv_router::plugins::install_router_plugin_registry(registry) {
+        return Err(PyRuntimeError::new_err(
+            "router plugin registry already installed",
+        ));
+    }
     register_core(m)
 }
 
@@ -474,7 +468,7 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
+    register_core_with_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.
@@ -1988,6 +1982,76 @@ impl Client {
         })
     }
 
+    /// Wait until at least `min_count` ready endpoint instances have MDC runtime_data
+    /// containing the requested JSON string value; returns their sorted worker ids.
+    #[pyo3(signature = (key, value, min_count, timeout_s=None))]
+    fn wait_for_instances_by_runtime_data<'p>(
+        &self,
+        py: Python<'p>,
+        key: String,
+        value: String,
+        min_count: usize,
+        timeout_s: Option<f64>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        if min_count == 0 {
+            return Err(PyValueError::new_err("min_count must be positive"));
+        }
+        let endpoint = self.endpoint.clone();
+        crate::future_into_py(py, async move {
+            // Scope the discovery watcher to this lookup so every exit path stops it.
+            let lifecycle = endpoint.drt().primary_token().child_token();
+            let _guard = lifecycle.clone().drop_guard();
+            let mut last_matches: Vec<u64> = Vec::new();
+            let wait = async {
+                let mut rx = llm_rs::discovery::runtime_config_watch(&endpoint, lifecycle.clone())
+                    .await
+                    .map_err(to_pyerr)?;
+
+                loop {
+                    let mut matches: Vec<u64> = rx
+                        .borrow_and_update()
+                        .iter()
+                        .filter_map(|(worker_id, runtime_config)| {
+                            let matched = runtime_config
+                                .runtime_data
+                                .get(&key)
+                                .and_then(|value| value.as_str())
+                                == Some(value.as_str());
+                            matched.then_some(*worker_id)
+                        })
+                        .collect();
+                    matches.sort_unstable();
+
+                    if matches.len() >= min_count {
+                        return Ok(matches);
+                    }
+                    last_matches = matches;
+
+                    rx.changed().await.map_err(to_pyerr)?;
+                }
+            };
+
+            if let Some(timeout_s) = timeout_s {
+                if !timeout_s.is_finite() || timeout_s < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout_s must be a finite non-negative number",
+                    ));
+                }
+                let timeout = std::time::Duration::from_secs_f64(timeout_s);
+                let result = tokio::time::timeout(timeout, wait).await;
+                match result {
+                    Ok(result) => result,
+                    Err(_) => Err(PyTimeoutError::new_err(format!(
+                        "Timed out waiting for {min_count} endpoint instances with runtime_data[{key:?}] == {value:?}; last_match_count={}, matching_ids={last_matches:?}",
+                        last_matches.len(),
+                    ))),
+                }
+            } else {
+                wait.await
+            }
+        })
+    }
+
     /// Issue a request to the endpoint using the default routing strategy.
     #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
     fn generate<'p>(
@@ -2215,12 +2279,7 @@ impl AsyncResponseStream {
                 let value = rx.lock().await.recv().await;
                 match value {
                     Some(pyobj) => {
-                        let pyobj = match pyobj.ok() {
-                            Ok(pyobj) => pyobj,
-                            Err(e) => {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(e));
-                            }
-                        };
+                        let pyobj = crate::errors::check_response_error(pyobj)?;
 
                         if annotated {
                             let object = Annotated { inner: pyobj };

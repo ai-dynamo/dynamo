@@ -9,7 +9,6 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed` -> `[DONE]`
 
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
@@ -295,7 +294,7 @@ impl ResponseStreamConverter {
             output,
             // Echo request params with spec-required defaults for omitted fields
             background: Some(false),
-            metadata: Some(HashMap::new()),
+            metadata: Some(self.params.metadata.clone().unwrap_or_default()),
             parallel_tool_calls: self.params.parallel_tool_calls.or(Some(true)),
             temperature: self.params.temperature.or(Some(1.0)),
             text: Some(self.params.text.clone().unwrap_or(ResponseTextParam {

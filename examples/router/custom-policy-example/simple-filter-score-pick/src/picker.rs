@@ -3,7 +3,7 @@
 
 //! Request-aware picker for the `simple-filter-score-pick` policy.
 
-use dynamo_kv_router::{
+use dynamo_kv_router::plugins::worker_selection::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext,
     WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
