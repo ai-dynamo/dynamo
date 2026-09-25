@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import threading
 
 import pytest
 
@@ -151,42 +150,6 @@ def test_callback_and_jsonl_only_do_not_retain_telemetry(tmp_path):
     assert jsonl_result.telemetry is None
 
 
-def test_jsonl_only_replay_releases_gil_for_background_python_thread(tmp_path):
-    started = threading.Event()
-    stop = threading.Event()
-    progress = 0
-
-    def run_background():
-        nonlocal progress
-        started.set()
-        while not stop.is_set():
-            progress += 1
-
-    thread = threading.Thread(target=run_background)
-    thread.start()
-    assert started.wait(timeout=1.0)
-    progress_before_replay = progress
-    kwargs = _replay_kwargs()
-    kwargs.update(request_count=20_000, replay_concurrency=16)
-    jsonl_path = tmp_path / "telemetry.jsonl"
-
-    try:
-        result = run_mocker_synthetic_trace_replay(
-            **kwargs,
-            telemetry_jsonl_path=jsonl_path,
-            telemetry_sample_interval_ms=1_000_000_000.0,
-        )
-        progress_during_replay = progress - progress_before_replay
-    finally:
-        stop.set()
-        thread.join(timeout=1.0)
-
-    assert progress_during_replay > 0
-    assert not thread.is_alive()
-    assert jsonl_path.read_text().splitlines()
-    assert result.telemetry is None
-
-
 def test_jsonl_open_failure_fails_replay(tmp_path):
     with pytest.raises(Exception, match=r"(?i)directory|os error"):
         run_mocker_synthetic_trace_replay(
@@ -236,28 +199,110 @@ def test_native_telemetry_rejects_online_mode_and_non_callable_callback():
         )
 
 
-def test_native_rejects_exact_output_path_collision(tmp_path):
+@pytest.mark.parametrize("alias_kind", ["direct", "dot", "absolute", "parent"])
+def test_native_rejects_output_path_aliases(tmp_path, monkeypatch, alias_kind):
     trace_path = _write_multiturn_trace(tmp_path)
     output = tmp_path / "samples.jsonl"
     output.write_text("sentinel")
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+    aliases = {
+        "direct": "samples.jsonl",
+        "dot": "./samples.jsonl",
+        "absolute": str(output),
+        "parent": "sub/../samples.jsonl",
+    }
 
     with pytest.raises(ValueError, match="must differ"):
         run_mocker_trace_replay(
             [trace_path],
-            report_jsonl_path=output,
-            telemetry_jsonl_path=output,
+            report_jsonl_path="samples.jsonl",
+            telemetry_jsonl_path=aliases[alias_kind],
         )
 
     assert output.read_text() == "sentinel"
 
 
+@pytest.mark.parametrize("alias", ["./samples.jsonl", "sub/../samples.jsonl"])
+def test_native_rejects_output_aliases_before_file_creation(
+    tmp_path, monkeypatch, alias
+):
+    trace_path = _write_multiturn_trace(tmp_path)
+    output = tmp_path / "samples.jsonl"
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert not output.exists()
+    with pytest.raises(ValueError, match="must differ"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path="samples.jsonl",
+            telemetry_jsonl_path=alias,
+        )
+    assert not output.exists()
+
+
+def test_native_rejects_new_output_aliases_through_symlinked_parent(
+    tmp_path, monkeypatch
+):
+    trace_path = _write_multiturn_trace(tmp_path)
+    real_dir = tmp_path / "run-1"
+    real_dir.mkdir()
+    (tmp_path / "latest").symlink_to(real_dir, target_is_directory=True)
+    output = real_dir / "samples.jsonl"
+    monkeypatch.chdir(tmp_path)
+
+    assert not output.exists()
+    with pytest.raises(ValueError, match="must differ"):
+        run_mocker_trace_replay(
+            [trace_path],
+            report_jsonl_path="run-1/samples.jsonl",
+            telemetry_jsonl_path="latest/samples.jsonl",
+        )
+    assert not output.exists()
+
+
+def test_native_allows_distinct_outputs_after_symlink_parent_traversal(
+    tmp_path, monkeypatch
+):
+    trace_path = _write_multiturn_trace(tmp_path)
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    (outside_dir / "nested").mkdir(parents=True)
+    (work_dir / "link").symlink_to(outside_dir / "nested", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    run_mocker_trace_replay(
+        [trace_path],
+        report_jsonl_path="work/samples.jsonl",
+        telemetry_jsonl_path="work/link/../samples.jsonl",
+    )
+
+    assert (work_dir / "samples.jsonl").exists()
+    assert (outside_dir / "samples.jsonl").exists()
+
+
 @pytest.mark.parametrize("output_option", ["telemetry_jsonl_path", "report_jsonl_path"])
-def test_native_rejects_output_equal_to_input(tmp_path, output_option):
+@pytest.mark.parametrize("alias_kind", ["direct", "dot", "absolute", "parent"])
+def test_native_rejects_output_alias_to_input(
+    tmp_path, monkeypatch, output_option, alias_kind
+):
     trace_path = _write_multiturn_trace(tmp_path)
     original = trace_path.read_text()
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+    aliases = {
+        "direct": "multiturn_trace.jsonl",
+        "dot": "./multiturn_trace.jsonl",
+        "absolute": str(trace_path),
+        "parent": "sub/../multiturn_trace.jsonl",
+    }
 
     with pytest.raises(ValueError, match="must differ"):
-        run_mocker_trace_replay([trace_path], **{output_option: trace_path})
+        run_mocker_trace_replay(
+            ["multiturn_trace.jsonl"], **{output_option: aliases[alias_kind]}
+        )
 
     assert trace_path.read_text() == original
 

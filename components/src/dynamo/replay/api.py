@@ -38,10 +38,13 @@ def _planner_replay_adapter():
 
 @dataclass(frozen=True)
 class TelemetryOptions:
-    """Optional policy-neutral telemetry for an offline replay."""
+    """Optional policy-neutral telemetry for an offline replay.
+
+    In-memory capture is the default only when no callback or JSONL sink is set.
+    """
 
     sample_interval_ms: float = 1_000.0
-    capture_in_memory: bool = True
+    capture_in_memory: bool | None = None
     callback: Callable[[dict[str, Any]], None] | None = None
     jsonl_path: str | os.PathLike[str] | None = None
 
@@ -130,8 +133,17 @@ def _materialize_offline_report(
 def _telemetry_kwargs(options: TelemetryOptions | None) -> dict[str, Any]:
     if options is None:
         return {}
+    capture_in_memory = options.capture_in_memory
+    if capture_in_memory is None:
+        capture_in_memory = options.callback is None and options.jsonl_path is None
+    if (
+        not capture_in_memory
+        and options.callback is None
+        and options.jsonl_path is None
+    ):
+        raise ValueError("TelemetryOptions needs at least one sink")
     return {
-        "capture_telemetry": options.capture_in_memory,
+        "capture_telemetry": capture_in_memory,
         "telemetry_sample_interval_ms": options.sample_interval_ms,
         "telemetry_callback": options.callback,
         "telemetry_jsonl_path": options.jsonl_path,

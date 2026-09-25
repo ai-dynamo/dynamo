@@ -231,7 +231,8 @@ def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
     )
 
     assert seen["telemetry_options"] == TelemetryOptions(sample_interval_ms=2_500.0)
-    assert report.metadata["native_report"]["telemetry"] == {
+    assert "native_report" not in report.metadata
+    assert report.metadata["telemetry"] == {
         "sample_interval_ms": 2_500.0,
         "samples": [sample],
     }

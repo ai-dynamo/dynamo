@@ -913,6 +913,50 @@ impl MockEngineArgs {
     }
 }
 
+fn replay_canonical_path(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok().or_else(|| {
+        let file_name = path.file_name()?;
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        parent
+            .canonicalize()
+            .ok()
+            .map(|parent| parent.join(file_name))
+    })
+}
+
+fn replay_normalized_absolute_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut normalized = PathBuf::new();
+    for component in std::path::absolute(path)?.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn replay_paths_equal(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (replay_canonical_path(left), replay_canonical_path(right)) {
+        (Some(left), Some(right)) => left == right,
+        _ => matches!(
+            (
+                replay_normalized_absolute_path(left),
+                replay_normalized_absolute_path(right)
+            ),
+            (Ok(left), Ok(right)) if left == right
+        ),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, capture_telemetry=false, telemetry_sample_interval_ms=1_000.0, telemetry_callback=None, telemetry_jsonl_path=None))]
 #[allow(clippy::too_many_arguments)]
@@ -950,13 +994,18 @@ pub fn run_mocker_trace_replay(
     telemetry_callback: Option<Py<PyAny>>,
     telemetry_jsonl_path: Option<PathBuf>,
 ) -> PyResult<PyObject> {
-    if telemetry_jsonl_path
-        .as_ref()
-        .is_some_and(|path| report_jsonl_path.as_ref() == Some(path) || trace_files.contains(path))
-        || report_jsonl_path
-            .as_ref()
-            .is_some_and(|path| trace_files.contains(path))
-    {
+    if telemetry_jsonl_path.as_deref().is_some_and(|path| {
+        report_jsonl_path
+            .as_deref()
+            .is_some_and(|report| replay_paths_equal(path, report))
+            || trace_files
+                .iter()
+                .any(|trace| replay_paths_equal(path, trace))
+    }) || report_jsonl_path.as_deref().is_some_and(|path| {
+        trace_files
+            .iter()
+            .any(|trace| replay_paths_equal(path, trace))
+    }) {
         return Err(PyValueError::new_err(
             "replay output paths must differ from each other and trace files",
         ));
@@ -1022,10 +1071,10 @@ pub fn run_mocker_trace_replay(
     };
     let scaling_callback_error = scaling_policy
         .as_ref()
-        .map(|_| PyReplayScalingErrorSlot::default());
+        .map(|_| PyCallbackErrorSlot::default());
     let telemetry_callback_error = telemetry_callback
         .as_ref()
-        .map(|_| PyReplayTelemetryErrorSlot::default());
+        .map(|_| PyCallbackErrorSlot::default());
     let PreparedReplayTelemetry {
         options: telemetry,
         capture: telemetry_capture,
@@ -1544,10 +1593,10 @@ pub fn run_mocker_synthetic_trace_replay(
     };
     let scaling_callback_error = scaling_policy
         .as_ref()
-        .map(|_| PyReplayScalingErrorSlot::default());
+        .map(|_| PyCallbackErrorSlot::default());
     let telemetry_callback_error = telemetry_callback
         .as_ref()
-        .map(|_| PyReplayTelemetryErrorSlot::default());
+        .map(|_| PyCallbackErrorSlot::default());
     let PreparedReplayTelemetry {
         options: telemetry,
         capture: telemetry_capture,
@@ -2608,7 +2657,7 @@ type ReplayTelemetryWriter = Arc<Mutex<ReplayTelemetryJsonl>>;
 struct PyReplayTelemetryObserver {
     capture: Option<ReplayTelemetryCapture>,
     callback: Option<Py<PyAny>>,
-    callback_error: Option<PyReplayTelemetryErrorSlot>,
+    callback_error: Option<PyCallbackErrorSlot>,
     writer: Option<ReplayTelemetryWriter>,
 }
 
@@ -2652,7 +2701,7 @@ fn prepare_replay_telemetry(
     sample_interval_ms: f64,
     callback: Option<Py<PyAny>>,
     jsonl_path: Option<&Path>,
-    callback_error: Option<PyReplayTelemetryErrorSlot>,
+    callback_error: Option<PyCallbackErrorSlot>,
 ) -> PyResult<PreparedReplayTelemetry> {
     let enabled = capture_telemetry || callback.is_some() || jsonl_path.is_some();
     if !enabled {
@@ -2732,13 +2781,13 @@ fn take_runtime_observers(
 /// generic conversion.
 fn replay_run_err_to_pyerr(
     err: anyhow::Error,
-    callback_error: Option<&PyReplayScalingErrorSlot>,
-    telemetry_callback_error: Option<&PyReplayTelemetryErrorSlot>,
+    callback_error: Option<&PyCallbackErrorSlot>,
+    telemetry_callback_error: Option<&PyCallbackErrorSlot>,
 ) -> PyErr {
-    if let Some(py_err) = callback_error.and_then(PyReplayScalingErrorSlot::take) {
+    if let Some(py_err) = callback_error.and_then(PyCallbackErrorSlot::take) {
         return py_err;
     }
-    if let Some(py_err) = telemetry_callback_error.and_then(PyReplayTelemetryErrorSlot::take) {
+    if let Some(py_err) = telemetry_callback_error.and_then(PyCallbackErrorSlot::take) {
         return py_err;
     }
     match err.downcast::<PyErr>() {
@@ -2748,22 +2797,9 @@ fn replay_run_err_to_pyerr(
 }
 
 #[derive(Clone, Default)]
-struct PyReplayScalingErrorSlot(Arc<Mutex<Option<PyErr>>>);
+struct PyCallbackErrorSlot(Arc<Mutex<Option<PyErr>>>);
 
-impl PyReplayScalingErrorSlot {
-    fn record(&self, py: Python<'_>, error: &PyErr) {
-        *self.0.lock() = Some(error.clone_ref(py));
-    }
-
-    fn take(&self) -> Option<PyErr> {
-        self.0.lock().take()
-    }
-}
-
-#[derive(Clone, Default)]
-struct PyReplayTelemetryErrorSlot(Arc<Mutex<Option<PyErr>>>);
-
-impl PyReplayTelemetryErrorSlot {
+impl PyCallbackErrorSlot {
     fn record(&self, py: Python<'_>, error: &PyErr) {
         *self.0.lock() = Some(error.clone_ref(py));
     }
@@ -2778,7 +2814,7 @@ impl PyReplayTelemetryErrorSlot {
 struct PyReplayScalingPolicy {
     callback: Py<PyAny>,
     capture_lifecycle_evidence: bool,
-    callback_error: PyReplayScalingErrorSlot,
+    callback_error: PyCallbackErrorSlot,
 }
 
 impl ReplayScalingPolicy for PyReplayScalingPolicy {

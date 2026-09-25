@@ -22,7 +22,9 @@ def test_replay_api_routes_trace_file_lists(monkeypatch):
 
     def capture_api(*args, **kwargs):
         api_calls.append((args, kwargs))
-        return SimpleNamespace(summary={}, per_request=None, coverage={})
+        return SimpleNamespace(
+            summary={}, per_request=None, coverage={}, telemetry=None
+        )
 
     monkeypatch.setattr(replay_api, "_run_mocker_trace_replay", capture_api)
     replay_api.run_trace_replay("mooncake.jsonl")

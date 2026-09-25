@@ -443,7 +443,6 @@ class DynamoReplayRunner:
         if (
             output_requirements.include_raw_report
             or output_requirements.capture_per_request
-            or output_requirements.capture_telemetry
         ):
             if hasattr(report, "to_dict"):
                 native_report = report.to_dict()
@@ -452,6 +451,8 @@ class DynamoReplayRunner:
             else:
                 native_report = dict(report)
             metadata["native_report"] = native_report
+        if output_requirements.capture_telemetry:
+            metadata["telemetry"] = report.telemetry.to_dict()
         return metrics, metadata
 
     @staticmethod

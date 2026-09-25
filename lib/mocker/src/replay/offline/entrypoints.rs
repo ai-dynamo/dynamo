@@ -10,8 +10,8 @@ use std::collections::VecDeque;
 
 use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
-    ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec, ReplayTopology,
-    Replayer, WorkerPoolSpec,
+    ReplayComposition, ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec,
+    ReplayTopology, Replayer, WorkerPoolSpec,
 };
 use anyhow::Result;
 
@@ -41,6 +41,18 @@ fn worker_pool(initial_workers: usize, args: &MockEngineArgs) -> WorkerPoolSpec 
     WorkerPoolSpec {
         initial_workers,
         startup_delay_ms: startup_delay_ms(args),
+    }
+}
+
+fn with_telemetry<C: ReplayComposition>(
+    replayer: Replayer<C>,
+    telemetry: Option<ReplayTelemetryOptions>,
+) -> Result<Replayer<C>> {
+    match telemetry {
+        Some(options) => {
+            Ok(replayer.with_telemetry_observer(options.sample_interval_ms, options.observer)?)
+        }
+        None => Ok(replayer),
     }
 }
 
@@ -158,12 +170,7 @@ fn run_aggregated_with_capture_options(
             )?
             .with_capture_options(capture_options)
             .with_runtime_input(input);
-            let replayer = match telemetry {
-                Some(options) => replayer
-                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
-                None => replayer,
-            };
-            Ok(replayer.run()?)
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
         }
         ReplayRouterMode::KvRouter => {
             let replayer = Replayer::with_composition(
@@ -179,12 +186,7 @@ fn run_aggregated_with_capture_options(
             )?
             .with_capture_options(capture_options)
             .with_runtime_input(input);
-            let replayer = match telemetry {
-                Some(options) => replayer
-                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
-                None => replayer,
-            };
-            Ok(replayer.run()?)
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
         }
     }
 }
@@ -265,12 +267,7 @@ fn run_disaggregated_with_capture_options(
             )?
             .with_capture_options(capture_options)
             .with_runtime_input(input);
-            let replayer = match telemetry {
-                Some(options) => replayer
-                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
-                None => replayer,
-            };
-            Ok(replayer.run()?)
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
         }
         ReplayRouterMode::KvRouter => {
             let replayer = Replayer::with_composition(
@@ -288,12 +285,7 @@ fn run_disaggregated_with_capture_options(
             )?
             .with_capture_options(capture_options)
             .with_runtime_input(input);
-            let replayer = match telemetry {
-                Some(options) => replayer
-                    .with_telemetry_observer(options.sample_interval_ms, options.observer)?,
-                None => replayer,
-            };
-            Ok(replayer.run()?)
+            Ok(with_telemetry(replayer, telemetry)?.run()?)
         }
     }
 }

@@ -88,7 +88,7 @@ def test_default_replay_omits_native_telemetry_options(monkeypatch) -> None:
     assert "telemetry" not in report.to_dict()
 
 
-def test_telemetry_options_capture_in_memory_by_default(monkeypatch) -> None:
+def test_telemetry_options_use_in_memory_as_the_default_sink(monkeypatch) -> None:
     seen = {}
 
     def run_native(*args, **kwargs):
@@ -106,3 +106,41 @@ def test_telemetry_options_capture_in_memory_by_default(monkeypatch) -> None:
 
     assert seen["capture_telemetry"] is True
     assert seen["telemetry_sample_interval_ms"] == 1_000.0
+
+
+@pytest.mark.parametrize(
+    ("options", "expected_callback", "expected_path"),
+    [
+        (api.TelemetryOptions(callback=lambda _sample: None), True, None),
+        (api.TelemetryOptions(jsonl_path="samples.jsonl"), False, "samples.jsonl"),
+    ],
+)
+def test_external_sink_does_not_retain_samples_by_default(
+    monkeypatch,
+    options,
+    expected_callback,
+    expected_path,
+) -> None:
+    seen = {}
+
+    def run_native(*args, **kwargs):
+        seen.update(kwargs)
+        return _native_result()
+
+    monkeypatch.setattr(api, "_run_mocker_synthetic_trace_replay", run_native)
+
+    api.run_synthetic_trace_replay(16, 4, 1, telemetry_options=options)
+
+    assert seen["capture_telemetry"] is False
+    assert (seen["telemetry_callback"] is not None) is expected_callback
+    assert seen["telemetry_jsonl_path"] == expected_path
+
+
+def test_telemetry_options_reject_no_sink() -> None:
+    with pytest.raises(ValueError, match="at least one sink"):
+        api.run_synthetic_trace_replay(
+            16,
+            4,
+            1,
+            telemetry_options=api.TelemetryOptions(capture_in_memory=False),
+        )

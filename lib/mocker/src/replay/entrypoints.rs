@@ -161,36 +161,6 @@ pub fn simulate_loaded_trace_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        num_workers,
-        arrival_speedup_ratio,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    num_workers: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_loaded_trace_with_router_mode_and_options_and_runtime_observers(
         args,
         router_config,
@@ -202,10 +172,7 @@ pub fn simulate_loaded_trace_with_router_mode_and_options_and_scaling_policy(
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -318,34 +285,6 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        arrival_speedup_ratio,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_loaded_trace_disagg_with_router_mode_and_options_and_runtime_observers(
         config,
         router_config,
@@ -356,10 +295,7 @@ pub fn simulate_loaded_trace_disagg_with_router_mode_and_options_and_scaling_pol
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -596,46 +532,6 @@ pub fn simulate_trace_file_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace_path,
-        trace_block_size,
-        num_workers,
-        arrival_speedup_ratio,
-        router_mode,
-        trace_format,
-        trace_shared_prefix_ratio,
-        trace_num_prefix_groups,
-        record_per_request,
-        max_sim_time_ms,
-        None,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace_path: &Path,
-    trace_block_size: usize,
-    num_workers: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    trace_format: TraceFileFormat,
-    trace_shared_prefix_ratio: f64,
-    trace_num_prefix_groups: usize,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    agentic_lanes: Option<usize>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_trace_file_with_router_mode_and_format_and_runtime_observers(
         args,
         router_config,
@@ -650,12 +546,9 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
         trace_num_prefix_groups,
         record_per_request,
         max_sim_time_ms,
-        agentic_lanes,
+        None,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -816,44 +709,6 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace_path,
-        trace_block_size,
-        arrival_speedup_ratio,
-        router_mode,
-        trace_format,
-        trace_shared_prefix_ratio,
-        trace_num_prefix_groups,
-        record_per_request,
-        max_sim_time_ms,
-        None,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace_path: &Path,
-    trace_block_size: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    trace_format: TraceFileFormat,
-    trace_shared_prefix_ratio: f64,
-    trace_num_prefix_groups: usize,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    agentic_lanes: Option<usize>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_trace_file_disagg_with_router_mode_and_format_and_runtime_observers(
         config,
         router_config,
@@ -867,12 +722,9 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy
         trace_num_prefix_groups,
         record_per_request,
         max_sim_time_ms,
-        agentic_lanes,
+        None,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -1151,7 +1003,7 @@ pub fn simulate_trace_requests_with_router_mode(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_requests_with_router_mode_and_scaling_policy(
+    simulate_trace_requests_with_router_mode_and_runtime_observers(
         args,
         router_config,
         prefill_load_estimator,
@@ -1161,38 +1013,7 @@ pub fn simulate_trace_requests_with_router_mode(
         router_mode,
         false,
         sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_requests_with_router_mode_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
-    num_workers: usize,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
-    simulate_trace_requests_with_router_mode_and_runtime_observers(
-        args,
-        router_config,
-        prefill_load_estimator,
-        requests,
-        num_workers,
-        arrival_speedup_ratio,
-        router_mode,
-        record_per_request,
-        sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -1246,7 +1067,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
+    simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
         config,
         router_config,
         prefill_load_estimator,
@@ -1255,36 +1076,7 @@ pub fn simulate_trace_requests_disagg_with_router_mode(
         router_mode,
         false,
         sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
-    arrival_speedup_ratio: f64,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
-    simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
-        config,
-        router_config,
-        prefill_load_estimator,
-        requests,
-        arrival_speedup_ratio,
-        router_mode,
-        record_per_request,
-        sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -1463,44 +1255,6 @@ pub fn simulate_concurrency_file_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace_path,
-        trace_block_size,
-        max_in_flight,
-        num_workers,
-        router_mode,
-        trace_format,
-        trace_shared_prefix_ratio,
-        trace_num_prefix_groups,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace_path: &Path,
-    trace_block_size: usize,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    trace_format: TraceFileFormat,
-    trace_shared_prefix_ratio: f64,
-    trace_num_prefix_groups: usize,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_concurrency_file_with_router_mode_and_format_and_runtime_observers(
         args,
         router_config,
@@ -1516,10 +1270,7 @@ pub fn simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy(
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -1645,42 +1396,6 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_policy(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace_path,
-        trace_block_size,
-        max_in_flight,
-        router_mode,
-        trace_format,
-        trace_shared_prefix_ratio,
-        trace_num_prefix_groups,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace_path: &Path,
-    trace_block_size: usize,
-    max_in_flight: usize,
-    router_mode: ReplayRouterMode,
-    trace_format: TraceFileFormat,
-    trace_shared_prefix_ratio: f64,
-    trace_num_prefix_groups: usize,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_concurrency_file_disagg_with_router_mode_and_format_and_runtime_observers(
         config,
         router_config,
@@ -1695,10 +1410,7 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -1982,7 +1694,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_requests_with_router_mode_and_scaling_policy(
+    simulate_concurrency_requests_with_router_mode_and_runtime_observers(
         args,
         router_config,
         prefill_load_estimator,
@@ -1992,38 +1704,7 @@ pub fn simulate_concurrency_requests_with_router_mode(
         router_mode,
         false,
         sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_requests_with_router_mode_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
-    simulate_concurrency_requests_with_router_mode_and_runtime_observers(
-        args,
-        router_config,
-        prefill_load_estimator,
-        requests,
-        max_in_flight,
-        num_workers,
-        router_mode,
-        record_per_request,
-        sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -2082,7 +1763,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
     router_mode: ReplayRouterMode,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
+    simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers(
         config,
         router_config,
         prefill_load_estimator,
@@ -2091,36 +1772,7 @@ pub fn simulate_concurrency_requests_disagg_with_router_mode(
         router_mode,
         false,
         sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_requests_disagg_with_router_mode_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
-    max_in_flight: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
-    simulate_concurrency_requests_disagg_with_router_mode_and_runtime_observers(
-        config,
-        router_config,
-        prefill_load_estimator,
-        requests,
-        max_in_flight,
-        router_mode,
-        record_per_request,
-        sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -2212,34 +1864,6 @@ fn simulate_trace_workload_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        num_workers,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_trace_workload_with_router_mode_and_options_and_runtime_observers(
         args,
         router_config,
@@ -2250,10 +1874,7 @@ pub fn simulate_trace_workload_with_router_mode_and_options_and_scaling_policy(
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -2325,32 +1946,6 @@ fn simulate_trace_workload_disagg_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_policy(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_trace_workload_disagg_with_router_mode_and_options_and_runtime_observers(
         config,
         router_config,
@@ -2360,10 +1955,7 @@ pub fn simulate_trace_workload_disagg_with_router_mode_and_options_and_scaling_p
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -2520,36 +2112,6 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy(
-        args,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        max_in_flight,
-        num_workers,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_workload_with_router_mode_and_options_and_scaling_policy(
-    args: MockEngineArgs,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    max_in_flight: usize,
-    num_workers: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_with_router_mode_and_options_and_runtime_observers(
         args,
         router_config,
@@ -2561,10 +2123,7 @@ pub fn simulate_concurrency_workload_with_router_mode_and_options_and_scaling_po
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
@@ -2645,34 +2204,6 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
-    simulate_concurrency_workload_disagg_with_router_mode_and_options_and_scaling_policy(
-        config,
-        router_config,
-        prefill_load_estimator,
-        trace,
-        max_in_flight,
-        router_mode,
-        record_per_request,
-        max_sim_time_ms,
-        sla,
-        None,
-    )
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_scaling_policy(
-    config: OfflineDisaggReplayConfig,
-    router_config: Option<KvRouterConfig>,
-    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    trace: Trace,
-    max_in_flight: usize,
-    router_mode: ReplayRouterMode,
-    record_per_request: bool,
-    max_sim_time_ms: Option<f64>,
-    sla: SlaThresholds,
-    scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
-) -> Result<TraceSimulationReport> {
     simulate_concurrency_workload_disagg_with_router_mode_and_options_and_runtime_observers(
         config,
         router_config,
@@ -2683,10 +2214,7 @@ pub fn simulate_concurrency_workload_disagg_with_router_mode_and_options_and_sca
         record_per_request,
         max_sim_time_ms,
         sla,
-        super::ReplayRuntimeObservers {
-            scaling_policy,
-            telemetry: None,
-        },
+        super::ReplayRuntimeObservers::default(),
     )
 }
 
