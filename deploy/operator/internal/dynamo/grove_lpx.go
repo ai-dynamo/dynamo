@@ -38,15 +38,15 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 		}
 	}
 	verifiedAvailable := int32(0)
-	result := func(ready bool, classification, message string) GroveReadiness {
+	result := func(ready bool, message string) GroveReadiness {
 		if status.AvailableReplicas != nil {
 			status.AvailableReplicas = ptr.To(min(*status.AvailableReplicas, verifiedAvailable))
 		}
 		statuses[component.ComponentName] = status
-		return GroveReadiness{Ready: ready, Classification: classification, Message: message, ComponentStatuses: statuses}
+		return GroveReadiness{Ready: ready, Message: message, ComponentStatuses: statuses}
 	}
 	pending := func(message string) GroveReadiness {
-		return result(false, v1beta1.DGDReadyReasonSomeResourcesNotReady, message)
+		return result(false, message)
 	}
 	if pcs == nil {
 		return pending("Waiting for the exact LPX PodCliqueSet")
@@ -67,15 +67,10 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 	status.ScheduledReplicas = ptr.To(pcsg.Status.ScheduledReplicas)
 	replicas := ptr.Deref(component.Replicas, pcsg.Spec.Replicas)
 	if pcsg.Spec.Replicas != replicas || pcsg.Status.CurrentPodCliqueSetGenerationHash == nil || *pcsg.Status.CurrentPodCliqueSetGenerationHash != *hash {
-		return result(false, v1beta1.DGDReadyReasonUpdating, "LPX scaling group has not applied the desired revision and capacity")
+		return pending("LPX scaling group has not applied the desired revision and capacity")
 	}
 	// Observe every member before returning so partial draft readiness remains visible.
-	unreadyClassification, unreadyMessage := "", ""
-	noteUnready := func(classification, message string) {
-		if unreadyMessage == "" {
-			unreadyClassification, unreadyMessage = classification, message
-		}
-	}
+	unreadyMessage := ""
 	for replica := range replicas {
 		replicaReady := true
 		for _, template := range pcs.Spec.Template.Cliques {
@@ -90,9 +85,9 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 			readiness := groveComponentReadiness{}
 			switch {
 			case pclq == nil:
-				readiness = readiness.withResult(false, fmt.Sprintf("Waiting for LPX role %s", name), v1beta1.DGDReadyReasonSomeResourcesNotReady)
+				readiness.reason = fmt.Sprintf("Waiting for LPX role %s", name)
 			case pclq.Status.CurrentPodCliqueSetGenerationHash == nil || *pclq.Status.CurrentPodCliqueSetGenerationHash != *hash:
-				readiness = readiness.withResult(false, fmt.Sprintf("LPX role %s has not applied the desired revision", name), v1beta1.DGDReadyReasonUpdating)
+				readiness.reason = fmt.Sprintf("LPX role %s has not applied the desired revision", name)
 			default:
 				readiness = observeLPXRole(ctx, pclq)
 			}
@@ -108,7 +103,9 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 				statuses[memberName] = draft
 			}
 			if !readiness.ready {
-				noteUnready(readiness.classification, readiness.reason)
+				if unreadyMessage == "" {
+					unreadyMessage = readiness.reason
+				}
 				replicaReady = false
 			}
 		}
@@ -117,13 +114,9 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 		}
 	}
 	if unreadyMessage != "" {
-		return result(false, unreadyClassification, unreadyMessage)
+		return pending(unreadyMessage)
 	}
-	ready, message, classification := pcsgStatusReady(pcsg, replicas)
-	if ready {
-		classification = v1beta1.DGDReadyReasonAllResourcesReady
-	}
-	return result(ready, classification, message)
+	return result(pcsgStatusReady(pcsg, replicas))
 }
 
 // observeLPXRole calculates readiness and complete-instance counts from a non-nil
@@ -135,7 +128,7 @@ func observeLPXRole(ctx context.Context, pclq *grovev1alpha1.PodClique) groveCom
 
 	// A model instance is counted only after the complete build width is observed.
 	readiness := podCliqueReadiness(pclq, log.FromContext(ctx))
-	role = role.withResult(readiness.ready, readiness.reason, readiness.classification)
+	role.ready, role.reason = readiness.ready, readiness.reason
 	if pclq.Status.ObservedGeneration == nil || *pclq.Status.ObservedGeneration != pclq.Generation {
 		return role
 	}
@@ -156,27 +149,27 @@ func observeLPXRole(ctx context.Context, pclq *grovev1alpha1.PodClique) groveCom
 	return role
 }
 
-func pcsgStatusReady(pcsg *grovev1alpha1.PodCliqueScalingGroup, desiredReplicas int32) (bool, string, string) {
+func pcsgStatusReady(pcsg *grovev1alpha1.PodCliqueScalingGroup, desiredReplicas int32) (bool, string) {
 	if pcsg.Status.Replicas == desiredReplicas &&
 		pcsg.Status.UpdatedReplicas == desiredReplicas &&
 		pcsg.Status.AvailableReplicas == desiredReplicas {
-		return true, "", ""
+		return true, ""
 	}
 
 	minAvailable := meta.FindStatusCondition(pcsg.Status.Conditions, groveconstants.ConditionTypeMinAvailableBreached)
 	if minAvailable != nil && minAvailable.Status == metav1.ConditionFalse &&
 		(minAvailable.Reason == groveconstants.ConditionReasonScheduledReplicasBelowMinAvailable ||
 			minAvailable.Reason == legacyConditionReasonInsufficientScheduledPCSGReplicas) {
-		return false, fmt.Sprintf("min-available breached (%s): %s", minAvailable.Reason, minAvailable.Message), v1beta1.DGDReadyReasonInsufficientCapacity
+		return false, fmt.Sprintf("min-available breached (%s): %s", minAvailable.Reason, minAvailable.Message)
 	}
 	if scheduled := pcsg.Status.ScheduledReplicas; scheduled > 0 && scheduled < desiredReplicas {
-		return false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduled, desiredReplicas), v1beta1.DGDReadyReasonInsufficientCapacity
+		return false, fmt.Sprintf("insufficient scheduled replicas: scheduled=%d/%d", scheduled, desiredReplicas)
 	}
 	if pcsg.Status.UpdatedReplicas != desiredReplicas {
-		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, pcsg.Status.UpdatedReplicas), v1beta1.DGDReadyReasonUpdating
+		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, pcsg.Status.UpdatedReplicas)
 	}
 	if pcsg.Status.Replicas != desiredReplicas {
-		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, pcsg.Status.Replicas), v1beta1.DGDReadyReasonUpdating
+		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, pcsg.Status.Replicas)
 	}
-	return false, fmt.Sprintf("scheduled but available=%d/%d", pcsg.Status.AvailableReplicas, desiredReplicas), v1beta1.DGDReadyReasonPodsNotReady
+	return false, fmt.Sprintf("scheduled but available=%d/%d", pcsg.Status.AvailableReplicas, desiredReplicas)
 }

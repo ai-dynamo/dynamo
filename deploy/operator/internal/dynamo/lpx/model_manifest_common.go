@@ -215,7 +215,7 @@ func validateManifestPartitionNodeCount(
 
 	// partSelect artifacts contain only the selected partitions, while numLpuNodes
 	// describes the complete deployment geometry.
-	if partialSelection && (want >= packagedNodes || want >= hostEmbeddingNodes) {
+	if partialSelection && want >= hostEmbeddingNodes {
 		return nil
 	}
 

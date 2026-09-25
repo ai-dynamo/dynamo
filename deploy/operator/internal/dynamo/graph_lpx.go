@@ -296,7 +296,6 @@ func renderLPXComponents(p cliqueParams, workload *dynamolpx.Workload, plan *dyn
 		role := lpxRoleComponent(component, template, p.dynamoDeployment, p.discoveryBackend)
 		role.ComponentType = v1beta1.ComponentTypeDecode
 		role.Replicas = ptr.To(replicas)
-		role.MinAvailable = nil
 		defaults := &podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()}
 		gpu := p
 		gpu.component = role

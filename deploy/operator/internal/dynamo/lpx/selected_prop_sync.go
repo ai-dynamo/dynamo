@@ -64,7 +64,7 @@ func validateSelectedPropSyncGraph(
 }
 
 func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
-	if b == nil || len(b.SelectedPropSyncChains) == 0 {
+	if len(b.SelectedPropSyncChains) == 0 {
 		return nil
 	}
 	if len(b.SelectedPropSyncChains) != 1 {

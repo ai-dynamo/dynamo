@@ -144,14 +144,14 @@ func (r *defaultModelRegistry) BuildURL(id string) (*url.URL, error) {
 		return nil, fmt.Errorf("build ID %q must remain within the configured model registry", id)
 	}
 	relativeID = filepath.Clean(relativeID)
-	if relativeID == "" || relativeID == "." {
+	if relativeID == "." {
 		return nil, fmt.Errorf("empty ref")
 	}
 
 	if r.registryURL.Scheme == BuildSchemeFile {
 		return &url.URL{
 			Scheme: BuildSchemeFile,
-			Path:   filepath.Clean(filepath.Join(r.registryURL.Path, relativeID)),
+			Path:   filepath.Join(r.registryURL.Path, relativeID),
 		}, nil
 	}
 
