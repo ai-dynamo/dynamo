@@ -302,7 +302,8 @@ jobs:
     # than the tree that actually publishes. This replays both jobs against
     # docs-website and runs fern check on the composed result.
     - name: Fetch docs-website
-      run: git fetch --no-tags --depth=1 origin docs-website:refs/remotes/origin/docs-website
+      # Force only this ephemeral tracking ref in case docs-website advances during checkout.
+      run: git fetch --no-tags --depth=1 origin +docs-website:refs/remotes/origin/docs-website
     - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
       with:
         node-version: '22'
