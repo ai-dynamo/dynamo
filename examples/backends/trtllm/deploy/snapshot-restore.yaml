@@ -5,10 +5,9 @@
 #
 # This example uses DynamoCheckpoint Auto mode: the operator starts a checkpoint
 # job for TRTLLMWorker, waits for it to become Ready, and then restores the DGD
-# worker from that checkpoint. Use a snapshot placeholder image for the worker
-# and the matching runtime/frontend image for the frontend. Replace the
-# placeholder image names below with the tags for the Dynamo/TRTLLM revision
-# being tested.
+# worker from that checkpoint. Use the same TensorRT-LLM runtime image for
+# capture and restore, and use the matching frontend image. Replace the image
+# names below with tags for the Dynamo/TensorRT-LLM revision being tested.
 #
 # Requirements validated for the single-GPU TRTLLM path:
 # - Create a PersistentVolumeClaim (PVC) named model-cache in the target
@@ -70,7 +69,7 @@ spec:
                 type: CharDevice
           containers:
             - name: main
-              image: my-registry/tensorrtllm-placeholder:my-tag
+              image: my-registry/tensorrtllm-runtime:my-tag
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
