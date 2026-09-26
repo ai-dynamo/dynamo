@@ -15,6 +15,7 @@ import os
 import subprocess
 import time
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ import requests
 import yaml
 from kubernetes_asyncio.client.exceptions import ApiException
 
+from tests.deploy.api_checks import check_chat_api, check_embedding_api
 from tests.deploy.conftest import DeploymentTarget
 from tests.deploy.dgd_utils import (
     DEFAULT_MAX_TOKENS,
@@ -36,7 +38,8 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import wait_for_model_availability
+from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
 
@@ -218,48 +221,48 @@ async def test_deployment(
             base_url = f"http://localhost:{port_forward.local_port}"
             logger.info(f"Port forwarding established: {base_url}")
 
-            # Wait for model to be available
-            endpoint = deployment_spec.endpoint
-            model_ready = wait_for_model_availability(
-                url=base_url,
-                endpoint=endpoint,
-                model=model,
-                logger=logger,
+            if profile == "agg_embed":
+                endpoint = "/v1/embeddings"
+                ready_payload = {"model": model, "input": "test"}
+                check_api = check_embedding_api
+            else:
+                endpoint = deployment_spec.endpoint
+                ready_payload = None
+                check_api = check_chat_api
+            url = base_url + endpoint
+            model_ready = await asyncio.to_thread(
+                wait_for_model_availability,
+                base_url,
+                endpoint,
+                model,
+                logger,
                 max_attempts=30,
+                payload=ready_payload,
             )
-
-            assert (
-                model_ready
-            ), f"Model '{model}' did not become available within the timeout period"
-
-            # This chat-completion request is side-effect free, so one retry after a
-            # dropped port-forward is safe.
-            payload = {
-                "model": model,
-                "messages": [{"role": "user", "content": TEST_PROMPT}],
-                "max_tokens": DEFAULT_MAX_TOKENS,
-                "temperature": DEFAULT_TEMPERATURE,
-                "stream": False,
-            }
+            assert model_ready, f"Model '{model}' did not become available"
             frontend_log_baseline = (
                 len(normalize_log_lines(frontend_pod.logs(container="main")))
                 if validate_agg_logging
                 else 0
             )
-            response = deployment.send_request_with_port_forward_retry(
-                pod=frontend_pod,
-                remote_port=port,
-                endpoint=endpoint,
-                payload=payload,
-                timeout=float(DEFAULT_REQUEST_TIMEOUT),
-                port_forward=port_forward,
-            )
 
-            # Validate response
-            validate_chat_response(
-                response=response,
-                expected_model=model,
-                min_content_length=MIN_RESPONSE_CONTENT_LENGTH,
+            def send_with_retry(url, payload, *, timeout, method, stream):
+                return deployment.send_request_with_port_forward_retry(
+                    pod=frontend_pod,
+                    remote_port=port,
+                    endpoint=endpoint,
+                    payload=payload,
+                    timeout=timeout,
+                    port_forward=port_forward,
+                    request_sender=partial(send_request, stream=stream),
+                )
+
+            await asyncio.to_thread(
+                check_api,
+                url,
+                model,
+                Path(resolve_test_output_path(request.node.name)) / "responses",
+                request_sender=send_with_retry,
             )
 
             if validate_agg_logging:

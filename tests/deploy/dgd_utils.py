@@ -25,7 +25,9 @@ import yaml
 from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
+from openai.types.chat import ChatCompletion
 
+from tests.deploy.response_checks import validate_chat
 from tests.deploy.vcluster_utils import (
     VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
     retry_vcluster_api,
@@ -75,16 +77,20 @@ def validate_chat_response(
     response: requests.Response,
     expected_model: str,
     min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
-) -> dict[str, Any]:
+    max_tokens: int | None = None,
+    stop: str | None = None,
+) -> ChatCompletion:
     """Validate the structure and content of a chat completion response.
 
     Args:
         response: HTTP response from the chat completion endpoint
         expected_model: Expected model name in the response
         min_content_length: Minimum required length for response content
+        max_tokens: Optional requested token cap for the completion contract
+        stop: Stop sequence; permits empty or shortened response content
 
     Returns:
-        Parsed response JSON on success
+        Validated chat completion on success
 
     Raises:
         AssertionError: If validation fails
@@ -100,35 +106,22 @@ def validate_chat_response(
     except ValueError as e:
         pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
 
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
-
-    choice = data["choices"][0]
-    assert "message" in choice, f"Choice missing 'message' field: {choice}"
-
-    message = choice["message"]
+    result = validate_chat(data, max_tokens, stop)
+    content = result.choices[0].message.content or ""
+    if stop is None:
+        assert len(content) >= min_content_length, (
+            f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+            f"Content: {content[:200]}"
+        )
     assert (
-        message.get("role") == "assistant"
-    ), f"Expected role 'assistant', got '{message.get('role')}'"
-    assert "content" in message, f"Message missing 'content' field: {message}"
-
-    content = message["content"]
-    assert len(content) >= min_content_length, (
-        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
-        f"Content: {content[:200]}"
-    )
-
-    assert "model" in data, f"Response missing 'model' field: {data}"
-    assert (
-        data["model"] == expected_model
-    ), f"Expected model '{expected_model}', got '{data['model']}'"
-
+        result.model == expected_model
+    ), f"Expected model '{expected_model}', got '{result.model}'"
     logger.info(
-        f"Response validation passed: model={data['model']}, "
-        f"content_length={len(content)}"
+        "Response validation passed: model=%s, content_length=%s",
+        result.model,
+        len(content),
     )
-
-    return data
+    return result
 
 
 def _get_workspace_dir() -> str:
@@ -1748,20 +1741,23 @@ class ManagedDeployment:
         port_forward: Any,
         request_sender: Any = send_request,
     ) -> requests.Response:
-        """Retry one request after rebuilding a dropped pod port-forward."""
+        """Retry one complete response after rebuilding a dropped port-forward."""
         active_port_forward = port_forward
 
         # Inference POSTs may have reached the backend before their connection
         # failed, so rebuild the port-forward and replay each request only once.
         for attempt in range(PORT_FORWARD_REQUEST_RETRY_LIMIT + 1):
             url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
+            response = None
             try:
-                return request_sender(url, payload, timeout=timeout, method="POST")
-            except (
-                requests.ConnectionError,
-                requests.Timeout,
-                httpx.TransportError,
-            ) as error:
+                response = request_sender(url, payload, timeout=timeout, method="POST")
+                # Keep streamed body reads inside the retry boundary. Accessing
+                # content is a no-op for responses that are already buffered.
+                _ = response.content
+                return response
+            except (requests.RequestException, httpx.TransportError) as error:
+                if response is not None:
+                    response.close()
                 if attempt == PORT_FORWARD_REQUEST_RETRY_LIMIT:
                     raise
 
