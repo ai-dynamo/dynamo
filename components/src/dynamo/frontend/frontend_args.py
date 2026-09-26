@@ -417,8 +417,9 @@ class FrontendArgGroup(ArgGroup):
             default=None,
             help=(
                 "Dynamo namespace prefix for model discovery scoping. Discovers models from "
-                "namespaces starting with this prefix (e.g., 'ns' matches 'ns', 'ns-abc123', "
-                "'ns-def456'). Takes precedence over --namespace if both are specified."
+                "this namespace and the worker generations under it, so 'ns' matches 'ns', "
+                "'ns-abc123' and 'ns-def456' but not the separate deployment 'ns2'. Takes "
+                "precedence over --namespace if both are specified."
             ),
         )
 
