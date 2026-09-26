@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml
+
+# GCP GB200 exposes the shared cache under a cluster-managed PVC, taints its
+# Arm nodes, and requires all four serving nodes to stay in one NVLink clique.
+patches:
+  - target:
+      group: nvidia.com
+      version: v1alpha1
+      kind: DynamoGraphDeployment
+      name: dsv4-pro-disagg
+    patch: |-
+      - op: replace
+        path: /spec/pvcs/0/name
+        value: shared-model-cache
+      - op: replace
+        path: /spec/services/Frontend/volumeMounts/0/name
+        value: shared-model-cache
+      - op: add
+        path: /spec/services/Frontend/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
+      - op: replace
+        path: /spec/services/prefill/volumeMounts/0/name
+        value: shared-model-cache
+      - op: add
+        path: /spec/services/prefill/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
+      - op: add
+        path: /spec/services/prefill/extraPodSpec/affinity
+        value:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: nvidia.com/gpu.clique
+                labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-component-type
+                      operator: In
+                      values: [worker, prefill, decode]
+      - op: add
+        path: /spec/services/prefill/extraPodSpec/tolerations
+        value:
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
+      - op: replace
+        path: /spec/services/decode/volumeMounts/0/name
+        value: shared-model-cache
+      - op: add
+        path: /spec/services/decode/extraPodSpec/priorityClassName
+        value: ci-nightly-high-priority
+      - op: add
+        path: /spec/services/decode/extraPodSpec/affinity
+        value:
+          podAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: nvidia.com/gpu.clique
+                labelSelector:
+                  matchExpressions:
+                    - key: nvidia.com/dynamo-component-type
+                      operator: In
+                      values: [worker, prefill, decode]
+      - op: add
+        path: /spec/services/decode/extraPodSpec/tolerations
+        value:
+          - key: kubernetes.io/arch
+            operator: Equal
+            value: arm64
+            effect: NoSchedule
