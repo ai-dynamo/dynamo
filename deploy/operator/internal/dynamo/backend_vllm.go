@@ -408,12 +408,12 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 	case RoleLeader:
 		quotedCmd := make([]string, len(container.Command))
 		for i, tok := range container.Command {
-			quotedCmd[i] = shellQuoteForBashC(tok)
+			quotedCmd[i] = shellQuoteForSh(tok)
 		}
 		fullCommand := strings.Join(quotedCmd, " ")
 		quotedArgs := make([]string, len(container.Args))
 		for i, arg := range container.Args {
-			quotedArgs[i] = shellQuoteForBashC(arg)
+			quotedArgs[i] = shellQuoteForSh(arg)
 		}
 		originalArgs := strings.Join(quotedArgs, " ")
 		vllmMultinodeFlags := fmt.Sprintf("%s ray", distributedExecutorFlag)

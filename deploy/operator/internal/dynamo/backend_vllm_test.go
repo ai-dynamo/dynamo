@@ -2,7 +2,9 @@ package dynamo
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -49,6 +51,81 @@ func TestShellQuotePOSIX_ArgvRoundTrip(t *testing.T) {
 	got = got[:len(got)-1] // trailing NUL yields a final empty element
 	if !reflect.DeepEqual(got, tokens) {
 		t.Fatalf("argv not preserved through sh -c:\n got  %#v\n want %#v", got, tokens)
+	}
+}
+
+func TestMultinodeShellWrappersPreserveArgs(t *testing.T) {
+	t.Log("Capture the engine argv after executing the rendered command through a real shell")
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "python3"), []byte("#!/bin/sh\nprintf '%s\\000' \"$@\"\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "ray"), []byte("#!/bin/sh\nexit 0\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GROVE_PCLQ_POD_INDEX", "0")
+
+	tests := []struct {
+		name    string
+		backend Backend
+		module  string
+		role    Role
+		mode    string
+		suffix  []string
+	}{
+		{
+			name:    "ray leader",
+			backend: &VLLMBackend{},
+			module:  "vllm",
+			role:    RoleLeader,
+			mode:    "ray",
+			suffix:  []string{"--distributed-executor-backend", "ray"},
+		},
+		{
+			name:    "multiprocessing worker",
+			backend: &VLLMBackend{},
+			module:  "vllm",
+			role:    RoleWorker,
+			mode:    "mp",
+			suffix: []string{
+				"--distributed-executor-backend", "mp", "--nnodes", "2",
+				"--master-addr", "pcs-0-worker-ldr-0.headless", "--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", "1", "--headless",
+			},
+		},
+		{
+			name:    "sglang worker",
+			backend: &SGLangBackend{},
+			module:  "sglang",
+			role:    RoleWorker,
+			suffix:  []string{"--dist-init-addr", "pcs-0-worker-ldr-0.headless:29500", "--nnodes", "2", "--node-rank", "1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render an argv-form command containing quotes, empty values, and literal shell characters")
+			args := []string{
+				"--model", "models/it's a model", tensorParallelSizeFlag, "8",
+				"--served-model-name", "", "--chat-template", `{{ 'hello' }}`,
+				"--literal", `glob*?[x]`, "--config", `{"path":"$MODEL_PATH", "separator":"\\"}`,
+				"--carriage-return", "carriage\rreturn", "--whitespace", "tab\tline\nnext",
+			}
+			container := &corev1.Container{
+				Command: []string{"python3", "-m", "dynamo." + tt.module},
+				Args:    append([]string(nil), args...),
+			}
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{commonconsts.KubeAnnotationVLLMDistributedExecutorBackend: tt.mode},
+			})
+			require.NoError(t, tt.backend.UpdateContainer(container, 2, tt.role, component, "worker", &GroveMultinodeDeployer{}, staticContainerGPUCount(4)))
+
+			t.Log("Expand kubelet references, then verify the shell preserves the original argv and evaluates the injected rank")
+			expand := strings.NewReplacer("$(GROVE_PCSG_NAME)", "pcs", "$(GROVE_PCSG_INDEX)", "0", "$(GROVE_HEADLESS_SERVICE)", "headless")
+			container.Args[0] = expand.Replace(container.Args[0])
+			out, err := exec.Command(container.Command[0], append(container.Command[1:], container.Args...)...).CombinedOutput()
+			require.NoError(t, err, "%s", out)
+			got := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+			want := append([]string{"-m", "dynamo." + tt.module}, args...)
+			want = append(want, tt.suffix...)
+			require.Equal(t, want, got)
+		})
 	}
 }
 
