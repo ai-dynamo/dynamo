@@ -127,12 +127,17 @@ async def test_context_enter_preserves_setup_error_when_cleanup_times_out(
         await deployment.__aenter__()
 
 
-async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:
+async def test_context_exit_preserves_primary_error_for_cleanup_defect(
+    tmp_path,
+) -> None:
     deployment = managed_deployment(tmp_path)
-    deployment._cleanup = AsyncMock(side_effect=RuntimeError("cleanup defect"))
+    cleanup_error = RuntimeError("cleanup defect")
+    deployment._cleanup = AsyncMock(side_effect=cleanup_error)
 
-    with pytest.raises(RuntimeError, match="cleanup defect"):
-        await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+    result = await deployment.__aexit__(ValueError, ValueError("test failed"), None)
+
+    assert result is False
+    assert deployment.cleanup_errors == [cleanup_error]
 
 
 @pytest.mark.parametrize(
@@ -272,7 +277,7 @@ async def test_discovery_capture_and_cleanup(
         await asyncio.sleep(0)
         events.append("capture-done")
 
-    async def delete():
+    async def delete(*, fail_on_timeout=True):
         events.append("delete")
 
     deployment._capture_discovery_state = capture
