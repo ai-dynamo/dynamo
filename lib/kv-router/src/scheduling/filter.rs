@@ -322,7 +322,7 @@ impl<'a> RoutingEligibility<'a> {
     }
 }
 
-fn worker_config_for_rank<C: WorkerConfigLike>(
+pub(super) fn worker_config_for_rank<C: WorkerConfigLike>(
     workers: &HashMap<WorkerId, C>,
     worker: WorkerWithDpRank,
 ) -> Result<&C, WorkerEligibilityError> {
