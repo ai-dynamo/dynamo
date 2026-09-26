@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_backend_common::{
-    FinishReason, GenerateContext, LLMEngine, OutputOptions, PreprocessedRequest, SamplingOptions,
-    StopConditions, StopReason,
+    FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions, PreprocessedRequest,
+    SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -435,6 +435,232 @@ fn unsupported_request_controls_are_rejected() {
         |r| r.sampling_options.seed = Some(-1),
         "seed must be non-negative",
     );
+}
+
+/// Adds `sources` as `image_url` items in the form the Rust frontend sends.
+fn with_images(mut req: PreprocessedRequest, sources: &[&str]) -> PreprocessedRequest {
+    let items = sources
+        .iter()
+        .map(|source| serde_json::from_value(json!({ "Url": source })).expect("media URL"))
+        .collect();
+    req.multi_modal_data = Some(HashMap::from([("image_url".to_string(), items)]));
+    req
+}
+
+/// Routing-only data the frontend attaches to an image request when
+/// multimodal routing is built in, with the prompt length after expansion.
+fn with_routing_info(
+    mut req: PreprocessedRequest,
+    expanded_prompt_len: usize,
+) -> PreprocessedRequest {
+    req.mm_routing_info = Some(
+        serde_json::from_value(json!({
+            "routing_token_ids": vec![7; expanded_prompt_len],
+            "block_mm_infos": [],
+            "expanded_prompt_len": expanded_prompt_len,
+        }))
+        .expect("routing info"),
+    );
+    req
+}
+
+#[test]
+fn image_data_uris_are_forwarded_in_request_order() {
+    let mut req = with_routing_info(
+        with_images(
+            request(),
+            &[
+                "data:image/jpeg;base64,aW1hZ2UtYQ==",
+                // TensorRT-LLM identifies the format from the bytes.
+                "data:application/octet-stream;base64,aW1hZ2UtYg==",
+            ],
+        ),
+        1000,
+    );
+    // The scheme and the base64 marker are case-insensitive.
+    req.multi_modal_data
+        .as_mut()
+        .and_then(|media| media.get_mut("image_url"))
+        .expect("image items")
+        .push(MultimodalData::RawUrl(
+            "DATA:image/png;BASE64,aW1hZ2UtYw==".to_string(),
+        ));
+    let proto = build_generate_request(&req, "req", None).expect("image request must build");
+    assert_eq!(
+        proto
+            .multimodal_input
+            .expect("multimodal_input must be set")
+            .image_data,
+        [
+            b"image-a".to_vec(),
+            b"image-b".to_vec(),
+            b"image-c".to_vec()
+        ]
+    );
+    // The engine expands the image placeholders itself.
+    assert_eq!(proto.tokenized.unwrap().input_token_ids, [11, 22, 33]);
+
+    // Routing-only data never blocks a request.
+    let text = with_routing_info(request(), 3);
+    let text = build_generate_request(&text, "req", None).expect("text request");
+    assert!(text.multimodal_input.is_none());
+}
+
+#[test]
+fn omitted_max_tokens_for_an_image_is_an_upper_bound() {
+    let mut req = with_routing_info(
+        with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]),
+        60,
+    );
+    req.stop_conditions.max_tokens = None;
+    // Sized from the three unexpanded prompt tokens, not from the frontend's
+    // expanded estimate; TensorRT-LLM reduces it to what its expanded prompt
+    // leaves of the context.
+    let proto = build_generate_request(&req, "req", Some(100)).expect("build with fallback");
+    assert_eq!(proto.max_tokens, 97);
+}
+
+#[test]
+fn unsupported_media_is_rejected_before_dispatch() {
+    let image = |source: &'static str| {
+        move |r: &mut PreprocessedRequest| {
+            *r = with_images(r.clone(), &[source]);
+        }
+    };
+    // The engine receives bytes and cannot fetch a URL.
+    assert_rejected(
+        image("https://example.com/cat.jpg"),
+        "cannot fetch image URLs",
+    );
+    assert_rejected(image("data:image/png,rawbytes"), "must have the form");
+    assert_rejected(image("data:image/png;base64"), "must have the form");
+    assert_rejected(image("data:image/png;base64,@@@"), "not valid base64");
+    assert_rejected(image("data:image/png;base64,"), "no image bytes");
+    assert_rejected(
+        |r| {
+            r.multi_modal_data = Some(HashMap::from([(
+                "image_url".to_string(),
+                vec![MultimodalData::UuidOnly("cached".to_string())],
+            )]))
+        },
+        "UUID-only",
+    );
+    assert_rejected(
+        |r| {
+            r.multi_modal_data = Some(HashMap::from([(
+                "video_url".to_string(),
+                vec![MultimodalData::RawUrl(
+                    "data:video/mp4;base64,AA==".to_string(),
+                )],
+            )]))
+        },
+        "`video_url` input is not supported",
+    );
+    assert_rejected(|r| r.encoder_result = Some(json!({})), "encoder results");
+}
+
+#[test]
+fn image_refusals_carry_a_public_message() {
+    let refused = |req: PreprocessedRequest| {
+        build_generate_request(&req, "req", None).expect_err("must reject")
+    };
+    let image = |source: &str| refused(with_images(request(), &[source]));
+    let with_image = |mutate: fn(&mut PreprocessedRequest)| {
+        let mut req = with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]);
+        mutate(&mut req);
+        refused(req)
+    };
+    let uuid_only = |r: &mut PreprocessedRequest| {
+        r.multi_modal_data = Some(HashMap::from([(
+            "image_url".to_string(),
+            vec![MultimodalData::UuidOnly("cached".to_string())],
+        )]))
+    };
+    // The frontend shows only the public message to the client.
+    for (error, public) in [
+        (
+            image("https://example.com/cat.jpg"),
+            "the TensorRT-LLM sidecar cannot fetch image URLs; send images as base64 data URIs",
+        ),
+        (
+            image("data:image/png;base64,@@@"),
+            "image data URI is not valid base64",
+        ),
+        (
+            image("data:image/png,rawbytes"),
+            "image data URI must have the form data:<type>;base64,<data>",
+        ),
+        (
+            image("data:image/png;base64,"),
+            "image data URI has no image bytes",
+        ),
+        (
+            with_image(uuid_only),
+            "the TensorRT-LLM sidecar cannot resolve UUID-only media; send images as data URIs",
+        ),
+        (
+            with_image(|r| r.mm_processor_kwargs = Some(json!({"do_resize": false}))),
+            "mm_processor_kwargs is not supported by the TensorRT-LLM sidecar",
+        ),
+        (
+            with_image(|r| r.media_io_kwargs = Some(json!({"image": {"max_width": 64}}))),
+            "media_io_kwargs.image is not supported by the TensorRT-LLM sidecar",
+        ),
+    ] {
+        assert_eq!(error.public_message(), Some(public));
+    }
+    // The decoder detail stays in the private message.
+    let invalid = image("data:image/png;base64,@@@");
+    assert!(
+        invalid
+            .to_string()
+            .contains("image data URI is not valid base64: ")
+    );
+
+    // Refusals that main already made keep their private message only.
+    let video = with_image(|r| {
+        r.multi_modal_data = Some(HashMap::from([(
+            "video_url".to_string(),
+            vec![MultimodalData::RawUrl(
+                "data:video/mp4;base64,AA==".to_string(),
+            )],
+        )]))
+    });
+    assert_eq!(video.public_message(), None);
+    let mut stop_str = request();
+    stop_str.sampling_options.include_stop_str_in_output = Some(true);
+    assert_eq!(refused(stop_str).public_message(), None);
+}
+
+#[test]
+fn image_processing_options_are_rejected() {
+    let with_options = |mm_processor_kwargs, media_io_kwargs| {
+        let mut req = with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]);
+        req.mm_processor_kwargs = mm_processor_kwargs;
+        req.media_io_kwargs = media_io_kwargs;
+        build_generate_request(&req, "req", None)
+    };
+    // The engine cannot apply processor or image decoder options, so the
+    // sidecar must not drop them without notice.
+    let error = with_options(Some(json!({"do_resize": false})), None).expect_err("must reject");
+    assert!(error.to_string().contains("mm_processor_kwargs"));
+    let error =
+        with_options(None, Some(json!({"image": {"max_width": 64}}))).expect_err("must reject");
+    assert!(error.to_string().contains("media_io_kwargs.image"));
+    let error = with_options(None, Some(json!("max_width=64"))).expect_err("must reject");
+    assert!(error.to_string().contains("media_io_kwargs.image"));
+    // Null, `{}`, and options for other media set no image option.
+    with_options(
+        Some(json!({})),
+        Some(json!({"image": {}, "video": {"num_frames": 8}})),
+    )
+    .expect("no image options must build");
+    with_options(Some(serde_json::Value::Null), None).expect("null options must build");
+
+    // Without images there is nothing for the options to change.
+    let mut text = request();
+    text.mm_processor_kwargs = Some(json!({"do_resize": false}));
+    build_generate_request(&text, "req", None).expect("text request must build");
 }
 
 #[test]

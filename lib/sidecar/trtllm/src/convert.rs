@@ -4,14 +4,17 @@
 //! Conversion between Dynamo's `PreprocessedRequest` / `LLMEngineOutput` and
 //! the TensorRT-LLM `TrtllmService` protobuf messages.
 //!
-//! Scope: aggregated generation. Disaggregation, multimodal, LoRA, beam search,
-//! and `n > 1` are rejected before dispatch — the `Generate` response contract
-//! carries no disaggregation handoff, and the sidecar streams a single sequence.
+//! Scope: aggregated generation, with images as base64 data URIs.
+//! Disaggregation, other media, LoRA, beam search, and `n > 1` are rejected
+//! before dispatch: the `Generate` response contract carries no disaggregation
+//! handoff, and the sidecar streams a single sequence.
 
 use std::collections::BTreeSet;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::{
-    DynamoError, FinishReason, LLMEngineOutput, PreprocessedRequest, StopReason, TopLogprob, usage,
+    DynamoError, FinishReason, LLMEngineOutput, MultimodalData, PreprocessedRequest, StopReason,
+    TopLogprob, usage,
 };
 
 use crate::client;
@@ -20,6 +23,8 @@ use crate::proto as pb;
 /// Per-chunk logprobs: the selected-token logprob sequence plus the per-token
 /// top-k alternatives, both aligned with the chunk's delta tokens.
 type MappedLogprobs = (Option<Vec<f64>>, Option<Vec<Vec<TopLogprob>>>);
+
+const IMAGE_URL_KEY: &str = "image_url";
 
 pub(crate) fn build_generate_request(
     request: &PreprocessedRequest,
@@ -64,6 +69,7 @@ pub(crate) fn build_generate_request(
         max_tokens: max_tokens(request, context_length)?,
         streaming: true,
         guided_decoding: guided_decoding(request)?,
+        multimodal_input: multimodal_input(request)?,
         stop: stop.stop.clone().unwrap_or_default(),
         stop_token_ids: stop_token_ids(request),
         ignore_eos: stop.ignore_eos.unwrap_or(false),
@@ -79,11 +85,16 @@ pub(crate) fn build_generate_request(
 // Temporary workaround: TensorRT-LLM's gRPC `GenerateRequest.max_tokens` is
 // REQUIRED (see proto/trtllm_service.proto), so an omitted `max_tokens` — which
 // the Dynamo frontend forwards as `None` for the backend to default — has no
-// natural value. We mirror the in-process backend's text-only default,
+// natural value. We mirror the in-process backend's default,
 // `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm
-// `_default_max_tokens`); the sidecar rejects multimodal before dispatch, so
-// `token_ids.len()` is the true prompt length. `context_length` is resolved in
-// `engine::start`, where `--context-length` wins over the `GetModelInfo` report.
+// `_default_max_tokens`), with `prompt_len = token_ids.len()`. For an image
+// request that is only an upper bound: `token_ids` hold unexpanded image
+// placeholders, and TensorRT-LLM reduces the value to the context that its
+// expanded prompt leaves (`_deduce_max_tokens`, which logs a warning). The
+// frontend's expanded length in `mm_routing_info` is not used: it is an
+// estimate, and a value that is too large would end generation early.
+// `context_length` is resolved in `engine::start`, where `--context-length`
+// wins over the `GetModelInfo` report.
 // Only `/v1/chat/completions` and `/v1/responses` reach this fallback: they set
 // `PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY`, which stops the frontend supplying
 // its own default (`preprocessor::omitted_max_tokens_default`). `/v1/completions`
@@ -110,6 +121,110 @@ fn max_tokens(
     })?;
     let prompt_len = request.token_ids.len() as u32;
     Ok(context_length.saturating_sub(prompt_len).max(1))
+}
+
+/// Maps images onto `MultimodalInput.image_data`, in request order.
+/// TensorRT-LLM's servicer decodes the bytes itself, so the sidecar only strips
+/// the data URI. The engine cannot fetch a URL, resolve a cache UUID, or read
+/// RDMA media, so every other form is rejected here, before the RPC.
+fn multimodal_input(
+    request: &PreprocessedRequest,
+) -> Result<Option<pb::MultimodalInput>, DynamoError> {
+    let Some(media) = request.multi_modal_data.as_ref() else {
+        return Ok(None);
+    };
+    if let Some(key) = media
+        .iter()
+        .filter(|(key, items)| key.as_str() != IMAGE_URL_KEY && !items.is_empty())
+        .map(|(key, _)| key)
+        .min()
+    {
+        return Err(client::invalid_argument(format!(
+            "`{key}` input is not supported by the TensorRT-LLM sidecar; only image_url is"
+        )));
+    }
+    let Some(images) = media.get(IMAGE_URL_KEY).filter(|items| !items.is_empty()) else {
+        return Ok(None);
+    };
+    // The gRPC request has no field for processor or image decoder options, so
+    // the engine would silently apply its defaults. Same test as the frontend's
+    // `has_mm_processor_override`: null and `{}` set no option.
+    let sets_options = |options: Option<&serde_json::Value>| {
+        options.is_some_and(|options| match options {
+            serde_json::Value::Null => false,
+            serde_json::Value::Object(map) => !map.is_empty(),
+            _ => true,
+        })
+    };
+    // `media_io_kwargs` is keyed by modality; only its `image` entry applies.
+    let image_io_kwargs = match request.media_io_kwargs.as_ref() {
+        Some(serde_json::Value::Object(kwargs)) => kwargs.get("image"),
+        other => other,
+    };
+    for (options, message) in [
+        (
+            request.mm_processor_kwargs.as_ref(),
+            "mm_processor_kwargs is not supported by the TensorRT-LLM sidecar",
+        ),
+        (
+            image_io_kwargs,
+            "media_io_kwargs.image is not supported by the TensorRT-LLM sidecar",
+        ),
+    ] {
+        if sets_options(options) {
+            return Err(client::invalid_request(message));
+        }
+    }
+    let image_data = images
+        .iter()
+        .map(|item| match item {
+            MultimodalData::Url(url) => decode_image_data_uri(url.as_str()),
+            MultimodalData::RawUrl(source) => decode_image_data_uri(source),
+            // A deployment setting (frontend media decoding), not a client error.
+            MultimodalData::Decoded(_) => Err(client::invalid_argument(
+                "the TensorRT-LLM sidecar cannot read media that the frontend decoded",
+            )),
+            MultimodalData::UuidOnly(_) => Err(client::invalid_request(
+                "the TensorRT-LLM sidecar cannot resolve UUID-only media; send images as data URIs",
+            )),
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(Some(pb::MultimodalInput { image_data }))
+}
+
+/// Decodes `data:[<media type>][;<param>...];base64,<data>`. TensorRT-LLM
+/// identifies the image format from the bytes, so the media type is not
+/// checked. The scheme and the `base64` marker are case-insensitive (RFC 2397).
+fn decode_image_data_uri(source: &str) -> Result<Vec<u8>, DynamoError> {
+    if !source
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        return Err(client::invalid_request(
+            "the TensorRT-LLM sidecar cannot fetch image URLs; send images as base64 data URIs",
+        ));
+    }
+    let payload = source
+        .split_once(',')
+        .filter(|(header, _)| {
+            header
+                .rsplit_once(';')
+                .is_some_and(|(_, marker)| marker.eq_ignore_ascii_case("base64"))
+        })
+        .map(|(_, payload)| payload)
+        .ok_or_else(|| {
+            client::invalid_request("image data URI must have the form data:<type>;base64,<data>")
+        })?;
+    let bytes = BASE64_STANDARD.decode(payload).map_err(|error| {
+        client::invalid_request_with_detail(
+            "image data URI is not valid base64",
+            format!("image data URI is not valid base64: {error}"),
+        )
+    })?;
+    if bytes.is_empty() {
+        return Err(client::invalid_request("image data URI has no image bytes"));
+    }
+    Ok(bytes)
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {
@@ -222,12 +337,12 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             "prompt embeddings are not supported by the TensorRT-LLM sidecar",
         ));
     }
-    if request.multi_modal_data.is_some()
-        || request.mm_routing_info.is_some()
-        || request.encoder_result.is_some()
-    {
+    // `multi_modal_data` is screened in `multimodal_input`. `mm_routing_info` is
+    // routing-only data that the frontend attaches to image requests; the
+    // engine does not need it.
+    if request.encoder_result.is_some() {
         return Err(client::invalid_argument(
-            "multimodal requests are not supported by the TensorRT-LLM sidecar",
+            "encoder results are not supported by the TensorRT-LLM sidecar",
         ));
     }
     if request.prefill_result.is_some() {
