@@ -374,6 +374,10 @@ jobs:
   sidecar-vllm-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, vllm-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: ${{ fromJSON(needs.changed-files.outputs.run_multigpu_tests == 'true' && '[1,2]' || '[1]') }}
     # vllm-build must have succeeded or been intentionally skipped (a
     # lib/sidecar-only PR) -- not failed or cancelled -- or the fallback below
     # would silently test this PR's sidecar binary against main's vllm image
@@ -386,14 +390,14 @@ jobs:
     with:
       test_suite_name: vllm
       framework: vllm  # matches the framework passed to vllm-build
-      test_type: Sidecar E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
+      test_type: ${{ format('Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.vllm-build.result == 'success' && needs.vllm-build.outputs.target_tag_plain || 'vllm-runtime' }}
       source_ref: ${{ needs.vllm-build.result == 'success' && github.sha || 'main' }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sidecar and vllm and gpu_1
+      gpu_test_markers: ${{ format('pre_merge and sidecar and vllm and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: vllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -402,6 +406,10 @@ jobs:
   sidecar-sglang-test:
     name: sidecar-runtime # This name overlaps with other sidecar jobs to group them in the UI
     needs: [changed-files, sglang-build, sidecar-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_count: ${{ fromJSON(needs.changed-files.outputs.run_multigpu_tests == 'true' && '[1,2]' || '[1]') }}
     # See sidecar-vllm-test above: sglang-build must have succeeded or been
     # intentionally skipped, not failed or cancelled.
     if: ${{ !cancelled() && needs.changed-files.outputs.sidecar == 'true' && needs.sidecar-build.result == 'success' && (needs.sglang-build.result == 'success' || needs.sglang-build.result == 'skipped') }}
@@ -412,14 +420,14 @@ jobs:
     with:
       test_suite_name: sglang
       framework: sglang  # matches the framework passed to sglang-build
-      test_type: Sidecar E2E Test
-      amd_runner: prod-tester-amd-gpu-v2
+      test_type: ${{ format('Sidecar {0}-GPU E2E Test', matrix.gpu_count) }}
+      amd_runner: ${{ matrix.gpu_count == 2 && 'prod-tester-amd-gpu-2-v2' || 'prod-tester-amd-gpu-v2' }}
       target_tag_plain: ${{ needs.sglang-build.result == 'success' && needs.sglang-build.outputs.target_tag_plain || 'sglang-runtime' }}
       source_ref: ${{ needs.sglang-build.result == 'success' && github.sha || 'main' }}
       cuda_version: '["13.0"]'
       platform: '["amd64"]'
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sidecar and sglang and gpu_1
+      gpu_test_markers: ${{ format('pre_merge and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
@@ -932,7 +940,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and vllm and gpu_2
+      gpu_test_markers: pre_merge and vllm and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
@@ -980,7 +988,7 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64"]' # No ARM GPUs available
       run_sanity_check: false
-      gpu_test_markers: pre_merge and sglang and gpu_2
+      gpu_test_markers: pre_merge and sglang and gpu_2 and not sidecar
       gpu_test_timeout_minutes: 60
     secrets: inherit
 
