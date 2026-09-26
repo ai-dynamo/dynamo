@@ -69,6 +69,7 @@ fn configured_zmq_context(value: Option<&OsStr>) -> Result<Context> {
 /// This controls the maximum number of messages that can be queued.
 /// Default ZMQ HWM is 1000, which limits scalability.
 const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
+pub(super) const DEFAULT_SNDHWM: i32 = ZMQ_SNDHWM;
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
@@ -124,13 +125,14 @@ where
     builder.connect(endpoint).map_err(map_socket_creation_error)
 }
 
-fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
+/// ZMQ reads a mark of zero as "no limit", which is the opposite of what a
+/// caller that sets a mark wants.
+fn configure_publish_builder<T>(builder: SocketBuilder<T>, sndhwm: i32) -> Result<SocketBuilder<T>>
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder
-        .set_sndhwm(ZMQ_SNDHWM)
-        .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+    anyhow::ensure!(sndhwm > 0, "ZMQ send HWM must be greater than zero");
+    Ok(builder.set_sndhwm(sndhwm).set_sndtimeo(ZMQ_SNDTIMEOUT_MS))
 }
 
 fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
@@ -176,6 +178,19 @@ impl ZmqPubTransport {
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
+        Self::bind_with_sndhwm(endpoint, topic, ZMQ_SNDHWM).await
+    }
+
+    /// Like [`Self::bind`], with an explicit send high-water mark.
+    ///
+    /// The mark is the number of messages ZMQ queues for each subscriber that
+    /// has stopped reading. A publisher of large messages lowers it to bound
+    /// the memory one stalled subscriber can hold.
+    pub async fn bind_with_sndhwm(
+        endpoint: &str,
+        topic: &str,
+        sndhwm: i32,
+    ) -> Result<(Self, String)> {
         let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
             format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
@@ -183,7 +198,10 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context()?;
-        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &bind_endpoint)?;
+        let socket = bind_tmq_socket(
+            configure_publish_builder(publish(&ctx), sndhwm)?,
+            &bind_endpoint,
+        )?;
         let actual_endpoint = socket
             .get_socket()
             .get_last_endpoint()
@@ -193,7 +211,7 @@ impl ZmqPubTransport {
         tracing::info!(
             endpoint = %actual_endpoint,
             topic = %topic,
-            sndhwm = ZMQ_SNDHWM,
+            sndhwm,
             "ZMQ PUB transport bound with configured HWM"
         );
 
@@ -212,32 +230,30 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context()?;
-        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
-
-        tracing::info!(
-            endpoint = %xsub_endpoint,
-            topic = %topic,
-            sndhwm = ZMQ_SNDHWM,
-            "ZMQ PUB transport connected to broker XSUB"
-        );
-
-        Ok(Self {
-            socket: Arc::new(Mutex::new(socket)),
-            topic: topic.to_string(),
-        })
+        Self::connect_multiple_with_sndhwm(&[xsub_endpoint.to_string()], topic, ZMQ_SNDHWM).await
     }
 
     /// Connect to multiple broker XSUB endpoints (HA mode)
     pub async fn connect_multiple(xsub_endpoints: &[String], topic: &str) -> Result<Self> {
+        Self::connect_multiple_with_sndhwm(xsub_endpoints, topic, ZMQ_SNDHWM).await
+    }
+
+    /// Like [`Self::connect_multiple`], with an explicit send high-water mark.
+    pub async fn connect_multiple_with_sndhwm(
+        xsub_endpoints: &[String],
+        topic: &str,
+        sndhwm: i32,
+    ) -> Result<Self> {
         let mut endpoints = xsub_endpoints.iter();
         let Some(first_endpoint) = endpoints.next() else {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
         let ctx = shared_zmq_context()?;
-        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
-
+        let socket = connect_tmq_socket(
+            configure_publish_builder(publish(&ctx), sndhwm)?,
+            first_endpoint,
+        )?;
         for endpoint in endpoints {
             socket.get_socket().connect(endpoint)?;
             tracing::debug!(endpoint = %endpoint, "ZMQ PUB connected to broker XSUB");
@@ -246,8 +262,8 @@ impl ZmqPubTransport {
         tracing::info!(
             num_endpoints = xsub_endpoints.len(),
             topic = %topic,
-            sndhwm = ZMQ_SNDHWM,
-            "ZMQ PUB transport connected to multiple broker XSUBs with configured HWM"
+            sndhwm,
+            "ZMQ PUB transport connected to broker XSUBs with configured HWM"
         );
 
         Ok(Self {
@@ -904,6 +920,75 @@ mod tests {
         assert_eq!(decoded.publisher_id, 12345);
         assert_eq!(decoded.sequence, 1);
         assert_eq!(decoded.topic, topic);
+    }
+
+    #[tokio::test]
+    async fn publisher_applies_explicit_send_hwm() {
+        let pid = std::process::id();
+        let topic = "explicit-send-hwm";
+
+        let endpoint = format!("inproc://dynamo-zmq-send-hwm-{pid}");
+        let (bounded, _) = ZmqPubTransport::bind_with_sndhwm(&endpoint, topic, 41)
+            .await
+            .unwrap();
+        assert_eq!(
+            bounded
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .get_sndhwm()
+                .unwrap(),
+            41
+        );
+
+        let endpoint = format!("inproc://dynamo-zmq-send-hwm-default-{pid}");
+        let (default, _) = ZmqPubTransport::bind(&endpoint, topic).await.unwrap();
+        assert_eq!(
+            default
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .get_sndhwm()
+                .unwrap(),
+            ZMQ_SNDHWM
+        );
+
+        let connected = ZmqPubTransport::connect_multiple_with_sndhwm(
+            std::slice::from_ref(&endpoint),
+            topic,
+            43,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            connected
+                .socket
+                .lock()
+                .await
+                .get_socket()
+                .get_sndhwm()
+                .unwrap(),
+            43
+        );
+
+        // Zero means "no limit" to ZMQ.
+        let unbounded = format!("inproc://dynamo-zmq-send-hwm-zero-{pid}");
+        assert!(
+            ZmqPubTransport::bind_with_sndhwm(&unbounded, topic, 0)
+                .await
+                .is_err()
+        );
+        assert!(
+            ZmqPubTransport::connect_multiple_with_sndhwm(
+                std::slice::from_ref(&endpoint),
+                topic,
+                -1
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[tokio::test]
