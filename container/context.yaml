@@ -130,13 +130,17 @@ sglang:
     # Dynamo Rust wheel is built without media-ffmpeg.
     baseline_sbom: cuda@0230b7f2
   xpu:
+    # oneAPI 2026.0 is required by the SGLang XPU pins below: torch 2.13.0+xpu
+    # links intel-sycl-rt 2026.0.0 (libsycl.so.9), and sgl-kernel-xpu's SYCL
+    # kernels must be compiled by the matching icpx. The 2025.3 base ships
+    # libsycl.so.8, so its icpx produces a kernel .so that torch cannot load.
     base_image: intel/deep-learning-essentials
-    base_image_tag: 2025.3.2-0-devel-ubuntu24.04
+    base_image_tag: 2026.0.0-devel-ubuntu24.04
     runtime_image: intel/deep-learning-essentials
-    runtime_image_tag: 2025.3.2-0-devel-ubuntu24.04
-    sglang_ref: v0.5.11
+    runtime_image_tag: 2026.0.0-devel-ubuntu24.04
+    sglang_ref: v0.5.19
     sglang_git_url: https://github.com/sgl-project/sglang.git
-    sglang_kernel_ref: 3fbd4d33721ce3cf818b1cec3978043951406f10
+    sglang_kernel_ref: v0.2.0
     sglang_kernel_git_url: https://github.com/sgl-project/sgl-kernel-xpu.git
     # XPU SGLang requires a newer NIXL than the framework default; scoped here
     # to avoid affecting sglang-cuda or other frameworks (e.g. dynamo KVBM link).
