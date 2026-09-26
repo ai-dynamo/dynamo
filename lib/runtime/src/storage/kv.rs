@@ -776,6 +776,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manager_watch_stops_when_receiver_is_dropped() {
+        let manager = Arc::new(Manager::memory());
+        let bucket = manager
+            .get_or_create_bucket(BUCKET_NAME, None)
+            .await
+            .unwrap();
+        let key = Key::new("ns/worker/generate/1".to_string());
+        bucket.insert(&key, "value".into(), 1).await.unwrap();
+
+        let cancel_token = CancellationToken::new();
+        let (watch_task, mut rx) = manager
+            .clone()
+            .watch(BUCKET_NAME, None, cancel_token.clone())
+            .await
+            .unwrap();
+
+        let initial = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(initial, WatchEvent::Put(_)));
+
+        drop(rx);
+
+        tokio::time::timeout(Duration::from_secs(5), watch_task)
+            .await
+            .expect("watch task must stop when its receiver is dropped")
+            .unwrap();
+        assert!(
+            !cancel_token.is_cancelled(),
+            "termination must not depend on the cancellation token"
+        );
+    }
+
+    #[tokio::test]
     async fn saturated_watch_channel_delivers_final_taint_state() {
         let cancel_token = CancellationToken::new();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);

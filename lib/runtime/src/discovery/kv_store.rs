@@ -724,7 +724,8 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        let (_, mut rx) = self
+        // Dropping the returned stream drops rx and stops the detached watch task.
+        let (_watch_task, mut rx) = self
             .store
             .clone()
             .watch(
