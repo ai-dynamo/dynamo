@@ -32,6 +32,27 @@ layouts and can generate deployment artifacts for the selected target.
 > [Supported Configurations](#supported-configurations) for the full matrix and
 > alternatives.
 
+## AISimulate Ownership and Compatibility
+
+> [!NOTE]
+> **Retained sizing interface.** The `aiconfigurator cli` commands on this page are compatibility
+> entry points provided by AISimulate. Follow the pinned AISimulate installation in [Quick
+> Start](#quick-start); do not install a separate `aiconfigurator` or `aiconfigurator-core` package.
+
+[AISimulate](https://pypi.org/project/aisimulate/) maintains the performance models, analytical
+sizing code, and deployment-artifact generator used here. The retained command and import names
+allow existing sizing workflows and Dynamo's Profiler integration to continue working.
+
+For request-level offline prediction and configuration search, start with the [AISimulate
+workflows](../knowledge-base/modular-components/ai-simulate-experimental/overview.md) and their
+`aisimulate predict` and `aisimulate recommend` commands. These use public YAML configurations and
+have different inputs and outputs from the analytical sizing modes below. Keep the retained sizing
+commands when you need those modes or their deployment artifacts; changing only the executable
+name is not a migration.
+
+The support-matrix links below describe compatibility coverage for these retained sizing workflows.
+Check coverage for the model, system, backend, and version used by your installed release.
+
 ## When to Use AIConfigurator
 
 When deploying LLMs with Dynamo, you need to make several critical decisions:

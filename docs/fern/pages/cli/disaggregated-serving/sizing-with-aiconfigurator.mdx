@@ -5,6 +5,13 @@ title: Size a Local Deployment with AIConfigurator
 subtitle: Choose parallelism and worker counts before launching local Dynamo processes
 ---
 
+<Note>
+**AISimulate compatibility path.** This guide uses the retained `aiconfigurator` sizing command
+shipped by AISimulate. Install AISimulate as shown below and keep these command names and arguments.
+See [AISimulate ownership and compatibility](../../developer-guide/additional-resources/aiconfigurator-reference.md#aisimulate-ownership-and-compatibility)
+for the distinction between analytical sizing and the unified prediction and recommendation CLI.
+</Note>
+
 AIConfigurator estimates inference performance across candidate parallelism and deployment layouts.
 Use it before launching a local Dynamo deployment to choose tensor parallelism (TP), pipeline
 parallelism (PP), and the number of worker replicas to validate.

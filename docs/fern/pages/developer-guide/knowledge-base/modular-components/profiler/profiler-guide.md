@@ -11,6 +11,13 @@ The Dynamo Profiler analyzes model inference performance and generates optimized
 
 The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
+> [!NOTE]
+> **AISimulate owns the sizing implementation.** The Profiler remains a supported Dynamo
+> component and consumes the retained AIC APIs shipped in AISimulate. The `aiconfigurator` and
+> `aiconfigurator_core` import names do not require separate legacy distributions. See
+> [AISimulate ownership and compatibility](../../../additional-resources/aiconfigurator-reference.md#aisimulate-ownership-and-compatibility)
+> for installation and the distinction from standalone prediction and recommendation workflows.
+
 ## Workflow
 
 - **What** model you want to deploy (`model`)
