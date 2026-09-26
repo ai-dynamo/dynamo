@@ -272,6 +272,64 @@ def test_make_kv_connector_protocol_dispatches_nixl():
     assert isinstance(proto, NixlConnectorProtocol)
 
 
+def test_make_kv_connector_protocol_dispatches_nixl_push():
+    """NixlPushConnector (vLLM #35264) shares pull mode's wire shape, so it
+    resolves to the same protocol instead of the unsupported-connector error."""
+    proto = make_kv_connector_protocol(_config("NixlPushConnector"))
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+def test_make_kv_connector_protocol_dispatches_nixl_pull():
+    proto = make_kv_connector_protocol(_config("NixlPullConnector"))
+    assert isinstance(proto, NixlConnectorProtocol)
+    assert (
+        proto.prefill_request_kv_transfer_params()
+        == NixlConnectorProtocol(
+            _config("NixlConnector")
+        ).prefill_request_kv_transfer_params()
+    )
+    engine_payload = {"remote_engine_id": "eng-1", "remote_block_ids": [3, 4]}
+    response = SimpleNamespace(kv_transfer_params=engine_payload)
+    assert proto.decode_request_kv_transfer_params(response) is engine_payload
+
+
+def test_make_kv_connector_protocol_dispatches_multiconnector_to_nixl_push():
+    proto = make_kv_connector_protocol(
+        _config(
+            "MultiConnector",
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "DynamoConnector"},
+                    {"kv_connector": "NixlPushConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+
+
+@pytest.mark.parametrize("wrapper", ["PdConnector", "MultiConnector"])
+def test_make_kv_connector_protocol_dispatches_wrapper_to_nixl_pull(wrapper):
+    proto = make_kv_connector_protocol(
+        _config(
+            wrapper,
+            kv_connector_extra_config={
+                "connectors": [
+                    {"kv_connector": "DynamoConnector"},
+                    {"kv_connector": "NixlPullConnector"},
+                ]
+            },
+        )
+    )
+    assert isinstance(proto, NixlConnectorProtocol)
+    assert (
+        proto.prefill_request_kv_transfer_params()
+        == NixlConnectorProtocol(
+            _config("NixlConnector")
+        ).prefill_request_kv_transfer_params()
+    )
+
+
 def test_make_kv_connector_protocol_dispatches_mooncake(fake_mooncake):
     proto = make_kv_connector_protocol(_config("MooncakeConnector"))
     assert isinstance(proto, MooncakeConnectorProtocol)
@@ -530,9 +588,11 @@ def test_registry_keys_match_vllm_connector_names():
     vLLM uses in ``KVTransferConfig.kv_connector``."""
     assert set(KV_CONNECTOR_PROTOCOLS) == {
         "NixlConnector",
+        "NixlPullConnector",
         "MooncakeConnector",
         "LMCacheMPConnector",
         "NeuronNixlConnector",
+        "NixlPushConnector",
         "MooncakeConnector",
     }
     for cls in KV_CONNECTOR_PROTOCOLS.values():
