@@ -306,7 +306,10 @@ class OrchestratorEngineAdapter:
             self._orchestrator.register_internal(
                 plugin_id=predict.plugin_id,
                 plugin_type="predict",
-                priority=0,
+                # PREDICT is first-writer-wins. Leave priorities 0-99 for
+                # external forecasts; the builtin fills missing fields and
+                # remains the fallback when an external predictor has no result.
+                priority=100,
                 instance=predict,
                 execution_interval_seconds=throughput_interval,
                 needs=["observations.traffic"],

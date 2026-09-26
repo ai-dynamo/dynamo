@@ -1449,3 +1449,73 @@ def test_lazy_traffic_pull_matches_dot_path_sub_paths_of_observations_traffic():
     assert (
         sched.need_traffic_metrics is False
     ), "unrelated needs must not trigger the traffic pull"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_kind", ["prediction", "no_opinion", "failure"])
+async def test_external_prediction_overrides_builtin_with_fallback(
+    response_kind: str,
+) -> None:
+    """An external forecast wins; missing or failed forecasts use the builtin."""
+    from dynamo.planner.plugins.types import (
+        PredictionData,
+        PredictStageRequest,
+        PredictStageResponse,
+    )
+
+    class ExternalPredictor:
+        async def Predict(self, req: PredictStageRequest) -> PredictStageResponse:
+            if response_kind == "failure":
+                raise RuntimeError("forecast unavailable")
+            if response_kind == "no_opinion":
+                return PredictStageResponse()
+            return PredictStageResponse(
+                predictions=PredictionData(
+                    predicted_num_req=300.0,
+                    predicted_isl=1024.0,
+                    predicted_osl=256.0,
+                    source="external_predictor",
+                )
+            )
+
+    cfg = _agg_config_custom_intervals(load_interval=5.0, throughput_interval=60.0)
+    cfg.load_predictor = "constant"
+    adapter = OrchestratorEngineAdapter(cfg, _caps(), clock=VirtualClock())
+    adapter._orchestrator.register_internal(
+        plugin_id="external_predictor",
+        plugin_type="predict",
+        priority=10,
+        instance=ExternalPredictor(),
+        needs=["observations.traffic"],
+        is_builtin=False,
+    )
+    adapter.initial_tick(start_s=0.0)
+    adapter._last_tick_s = 59.0
+    adapter._last_tick_monotonic = 59.0
+    tick = adapter._compute_next_scheduled_tick()
+    effects = await adapter.tick(
+        tick,
+        TickInput(
+            now_s=60.0,
+            traffic=TrafficObservation(
+                duration_s=60.0,
+                num_req=100.0,
+                isl=512.0,
+                osl=128.0,
+                kv_hit_rate=0.25,
+            ),
+            worker_counts=WorkerCounts(ready_num_decode=1),
+        ),
+    )
+
+    diagnostics = effects.diagnostics
+    if response_kind == "prediction":
+        assert diagnostics.predicted_num_req == 300.0
+        assert diagnostics.predicted_isl == 1024.0
+        assert diagnostics.predicted_osl == 256.0
+    else:
+        assert diagnostics.predicted_num_req == 100.0
+        assert diagnostics.predicted_isl == 512.0
+        assert diagnostics.predicted_osl == 128.0
+    # Fields the external model does not predict still come from the builtin.
+    assert diagnostics.predicted_kv_hit_rate == 0.25
