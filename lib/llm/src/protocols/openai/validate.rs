@@ -66,7 +66,10 @@ pub const MAX_TOP_LOGPROBS: u8 = 20;
 /// Minimum allowed value for `logprobs` in completion requests
 pub const MIN_LOGPROBS: u8 = 0;
 /// Maximum allowed value for `logprobs` in completion requests
-pub const MAX_LOGPROBS: u8 = 5;
+///
+/// Matches the chat `top_logprobs` limit and vLLM's default `--max-logprobs`,
+/// rather than the legacy OpenAI completions limit of 5.
+pub const MAX_LOGPROBS: u8 = 20;
 
 /// Minimum allowed value for `n` (number of choices)
 pub const MIN_N: u8 = 1;
@@ -1232,6 +1235,13 @@ mod tests {
             let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
         }
+    }
+
+    #[test]
+    fn validate_logprobs_matches_top_logprobs_limit() {
+        validate_logprobs(Some(MAX_TOP_LOGPROBS)).unwrap();
+        let err = validate_logprobs(Some(MAX_TOP_LOGPROBS + 1)).unwrap_err();
+        assert!(err.to_string().contains("between 0 and 20"), "{err}");
     }
 
     #[test]
