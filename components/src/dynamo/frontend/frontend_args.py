@@ -140,7 +140,6 @@ def _quota_in_cgroup_hierarchy(
 
 
 def _default_sglang_preprocess_workers() -> int:
-    """Leave one effective CPU for the frontend and cap pool size at two."""
     try:
         cpu_count = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):

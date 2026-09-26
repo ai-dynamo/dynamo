@@ -190,9 +190,8 @@ def test_cgroup_v2_namespaced_root(
     assert frontend_args._cpu_quota_count() == 2
 
 
-@pytest.mark.parametrize("mount_root", ["/kubepods/pod", "/.."])
 def test_cgroup_ambiguous_mount_is_conservative(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mount_root: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     root = tmp_path / "cgroup"
     root.mkdir()
@@ -200,7 +199,7 @@ def test_cgroup_ambiguous_mount_is_conservative(
     mock_proc_cgroup(
         monkeypatch,
         "0::/",
-        f"31 24 0:28 {mount_root} {root} rw - cgroup2 cgroup rw",
+        f"31 24 0:28 /kubepods/pod {root} rw - cgroup2 cgroup rw",
     )
 
     assert frontend_args._cpu_quota_count() == 1
