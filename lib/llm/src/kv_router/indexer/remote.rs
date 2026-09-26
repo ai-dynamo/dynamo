@@ -888,6 +888,42 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_retirement_blocks_replacement_until_cleanup_completes() {
+        // The process-global TCP accept loop must outlive this test's real query.
+        const TEST: &str = concat!(
+            module_path!(),
+            "::interrupted_retirement_blocks_replacement_until_cleanup_completes"
+        );
+        let test_name = TEST.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_SERVED_INDEXER_TEST").as_deref() != Ok(test_name) {
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("DYNAMO_SERVED_INDEXER_TEST", test_name)
+                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RPC_PORT", "0")
+                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("retirement subprocess must finish within its deadline")
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+                "retirement subprocess must run exactly one passing test: {stdout}"
+            );
+            return;
+        }
         let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
         tokio::time::timeout(Duration::from_secs(10), async {
             let (drt, component) = registry_test_component("retirement-barrier").await;
