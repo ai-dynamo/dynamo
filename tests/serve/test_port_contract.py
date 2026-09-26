@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import re
 import subprocess
 from pathlib import Path
+from typing import Dict, Sequence, Tuple
 
 import pytest
 
@@ -12,6 +15,89 @@ from tests.utils.engine_process import EngineConfig
 from tests.utils.port_utils import ServicePorts, reserved_ports
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+_E_PD_LAUNCHER = (
+    Path(__file__)
+    .parents[2]
+    .joinpath("examples/backends/vllm/launch/disagg_multimodal_e_pd.sh")
+)
+
+# Records one worker's ports, then stays alive until every role has recorded:
+# the launcher tears down its whole process group when a child exits, racing
+# later workers out of the record. The bound only caps a launch that never
+# starts all three; the launcher's own cleanup trap reaps this stub first.
+_STUB_ROLES = 3
+_STUB_ENGINE = f"""#!/bin/bash
+# Only a module launch is a worker; the launcher also runs the interpreter for
+# its own checks, and those have to reach the real one.
+case " $* " in
+    *" -m "*) ;;
+    *) exec python3 "$@" ;;
+esac
+printf '%s\\t%s\\t%s\\n' \
+    "${{DYN_SYSTEM_PORT:-}}" "${{VLLM_NIXL_SIDE_CHANNEL_PORT:-}}" "$*" >> "$PORT_RECORD"
+for _ in $(seq 200); do
+    [ "$(wc -l < "$PORT_RECORD")" -ge {_STUB_ROLES} ] && exit 0
+    sleep 0.05
+done
+"""
+
+
+def _run_e_pd_launcher(
+    tmp_path: Path, env: Dict[str, str], extra_args: Sequence[str] = ()
+) -> Tuple[subprocess.CompletedProcess, Dict[str, Dict[str, str]]]:
+    """Launch the E+PD script against a stub engine and collect per-worker ports.
+
+    Returns the finished process plus, keyed by role, the system port, the NIXL
+    side-channel port, the KV-event endpoint port, and the raw command line each
+    process received.
+    """
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "python"
+    stub.write_text(_STUB_ENGINE)
+    stub.chmod(0o755)
+    record = tmp_path / "ports.tsv"
+
+    result = subprocess.run(
+        ["bash", str(_E_PD_LAUNCHER), "--single-gpu", *extra_args],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+        # The launcher's cleanup trap signals its own process group. Without a
+        # new session that group is pytest's.
+        start_new_session=True,
+        env={
+            "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+            "PORT_RECORD": str(record),
+            **env,
+        },
+    )
+
+    workers: Dict[str, Dict[str, str]] = {}
+    lines = record.read_text().splitlines() if record.exists() else []
+    for line in lines:
+        system_port, nixl_port, args = line.split("\t")
+        if "--disaggregation-mode encode" in args:
+            role = "encode"
+        elif "--disaggregation-mode pd" in args:
+            role = "pd"
+        else:
+            role = "frontend"
+        endpoint = re.search(r"tcp://\*:(\d+)", args)
+        workers[role] = {
+            "system": system_port,
+            "nixl": nixl_port,
+            "kv": endpoint.group(1) if endpoint else "",
+            "args": args,
+        }
+    return result, workers
+
+
+def _ports(worker: Dict[str, str]) -> Dict[str, str]:
+    """Drop the raw command line so a comparison stays exhaustive over ports."""
+    return {key: worker[key] for key in ("system", "nixl", "kv")}
 
 
 class _RequestNode:
@@ -236,6 +322,262 @@ def test_dyn_port_rejects_out_of_range_fallback() -> None:
 
     assert result.returncode != 0
     assert "DYN_SYSTEM_PORT1" in result.stderr
+
+
+# Backstop above _run_e_pd_launcher's own 120s subprocess bound, so that bound
+# reports the hang first and this only stops pytest waiting forever.
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_isolates_every_managed_worker_port(tmp_path: Path) -> None:
+    """Give each worker the vector index for its role, and the frontend none."""
+    with reserved_ports(6, DynamoPortRange.SERVE.value) as allocated:
+        system_ports = allocated[0:2]
+        kv_event_ports = allocated[2:4]
+        nixl_ports = allocated[4:6]
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                # The harness aliases the unindexed name to worker 1's port.
+                "DYN_SYSTEM_PORT": str(system_ports[0]),
+                "DYN_SYSTEM_PORT1": str(system_ports[0]),
+                "DYN_SYSTEM_PORT2": str(system_ports[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(kv_event_ports[0]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(kv_event_ports[1]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(nixl_ports[0]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(nixl_ports[1]),
+            },
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert set(workers) == {"frontend", "encode", "pd"}, result.stdout
+    assert _ports(workers["encode"]) == {
+        "system": str(system_ports[0]),
+        "nixl": str(nixl_ports[0]),
+        "kv": str(kv_event_ports[0]),
+    }
+    assert _ports(workers["pd"]) == {
+        "system": str(system_ports[1]),
+        "nixl": str(nixl_ports[1]),
+        "kv": str(kv_event_ports[1]),
+    }
+    assert workers["frontend"]["system"] not in {str(port) for port in system_ports}
+
+
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_fails_fast_on_missing_managed_port(tmp_path: Path) -> None:
+    """Stop the launch before any worker starts, rather than share a default."""
+    with reserved_ports(5, DynamoPortRange.SERVE.value) as allocated:
+        system_ports = allocated[0:2]
+        kv_event_ports = allocated[2:4]
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(system_ports[0]),
+                "DYN_SYSTEM_PORT1": str(system_ports[0]),
+                "DYN_SYSTEM_PORT2": str(system_ports[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(kv_event_ports[0]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(kv_event_ports[1]),
+                # PORT2 omitted on purpose.
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+            },
+        )
+
+    assert result.returncode != 0
+    assert "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2" in result.stderr
+    assert "encode" not in workers
+    assert "pd" not in workers
+
+
+@pytest.mark.parametrize(
+    "option", ["--kv-events-config", "--kv_events_config", "--kv_events_config="]
+)
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_refuses_managed_kv_events_override(
+    tmp_path: Path, option: str
+) -> None:
+    """Stop a passthrough config whose endpoint is not the reserved KV port."""
+    with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
+        config = f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{allocated[6]}"}}'
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(allocated[0]),
+                "DYN_SYSTEM_PORT1": str(allocated[0]),
+                "DYN_SYSTEM_PORT2": str(allocated[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(allocated[2]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(allocated[3]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(allocated[5]),
+            },
+            extra_args=[option + config] if option.endswith("=") else [option, config],
+        )
+
+    assert result.returncode != 0
+    assert "DYN_VLLM_KV_EVENT_PORT2" in result.stderr
+    assert "pd" not in workers
+
+
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_refuses_managed_kv_events_endpoint_decoy(
+    tmp_path: Path,
+) -> None:
+    """Read the last duplicate endpoint, matching the JSON parser's behavior."""
+    with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
+        reserved = f'"endpoint":"tcp://*:{allocated[3]}"'
+        config = (
+            '{"publisher":"zmq",'
+            f"{reserved},"
+            f'"endpoint":"tcp://*:{allocated[6]}"}}'
+        )
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(allocated[0]),
+                "DYN_SYSTEM_PORT1": str(allocated[0]),
+                "DYN_SYSTEM_PORT2": str(allocated[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(allocated[2]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(allocated[3]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(allocated[5]),
+            },
+            extra_args=["--kv-events-config", config],
+        )
+
+    assert result.returncode != 0
+    assert str(allocated[6]) in result.stderr
+    assert "pd" not in workers
+
+
+# Cover each option form once, including JSON decoding of an escaped endpoint.
+@pytest.mark.parametrize(
+    "option,escape_slashes",
+    [
+        ("--kv-events-config", True),
+        ("--kv-events-config=", False),
+        ("--kv_events_config", False),
+        ("--kv_events_config=", False),
+    ],
+)
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_keeps_managed_kv_events_on_the_reserved_port(
+    tmp_path: Path, option: str, escape_slashes: bool
+) -> None:
+    """Keep a passthrough config that leaves the endpoint on the reserved port."""
+    with reserved_ports(6, DynamoPortRange.SERVE.value) as allocated:
+        scheme = "tcp:\\/\\/" if escape_slashes else "tcp://"
+        config = (
+            '{"publisher":"zmq","topic":"kv-events",'
+            f'"endpoint":"{scheme}*:{allocated[3]}",'
+            '"enable_kv_cache_events":true}'
+        )
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT": str(allocated[0]),
+                "DYN_SYSTEM_PORT1": str(allocated[0]),
+                "DYN_SYSTEM_PORT2": str(allocated[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(allocated[2]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(allocated[3]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(allocated[5]),
+            },
+            extra_args=[option + config] if option.endswith("=") else [option, config],
+        )
+
+    assert result.returncode == 0, result.stderr
+    # Read from the raw command line rather than the parsed "kv" field, which
+    # only recognises the unescaped spelling.
+    assert f"*:{allocated[3]}" in workers["pd"]["args"]
+    # The generated config sets no enable_kv_cache_events, and vLLM would keep
+    # only one of the two, so reading the flag back means the caller's copy is
+    # the one that survived.
+    assert "enable_kv_cache_events" in workers["pd"]["args"]
+    assert len(re.findall(r"--kv[-_]events[-_]config", workers["pd"]["args"])) == 1
+
+
+@pytest.mark.parametrize(
+    "option,with_json",
+    [
+        ("--kv-events-config.endpoint", False),
+        ("--kv_events_config.endpoint=", False),
+        ("--kv-events-config.endpoint=", True),
+        ("--kv_events_config.enable_kv_cache_events", True),
+    ],
+)
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_refuses_managed_dotted_kv_events(
+    tmp_path: Path, option: str, with_json: bool
+) -> None:
+    """Dotted fields must not replace a validated whole JSON configuration."""
+    with reserved_ports(7, DynamoPortRange.SERVE.value) as allocated:
+        value = (
+            "true" if "enable_kv_cache_events" in option else f"tcp://*:{allocated[6]}"
+        )
+        args = [option + value] if option.endswith("=") else [option, value]
+        if with_json:
+            args = [
+                "--kv-events-config",
+                f'{{"publisher":"zmq","endpoint":"tcp://*:{allocated[3]}"}}',
+                *args,
+            ]
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {
+                "DYN_MANAGED_PORTS": "1",
+                "DYN_SYSTEM_PORT1": str(allocated[0]),
+                "DYN_SYSTEM_PORT2": str(allocated[1]),
+                "DYN_VLLM_KV_EVENT_PORT1": str(allocated[2]),
+                "DYN_VLLM_KV_EVENT_PORT2": str(allocated[3]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT1": str(allocated[4]),
+                "DYN_VLLM_NIXL_SIDE_CHANNEL_PORT2": str(allocated[5]),
+            },
+            extra_args=args,
+        )
+
+    assert result.returncode != 0
+    assert "Refusing dotted --kv-events-config" in result.stderr
+    assert "encode" not in workers
+    assert "pd" not in workers
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--kv-events-config",
+        "--kv_events_config",
+        "--kv_events_config=",
+        "--kv-events-config.endpoint",
+        "--kv_events_config.endpoint=",
+    ],
+)
+@pytest.mark.timeout(180)
+def test_e_pd_launcher_keeps_standalone_kv_events_passthrough(
+    tmp_path: Path, option: str
+) -> None:
+    """Drop the generated config standalone, where the caller's has always won."""
+    # _run_e_pd_launcher reports the first endpoint in the argument list. The
+    # allocator's range is disjoint from the launcher's standalone KV-event
+    # default, so reading this port back can only mean the generated option,
+    # which would precede it, was dropped.
+    with reserved_ports(1, DynamoPortRange.SERVE.value) as allocated:
+        value = (
+            f"tcp://*:{allocated[0]}"
+            if ".endpoint" in option
+            else f'{{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:{allocated[0]}"}}'
+        )
+        result, workers = _run_e_pd_launcher(
+            tmp_path,
+            {},
+            extra_args=[option + value] if option.endswith("=") else [option, value],
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert workers["pd"]["kv"] == str(allocated[0])
+    assert len(re.findall(r"--kv[-_]events[-_]config", workers["pd"]["args"])) == 1
 
 
 def test_dyn_port_accepts_high_non_system_port() -> None:

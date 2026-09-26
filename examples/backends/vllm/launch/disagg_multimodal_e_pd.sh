@@ -81,10 +81,11 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal E+PD ($GPU_
 
 # Start frontend (no router mode)
 echo "Starting frontend..."
-python -m dynamo.frontend &
-
-# Each worker needs its own system port when tests inject DYN_SYSTEM_PORT{1,2}.
-unset DYN_SYSTEM_PORT
+# Keep the harness's worker system ports out of the frontend's environment, as
+# disagg_multimodal_epd.sh does. The frontend also drops DYN_SYSTEM_PORT itself
+# (components/src/dynamo/frontend/main.py), so this is defence in depth.
+env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
+    python -m dynamo.frontend &
 
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
@@ -122,6 +123,80 @@ if [[ -z "$PD_GPU_MEM_ARGS" ]]; then
     PD_GPU_MEM_ARGS="--gpu-memory-utilization $DYN_PD_GPU_MEM"
 fi
 
+# Per-worker ports: literal defaults standalone; under DYN_MANAGED_PORTS
+# dyn_port refuses a missing or invalid value instead of sharing a default.
+SYSTEM_PORT_ENCODE=$(dyn_port DYN_SYSTEM_PORT 1 8081)
+SYSTEM_PORT_PD=$(dyn_port DYN_SYSTEM_PORT 2 8082)
+# vLLM binds the NIXL side channel only behind a KV connector; this script
+# passes no --kv-transfer-config, so today these only keep the two workers on
+# distinct values if one is ever configured.
+NIXL_PORT_ENCODE=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 1 "${VLLM_NIXL_SIDE_CHANNEL_PORT_ENCODE:-20097}")
+NIXL_PORT_PD=$(dyn_port DYN_VLLM_NIXL_SIDE_CHANNEL_PORT 2 "${VLLM_NIXL_SIDE_CHANNEL_PORT_PD:-20098}")
+# Pins the ZMQ endpoint for KV events; publishing itself stays off
+# (KVEventsConfig.enable_kv_cache_events defaults to false).
+KV_PORT_ENCODE=$(dyn_port DYN_VLLM_KV_EVENT_PORT 1 "${VLLM_ZMQ_PORT_ENCODE:-20080}")
+KV_PORT_PD=$(dyn_port DYN_VLLM_KV_EVENT_PORT 2 "${VLLM_ZMQ_PORT_PD:-20081}")
+
+# vLLM keeps only the last --kv-events-config it is given, so a passthrough copy
+# and the generated one cannot both apply. The caller's copy wins, as it did
+# before this script generated one, which keeps options the generated config
+# does not set (enable_kv_cache_events among them) reachable. Under
+# DYN_MANAGED_PORTS that copy must still name the port reserved for this worker;
+# any other endpoint would move the worker off it, so refuse the launch.
+KV_EVENTS_ARGS_PD=(--kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PD}\"}")
+KV_EVENTS_PD_OVERRIDE=""
+KV_EVENTS_PD_FOUND=false
+# Last occurrence wins, matching what argparse hands vLLM.
+for i in "${!EXTRA_PD_ARGS[@]}"; do
+    # Normalize only the option name; JSON values must reach vLLM unchanged.
+    KV_EVENTS_PD_OPTION="${EXTRA_PD_ARGS[$i]%%=*}"
+    KV_EVENTS_PD_OPTION="${KV_EVENTS_PD_OPTION//_/-}"
+    case "$KV_EVENTS_PD_OPTION" in
+        --kv-events-config)
+            if [[ "${EXTRA_PD_ARGS[$i]}" == *=* ]]; then
+                KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$i]#*=}"
+            else
+                KV_EVENTS_PD_OVERRIDE="${EXTRA_PD_ARGS[$((i + 1))]:-}"
+            fi
+            KV_EVENTS_PD_FOUND=true
+            ;;
+        --kv-events-config.*)
+            # vLLM assembles dotted options after whole JSON options. Do not
+            # validate one config while the engine uses another.
+            if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+                echo "Refusing dotted --kv-events-config options under DYN_MANAGED_PORTS." \
+                     "Use --kv-events-config JSON with endpoint tcp://*:${KV_PORT_PD}" \
+                     "reserved on DYN_VLLM_KV_EVENT_PORT2 instead." >&2
+                exit 1
+            fi
+            KV_EVENTS_PD_FOUND=true
+            ;;
+    esac
+done
+if [[ "$KV_EVENTS_PD_FOUND" == true ]]; then
+    if [[ -n "${DYN_MANAGED_PORTS:-}" ]]; then
+        # Decoded with the same json module vLLM parses this option with, so an
+        # escaped or duplicated endpoint reads here as it will there. Anything
+        # that is not an object with a string endpoint, including unparseable
+        # JSON or a missing interpreter, reads as unset and is refused.
+        KV_EVENTS_PD_ENDPOINT=$(python -c '
+import json, sys
+config = json.loads(sys.argv[1])
+endpoint = config.get("endpoint") if isinstance(config, dict) else None
+if isinstance(endpoint, str):
+    print(endpoint)
+' "$KV_EVENTS_PD_OVERRIDE" 2>/dev/null) || KV_EVENTS_PD_ENDPOINT=""
+        if [[ "$KV_EVENTS_PD_ENDPOINT" != "tcp://*:${KV_PORT_PD}" ]]; then
+            echo "Refusing a passthrough --kv-events-config under DYN_MANAGED_PORTS:" \
+                 "its endpoint reads as ${KV_EVENTS_PD_ENDPOINT:-unset}, not the" \
+                 "tcp://*:${KV_PORT_PD} reserved on DYN_VLLM_KV_EVENT_PORT2." \
+                 "Set that endpoint to keep the rest of the config." >&2
+            exit 1
+        fi
+    fi
+    KV_EVENTS_ARGS_PD=()
+fi
+
 # Start encode worker.
 #
 # NOTE: encoder VRAM is STATIC, set by the model — $DYN_ENCODE_GPU_MEM
@@ -149,8 +224,9 @@ fi
 # model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
 # once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_ENCODE \
 VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_ENCODE \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --enable-multimodal \
@@ -158,11 +234,13 @@ python -m dynamo.vllm \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
   $FD_ARGS \
-  $EXTRA_ARGS &
+  $EXTRA_ARGS \
+  --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_ENCODE}\"}" &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
 echo "Starting PD worker on GPU $DYN_PD_WORKER_GPU (${PD_GPU_MEM_ARGS})..."
-DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+DYN_SYSTEM_PORT=$SYSTEM_PORT_PD \
+VLLM_NIXL_SIDE_CHANNEL_PORT=$NIXL_PORT_PD \
 CUDA_VISIBLE_DEVICES=$DYN_PD_WORKER_GPU \
 python -m dynamo.vllm \
   --route-to-encoder \
@@ -173,7 +251,8 @@ python -m dynamo.vllm \
   $PD_GPU_MEM_ARGS \
   $FD_ARGS \
   $EXTRA_ARGS \
-  "${EXTRA_PD_ARGS[@]}" &
+  "${EXTRA_PD_ARGS[@]}" \
+  "${KV_EVENTS_ARGS_PD[@]}" &
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."
