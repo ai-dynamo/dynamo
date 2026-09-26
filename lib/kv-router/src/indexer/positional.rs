@@ -396,6 +396,7 @@ impl PositionalIndexer {
             parent_hash,
             start_position,
             blocks,
+            ..
         } = store_data;
         let worker_map = worker_blocks.entry(worker).or_default();
         let start_pos = match start_position {
@@ -564,6 +565,7 @@ impl PositionalIndexer {
                     event: KvCacheEvent {
                         event_id,
                         data: KvCacheEventData::Stored(KvCacheStoreData {
+                            shared_cache_eligible: false,
                             parent_hash: None,
                             start_position: Some(pos as u32),
                             blocks: vec![KvCacheStoredBlockData {

@@ -994,6 +994,7 @@ impl ApproximateLruLane {
             KvCacheEvent {
                 event_id: self.next_event_id(),
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: parent_hash.map(ExternalSequenceBlockHash),
                     start_position: None,
                     blocks: stored,
