@@ -138,9 +138,28 @@ class DynamoWorkerProcess(ManagedProcess):
         return super().__exit__(exc_type, exc_val, exc_tb)
 
 
-@pytest.mark.timeout(135)  # 3x average
-def test_request_cancellation_trtllm_aggregated(
+@pytest.fixture
+def trtllm_aggregated_topology(
     request, runtime_services_dynamic_ports, predownload_models
+):
+    """Start and stop the topology outside the cancellation test's timeout."""
+    # Step 1: Start the frontend (allocates its own frontend_port)
+    with DynamoFrontendProcess(request) as frontend:
+        logger.info("Frontend started successfully")
+
+        # Step 2: Start an aggregated worker (allocates its own system_port)
+        with DynamoWorkerProcess(request, frontend.frontend_port, mode="agg") as worker:
+            logger.info("Aggregated Worker PID: %s", worker.get_pid())
+
+            # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
+            time.sleep(2)
+
+            yield frontend, worker
+
+
+@pytest.mark.timeout(135, func_only=True)
+def test_request_cancellation_trtllm_aggregated(
+    trtllm_aggregated_topology,
 ):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
@@ -152,86 +171,78 @@ def test_request_cancellation_trtllm_aggregated(
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
 
+    The timeout covers the cancellation scenarios; the fixture handles startup
+    and teardown using the existing process readiness and shutdown timeouts.
+
     Timing (Last Run: 2025-12-09): ~45s total
     - Engine initialization: ~27s (frontend + worker)
     - Testing 3 scenarios: ~15s (~5s each)
     - Teardown: ~3s
     """
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
+    frontend, worker = trtllm_aggregated_topology
 
-        # Step 2: Start an aggregated worker (allocates its own system_port)
-        with DynamoWorkerProcess(request, frontend.frontend_port, mode="agg") as worker:
-            logger.info(f"Aggregated Worker PID: {worker.get_pid()}")
+    # Step 3: Test request cancellation with polling approach
+    frontend_log_offset, worker_log_offset = 0, 0
 
-            # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
-            time.sleep(2)
+    test_scenarios = [
+        ("completion", "Completion request cancellation"),
+        ("chat_completion", "Chat completion request cancellation"),
+        (
+            "chat_completion_stream",
+            "Chat completion stream request cancellation",
+        ),
+    ]
 
-            # Step 3: Test request cancellation with polling approach
-            frontend_log_offset, worker_log_offset = 0, 0
+    for idx, (request_type, description) in enumerate(test_scenarios):
+        logger.info(f"Testing {description.lower()}...")
 
-            test_scenarios = [
-                ("completion", "Completion request cancellation"),
-                ("chat_completion", "Chat completion request cancellation"),
-                (
-                    "chat_completion_stream",
-                    "Chat completion stream request cancellation",
-                ),
-            ]
+        # Send the request (non-blocking)
+        cancellable_req = send_cancellable_request(frontend.frontend_port, request_type)
 
-            for idx, (request_type, description) in enumerate(test_scenarios):
-                logger.info(f"Testing {description.lower()}...")
+        # Poll for "AggregatedHandler Request ID" pattern
+        request_id, worker_log_offset = poll_for_pattern(
+            process=worker,
+            pattern="AggregatedHandler Request ID: ",
+            log_offset=worker_log_offset,
+            match_type="contains",
+        )
 
-                # Send the request (non-blocking)
-                cancellable_req = send_cancellable_request(
-                    frontend.frontend_port, request_type
-                )
+        # For streaming, read 5 responses before cancelling
+        if request_type == "chat_completion_stream":
+            read_streaming_responses(cancellable_req, expected_count=5)
 
-                # Poll for "AggregatedHandler Request ID" pattern
-                request_id, worker_log_offset = poll_for_pattern(
-                    process=worker,
-                    pattern="AggregatedHandler Request ID: ",
-                    log_offset=worker_log_offset,
-                    match_type="contains",
-                )
+        # Now cancel the request
+        cancellable_req.cancel()
+        logger.info(f"Cancelled request ID: {request_id}")
 
-                # For streaming, read 5 responses before cancelling
-                if request_type == "chat_completion_stream":
-                    read_streaming_responses(cancellable_req, expected_count=5)
+        # Poll for "Aborted Request ID" with matching ID
+        _, worker_log_offset = poll_for_pattern(
+            process=worker,
+            pattern=f"Aborted Request ID: {request_id}",
+            log_offset=worker_log_offset,
+        )
 
-                # Now cancel the request
-                cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id}")
+        # Verify frontend log has kill message
+        _, frontend_log_offset = poll_for_pattern(
+            process=frontend,
+            pattern="issued control message control_msg=Kill",
+            log_offset=frontend_log_offset,
+        )
 
-                # Poll for "Aborted Request ID" with matching ID
-                _, worker_log_offset = poll_for_pattern(
-                    process=worker,
-                    pattern=f"Aborted Request ID: {request_id}",
-                    log_offset=worker_log_offset,
-                )
+        logger.info(f"{description} detected successfully")
 
-                # Verify frontend log has kill message
-                _, frontend_log_offset = poll_for_pattern(
-                    process=frontend,
-                    pattern="issued control message control_msg=Kill",
-                    log_offset=frontend_log_offset,
-                )
-
-                logger.info(f"{description} detected successfully")
-
-                # Verify cancellation metrics after each scenario
-                verify_frontend_cancellation_metrics(
-                    frontend_port=frontend.frontend_port,
-                    request_type=request_type,
-                    expected_count=1,
-                )
-                verify_runtime_cancellation_metrics(
-                    worker_system_port=worker.system_port,
-                    expected_count=idx + 1,
-                    component="backend",
-                )
+        # Verify cancellation metrics after each scenario
+        verify_frontend_cancellation_metrics(
+            frontend_port=frontend.frontend_port,
+            request_type=request_type,
+            expected_count=1,
+        )
+        verify_runtime_cancellation_metrics(
+            worker_system_port=worker.system_port,
+            expected_count=idx + 1,
+            component="backend",
+        )
 
 
 @pytest.mark.timeout(195)  # 3x average
