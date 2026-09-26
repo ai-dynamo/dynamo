@@ -33,6 +33,15 @@ from typing import (
 
 import numpy as np
 import torch
+
+try:
+    from modelexpress import envs as _modelexpress_envs
+    from modelexpress_rl import envs as _modelexpress_rl_envs
+except ModuleNotFoundError as exc:
+    if exc.name not in {"modelexpress", "modelexpress_rl"}:
+        raise
+    _modelexpress_envs = None
+    _modelexpress_rl_envs = None
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -96,7 +105,7 @@ from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from .args import Config
 from .cache_info import get_configured_kv_event_block_size
 from .capacity import publish_vllm_token_budget
-from .constants import DisaggregationMode, EmbeddingTransferMode
+from .constants import MX_LOAD_FORMATS, DisaggregationMode, EmbeddingTransferMode
 from .dp_topology import get_dp_range_for_worker
 from .engine_monitor import VllmEngineMonitor
 from .lora_state import LoRAState
@@ -163,6 +172,28 @@ _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
 )
 # An object sentinel cannot collide with a caller-supplied version.
 _WEIGHT_VERSION_UNDECLARED: Final = object()
+
+
+def _modelexpress_startup_weight_version(config: Config) -> Any:
+    """Return the version enforced by the ModelExpress RL startup loader.
+
+    ModelExpress releases without the RL startup policy do not expose its
+    configuration module and leave the version undeclared. When the policy is
+    available, its environment modules provide the same parsed values used by
+    the loader. The RL loader fails engine initialization unless every rank
+    loads the desired version, so a subsequently constructed handler serves
+    that version.
+    """
+    load_format = config.engine_args.load_format
+    if (
+        load_format not in MX_LOAD_FORMATS
+        or _modelexpress_envs is None
+        or _modelexpress_rl_envs is None
+        or _modelexpress_envs.MX_LOAD_STRATEGY_CHAIN != "RL"
+    ):
+        return _WEIGHT_VERSION_UNDECLARED
+    desired = _modelexpress_rl_envs.MX_REFIT_DESIRED_VERSION_UID
+    return desired if desired is not None else _WEIGHT_VERSION_UNDECLARED
 
 
 def build_prompt_tokens_details(
@@ -1210,7 +1241,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # to prevent both bypassing the check before either inserts (atomicity).
         self._lora_capacity_guard = asyncio.Lock()
         self._paused: bool = False
-        self._weight_version: Any = _WEIGHT_VERSION_UNDECLARED
+        self._weight_version: Any = _modelexpress_startup_weight_version(config)
 
         embedding_loader = self.init_embedding_loader(config, encode_worker_client)
 
