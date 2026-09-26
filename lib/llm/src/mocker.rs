@@ -1020,6 +1020,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
         let async_context = ctx.context();
         let reasoning = self.engine_args.reasoning.clone();
+        let enable_prefix_caching = self.engine_args.enable_prefix_caching;
         let handoff_session_timeout =
             Duration::from_millis(self.engine_args.handoff_session_timeout_ms);
         let mut native_timing = native_timing;
@@ -1119,6 +1120,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         }
 
                         if let Some(cached) = signal.cached_tokens {
+                            // Only account cache lookups when prefix caching is
+                            // enabled; otherwise the scheduler reports a zero
+                            // cached_tokens and every prompt length would be
+                            // counted as a query despite no cache lookup.
+                            if enable_prefix_caching {
+                                native_timing
+                                    .record_prefix_cache_result(prompt_tokens_count, cached);
+                            }
                             cached_prefix_tokens = Some(cached);
                         }
 

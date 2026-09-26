@@ -54,6 +54,8 @@ struct VllmFamilyCollectors {
     kv_cache_usage_perc: GaugeVec,
     gpu_cache_usage_perc: GaugeVec,
     num_preemptions_total: IntCounterVec,
+    prefix_cache_queries_total: Option<IntCounterVec>,
+    prefix_cache_hits_total: Option<IntCounterVec>,
     time_to_first_token_seconds: HistogramVec,
     inter_token_latency_seconds: HistogramVec,
     e2e_request_latency_seconds: HistogramVec,
@@ -80,6 +82,8 @@ struct VllmDpHandles {
     kv_cache_usage_perc: Gauge,
     gpu_cache_usage_perc: Gauge,
     num_preemptions_total: IntCounter,
+    prefix_cache_queries_total: Option<IntCounter>,
+    prefix_cache_hits_total: Option<IntCounter>,
     request_metrics: NativeRequestMetricHandles,
 }
 
@@ -109,6 +113,9 @@ pub(crate) struct NativeRequestTiming {
     handles: Option<NativeRequestMetricHandles>,
     start: Instant,
     last_token_at: Option<Instant>,
+    prefix_cache_queries_total: Option<IntCounter>,
+    prefix_cache_hits_total: Option<IntCounter>,
+    prefix_cache_observed: bool,
 }
 
 impl NativeMockerMetrics {
@@ -157,15 +164,14 @@ impl NativeMockerMetrics {
         is_prefill: bool,
         start: Instant,
     ) -> NativeRequestTiming {
-        if is_prefill {
-            return NativeRequestTiming::disabled(start);
-        }
-
+        // Prefill workers disable latency timing (they emit no tokens), but they
+        // still own the prefix-cache bookkeeping for their prompt, so bind the
+        // cache counters rather than returning a fully disabled timing.
         let Some(model_name) = self.ensure_model_name(model_name).await else {
             return NativeRequestTiming::disabled(start);
         };
 
-        let handles = {
+        let (handles, prefix_cache_queries_total, prefix_cache_hits_total) = {
             let mut state = self
                 .state
                 .lock()
@@ -174,13 +180,29 @@ impl NativeMockerMetrics {
             match state.handles.as_ref() {
                 Some(NativeMetricHandles::Vllm(handles)) => handles
                     .get(&dp_rank)
-                    .map(|handles| handles.request_metrics.clone()),
-                Some(NativeMetricHandles::Sglang(handles)) => Some(handles.request_metrics.clone()),
-                None => None,
+                    .map(|handles| {
+                        (
+                            (!is_prefill).then(|| handles.request_metrics.clone()),
+                            handles.prefix_cache_queries_total.clone(),
+                            handles.prefix_cache_hits_total.clone(),
+                        )
+                    })
+                    .unwrap_or((None, None, None)),
+                Some(NativeMetricHandles::Sglang(handles)) => (
+                    (!is_prefill).then(|| handles.request_metrics.clone()),
+                    None,
+                    None,
+                ),
+                None => (None, None, None),
             }
         };
 
-        NativeRequestTiming::new(start, handles)
+        NativeRequestTiming::new(
+            start,
+            handles,
+            prefix_cache_queries_total,
+            prefix_cache_hits_total,
+        )
     }
 
     async fn ensure_model_name(&self, request_model_name: &str) -> Option<String> {
@@ -243,6 +265,14 @@ impl NativeMockerMetrics {
                             num_preemptions_total: collectors
                                 .num_preemptions_total
                                 .with_label_values(&label_values),
+                            prefix_cache_queries_total: collectors
+                                .prefix_cache_queries_total
+                                .as_ref()
+                                .map(|counter| counter.with_label_values(&label_values)),
+                            prefix_cache_hits_total: collectors
+                                .prefix_cache_hits_total
+                                .as_ref()
+                                .map(|counter| counter.with_label_values(&label_values)),
                             request_metrics: NativeRequestMetricHandles::Vllm {
                                 time_to_first_token_seconds: collectors
                                     .time_to_first_token_seconds
@@ -420,6 +450,29 @@ impl VllmFamilyCollectors {
                 Opts::new(format!("{prefix}:num_preemptions_total"), preemptions_help),
                 VLLM_LABELS,
             )?,
+            // These counters follow the vLLM cache-metrics contract only.
+            prefix_cache_queries_total: (prefix == "vllm")
+                .then(|| {
+                    IntCounterVec::new(
+                        Opts::new(
+                            "vllm:prefix_cache_queries_total",
+                            "Number of prompt tokens queried against the Mocker prefix cache.",
+                        ),
+                        VLLM_LABELS,
+                    )
+                })
+                .transpose()?,
+            prefix_cache_hits_total: (prefix == "vllm")
+                .then(|| {
+                    IntCounterVec::new(
+                        Opts::new(
+                            "vllm:prefix_cache_hits_total",
+                            "Number of prompt tokens reused from the Mocker prefix cache.",
+                        ),
+                        VLLM_LABELS,
+                    )
+                })
+                .transpose()?,
             time_to_first_token_seconds: HistogramVec::new(
                 HistogramOpts::new(
                     format!("{prefix}:time_to_first_token_seconds"),
@@ -453,6 +506,12 @@ impl VllmFamilyCollectors {
         registry.add_metric(Box::new(self.kv_cache_usage_perc.clone()))?;
         registry.add_metric(Box::new(self.gpu_cache_usage_perc.clone()))?;
         registry.add_metric(Box::new(self.num_preemptions_total.clone()))?;
+        if let Some(counter) = &self.prefix_cache_queries_total {
+            registry.add_metric(Box::new(counter.clone()))?;
+        }
+        if let Some(counter) = &self.prefix_cache_hits_total {
+            registry.add_metric(Box::new(counter.clone()))?;
+        }
         registry.add_metric(Box::new(self.time_to_first_token_seconds.clone()))?;
         registry.add_metric(Box::new(self.inter_token_latency_seconds.clone()))?;
         registry.add_metric(Box::new(self.e2e_request_latency_seconds.clone()))?;
@@ -519,16 +578,45 @@ impl SglangCollectors {
 }
 
 impl NativeRequestTiming {
-    fn new(start: Instant, handles: Option<NativeRequestMetricHandles>) -> Self {
+    fn new(
+        start: Instant,
+        handles: Option<NativeRequestMetricHandles>,
+        prefix_cache_queries_total: Option<IntCounter>,
+        prefix_cache_hits_total: Option<IntCounter>,
+    ) -> Self {
         Self {
             handles,
             start,
             last_token_at: None,
+            prefix_cache_queries_total,
+            prefix_cache_hits_total,
+            prefix_cache_observed: false,
         }
     }
 
     fn disabled(start: Instant) -> Self {
-        Self::new(start, None)
+        Self::new(start, None, None, None)
+    }
+
+    pub(crate) fn record_prefix_cache_result(
+        &mut self,
+        queried_tokens: usize,
+        cached_tokens: usize,
+    ) {
+        if self.prefix_cache_observed {
+            return;
+        }
+        self.prefix_cache_observed = true;
+        if let Some(queries) = &self.prefix_cache_queries_total {
+            let queried_tokens = u64::try_from(queried_tokens).unwrap_or(u64::MAX);
+            let cached_tokens = u64::try_from(cached_tokens)
+                .unwrap_or(u64::MAX)
+                .min(queried_tokens);
+            queries.inc_by(queried_tokens);
+            if let Some(hits) = &self.prefix_cache_hits_total {
+                hits.inc_by(cached_tokens);
+            }
+        }
     }
 
     pub(crate) fn record_tokens(&mut self, token_count: usize) {
@@ -736,8 +824,37 @@ mod tests {
         let mut timing = metrics
             .request_timing("llama", 0, false, Instant::now())
             .await;
+        timing.record_prefix_cache_result(256, 128);
+        timing.record_prefix_cache_result(256, 128);
         timing.record_tokens(1);
         timing.record_normal_completion();
+        let mut miss_timing = metrics
+            .request_timing("llama", 0, false, Instant::now())
+            .await;
+        miss_timing.record_prefix_cache_result(64, 0);
+        // A prefill worker keeps latency timing disabled but still records the
+        // prefix-cache result for its prompt.
+        let mut prefill_timing = metrics
+            .request_timing("llama", 1, true, Instant::now())
+            .await;
+        prefill_timing.record_prefix_cache_result(512, 384);
+        prefill_timing.record_tokens(1);
+        prefill_timing.record_normal_completion();
+        // The non-prefill request above emitted one TTFT and one E2E sample,
+        // and no ITL (only one token recorded). Prefill must not add any
+        // latency samples, only cache counters.
+        assert_eq!(
+            histogram_count(&registry, "vllm:time_to_first_token_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&registry, "vllm:inter_token_latency_seconds"),
+            0
+        );
+        assert_eq!(
+            histogram_count(&registry, "vllm:e2e_request_latency_seconds"),
+            1
+        );
 
         let running = gather_family(&registry, "vllm:num_requests_running");
         assert_eq!(running.get_field_type(), MetricType::GAUGE);
@@ -761,6 +878,14 @@ mod tests {
         assert_eq!(
             gather_family(&registry, "vllm:num_preemptions_total").get_field_type(),
             MetricType::COUNTER
+        );
+        assert_eq!(
+            counter_value(&registry, "vllm:prefix_cache_queries_total"),
+            832.0
+        );
+        assert_eq!(
+            counter_value(&registry, "vllm:prefix_cache_hits_total"),
+            512.0
         );
         assert_eq!(
             gather_family(&registry, "vllm:time_to_first_token_seconds").get_field_type(),
