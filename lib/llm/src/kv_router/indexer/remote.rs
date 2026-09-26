@@ -301,6 +301,8 @@ impl ServedIndexerService {
             .endpoints
             .push(start_query_endpoint(component.clone(), bindings.clone()).await?);
         if mode == ServedIndexerMode::Approximate {
+            #[cfg(test)]
+            tests::pause_record_startup(&component).await;
             startup
                 .endpoints
                 .push(start_record_endpoint(component.clone(), bindings.clone()).await?);
@@ -343,7 +345,11 @@ impl ServedIndexerService {
                     let endpoints = Arc::clone(&self.endpoints);
                     async move {
                         let mut instance_ids = HashSet::new();
-                        while let Some(endpoint) = endpoints.lock().pop() {
+                        loop {
+                            let endpoint = endpoints.lock().pop();
+                            let Some(endpoint) = endpoint else {
+                                break;
+                            };
                             instance_ids.insert(endpoint.instance().instance_id);
                             shutdown_endpoint(endpoint).await;
                         }
@@ -366,8 +372,18 @@ async fn shutdown_endpoints(endpoints: Vec<StartedEndpoint>) {
 }
 
 async fn shutdown_endpoint(endpoint: StartedEndpoint) {
+    let instance = endpoint.instance().clone();
+    #[cfg(test)]
+    tests::pause_retirement(&instance).await;
     if let Err(error) = endpoint.shutdown().await {
-        tracing::warn!(error = %error, "served indexer endpoint shutdown failed");
+        tracing::warn!(
+            %error,
+            namespace = %instance.namespace,
+            component = %instance.component,
+            endpoint = %instance.endpoint,
+            instance_id = instance.instance_id,
+            "served indexer endpoint shutdown failed"
+        );
     }
 }
 
@@ -390,7 +406,6 @@ pub async fn ensure_served_indexer_service(
     indexer: Indexer,
 ) -> Result<ServedIndexerHandle> {
     enum BindOutcome {
-        Bound,
         AlreadyRegistered,
         Retired,
     }
@@ -416,18 +431,16 @@ pub async fn ensure_served_indexer_service(
             } else if bindings.contains_key(&model_name) {
                 BindOutcome::AlreadyRegistered
             } else {
-                bindings.insert(model_name.clone(), indexer.clone());
-                BindOutcome::Bound
-            }
-        };
-
-        match outcome {
-            BindOutcome::Bound => {
+                bindings.insert(model_name.clone(), indexer);
+                drop(bindings);
                 return Ok(ServedIndexerHandle {
                     service,
                     model_name,
                 });
             }
+        };
+
+        match outcome {
             BindOutcome::AlreadyRegistered => anyhow::bail!(
                 "served indexer for model {} is already registered under {}.{}",
                 model_name,
@@ -739,6 +752,180 @@ mod tests {
     use dynamo_kv_router::protocols::{StorageTier, WorkerWithDpRank, compute_seq_hash_for_block};
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio_util::sync::CancellationToken;
+
+    type Pause = (
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    );
+    type Pauses = LazyLock<parking_lot::Mutex<HashMap<ServiceKey, Pause>>>;
+    static STARTUP_PAUSES: Pauses = LazyLock::new(Default::default);
+    static RETIREMENT_PAUSES: Pauses = LazyLock::new(Default::default);
+
+    fn install_pause(
+        pauses: &Pauses,
+        key: ServiceKey,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        assert!(
+            pauses
+                .lock()
+                .insert(key, (reached_tx, release_rx))
+                .is_none()
+        );
+        (reached_rx, release_tx)
+    }
+
+    async fn pause(pauses: &Pauses, key: &ServiceKey) {
+        let barrier = pauses.lock().remove(key);
+        if let Some((reached, release)) = barrier {
+            reached.send(()).unwrap();
+            let _ = release.await;
+        }
+    }
+
+    pub(super) async fn pause_record_startup(component: &Component) {
+        pause(&STARTUP_PAUSES, &service_key(component)).await;
+    }
+
+    pub(super) async fn pause_retirement(instance: &dynamo_runtime::component::Instance) {
+        pause(
+            &RETIREMENT_PAUSES,
+            &(
+                instance.instance_id,
+                instance.namespace.clone(),
+                instance.component.clone(),
+            ),
+        )
+        .await;
+    }
+
+    async fn assert_query_callable(component: &Component) {
+        let remote = RemoteIndexer::new(component, "model-a".to_string(), true)
+            .await
+            .unwrap();
+        remote.query_client.wait_for_instances().await.unwrap();
+        dynamo_kv_router::services::indexer::backend::RemotePrimary::find_matches_by_tier(
+            &remote,
+            vec![],
+            true,
+        )
+        .await
+        .expect("replacement query endpoint should remain callable");
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_cleans_query_and_allows_retry() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (drt, component) = registry_test_component("cancelled-startup").await;
+            let key = service_key(&component);
+            let (reached, release) = install_pause(&STARTUP_PAUSES, key.clone());
+            let startup = tokio::spawn({
+                let component = component.clone();
+                async move {
+                    ensure_served_indexer_service(
+                        component,
+                        ServedIndexerMode::Approximate,
+                        "model-a".to_string(),
+                        Indexer::None,
+                    )
+                    .await
+                }
+            });
+            reached.await.unwrap();
+            assert!(!SERVED_INDEXER_SERVICES.contains_key(&key));
+            let query = DiscoveryQuery::ComponentEndpoints {
+                namespace: component.namespace().name(),
+                component: component.name().to_string(),
+            };
+            assert_eq!(drt.discovery().list(query.clone()).await.unwrap().len(), 1);
+            startup.abort();
+            assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+            drop(release);
+            while !drt
+                .discovery()
+                .list(query.clone())
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+            let handle = ensure_served_indexer_service(
+                component.clone(),
+                ServedIndexerMode::Approximate,
+                "model-a".to_string(),
+                Indexer::None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(drt.discovery().list(query).await.unwrap().len(), 2);
+            drop(handle);
+            shutdown_and_settle(drt).await;
+        })
+        .await
+        .expect("cancelled startup did not clean up and recover");
+    }
+
+    #[tokio::test]
+    async fn interrupted_retirement_blocks_replacement_until_cleanup_completes() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (drt, component) = registry_test_component("retirement-barrier").await;
+            let key = service_key(&component);
+            let handle = ensure_served_indexer_service(
+                component.clone(),
+                ServedIndexerMode::EventDriven,
+                "model-a".to_string(),
+                Indexer::None,
+            )
+            .await
+            .unwrap();
+            let service = cached_service(&key).unwrap();
+            drop(handle);
+            assert!(service.retire_if_unused());
+            let (reached, release) = install_pause(&RETIREMENT_PAUSES, key.clone());
+            let retiring = tokio::spawn({
+                let service = service.clone();
+                async move { service.stop_endpoints().await }
+            });
+            reached.await.unwrap();
+            assert!(service.endpoints.lock().is_empty());
+            retiring.abort();
+            assert!(retiring.await.unwrap_err().is_cancelled());
+
+            let mut replacement = Box::pin(ensure_served_indexer_service(
+                component.clone(),
+                ServedIndexerMode::EventDriven,
+                "model-a".to_string(),
+                Indexer::None,
+            ));
+            assert!(futures::poll!(replacement.as_mut()).is_pending());
+            assert!(Arc::ptr_eq(&cached_service(&key).unwrap(), &service));
+            assert!(service.is_retired());
+            release.send(()).unwrap();
+            let handle = replacement.await.unwrap();
+            assert!(!Arc::ptr_eq(&cached_service(&key).unwrap(), &service));
+            let endpoints = drt
+                .discovery()
+                .list(DiscoveryQuery::ComponentEndpoints {
+                    namespace: component.namespace().name(),
+                    component: component.name().to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(endpoints.len(), 1);
+            assert_query_callable(&component).await;
+            drop(handle);
+            shutdown_and_settle(drt).await;
+        })
+        .await
+        .expect("replacement did not wait for interrupted retirement");
+    }
 
     async fn registry_test_component(name: &str) -> (DistributedRuntime, Component) {
         let runtime = Runtime::from_current().unwrap();

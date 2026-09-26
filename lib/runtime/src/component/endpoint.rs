@@ -278,7 +278,8 @@ impl EndpointConfigBuilder {
         let server_for_cleanup = server;
         let cancel_token_for_cleanup = endpoint_shutdown_token.clone();
         let startup_cancellation = startup_guard.cancellation.clone();
-        let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+        let (registration_tx, registration_rx) =
+            tokio::sync::oneshot::channel::<crate::discovery::EndpointRegistrationLease>();
 
         let task: tokio::task::JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
             let registration_lease = registration_rx.await.ok();
@@ -286,7 +287,10 @@ impl EndpointConfigBuilder {
                 _ = cancel_token_for_cleanup.cancelled() => {}
                 _ = startup_cancellation.cancelled() => {}
             }
-            drop(registration_lease);
+            let release_result = match registration_lease {
+                Some(lease) => lease.release().await,
+                None => Ok(()),
+            };
 
             tracing::debug!(
                 endpoint = %endpoint_name_for_cleanup,
@@ -309,7 +313,7 @@ impl EndpointConfigBuilder {
                 tracker.unregister_endpoint();
             }
 
-            anyhow::Ok(())
+            release_result
         });
 
         let registration_lease = endpoint
@@ -486,6 +490,113 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoopHandler;
+
+    #[async_trait::async_trait]
+    impl PushWorkHandler for NoopHandler {
+        async fn handle_payload(
+            &self,
+            _payload: bytes::Bytes,
+            _request_id: Option<String>,
+        ) -> std::result::Result<(), crate::pipeline::PipelineError> {
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &Endpoint,
+            _labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_before_discovery_cleans_handler_and_tracker() {
+        use crate::discovery::DiscoveryQuery;
+        use crate::{DistributedRuntime, Runtime, distributed::DistributedConfig};
+        use std::time::Duration;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let drt = DistributedRuntime::new(
+                Runtime::from_current().unwrap(),
+                DistributedConfig::process_local(),
+            )
+            .await
+            .unwrap();
+            // Initialize the server so the first pending poll is discovery acquisition.
+            drt.request_plane_server().await.unwrap();
+            let endpoint = drt
+                .namespace("startup-cancellation")
+                .unwrap()
+                .component("worker")
+                .unwrap()
+                .endpoint("query");
+            let handler: Arc<dyn PushWorkHandler> = Arc::new(NoopHandler);
+            let tracker = drt.graceful_shutdown_tracker();
+            let initial_count = tracker.get_count();
+            let mut startup = Box::pin(
+                endpoint
+                    .endpoint_builder()
+                    .handler(handler.clone())
+                    .start_with_registration(),
+            );
+            assert!(futures::poll!(startup.as_mut()).is_pending());
+            assert_eq!(tracker.get_count(), initial_count + 1);
+            // The registration manager's spawned acquisition has not been polled yet.
+            assert!(
+                drt.discovery()
+                    .list(DiscoveryQuery::AllEndpoints)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            drop(startup);
+            while tracker.get_count() != initial_count || Arc::strong_count(&handler) != 1 {
+                tokio::task::yield_now().await;
+            }
+            while !drt
+                .discovery()
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+            let retry = endpoint
+                .endpoint_builder()
+                .handler(handler.clone())
+                .start_with_registration()
+                .await
+                .unwrap();
+            assert_eq!(tracker.get_count(), initial_count + 1);
+            assert_eq!(
+                drt.discovery()
+                    .list(DiscoveryQuery::AllEndpoints)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            retry.shutdown().await.unwrap();
+            assert_eq!(tracker.get_count(), initial_count);
+            assert_eq!(Arc::strong_count(&handler), 1);
+            assert!(
+                drt.discovery()
+                    .list(DiscoveryQuery::AllEndpoints)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let done = drt.primary_token();
+            drt.shutdown();
+            done.cancelled().await;
+        })
+        .await
+        .expect("cancelled endpoint startup did not clean up and recover");
+    }
 
     #[test]
     fn tcp_transport_uses_concrete_ipv4_and_bracketed_ipv6_addresses() {

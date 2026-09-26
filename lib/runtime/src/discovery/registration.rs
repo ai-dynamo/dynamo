@@ -181,6 +181,19 @@ impl EndpointRegistrationLease {
             id: Some(id),
         }
     }
+
+    /// Wait for release while allowing cleanup to finish if the caller is cancelled.
+    pub(crate) async fn release(mut self) -> Result<()> {
+        if let Some(id) = self.id.take() {
+            let manager = self.manager.clone();
+            self.manager
+                .runtime
+                .spawn(async move { manager.release(id).await })
+                .await
+                .context("endpoint discovery release task failed")?;
+        }
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for EndpointRegistrationLease {

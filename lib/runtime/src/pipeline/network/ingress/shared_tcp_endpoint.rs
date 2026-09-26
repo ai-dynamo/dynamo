@@ -916,8 +916,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!server.handlers.contains_key("1/shared"));
-        assert!(server.handlers.contains_key("2/shared"));
+        assert!(!server.handlers.contains_key("1/test/component/shared"));
+        assert!(server.handlers.contains_key("2/test/component/shared"));
 
         crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
             server.as_ref(),
