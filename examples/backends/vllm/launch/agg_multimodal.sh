@@ -119,7 +119,7 @@ DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
     --max-num-seqs "$MAX_CONCURRENT_SEQS" \
     $GPU_MEM_ARGS \
     $MODEL_EXTRA_ARGS \
-    "${EXTRA_ARGS[@]}"
+    "${EXTRA_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
 wait_any_exit
