@@ -1035,6 +1035,29 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
 		{
+			// Regression test: shouldInjectVLLMMpWaitLeaderInit used to read the raw,
+			// un-normalized command line for --distributed-executor-backend, a second path
+			// that bypassed normalizeVLLMFlags entirely and so never recognized underscore
+			// or equals spellings that the rest of this package already understood.
+			name:              "mp worker with underscore-and-equals executor flag injects init container",
+			numberOfNodes:     2,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialPodSpec: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:    "main",
+						Image:   "vllm:underscore",
+						Command: []string{"python3"},
+						Args:    []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16", "--distributed_executor_backend=mp"},
+					},
+				},
+			},
+			expectInitContainer: true,
+			expectedInitImage:   "vllm:underscore",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+		},
+		{
 			name:              "mp worker with shell-form command injects init container",
 			numberOfNodes:     2,
 			role:              RoleWorker,
