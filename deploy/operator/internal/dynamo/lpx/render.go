@@ -144,19 +144,20 @@ func RenderNodeLocal(
 		stage := projection.stage
 		if index == 0 || stage != projections[index-1].stage {
 			template = input.Stages[stage]
-			storagePath, err := lpuModelStoragePath(template.Spec)
-			if err != nil {
-				return nil, fmt.Errorf("stage %s: %w", stage, err)
-			}
-			if storagePath != modelStoragePath {
-				return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
-			}
 
 			// Publish the model path before template-owned hybrid Agent bindings.
 			if hybrid {
 				container := common.FindContainerByName(template.Spec.Containers, commonconsts.MainContainerName)
 				if err := applyModelPaths(container, projections, modelStoragePath); err != nil {
 					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
+			} else {
+				storagePath, err := lpuModelStoragePath(template.Spec)
+				if err != nil {
+					return nil, fmt.Errorf("stage %s: %w", stage, err)
+				}
+				if storagePath != modelStoragePath {
+					return nil, fmt.Errorf("stage %s must use the Conductor model-storage mount path %q", stage, modelStoragePath)
 				}
 			}
 			var conductorSpec *corev1.PodSpec

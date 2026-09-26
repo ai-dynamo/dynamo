@@ -79,6 +79,7 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 			}
 			name := grovecommon.GeneratePodCliqueName(grovecommon.ResourceNameReplica{Name: pcsg.Name, Replica: int(replica)}, template.Name)
 			memberName := template.Labels[commonconsts.KubeLabelDynamoComponent]
+			draft, isDraft := statuses[memberName]
 
 			// Revision checks precede the pure per-clique readiness calculation.
 			pclq := pclqs[name]
@@ -88,11 +89,13 @@ func EvaluateLPXGroveReadiness(ctx context.Context, source *v1beta1.DynamoGraphD
 				readiness.reason = fmt.Sprintf("Waiting for LPX role %s", name)
 			case pclq.Status.CurrentPodCliqueSetGenerationHash == nil || *pclq.Status.CurrentPodCliqueSetGenerationHash != *hash:
 				readiness.reason = fmt.Sprintf("LPX role %s has not applied the desired revision", name)
+			case !isDraft:
+				readiness = podCliqueReadiness(pclq, log.FromContext(ctx))
 			default:
 				readiness = observeLPXRole(ctx, pclq)
 			}
 			// Sum complete model instances, never physical Agent Pod counts.
-			if draft, isDraft := statuses[memberName]; isDraft {
+			if isDraft {
 				draft.ComponentNames = append(draft.ComponentNames, name)
 				if readiness.status.ReadyReplicas != nil {
 					draft.Replicas += readiness.status.Replicas
