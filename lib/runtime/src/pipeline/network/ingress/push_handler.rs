@@ -260,7 +260,16 @@ where
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
-        while let Some(resp) = stream.next().await {
+        loop {
+            // Exit the pump when the request context is stopped/killed even if the
+            // engine stream never yields again: a hung stream would otherwise pin the
+            // handler and leak inflight accounting until the process restarts.
+            let resp = tokio::select! {
+                resp = stream.next() => resp,
+                _ = context.stopped() => None,
+                _ = context.killed() => None,
+            };
+            let Some(resp) = resp else { break };
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
                 .payload_adapter
