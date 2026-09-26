@@ -138,6 +138,15 @@ impl EndpointRegistrationManager {
                     .await
                 {
                     Ok(()) => break,
+                    // Runtime shutdown may have already deleted the file-store record.
+                    Err(error)
+                        if matches!(
+                            error.downcast_ref::<crate::storage::kv::StoreError>(),
+                            Some(crate::storage::kv::StoreError::MissingKey(_))
+                        ) =>
+                    {
+                        break;
+                    }
                     Err(error) => {
                         tracing::warn!(
                             %error,
@@ -331,6 +340,41 @@ mod tests {
         tokio::task::yield_now().await;
         wait_for_endpoint_count(discovery.as_ref(), 1).await;
         drop(second);
+        wait_for_endpoint_count(discovery.as_ref(), 0).await;
+    }
+
+    #[tokio::test]
+    async fn release_completes_after_file_store_shutdown_removes_registration() {
+        let directory = tempfile::tempdir().unwrap();
+        let cancellation = CancellationToken::new();
+        let _cancel_on_drop = cancellation.clone().drop_guard();
+        let discovery: Arc<dyn Discovery> = Arc::new(super::super::KVStoreDiscovery::new(
+            crate::storage::kv::Manager::file(cancellation.clone(), directory.path()),
+            cancellation,
+        ));
+        let manager = EndpointRegistrationManager::new(
+            discovery.clone(),
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        );
+        let lease = manager.register(endpoint_spec()).await.unwrap();
+        wait_for_endpoint_count(discovery.as_ref(), 1).await;
+
+        // DistributedRuntime::shutdown removes file-store records before endpoint cleanup.
+        discovery.shutdown();
+        wait_for_endpoint_count(discovery.as_ref(), 0).await;
+        tokio::time::timeout(Duration::from_secs(1), lease.release())
+            .await
+            .expect("release retried an already removed discovery record")
+            .unwrap();
+
+        let mut replacement_spec = endpoint_spec();
+        if let DiscoverySpec::Endpoint { transport, .. } = &mut replacement_spec {
+            *transport = TransportType::Tcp("127.0.0.1:2/7/router".to_string());
+        }
+        let replacement = manager.register(replacement_spec).await.unwrap();
+        wait_for_endpoint_count(discovery.as_ref(), 1).await;
+        replacement.release().await.unwrap();
         wait_for_endpoint_count(discovery.as_ref(), 0).await;
     }
 }
