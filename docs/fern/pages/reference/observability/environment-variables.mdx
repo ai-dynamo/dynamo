@@ -291,9 +291,13 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mode`), which measures whole-model forward-pass latencies for the FPM performance database. They have no effect on serving.
 
 <ParamField path="DYN_BENCH_KV_WARMUP" type="string" default="on">
-  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill chains. By default, eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. Set `off` to force the legacy synthetic-KV path.
+  KV warm-up master switch. When on, eligible decode benchmark points read attention KV produced by real prefill. Set `off` to force the legacy synthetic-KV path.
 
-  All eligible configurations require prefix caching, a loadable tokenizer, and enough seeding dataset content for the model length. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails to build or cannot reserve its shadow blocks, every rank falls back to synthetic KV for that stage.
+  When the runtime cache layout contains at least one finite `SlidingWindowSpec` and only `FullAttentionSpec` or `SlidingWindowSpec` groups, warm-up uses native prefill at each point's exact admission context. The same live requests then continue into decode, preserving their private convolution state instead of borrowing state from a deeper context. This covers Inkling's convolution cache layout and applies to dense models and MoE models with or without expert parallelism. It does not require prefix caching. Each point rebuilds its state, adding untimed collection work. The artifact records `kvwarm.initialization_strategy = "native_exact_context"`.
+
+  Other eligible configurations use shared prefill chains and require prefix caching. By default, chain eligibility requires a MoE model with expert parallelism and no recurrent-state layers. With `DYN_BENCHMARK_RANDOMIZE_KDA_STATE=true`, hybrid MoE models are also eligible without expert parallelism; their attention KV is real and their recurrent states remain synthetic. This option disables the native exact-context strategy.
+
+  Both strategies require a loadable tokenizer, enough seeding dataset content for the model length, and sufficient cache capacity. Configurations that do not meet these requirements skip warm-up and record the reason. Under attention data parallelism the decision is group-wide: if any rank is ineligible, every rank uses synthetic KV; if any rank's warm-up stage fails, every rank falls back for that stage. Failed initialization never marks synthetic state as `real_kv`.
 </ParamField>
 
 <ParamField path="DYN_BENCHMARK_RANDOMIZE_KDA_STATE" type="boolean" default="false">
@@ -319,11 +323,11 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_THRESHOLD" type="integer" default="1000000">
-  Total-KV-read threshold (tokens) above which a fake-injected decode point is measured with repeated steady steps. Points served from the real-KV warm-up chains always repeat. Set `0` to apply repeat protection to every point.
+  Total-KV-read threshold (tokens) at or above which fake-injected decode points use `DYN_BENCH_GIANT_KV_REPEATS`. Real-KV warm-up points use that count regardless of this threshold, subject to model-length headroom. Set `0` to apply it to every point.
 </ParamField>
 
 <ParamField path="DYN_BENCH_GIANT_KV_REPEATS" type="integer" default="3">
-  Steady-step repeat count for real-KV points and for fake-injected points above the threshold; the recorded latency is the median. The warm-up chains reserve this many steady writes per request.
+  Requested steady-step count for real-KV points and for fake-injected points at or above the threshold; the recorded latency is the median. The count is capped by model-length headroom, using the negotiated limit under attention data parallelism, so points may have a single sample. Native warm-up reserves the capped count; shared prefill chains reserve the configured count. Fake-injected points also fall back to one sample when cache capacity cannot fit the repeats.
 </ParamField>
 
 <ParamField path="DYN_BENCH_PREFILL_CONTENT" type="string">
