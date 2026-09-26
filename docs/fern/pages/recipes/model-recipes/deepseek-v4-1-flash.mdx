@@ -2,74 +2,175 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: "DeepSeek-V4.1-Flash"
-subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo and SGLang on GB200, aggregated or disaggregated."
+subtitle: "Serve DeepSeek-V4.1-Flash with Dynamo on Blackwell, with vLLM or SGLang, aggregated or disaggregated."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Both targets are Dynamo and SGLang deployments of DeepSeek-V4.1-Flash. Each uses 8x GB200 GPUs with TP4 workers. The checkpoint is FP8 dense with FP4 MoE experts, and the KV cache is FP8. Both targets serve up to 1,048,576 tokens of context. Pick your serving topology.
+Every target on this page is a Dynamo deployment of DeepSeek-V4.1-Flash, a Mixture-of-Experts model serving up to 1,048,576 tokens of context. The vLLM targets are performance-tuned and benchmarked on B200 and GB200. The SGLang targets are the original day-0 deployment on GB200. Pick your framework, GPU, and serving topology; every command on this page updates to match.
 
 <div className="dynamo-target-picker">
 <p className="dynamo-target-picker-title">Choose your deployment target</p>
 <div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Framework</span>
+<input type="radio" id="recipe-framework-vllm" name="recipe-framework" value="vllm" defaultChecked />
+<label htmlFor="recipe-framework-vllm">vLLM <span className="dynamo-target-picker-hint">Benchmarked</span></label>
+<input type="radio" id="recipe-framework-sglang" name="recipe-framework" value="sglang" />
+<label htmlFor="recipe-framework-sglang">SGLang</label>
+</div>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" defaultChecked />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" />
+<label htmlFor="recipe-sku-b200">B200</label>
+</div>
+<div className="dynamo-target-picker-row">
 <span className="dynamo-target-picker-dim">Topology</span>
 <input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
-<label htmlFor="recipe-variant-agg">Aggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<label htmlFor="recipe-variant-agg">Aggregated</label>
 <input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
 <label htmlFor="recipe-variant-disagg">Disaggregated</label>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="agg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>Precision</b> MXFP4 MoE experts, MXFP4 sparse-indexer KV</span>
+<span><b>GPUs</b> 8x GB200, two TP4 workers</span>
+<span><b>Parallelism</b> TP4 with expert parallelism and EPLB</span>
+<span><b>Speculative decoding</b> DSpark, 3 draft tokens</span>
+<span><b>Routing</b> KV-aware, with decode-load balancing</span>
+<span><b>Throughput</b> 533.2 output tok/s/GPU at concurrency 88</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>Precision</b> MXFP4 MoE experts, MXFP4 sparse-indexer KV</span>
+<span><b>GPUs</b> 12x GB200, 2 prefill + 1 decode, TP4 each</span>
+<span><b>Parallelism</b> TP4 with expert parallelism and EPLB</span>
+<span><b>KV transfer</b> NIXL over UCX, one NVLink clique</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Throughput</b> 694.7 output tok/s/GPU at concurrency 168</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>Precision</b> MXFP4 MoE experts, MXFP4 sparse-indexer KV</span>
+<span><b>GPUs</b> 8x B200, two TP4 workers</span>
+<span><b>Parallelism</b> TP4 with expert parallelism and EPLB</span>
+<span><b>Speculative decoding</b> DSpark, 3 draft tokens</span>
+<span><b>Routing</b> KV-aware, with decode-load balancing</span>
+<span><b>Throughput</b> 488.9 output tok/s/GPU at concurrency 88</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+<span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
+<span><b>Precision</b> MXFP4 MoE experts, MXFP4 sparse-indexer KV</span>
+<span><b>GPUs</b> 12x B200, 2 prefill + 1 decode, TP4 each</span>
+<span><b>Parallelism</b> TP4 with expert parallelism and EPLB</span>
+<span><b>KV transfer</b> NIXL over UCX on InfiniBand</span>
+<span><b>Routing</b> KV-aware</span>
+<span><b>Throughput</b> 610.8 output tok/s/GPU at concurrency 160</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
 <span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
 <span><b>Precision</b> FP8 dense, FP4 MoE experts, FP8 KV cache</span>
 <span><b>GPUs</b> 8x GB200, two workers</span>
 <span><b>Parallelism</b> TP4 and EP4 per worker</span>
-<span><b>Speculation</b> DSpark, block size 5</span>
+<span><b>Speculative decoding</b> DSpark, block size 5</span>
 <span><b>Routing</b> KV-aware</span>
-<span><b>Context</b> Up to 1,048,576 tokens</span>
+<span><b>Throughput</b> Day-0 deployment; not benchmarked</span>
 </div>
-<div className="dynamo-target-picker-summary" data-variant="disagg">
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> deepseek-ai/DeepSeek-V4.1-Flash</span>
 <span><b>Precision</b> FP8 dense, FP4 MoE experts, FP8 KV cache</span>
-<span><b>GPUs</b> 4x GB200 prefill + 4x GB200 decode</span>
+<span><b>GPUs</b> 4x GB200 prefill + 4x GB200 decode (1P1D)</span>
 <span><b>Parallelism</b> TP4 and EP4 per role</span>
-<span><b>Speculation</b> None. SGLang refuses it under disaggregation.</span>
-<span><b>KV transfer</b> Mooncake over TCP, or RDMA where the cluster provides it</span>
-<span><b>Context</b> Up to 1,048,576 tokens</span>
+<span><b>KV transfer</b> Mooncake over TCP, or RDMA where provided</span>
+<span><b>Speculative decoding</b> None. SGLang refuses it under disaggregation.</span>
+<span><b>Throughput</b> Day-0 deployment; not benchmarked</span>
+</div>
+<div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="b200" data-variant="agg disagg">
+<span><b>Status</b> No recipe available for this combination. Use the vLLM targets on B200, or SGLang on GB200.</span>
 </div>
 </div>
 
+<div data-recipe-framework="sglang">
+
 <Warning>
-Day-0 recipe. Both targets pass a functional probe. Neither is benchmarked, and neither carries a performance claim.
+Day-0 recipe. Both SGLang targets pass a functional probe. Neither is benchmarked, and neither carries a performance claim. For a performance-tuned deployment, choose vLLM.
 </Warning>
+
+</div>
 
 ## Overview
 
-DeepSeek-V4.1-Flash is a Mixture-of-Experts model. SGLang picks its attention, MoE, and GEMM backends from the checkpoint. Do not set those backend flags. A hand-set backend flag selects a slower fallback.
+DeepSeek-V4.1-Flash is a Mixture-of-Experts model. The checkpoint also accepts images; every target here serves text only.
 
-The checkpoint also accepts images. Both targets serve text only, and neither enables multimodal input.
+<div data-recipe-framework="vllm">
 
-The aggregated target caps the decode CUDA graph batch at 64. DSpark verify graphs run out of memory at batch 256.
+vLLM resolves the attention path from the checkpoint. On Blackwell it selects the `FLASHMLA_SPARSE_DSV41` attention backend, which brings DeepSeek's `fp8_ds_mla` KV cache format and fixes the KV block size at 128. The recipes leave all three at their resolved values and override two others:
 
-## Prerequisites
+| Overridden setting | Recipe value | Resolved default |
+| --- | --- | --- |
+| MoE backend | `deep_gemm_mega_moe` | `FLASHINFER_TRTLLM_MXFP4_MXFP8` |
+| Sparse-indexer KV dtype | `mxfp4` | `fp8` |
 
-<div data-variant="agg">
+The vLLM targets share one serving configuration across both GPUs. The aggregated recipe is identical on B200 and GB200 apart from the architecture label, the GPU product label, and the deployment name. The disaggregated recipes differ only in their KV fabric settings.
 
-- A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- 8x GB200 GPUs on two ARM64 nodes. Each worker needs 4 GPUs on one node.
-- A ReadWriteMany PVC named `shared-model-cache`, with at least 1000Gi.
-- Access to `deepseek-ai/DeepSeek-V4.1-Flash`, which is 510 GB over 48 shards.
+On identical settings GB200 measures about 9 percent higher than B200 aggregated. The cause is KV capacity rather than compute: a B200 TP4 worker holds roughly 19 percent fewer KV tokens, and prefix-cache hit rate follows. On a workload whose input median is near 67,600 tokens, each miss is a full prefill.
 
 </div>
 
-<div data-variant="disagg">
+<div data-recipe-framework="sglang">
+
+The aggregated target caps the decode CUDA graph batch at 64. DSpark verify graphs run out of memory at batch 256.
+
+</div>
+
+## Prerequisites
 
 - A Kubernetes cluster with the Dynamo platform installed. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
-- 8x GB200 GPUs on two ARM64 nodes. Prefill and decode each need 4 GPUs.
-- The NVIDIA DRA driver with ComputeDomain support. The manifest creates the ComputeDomain and both workers claim its channel.
 - A ReadWriteMany PVC named `shared-model-cache`, with at least 1000Gi.
 - Access to `deepseek-ai/DeepSeek-V4.1-Flash`, which is 510 GB over 48 shards.
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+
+- 8x GB200 GPUs on two ARM64 nodes. Each TP4 worker needs 4 GPUs on one node.
+- 512 GiB of host memory per worker, for the pinned host-side tables.
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+- 12x GB200 GPUs across three ARM64 nodes, all in one NVLink clique.
+- The NVIDIA DRA driver with ComputeDomain support. The manifest creates the ComputeDomain and every worker claims its channel.
+- Four RDMA devices per worker (`rdma/ib: 4`).
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+
+- 8x B200 GPUs in two groups of four. Each TP4 worker needs 4 GPUs on one node.
+- 512 GiB of host memory per worker, for the pinned host-side tables.
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+- 12x B200 GPUs in three groups of four.
+- Four RDMA devices per worker (`rdma/ib: 4`).
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
+
+- 8x GB200 GPUs on two ARM64 nodes. Each worker needs 4 GPUs on one node.
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
+
+- 8x GB200 GPUs on two ARM64 nodes. Prefill and decode each need 4 GPUs.
+- The NVIDIA DRA driver with ComputeDomain support. The manifest creates the ComputeDomain and both workers claim its channel.
 
 </div>
 
@@ -84,12 +185,12 @@ kubectl create secret generic hf-token-secret \
 ```
 
 <Warning>
-Edit the namespace, node selectors, tolerations, storage class, and image tag to match your cluster.
+Edit the namespace, node selectors, tolerations, storage class, and image tag to match your cluster. On the disaggregated targets, the RDMA resource name is cluster-specific and is the first field to check.
 </Warning>
 
 ## Deploy
 
-Both targets read the checkpoint from the `shared-model-cache` PVC with `HF_HUB_OFFLINE=1`. First create the PVC and download the weights:
+Every target reads the checkpoint from the `shared-model-cache` PVC with `HF_HUB_OFFLINE=1`. First create the PVC and download the weights:
 
 ```bash
 kubectl apply -f recipes/deepseek-v4.1-flash/model-cache/model-cache.yaml -n ${NAMESPACE}
@@ -97,9 +198,63 @@ kubectl apply -f recipes/deepseek-v4.1-flash/model-cache/model-download.yaml -n 
 kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
 ```
 
+<div data-recipe-framework="vllm">
+
 Then apply the manifest for your target.
 
-<div data-variant="agg">
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200">
+
+Then apply the manifest for your target.
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml -n ${NAMESPACE}
+```
+
+On Google Kubernetes Engine, apply the RDMA variant instead. It claims the four GKE RDMA networks that GB200 node pools advertise, drops the generic `rdma/ib` request, and sets the RoCEv2 GID index:
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-gke-rdma.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml -n ${NAMESPACE}
+```
+
+If your nodes expose several InfiniBand HCAs at different speeds, apply the pinned variant instead. It names a specific device list in `UCX_NET_DEVICES` so UCX cannot select a slow port. Read your own nodes with `ibstat` and edit the list to match before using it:
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-ib-device-pin.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
 
 ```bash
 kubectl apply -f recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml -n ${NAMESPACE}
@@ -107,7 +262,7 @@ kubectl apply -f recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml -n ${N
 
 </div>
 
-<div data-variant="disagg">
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 
 ```bash
 kubectl apply -f recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml -n ${NAMESPACE}
@@ -121,13 +276,53 @@ kubectl apply -f recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma
 
 </div>
 
-The first worker start loads 510 GB of weights and captures CUDA graphs. This step can take tens of minutes.
-
 ## Smoke Test
+
+<div data-recipe-framework="vllm">
 
 Forward the frontend port for your target:
 
-<div data-variant="agg">
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200">
+
+Forward the frontend port for your target:
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-gb200-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-gb200-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="agg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-b200-agg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="b200" data-variant="disagg">
+
+```bash
+kubectl port-forward svc/dsv41-flash-vllm-b200-disagg-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="agg">
 
 ```bash
 kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-agg-frontend 8000:8000 -n ${NAMESPACE}
@@ -135,7 +330,7 @@ kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-agg-frontend 8000:8000 
 
 </div>
 
-<div data-variant="disagg">
+<div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 
 ```bash
 kubectl port-forward svc/deepseek-v41-flash-sglang-gb200-disagg-frontend 8000:8000 -n ${NAMESPACE}
@@ -148,40 +343,132 @@ Then send a request:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":64}'
+  -d '{"model":"deepseek-ai/DeepSeek-V4.1-Flash","messages":[{"role":"user","content":"Reply with exactly: READY"}],"temperature":0,"max_tokens":512}'
 ```
 
-Read the response body, not the status code. On the disaggregated target a KV transfer failure still returns HTTP 200, with `content: null` and zero completion tokens. Readiness does not exercise the KV path. The Notes explain what to read in the worker log.
+<Warning>
+Read the response body, not the status code. On a disaggregated target a KV transfer failure still returns HTTP 200, with `content: null` and zero completion tokens. Readiness does not exercise the KV path. The Notes explain what to read in the worker log.
 
-The model reasons before it answers, and the reasoning text arrives in `reasoning_content`. Both targets support streaming chat, tool calls, and schema-constrained output. The `deepseek_v41` reasoning and tool-call parsers build the response.
+Give `max_tokens` real room. The model reasons before it answers, and a small budget returns `content: null` with `finish_reason: length`, which reads as a broken deployment and is not.
+</Warning>
+
+The model reasons before it answers, and the reasoning text arrives in `reasoning_content`. Every target supports streaming chat, tool calls, and schema-constrained output. The `deepseek_v41` reasoning and tool-call parsers build the response.
+
+<div data-recipe-framework="vllm">
+
+## Benchmark
+
+The vLLM targets share one AIPerf trace-replay Job. Set `ENDPOINT` and `CONCURRENCY` for your target, stage the trace on the PVC, then run it. See [the benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/perf/README.md) for the full procedure.
+
+```bash
+kubectl apply -f recipes/deepseek-v4.1-flash/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=dsv41-flash-vllm-bench -f
+```
+
+The workload is a Mooncake-format agentic trace of 3,541 requests, with an input median near 67,600 tokens, an output median near 400, and about 90 percent designed KV reuse. Both SLO floors are measured at p50: output token throughput per user at or above 50 tok/s, and time to first token under 5,000 ms.
+
+## Expected Performance
+
+The selected target's best SLO-clearing operating point, not the peak of its throughput curve. Both topologies end on the per-user token rate rather than on TTFT, so a higher concurrency produces more total tokens while missing the floor. The [Compare All Targets](#compare-all-targets) table lists every target side by side.
+
+<div data-sku="gb200" data-variant="agg">
+
+| GPUs | Concurrency | Output tok/s/GPU | Total output tok/s | Per-user tok/s p50 | TTFT p50 | TTFT p99 | ITL p50 | ITL p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 88 | 533.2 | 4,266 | 54.23 | 296 ms | 14,510 ms | 18.44 ms | 128.36 ms |
+
+</div>
+
+<div data-sku="gb200" data-variant="disagg">
+
+| GPUs | Concurrency | Output tok/s/GPU | Total output tok/s | Per-user tok/s p50 | TTFT p50 | TTFT p99 | ITL p50 | ITL p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12 | 168 | **694.7** | **8,336** | 59.86 | 3,237 ms | 60,320 ms | 16.71 ms | **36.16 ms** |
+
+</div>
+
+<div data-sku="b200" data-variant="agg">
+
+| GPUs | Concurrency | Output tok/s/GPU | Total output tok/s | Per-user tok/s p50 | TTFT p50 | TTFT p99 | ITL p50 | ITL p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 8 | 88 | 488.9 | 3,911 | 54.65 | 210 ms | 17,126 ms | 18.30 ms | 123.67 ms |
+
+</div>
+
+<div data-sku="b200" data-variant="disagg">
+
+| GPUs | Concurrency | Output tok/s/GPU | Total output tok/s | Per-user tok/s p50 | TTFT p50 | TTFT p99 | ITL p50 | ITL p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 12 | 160 | 610.8 | 7,329 | 52.14 | 2,389 ms | 53,794 ms | 19.18 ms | **37.97 ms** |
+
+</div>
+
+Disaggregation gains roughly 30 percent throughput per GPU on GB200 and 25 percent on B200, on 50 percent more hardware, and cuts the inter-token latency tail by more than 3x. It pays for that with a time to first token an order of magnitude higher. The two topologies are not interchangeable; pick by the TTFT your workload accepts.
+
+<Warning>
+Throughput on this workload repeats to about 3 percent across identical runs. Do not read a throughput difference smaller than that as a result. Latency percentiles are far more stable and resolve differences throughput cannot.
+</Warning>
+
+<Info>
+`total_output_tokens` counts the non-reasoning subset only. Add `total_reasoning_tokens` to get what the GPU actually produced.
+</Info>
+
+</div>
 
 ## Compare All Targets
 
-| | Aggregated | Disaggregated |
-|---|---|---|
-| **Checkpoint** | deepseek-ai/DeepSeek-V4.1-Flash | deepseek-ai/DeepSeek-V4.1-Flash |
-| **Precision** | FP8 dense, FP4 MoE experts | FP8 dense, FP4 MoE experts |
-| **GPUs** | 8x GB200, two workers | 4x GB200 prefill + 4x GB200 decode (1P1D) |
-| **Parallelism** | TP4, EP4 | TP4, EP4 per role |
-| **Attention backend** | dsv4 | dsv4 |
-| **MoE backend** | flashinfer_mxfp4 | flashinfer_mxfp4 |
-| **KV cache dtype** | fp8_e4m3 | fp8_e4m3 |
-| **Grammar backend** | xgrammar | xgrammar |
-| **Page size** | 256 | 256 |
-| **GPU memory utilization** | 0.80 | 0.80 |
-| **Maximum running requests** | 256 | 256 |
-| **Maximum prefill tokens** | 16,384 | 16,384 |
-| **Decode CUDA graph batch** | 64 | 512 |
-| **Speculative decoding** | DSpark, block size 5 | None |
-| **KV transfer** | — | Mooncake over TCP, or RDMA |
-| **Routing** | KV-aware | KV-aware |
-| **Context length** | 1,048,576 | 1,048,576 |
+| Target | GPUs | Topology | Parallelism | Precision | Speculative decoding | KV transfer |
+| --- | --- | --- | --- | --- | --- | --- |
+| vLLM B200 aggregated | 8x B200 | Aggregated | TP4 + EP + EPLB | MXFP4 experts, MXFP4 indexer KV | DSpark, 3 | N/A |
+| vLLM B200 disaggregated | 12x B200 | 2P1D | TP4 per role | MXFP4 experts, MXFP4 indexer KV | DSpark, 3 both roles | NIXL/UCX over IB |
+| vLLM GB200 aggregated | 8x GB200 | Aggregated | TP4 + EP + EPLB | MXFP4 experts, MXFP4 indexer KV | DSpark, 3 | N/A |
+| vLLM GB200 disaggregated | 12x GB200 | 2P1D | TP4 per role | MXFP4 experts, MXFP4 indexer KV | DSpark, 3 both roles | NIXL/UCX, one clique |
+| SGLang GB200 aggregated | 8x GB200 | Aggregated | TP4, EP4 | FP8 dense, FP4 experts, FP8 KV | DSpark, block size 5 | N/A |
+| SGLang GB200 disaggregated | 8x GB200 | 1P1D | TP4, EP4 per role | FP8 dense, FP4 experts, FP8 KV | None | Mooncake, TCP or RDMA |
+
+Every target serves 1,048,576 tokens of context. The vLLM targets are benchmarked; the SGLang targets are not. For the
+full per-setting table — batch budgets, CUDA-graph sizes, prefix-cache
+retention, UCX and fabric settings — see the
+[recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/README.md).
 
 ## Related Feature Benchmarks
 
 No feature benchmark is linked to this recipe. Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for comparable KV-routing and disaggregation studies.
 
 ## Notes
+
+<div data-recipe-framework="vllm">
+
+- The single largest lever on this workload is `--prefix-cache-retention-interval 1024`. The resolved default is 0, which tells the sliding-window group to retain only a 160-token tail at the previous prompt end. The reconciled prefix hit is the minimum across groups, so that tail caps every request even though the compressed-KV group holds the prefix densely.
+- `enable_kv_cache_events` inside `--kv-events-config` is load-bearing. Omit it and it defaults to false: Dynamo logs `KV event publishing skipped`, the router receives no events, and `DYN_ROUTER_MODE=kv` silently degrades to load-based routing with `overlap_blocks=0` on every request.
+- Both reasoning parsers are required and they are not duplicates. `--reasoning-parser` is the engine-side one and gates guided decoding; `--dyn-reasoning-parser` is the Dynamo frontend one and splits the response into `reasoning_content` and `content`. Do not also set the engine-side `--tool-call-parser`: Dynamo refuses both halves of the tool-call pair at once.
+- Adaptive verification is disabled in the speculative config. It is the established cause of a CUDA illegal memory access on this model. Disabling it also rules out `--enforce-eager`, because that path structurally requires captured CUDA graphs.
+- Do not set `--attention-backend`, an unlisted `--moe-backend`, or `--linear-backend`. Do not set `--block-size` either; it resolves to 128 for this backend, and the DeepSeek-V4-Flash recipes' 256 belongs to a different model.
+- The vLLM recipes are authored as Kustomize matrices. Edit `kustomize/base/` or the Components, then regenerate with `scripts/kustomize-matrix.py unfold` followed by `render`. Never edit a `deploy-*.yaml` by hand.
+
+</div>
+
+<div data-recipe-framework="vllm" data-variant="disagg">
+
+- 2 prefill to 1 decode is balanced for this workload, not a free parameter. Both sides saturate together at the operating point: the prefill queue grows into TTFT, which still holds headroom, while decode inter-token latency grows into the per-user token rate, which is what binds. Other ratios measured worse or the same per GPU.
+- Each worker requests four RDMA devices (`rdma/ib: 4`). Without one, UCX falls back to TCP silently, with no error and a Ready deployment, and TTFT degrades by roughly an order of magnitude. The resource name is cluster-specific: these recipes request `rdma/ib`, other clusters expose `rdma/shared_ib` or a vendor-specific name, and GKE uses multi-network devices instead.
+- `UCX_TLS` keeps `tcp` in the list deliberately. `cuda_ipc` and `cuda_copy` are memory-type transports only and cannot carry NIXL's UCX active-message control plane, so removing `tcp` breaks the handshake rather than just the data path.
+- `UCX_IB_GID_INDEX` is set only on the GKE variant. Index 3 is the RoCEv2 convention, which applies to GKE's RDMA networks and does not apply where ports report `link_layer: InfiniBand`.
+- After the workers are Ready, confirm KV is moving over the expected transport from the NIXL metrics on the worker `/metrics` endpoint, with `nixl_num_failed_transfers` and `nixl_num_failed_notifications` both zero.
+
+</div>
+
+<div data-recipe-framework="vllm" data-sku="gb200" data-variant="disagg">
+
+<Warning>
+All pools must share one NVLink clique. A fabric memory handle cannot be imported across cliques, and a split placement does not error: the deployment reports Ready and chat completions return HTTP 200 with `content: null`. The ComputeDomain in this manifest is the supported mechanism for that guarantee. A dangling `resourceClaim` leaves pods `SchedulingGated` indefinitely with no error, so verify the DRA driver is installed before applying.
+</Warning>
+
+- There is deliberately no `NCCL_*` tuning. The KV transfer is NIXL over UCX; NCCL only forms the intra-worker TP4 group, which lives inside one node. Setting `NCCL_MNNVL_ENABLE`, `NCCL_NVLS_ENABLE`, or `NCCL_P2P_LEVEL` broke that group with `unhandled system error` in `ncclCommInitRank`.
+
+</div>
+
+<div data-recipe-framework="sglang">
 
 - The disaggregated target has no speculative decoding. SGLang refuses DSpark under prefill and decode disaggregation for this model. Use the aggregated target for speculative decoding.
 - Each worker needs TP4 and a GB200 node holds 4 GPUs. So prefill and decode always sit on different nodes, and KV crosses nodes. The generic target pins Mooncake to TCP with `MC_FORCE_TCP=1`. The GKE variant drops that pin and uses RDMA, because it attaches RDMA devices. Mooncake does not default to TCP on its own: with no RDMA device it reports `Found 0 HCAs` and takes the NVLink fabric, which is why the pin is explicit.
@@ -198,9 +485,26 @@ The NVLink fabric KV path needs both workers in one NVLink clique. A fabric memo
 - Both targets pair the native `reasoning-parser` with `--dyn-reasoning-parser`. The native parser gates guided decoding, and Dynamo builds the response. Do not pair the native and Dynamo tool-call parsers. Dynamo rejects that pair.
 - The disaggregated target is authored as a Kustomize matrix. Edit `kustomize/base/`, then regenerate with `scripts/kustomize-matrix.py`. Never edit `deploy-generic.yaml` or `deploy-gke-rdma.yaml` by hand.
 
+</div>
+
 ## Source
 
 - Source README: [recipes/deepseek-v4.1-flash/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/README.md)
-- Aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml)
-- Disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml)
-- Disaggregated GB200 on GKE: [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma.yaml)
+
+<div data-recipe-framework="vllm">
+
+- vLLM aggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml)
+- vLLM aggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml)
+- vLLM disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml), [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-gke-rdma.yaml)
+- vLLM disaggregated B200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml), [deploy-ib-device-pin.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-ib-device-pin.yaml)
+- Benchmark: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/perf/perf.yaml)
+
+</div>
+
+<div data-recipe-framework="sglang">
+
+- SGLang aggregated GB200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/agg-gb200/deploy.yaml)
+- SGLang disaggregated GB200: [deploy-generic.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-generic.yaml)
+- SGLang disaggregated GB200 on GKE: [deploy-gke-rdma.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/deepseek-v4.1-flash/sglang/disagg-gb200/deploy-gke-rdma.yaml)
+
+</div>

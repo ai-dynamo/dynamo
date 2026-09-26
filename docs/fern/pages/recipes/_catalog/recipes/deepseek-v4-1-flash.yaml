@@ -8,16 +8,143 @@ provider: deepseek
 model:
   name: DeepSeek-V4.1-Flash
   hf_id: deepseek-ai/DeepSeek-V4.1-Flash
-  precision: FP8 dense, FP4 MoE experts, FP8 KV cache
-status: experimental  # Day-0
+  precision: MXFP4 MoE experts (vLLM) / FP8 dense + FP4 experts + FP8 KV (SGLang)
+status: experimental
 targets:
-- id: sglang-agg-gb200
+- id: vllm-agg-gb200
   recommended: true
   hardware:
     gpu: GB200
     count: 8
   runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4
+  - prefix-caching
+  - mxfp4-indexer-kv
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-gb200-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c88 = 533.2 output tok/s/GPU @ user 54.23 tok/s, TTFT p50 296 ms.
+- id: vllm-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 12
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - 2p1d
+  - pd-kv-transfer
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4-per-role
+  - prefix-caching
+  - mxfp4-indexer-kv
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX, one NVLink clique'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-gb200-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c168 = 694.7 output tok/s/GPU @ user 59.86 tok/s, TTFT p50 3,237 ms; highest measured per GPU.
+- id: vllm-agg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+  topology: aggregated
+  techniques:
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4
+  - prefix-caching
+  - mxfp4-indexer-kv
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/agg-b200-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c88 = 488.9 output tok/s/GPU @ user 54.65 tok/s, TTFT p50 210 ms.
+- id: vllm-disagg-b200
+  recommended: false
+  hardware:
+    gpu: B200
+    count: 12
+  runtime:
+    framework: vllm
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.6.0-deepseek-v4.1-flash-dev.1
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - 2p1d
+  - pd-kv-transfer
+  - kv-aware-routing
+  - dspark-speculative-decoding
+  - expert-parallel
+  - eplb
+  - tp4-per-role
+  - prefix-caching
+  - mxfp4-indexer-kv
+  - 1m-context
+  workload:
+    type: trace-replay
+    traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 2P1D over NIXL/UCX on InfiniBand'
+    sla: user output >= 50 tok/s p50 and TTFT p50 < 5 s
+  deploy:
+    asset: recipes/deepseek-v4.1-flash/vllm/disagg-b200-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/deepseek-v4.1-flash/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: c160 = 610.8 output tok/s/GPU @ user 52.14 tok/s, TTFT p50 2,389 ms.
+- id: sglang-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 8
+  runtime:
     framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
   topology: aggregated
   techniques:
   - kv-aware-routing
@@ -41,6 +168,7 @@ targets:
     count: 8
   runtime:
     framework: sglang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.6.0-deepseek-v4.1-flash-dev.1
   topology: disaggregated
   techniques:
   - disaggregated-prefill-decode
@@ -61,3 +189,6 @@ targets:
     available: false
 related_benchmarks: []
 maintainer: null
+gaps:
+- The SGLang targets are day-0 and carry no benchmark or performance claim.
+- maintainer unknown

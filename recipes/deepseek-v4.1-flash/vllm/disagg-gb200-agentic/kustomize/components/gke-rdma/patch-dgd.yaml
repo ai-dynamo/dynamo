@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: dsv41-flash-vllm-gb200-disagg
+spec:
+  components:
+    - name: Frontend
+    - name: PrefillWorker
+      podTemplate:
+        metadata:
+          annotations: &gkeAnnotations
+            networking.gke.io/default-interface: eth0
+            networking.gke.io/interfaces: '[{"interfaceName":"eth0","network":"default"},{"interfaceName":"rdma0","network":"rdma-0"},{"interfaceName":"rdma1","network":"rdma-1"},{"interfaceName":"rdma2","network":"rdma-2"},{"interfaceName":"rdma3","network":"rdma-3"}]'
+        spec:
+          containers:
+            - name: main
+              env: &gkeEnv
+                - name: UCX_IB_GID_INDEX
+                  value: "3"
+              resources: &gkeResources
+                requests:
+                  rdma/ib: null
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+                limits:
+                  rdma/ib: null
+                  networking.gke.io.networks/rdma-0: "1"
+                  networking.gke.io.networks/rdma-1: "1"
+                  networking.gke.io.networks/rdma-2: "1"
+                  networking.gke.io.networks/rdma-3: "1"
+    - name: DecodeWorker
+      podTemplate:
+        metadata:
+          annotations: *gkeAnnotations
+        spec:
+          containers:
+            - name: main
+              env: *gkeEnv
+              resources: *gkeResources
