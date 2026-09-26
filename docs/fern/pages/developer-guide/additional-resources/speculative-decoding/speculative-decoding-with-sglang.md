@@ -44,6 +44,16 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+### Step 4: Check the Speculative Decoding Metrics
+
+The worker exposes `sglang:spec_*` metrics on its system port:
+
+```bash
+curl -s localhost:8081/metrics | grep '^sglang:spec_'
+```
+
+See the [SGLang metrics documentation](https://docs.sglang.io/docs/references/production_metrics) for metric definitions.
+
 ## Disaggregated Serving with KV-Aware Routing
 
 Pass the same speculative decoding flags to the prefill and decode workers, and start the frontend with `--router-mode kv`:
@@ -73,15 +83,7 @@ DYN_SYSTEM_PORT=8082 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang "${SPEC_ARG
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' &
 ```
 
-## Metrics
-
-With `--enable-metrics`, each worker exposes `sglang:spec_*` metrics on its `DYN_SYSTEM_PORT`. In disaggregated serving, speculation runs on the decode worker:
-
-```bash
-curl -s localhost:8082/metrics | grep '^sglang:spec_'
-```
-
-See the [SGLang metrics documentation](https://docs.sglang.io/docs/references/production_metrics) for metric definitions.
+Once the workers are ready, send the request from Step 3. Speculation runs on the decode worker, so read its metrics on port 8082.
 
 ## Limitations
 
