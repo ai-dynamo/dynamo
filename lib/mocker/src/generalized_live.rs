@@ -1418,9 +1418,16 @@ mod tests {
         assert!(pass_in_flight);
         assert!(is_request_cancellation);
         assert!(effects.by_rank[0].effects.suppressed_pending_output);
+        // Scheduler retirement and pending-output suppression can both report
+        // the same request. Cleanup is idempotent; check the retired identities.
         assert_eq!(
-            effects.by_rank[0].effects.retired_requests,
-            vec![request_id]
+            effects.by_rank[0]
+                .effects
+                .retired_requests
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([request_id])
         );
 
         let completed = actor
@@ -1651,8 +1658,8 @@ mod tests {
                 max_num_seqs: 8,
                 max_num_batched_tokens: 256,
                 timing_model: TimingModelConfig::Fixed {
-                    prefill_ms: 100.0,
-                    decode_ms: 0.0,
+                    prefill_ms: 0.0,
+                    decode_ms: 100.0,
                 },
                 ..EngineConfig::default()
             },

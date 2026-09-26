@@ -10,11 +10,11 @@ from dynamo.replay import run_synthetic_trace_replay
 
 # run_synthetic_trace_replay constructs the Rust AIC callback, which imports
 # the AIC-core engine API. Skip when the core wheel is absent.
-pytest.importorskip("aiconfigurator_core.sdk.engine")
-aic_backend_factory = pytest.importorskip("aiconfigurator_core.sdk.backends.factory")
-aic_config = pytest.importorskip("aiconfigurator_core.sdk.config")
-aic_models = pytest.importorskip("aiconfigurator_core.sdk.models")
-aic_perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
+pytest.importorskip("aisimulate_core.sdk.engine")
+aic_backend_factory = pytest.importorskip("aisimulate_core.sdk.backends.factory")
+aic_config = pytest.importorskip("aisimulate_core.sdk.config")
+aic_models = pytest.importorskip("aisimulate_core.sdk.models")
+aic_perf_database = pytest.importorskip("aisimulate_core.sdk.perf_database")
 
 AIC_PARITY_MODEL = "Qwen/Qwen3-32B"
 AIC_PARITY_SYSTEM = "h200_sxm"
@@ -149,7 +149,8 @@ def test_run_synthetic_concurrency_replay_matches_aic_static_point_no_prefix(
         osl=128,
         batch_size=8,
     )
-    expected_ttft_ms = aic["context_latency"] + aic["tpot"]
+    # Both schedulers sample the first token from the final prefill forward.
+    expected_ttft_ms = aic["context_latency"]
 
     assert report["mean_ttft_ms"] == pytest.approx(expected_ttft_ms, rel=0.05)
     assert report["mean_tpot_ms"] == pytest.approx(aic["tpot"], rel=0.05)

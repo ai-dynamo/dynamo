@@ -31,19 +31,19 @@ pytestmark = [
 
 def test_estimator_loader_does_not_import_upper_aiconfigurator(monkeypatch):
     """Planner modeling must remain usable with only the core wheel."""
-    pytest.importorskip("aiconfigurator_core")
+    pytest.importorskip("aisimulate_core")
     real_import = builtins.__import__
 
     def reject_upper_package(name, *args, **kwargs):
         """Reject accidental imports of the upper AIC distribution."""
-        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
+        if name == "aisimulate" or name.startswith("aisimulate."):
             raise AssertionError(f"planner imported upper package: {name}")
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", reject_upper_package)
-    loaded = aic_estimator._try_import_aiconfigurator_core()
+    loaded = aic_estimator._try_import_aisimulate_core()
 
-    assert loaded.__name__ == "aiconfigurator_core"
+    assert loaded.__name__ == "aisimulate_core"
 
 
 def test_estimator_passes_backend_name_to_model_factory():
@@ -60,7 +60,7 @@ def test_estimator_passes_backend_name_to_model_factory():
 
     with patch.object(
         aic_estimator,
-        "_try_import_aiconfigurator_core",
+        "_try_import_aisimulate_core",
         return_value=aic_core,
     ):
         estimator = aic_estimator.AIConfiguratorPerfEstimator(

@@ -62,7 +62,7 @@ def run_aic_interpolation(
 ) -> list[ForwardPassMetrics]:
     """Run the AIC interpolation sweep and return synthetic FPMs.
 
-    Lazy-imports ``aiconfigurator_core`` — callers should catch ``ImportError``
+    Lazy-imports ``aisimulate_core`` — callers should catch ``ImportError``
     and fall back to the file-based loader if the dependency is missing.
     """
     from dynamo.planner.monitoring.aic_estimator import AIConfiguratorPerfEstimator

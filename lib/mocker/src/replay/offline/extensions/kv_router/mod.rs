@@ -1191,6 +1191,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1205,6 +1206,7 @@ mod tests {
         let mut request = request(1, 7);
         request.replay_context = Some(ReplayRequestContext {
             authored_id: "length-only".into(),
+            agentic: None,
             session_id: None,
             turn_index: None,
             metadata: Value::Null,

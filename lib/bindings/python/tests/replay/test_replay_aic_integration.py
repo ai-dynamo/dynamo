@@ -46,7 +46,7 @@ def _engine_args(worker_type: str | None = None):
 
 
 def test_real_aic_memory_estimates_gpu_blocks() -> None:
-    from aiconfigurator_core.sdk.memory import estimate_num_gpu_blocks
+    from aisimulate_core.sdk.memory import estimate_num_gpu_blocks
 
     blocks = estimate_num_gpu_blocks(
         model_path=AIC_MODEL,
@@ -81,7 +81,7 @@ def test_default_aic_capacity_uses_queryable_version() -> None:
 
 
 def test_aggregated_replay_uses_native_aic_engine() -> None:
-    from aiconfigurator_core.sdk.engine import compile_engine
+    from aisimulate_core.sdk.engine import compile_engine
 
     from dynamo.replay import run_synthetic_trace_replay
 
@@ -118,3 +118,42 @@ def test_disaggregated_replay_uses_native_aic_engine() -> None:
     assert report["num_requests"] == 2
     assert report["mean_ttft_ms"] > 0.0
     assert report["mean_tpot_ms"] > 0.0
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+@pytest.mark.parametrize("fixed_capacity", [True, False])
+def test_canonical_aic_timing_runs_dynamo_replay(backend, fixed_capacity):
+    from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+    from dynamo.replay import run_synthetic_trace_replay
+    from dynamo.replay.simulation import DynamoReplayRunner
+
+    config = ForwardPassPerfModelConfig(
+        model=AIC_MODEL,
+        system=AIC_SYSTEM,
+        backend=backend,
+        worker_type="aggregated",
+    ).to_dict()
+    memory_field = (
+        "gpu_memory_utilization" if backend == "vllm" else "mem_fraction_static"
+    )
+    capacity = {"num_gpu_blocks": 1024} if fixed_capacity else {memory_field: 0.8}
+    args = DynamoReplayRunner._engine_args(
+        {
+            "engine_type": backend,
+            "enable_chunked_prefill": True,
+            **capacity,
+            "timing_model": {"type": "external", "provider": "aic", "config": config},
+        }
+    )
+    report = run_synthetic_trace_replay(
+        32,
+        4,
+        2,
+        extra_engine_args=args,
+        num_workers=1,
+        replay_mode="offline",
+        replay_concurrency=2,
+    )
+    assert report.summary["mean_ttft_ms"] > 0
+    assert report.summary["output_throughput_tok_s"] > 0

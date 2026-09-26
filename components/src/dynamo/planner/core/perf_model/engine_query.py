@@ -3,7 +3,7 @@
 
 """Planner-owned engine-level queries over AIC forward-pass estimates.
 
-``aiconfigurator_core.sdk.RustForwardPassPerfModel`` owns native AIC
+``aisimulate_core.sdk.RustForwardPassPerfModel`` owns native AIC
 estimation, online correction, and regression fallback. This module owns the
 Dynamo policy above that forward-pass abstraction: queue-drain estimates,
 TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
@@ -11,6 +11,7 @@ TTFT/ITL derivation, engine-limit checks, and bounded capacity searches.
 
 from __future__ import annotations
 
+import json
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -19,7 +20,9 @@ from itertools import pairwise
 from typing import Any, Callable, Literal, Optional
 
 import msgspec
-from aiconfigurator_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
+from aisimulate_core import RustForwardPassPerfModel as NativeForwardPassPerfModel
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
+from aisimulate_core.sdk import RustForwardPassPerfModel as AicForwardPassPerfModel
 
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
@@ -218,9 +221,26 @@ class AicCoreEnginePerfModel:
         attention_dp_size: int,
     ) -> AicCoreEnginePerfModel:
         if aic_config is None:
-            model = AicForwardPassPerfModel.from_regression(options)
+            # Regression has no hardware identity; these labels are unused by
+            # its estimator, but required by the canonical configuration schema.
+            config = ForwardPassPerfModelConfig(
+                model="regression",
+                system="regression",
+                backend="vllm",
+                worker_type=worker_type,
+                attention_dp=attention_dp_size,
+                estimation_mode="fpm_regression",
+                estimator_config=json.loads(
+                    NativeForwardPassPerfModel.legacy_estimator_config(
+                        json.dumps(options)
+                    )
+                ),
+            )
         else:
-            model = AicForwardPassPerfModel.best_available(aic_config, options)
+            config = ForwardPassPerfModelConfig.from_legacy_engine_config(
+                aic_config, worker_type, options, allow_regression=True
+            )
+        model = AicForwardPassPerfModel.best_available(config)
         return cls(
             model=model,
             worker_type=worker_type,

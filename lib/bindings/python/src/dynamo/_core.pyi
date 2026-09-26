@@ -2552,10 +2552,15 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    execution_model: Optional[str] = None,
+    weka_nested_timestamp_basis: Optional[Literal["auto", "absolute", "relative"]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
     Supports aggregated or disaggregated engine configurations.
+
+    ``weka_nested_timestamp_basis`` applies only to Weka traces. Omission uses
+    AISimulate's automatic selection; explicit absolute or relative overrides it.
 
     Offline replay returns an internal native result consumed by
     ``dynamo.replay``; online replay retains the summary dictionary.

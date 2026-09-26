@@ -22,7 +22,7 @@ pytestmark = [
 
 def _aisimulate_replay_modules():
     _require_aisimulate_distribution()
-    replay_aic = importlib.import_module("aisimulate.aic")
+    replay_aic = importlib.import_module("aisimulate.capacity")
     replay_config = importlib.import_module("dynamo.replay.config")
     return replay_aic, replay_config
 
@@ -109,6 +109,7 @@ def test_load_engine_args_materializes_unset_aic_blocks(monkeypatch):
             "fmha_dtype": None,
             "kv_cache_dtype": None,
             "comm_dtype": None,
+            "cuda_graph_reserved_bytes": 0,
             "systems_path": None,
         }
     ]

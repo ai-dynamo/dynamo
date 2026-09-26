@@ -93,12 +93,10 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
 
     class _FakeAicFacade:
         last_config = None
-        last_options = None
 
         @classmethod
-        def best_available(cls, config, options):
+        def best_available(cls, config):
             cls.last_config = config
-            cls.last_options = options
             return sentinel
 
     monkeypatch.setattr(engine_query, "AicForwardPassPerfModel", _FakeAicFacade)
@@ -111,7 +109,16 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         "max_batch_size": 16,
         "max_kv_tokens": 10_000,
     }
-    config = {"schema_version": 1, "model_name": "Qwen/Qwen3-0.6B"}
+    config = {
+        "schema_version": 1,
+        "model_name": "Qwen/Qwen3-0.6B",
+        "system_name": "h200_sxm",
+        "backend": "vllm",
+        "tp_size": 1,
+        "pp_size": 1,
+        "attention_dp_size": 1,
+        "extra": {},
+    }
 
     model = AicCoreEnginePerfModel.best_available(
         aic_config=config,
@@ -121,8 +128,13 @@ def test_best_available_uses_aic_core_wheel_facade(monkeypatch):
         attention_dp_size=1,
     )
 
-    assert _FakeAicFacade.last_config is config
-    assert _FakeAicFacade.last_options is options
+    forwarded = _FakeAicFacade.last_config
+    assert forwarded.model == config["model_name"]
+    assert forwarded.worker_type == "prefill"
+    assert forwarded.fallback_policy == "regression"
+    regression = forwarded.estimator_config["fpm_regression"]
+    assert regression["sampling"]["max_observations"] == 8
+    assert regression["min_observations"] == 2
     assert model.diagnostics()["readiness"] == "ready"
 
 
