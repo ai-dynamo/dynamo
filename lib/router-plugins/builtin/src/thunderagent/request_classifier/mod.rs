@@ -21,9 +21,9 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
 
-use dynamo_kv_router::protocols::WorkerWithDpRank;
 use self::scheduler::{RequestRegistration, State, WaitStatus};
 use super::{ConfigError, ThunderAgentConfig};
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 
 fn capacity_provider(context: RequestClassifierContext) -> Arc<dyn WorkerCapacityProvider> {
     let block_size = u64::from(context.block_size());
