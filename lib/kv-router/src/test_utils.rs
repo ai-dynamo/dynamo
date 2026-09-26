@@ -83,6 +83,7 @@ pub fn add_blocks_with_start_position(
     start_position: Option<u32>,
 ) -> KvCacheEventData {
     KvCacheEventData::Stored(KvCacheStoreData {
+        shared_cache_eligible: false,
         parent_hash,
         start_position,
         blocks: make_blocks(hashes),
@@ -170,6 +171,7 @@ pub fn make_store_event_with_parent(
         0,
         0,
         KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash,
             start_position: None,
             blocks: stored_blocks_with_sequence_hashes(&new_block_hashes, new_seq_hashes),
@@ -202,6 +204,7 @@ pub fn make_store_event_full(
         0,
         dp_rank,
         KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash,
             start_position,
             blocks: stored_blocks_with_sequence_hashes(&local_block_hashes, &seq_hashes),

@@ -235,6 +235,10 @@ class KvRouterConfigBase(ConfigBase):
     def apply_load_aware_preset(self) -> None:
         if not self.load_aware:
             return
+        if self.shared_cache_type == "mooncake-store":
+            raise ValueError(
+                "--shared-cache-type=mooncake-store is incompatible with --load-aware"
+            )
 
         for field, value in _LOAD_AWARE_KWARG_OVERRIDES.items():
             setattr(self, field, value)
@@ -693,11 +697,15 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] KV Router: Type of external shared KV cache to query. "
                 "'none' (default): disabled. "
-                "'hicache': query Mooncake master directly for SGLang L3 (HiCache) state "
-                "using SGLang-compatible Mooncake key derivation."
+                "'hicache': index Mooncake events using SGLang HiCache keys. "
+                "'mooncake-store': index vLLM MooncakeStoreConnector objects using "
+                "resolved worker metadata and GPU events. Requires the explicit "
+                "MooncakeStoreWorkerExtension, compatible pinned dependencies, "
+                "local KV events, and positive device-overlap credit; "
+                "not compatible with --use-remote-indexer."
             ),
             arg_type=str,
-            choices=["none", "hicache"],
+            choices=["none", "hicache", "mooncake-store"],
         )
         add_argument(
             g,

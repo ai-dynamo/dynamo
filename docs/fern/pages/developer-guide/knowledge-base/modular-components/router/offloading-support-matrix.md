@@ -13,7 +13,7 @@ Legend: ✅ tier-aware routing · ⚠️ available but not fully validated · �
 
 | Framework | Version gates | GPU | CPU RAM | Disk | Shared pool |
 | --- | --- | --- | --- | --- | --- |
-| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | ⚠️ Unified `STORAGE` events map to the Disk tier with locality gating; available but not fully validated | 🚧 Remote locality is dropped; shared-pool indexing is still planned |
+| [**vLLM**](#vllm) | vLLM v0.24.0+; Dynamo v1.3.0+ for CPU offloading; separate pins for Mooncake Store | ✅ KV events | ✅ `OffloadingConnector` + self-describing KV events (aggregated) | ⚠️ Unified `STORAGE` events map to the Disk tier with locality gating; available but not fully validated | **Experimental.** `MooncakeStoreConnector` + `--shared-cache-type mooncake-store`; pinned dependencies and worker extension required; GPU validation pending |
 | [**SGLang**](#sglang) | SGLang v0.5.11+; v0.5.13+ with Mooncake; Dynamo v1.2+ | ✅ KV events | ✅ HiCache + KV events | — no separate disk tier; HiCache's third tier is the shared pool (next column) | ✅ HiCache + Mooncake + `--shared-cache-type hicache` |
 | [**TensorRT-LLM**](#tensorrt-llm) | Dynamo v1.3.0+ for the current event flag | 🟡 `--publish-kv-events`; merged GPU + RAM view | 🟡 native host cache shares one router view with GPU; per-tier weights do not apply | — no native disk tier | — |
 
@@ -62,7 +62,9 @@ PYTHONHASHSEED=0 python3 -m dynamo.vllm \
 
 - Versions: vLLM v0.24.0 or later. Earlier versions publish placeholder CPU events that the router silently drops — offloading still works engine-side, but the router only sees the GPU tier.
 - Disk and multi-tier offloading (`TieringOffloadingSpec`): vLLM emits a unified `STORAGE` medium. Dynamo maps worker-local `STORAGE` events to the Disk tier. The path is available but not yet fully validated.
-- Shared pools: `LOCAL` or absent locality remains worker-local; `REMOTE` or unknown locality is dropped. Dynamo does not yet build a shared-pool index from these events.
+- `OffloadingConnector` locality: `LOCAL` or absent locality remains worker-local; `REMOTE` or unknown locality is dropped. These events do not populate a shared-pool index.
+- **Experimental Mooncake Store shared pool:** `MooncakeStoreConnector` has a separate event-driven path selected by `--shared-cache-type mooncake-store`. It requires the explicit `dynamo.vllm.mooncake_store_runtime.MooncakeStoreWorkerExtension`, pinned vLLM and Mooncake builds, a deployment-specific `cache_prefix`, deterministic integer GPU hashes, local GPU events, and the matching Mooncake publisher. The vLLM v0.24.0 CPU-offloading gate does not establish Store compatibility. See [Mooncake Store Shared-Cache Routing](../backends/vllm/native-kv-offloading.md#mooncake-store-shared-cache-routing) for the exact contract.
+- Mooncake Store supports conservative full-attention, full-attention plus sliding-window, and full-attention plus Mamba-align prefixes, including complete tensor/pipeline-parallel object membership. GPU acceptance remains unverified. Missing or unsupported metadata and inputs disable only the shared hint, not normal GPU routing. A cold router needs both learned GPU identity and observed store residency; event loss can leave stale estimates.
 - Cache-salted requests do not currently reuse `STORAGE`-tier entries for routing because those events omit the extra cache-namespace keys. See [Known Limitations](../backends/vllm/native-kv-offloading.md#known-limitations).
 
 See [Native KV Offloading](../backends/vllm/native-kv-offloading.md) for the full support matrix (including disaggregated and tensor-parallel status), setup commands, verification, and troubleshooting.
@@ -112,7 +114,7 @@ See the [TensorRT-LLM backend docs](../backends/tensorrt-llm/overview.md) for wo
 
 The Rust worker selector (`lib/kv-router/src/scheduling/selector.rs`) scores each candidate worker with:
 
-```
+```text
 overlap_credit_blocks = device_overlap_blocks       * effective_device_credit
                       + host_pinned_overlap_blocks  * 0.75  // host_cache_hit_weight, configurable in router config
                       + disk_overlap_blocks         * 0.25  // disk_cache_hit_weight, configurable in router config
@@ -139,7 +141,7 @@ These flags only affect routing. Values range from 0 to 1: 0 ignores lower-tier 
 | --- | --- | --- |
 | `--router-host-cache-hit-weight` | `0.75` | Credit for each matched host-pinned block |
 | `--router-disk-cache-hit-weight` | `0.25` | Credit for each matched disk or external-tier block |
-| `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Enable shared-cache lookup and credit matches beyond the device-local prefix |
+| `--shared-cache-type` / `--shared-cache-multiplier` | `none` / `0.5` | **Experimental.** Select `hicache` or `mooncake-store` and credit shared matches beyond the device-local prefix |
 
 See [Configuration and Tuning](configuration-and-tuning.md) for the cache-hit weight semantics, [Using HiCache](../backends/sglang/hicache.md#configuration) for the shared-cache flags, and [Router Operations](router-operations.md) for enabling event publishing per backend.
 

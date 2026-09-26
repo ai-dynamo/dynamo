@@ -33,8 +33,14 @@ use tracing_subscriber::EnvFilter;
 pub struct TestBatch(pub f64, pub Vec<RawKvEvent>, pub Option<i32>);
 
 impl TestBatch {
+    /// Outer batch stays a tuple; struct-like events become named maps. The
+    /// positional decoder follows vLLM's field order, which the derived
+    /// `RawKvEvent` serializer with skipped optionals does not reproduce.
     pub fn encode(&self) -> Vec<u8> {
-        rmp_serde::to_vec(self).expect("TestBatch serialize")
+        let mut buf = Vec::new();
+        self.serialize(&mut rmp_serde::Serializer::new(&mut buf).with_struct_map())
+            .expect("TestBatch serialize");
+        buf
     }
 }
 

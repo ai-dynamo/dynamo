@@ -182,6 +182,7 @@ mod tests {
             0,
             dp_rank,
             KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: locals

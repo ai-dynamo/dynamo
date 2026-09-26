@@ -247,6 +247,7 @@ fn stored(event_id: u64, hash: u64) -> RouterEvent {
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {

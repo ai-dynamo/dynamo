@@ -1797,6 +1797,77 @@ class TestRunnerPreservation:
         assert not hasattr(engine_cfg, "runner")
 
 
+class TestMooncakeFpmExtensionComposition:
+    @pytest.mark.parametrize(
+        ("existing", "expected"),
+        [
+            (None, "dynamo.vllm.gc_policy.FpmGcWorkerExtension"),
+            ("", "dynamo.vllm.gc_policy.FpmGcWorkerExtension"),
+            (
+                "dynamo.vllm.gc_policy.FpmGcWorkerExtension",
+                "dynamo.vllm.gc_policy.FpmGcWorkerExtension",
+            ),
+            (
+                "dynamo.vllm.mooncake_store_runtime.MooncakeStoreWorkerExtension",
+                "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension",
+            ),
+            (
+                "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension",
+                "dynamo.vllm.mooncake_store_worker.MooncakeStoreFpmWorkerExtension",
+            ),
+        ],
+    )
+    def test_benchmark_composes_without_importing_gc_in_launcher(
+        self, monkeypatch, existing, expected
+    ):
+        import builtins
+        import importlib
+
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+        dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+        engine_cfg = _make_engine_config_with_runner(
+            scheduler_cls=None, worker_extension_cls=existing
+        )
+        real_import = builtins.__import__
+        real_import_module = importlib.import_module
+
+        def check_worker_only_import(name):
+            assert name not in (
+                "dynamo.vllm.gc_policy",
+                "dynamo.vllm.mooncake_store_worker",
+            ), "launcher must not import GC-starting worker extensions"
+
+        def guarded_import(name, *args, **kwargs):
+            check_worker_only_import(name)
+            return real_import(name, *args, **kwargs)
+
+        def guarded_import_module(name, *args, **kwargs):
+            check_worker_only_import(name)
+            return real_import_module(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+        monkeypatch.setattr(importlib, "import_module", guarded_import_module)
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+        assert engine_cfg.worker_extension_cls == expected
+
+    def test_unrelated_extension_conflict_is_rejected(self, monkeypatch):
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        dynamo_cfg = _make_dynamo_config(benchmark_mode="agg")
+        engine_cfg = _make_engine_config_with_runner(
+            scheduler_cls=None, worker_extension_cls="example.UnrelatedExtension"
+        )
+        with pytest.raises(ValueError, match="DYN_FPM_GC_POLICY requires"):
+            update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    def test_normal_worker_extension_stays_opt_in(self, monkeypatch):
+        monkeypatch.setenv("DYN_FPM_GC_POLICY", "freeze")
+        dynamo_cfg = _make_dynamo_config()
+        engine_cfg = _make_engine_config_with_runner(worker_extension_cls="")
+        update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+        assert engine_cfg.worker_extension_cls == ""
+
+
 class TestForwardPassMetricsActivation:
     """FPM tracing should activate vLLM's existing FPM instrumentation."""
 

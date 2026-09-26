@@ -91,7 +91,8 @@ fn merge_data(pending: &mut KvCacheEventData, next: KvCacheEventData) {
 fn compatible_data(pending: &KvCacheEventData, next: &KvCacheEventData) -> bool {
     match (pending, next) {
         (KvCacheEventData::Stored(pending), KvCacheEventData::Stored(next)) => {
-            next.parent_hash == pending.blocks.last().map(|block| block.block_hash)
+            pending.shared_cache_eligible == next.shared_cache_eligible
+                && next.parent_hash == pending.blocks.last().map(|block| block.block_hash)
         }
         (KvCacheEventData::Removed(_), KvCacheEventData::Removed(_)) => true,
         _ => false,
@@ -259,6 +260,7 @@ mod tests {
 
     fn stored(parent: Option<u64>, block: u64) -> PlacementEvent {
         event(KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: parent.map(ExternalSequenceBlockHash),
             start_position: None,
             blocks: vec![KvCacheStoredBlockData {
@@ -301,6 +303,47 @@ mod tests {
             KvCacheEventData::Removed(data) if data.block_hashes.len() == 2
         ));
         assert!(matches!(output[2].event.data, KvCacheEventData::Cleared));
+    }
+
+    #[test]
+    fn mixed_shared_cache_eligibility_splits_the_store_chain() {
+        for (first_eligible, second_eligible) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let mut coalescer = PlacementEventCoalescer::new(128);
+            let mut output = Vec::new();
+            for (mut event, eligible) in [
+                (stored(None, 1), first_eligible),
+                (stored(Some(1), 2), second_eligible),
+            ] {
+                let KvCacheEventData::Stored(store) = &mut event.event.data else {
+                    unreachable!();
+                };
+                store.shared_cache_eligible = eligible;
+                let key = event.placement.clone();
+                output.extend(coalescer.push(key, event).into_iter().flatten());
+            }
+            output.extend(coalescer.flush());
+            let stores = output
+                .drain(..)
+                .map(|event| match event.event.data {
+                    KvCacheEventData::Stored(store) => store,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>();
+            if first_eligible == second_eligible {
+                assert_eq!(stores.len(), 1);
+                assert_eq!(stores[0].blocks.len(), 2);
+                assert_eq!(stores[0].shared_cache_eligible, first_eligible);
+            } else {
+                assert_eq!(stores.len(), 2);
+                assert_eq!(stores[0].blocks.len(), 1);
+                assert_eq!(stores[0].shared_cache_eligible, first_eligible);
+                assert_eq!(stores[1].blocks.len(), 1);
+                assert_eq!(stores[1].shared_cache_eligible, second_eligible);
+                assert_eq!(stores[1].parent_hash, Some(stores[0].blocks[0].block_hash));
+            }
+        }
     }
 
     #[test]

@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::super::affinity::SessionAffinityMode;
-use super::super::input::PromptRequest;
+use super::super::input::{MmRoutingInfoRequest, PromptRequest};
 use super::hint::transfer_hint_for_selection;
 use super::reservations::{
     Reservation, ReservationClaim, ReservationIndexObserver, sweep_reservation_index,
 };
 use super::*;
+use crate::indexer::SharedCacheQuery;
 use crate::protocols::ActiveSequenceEventData;
 use crate::protocols::{RoutingConstraints, StorageTier};
 use crate::services::common::replica_sync::HostReplicaChannels;
@@ -744,18 +745,236 @@ struct RecordingSharedCache {
 impl SharedKvCache for RecordingSharedCache {
     async fn check_blocks(
         &self,
-        tokens: &[u32],
-        block_size: u32,
-        cache_namespace: Option<&str>,
+        query: SharedCacheQuery<'_>,
     ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
         self.calls.lock().push((
-            tokens.to_vec(),
-            block_size,
-            cache_namespace.map(str::to_string),
+            query.tokens.to_vec(),
+            query.block_size,
+            query.cache_namespace.map(str::to_string),
         ));
-        let blocks = (tokens.len() / block_size as usize) as u32;
-        Ok(SharedCacheHits::from_hits(&vec![true; blocks as usize]))
+        let blocks = query.tokens.len() / query.block_size as usize;
+        Ok(SharedCacheHits::from_hits(&vec![true; blocks]))
     }
+}
+
+struct SharedCacheQuerySnapshot {
+    hashes_ptr: usize,
+    block_hashes: Vec<LocalBlockHash>,
+    tokens_ptr: usize,
+    tokens: Vec<u32>,
+    block_size: u32,
+    namespace: Option<String>,
+    eligible: bool,
+}
+
+struct InspectingSharedCache {
+    calls: parking_lot::Mutex<Vec<SharedCacheQuerySnapshot>>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl SharedKvCache for InspectingSharedCache {
+    async fn check_blocks(
+        &self,
+        query: SharedCacheQuery<'_>,
+    ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+        self.calls.lock().push(SharedCacheQuerySnapshot {
+            hashes_ptr: query.block_hashes.as_ptr() as usize,
+            block_hashes: query.block_hashes.to_vec(),
+            tokens_ptr: query.tokens.as_ptr() as usize,
+            tokens: query.tokens.to_vec(),
+            block_size: query.block_size,
+            namespace: query.cache_namespace.map(str::to_owned),
+            eligible: query.shared_cache_eligible,
+        });
+        if self.fail {
+            Err(crate::indexer::KvRouterError::IndexerOffline)
+        } else {
+            Ok(SharedCacheHits::from_hits(&vec![
+                query.shared_cache_eligible;
+                query.block_hashes.len()
+            ]))
+        }
+    }
+}
+
+async fn seed_lookup_tiers(indexer: &Indexer, hashes: &[LocalBlockHash]) {
+    let hashes: Vec<_> = hashes.iter().map(|hash| hash.0).collect();
+    for (position, tier) in [
+        StorageTier::Device,
+        StorageTier::HostPinned,
+        StorageTier::Disk,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        indexer
+            .apply_event_routed(store_event(
+                7,
+                0,
+                position as u64 + 1,
+                &hashes[..position],
+                &hashes[position..position + 1],
+                tier,
+            ))
+            .await
+            .unwrap();
+    }
+    indexer.dump_events().await.expect("flush local tiers");
+}
+
+fn assert_lookup_tiers(overlap: &OverlapSignals) {
+    let worker = WorkerWithDpRank::new(7, 0);
+    assert_eq!(overlap.tier_overlap_blocks.device.get(&worker), Some(&1));
+    assert_eq!(
+        overlap.tier_overlap_blocks.host_pinned.get(&worker),
+        Some(&1)
+    );
+    assert_eq!(overlap.tier_overlap_blocks.disk.get(&worker), Some(&1));
+}
+
+#[rstest::rstest]
+#[case(1)]
+#[case(2)]
+#[tokio::test]
+async fn shared_cache_queries_borrow_normalized_hashes_and_preserve_local_tiers(
+    #[case] threads: usize,
+) {
+    for (namespace, lora_name) in [
+        (None, None),
+        (Some("tenant"), None),
+        (Some("tenant"), Some("adapter")),
+    ] {
+        let request = PromptRequest {
+            token_ids: Some((100..113).collect()),
+            cache_namespace: namespace.map(str::to_owned),
+            lora_name: lora_name.map(str::to_owned),
+            ..PromptRequest::default()
+        };
+        let hashes = request.view().block_hashes_for_indexer(4, false).unwrap();
+        let mut core = local_core_with(test_config(true), threads, CancellationToken::new());
+        core.ensure_partition(default_key(), 4, false).unwrap();
+        let entry = core.entry(&default_key()).unwrap();
+        seed_lookup_tiers(&entry.indexer, &hashes).await;
+        for fail in [false, true] {
+            let cache = Arc::new(InspectingSharedCache {
+                calls: parking_lot::Mutex::new(Vec::new()),
+                fail,
+            });
+            core.host.cache.shared = Some(cache.clone());
+            for eligible in [false, true] {
+                for retain_kv_transfer_chain in [false, true] {
+                    let mut view = request.view();
+                    view.shared_cache_eligible = eligible;
+                    let mut timings = None;
+                    let prepared = core
+                        .prepare_selection_inputs(
+                            &entry,
+                            &view,
+                            None,
+                            true,
+                            retain_kv_transfer_chain,
+                            &mut timings,
+                        )
+                        .await
+                        .unwrap();
+                    assert_lookup_tiers(&prepared.overlap);
+                    assert_eq!(prepared.block_hashes, hashes);
+                    assert_eq!(
+                        prepared.shared_cache_hits.map(|hits| hits.total_hits),
+                        if fail {
+                            None
+                        } else {
+                            Some(if eligible { 3 } else { 0 })
+                        }
+                    );
+                    let timings = timings.unwrap();
+                    assert!(timings.shared_cache.is_some());
+                    assert_eq!(timings.shared_cache_error, fail);
+                    let calls = std::mem::take(&mut *cache.calls.lock());
+                    assert_eq!(calls.len(), 1);
+                    let query = &calls[0];
+                    assert_eq!(query.hashes_ptr, prepared.block_hashes.as_ptr() as usize);
+                    assert_eq!(query.block_hashes, hashes);
+                    let tokens = request.token_ids.as_deref().unwrap();
+                    assert_eq!(query.tokens_ptr, tokens.as_ptr() as usize);
+                    assert_eq!(query.tokens, tokens);
+                    assert_eq!(query.block_size, 4);
+                    assert_eq!(query.namespace.as_deref(), namespace);
+                    assert_eq!(query.eligible, eligible);
+                }
+            }
+        }
+        core.host.cache.shared = None;
+        for retain_kv_transfer_chain in [false, true] {
+            let mut timings = None;
+            let prepared = core
+                .prepare_selection_inputs(
+                    &entry,
+                    &request.view(),
+                    None,
+                    true,
+                    retain_kv_transfer_chain,
+                    &mut timings,
+                )
+                .await
+                .unwrap();
+            assert_lookup_tiers(&prepared.overlap);
+            assert_eq!(prepared.block_hashes, hashes);
+            assert!(prepared.shared_cache_hits.is_none());
+            let timings = timings.unwrap();
+            assert!(timings.shared_cache.is_none());
+            assert!(!timings.shared_cache_error);
+        }
+        core.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn shared_cache_eligibility_excludes_eagle_and_multimodal_prompts() {
+    let cache = Arc::new(InspectingSharedCache {
+        calls: parking_lot::Mutex::new(Vec::new()),
+        fail: false,
+    });
+    let core = core_with_host(SelectionHost {
+        cache: HostCache {
+            shared: Some(cache.clone()),
+            ..HostCache::default()
+        },
+        ..SelectionHost::default()
+    });
+    for default_is_eagle in [false, true] {
+        let key = RoutingPartitionId::new(format!("eagle-{default_is_eagle}"), "default");
+        core.ensure_partition(key.clone(), 4, default_is_eagle)
+            .unwrap();
+        let entry = core.entry(&key).unwrap();
+        for is_eagle in [None, Some(false), Some(true)] {
+            for mm_kind in 0..3 {
+                let request = PromptRequest {
+                    token_ids: Some((100..113).collect()),
+                    block_mm_infos: (mm_kind == 1).then(|| vec![None; 3]),
+                    mm_routing_info: (mm_kind == 2).then(|| MmRoutingInfoRequest {
+                        routing_token_ids: (200..213).collect(),
+                        block_mm_infos: vec![None; 3],
+                    }),
+                    is_eagle,
+                    ..PromptRequest::default()
+                };
+                let mut view = request.view();
+                view.shared_cache_eligible = true;
+                core.prepare_selection_inputs(&entry, &view, None, true, false, &mut None)
+                    .await
+                    .unwrap();
+                let calls = std::mem::take(&mut *cache.calls.lock());
+                assert_eq!(calls.len(), 1);
+                assert_eq!(
+                    calls[0].eligible,
+                    !is_eagle.unwrap_or(default_is_eagle) && mm_kind == 0
+                );
+            }
+        }
+    }
+    core.shutdown();
 }
 
 struct OnlyWorkerForLora {

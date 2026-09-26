@@ -44,6 +44,7 @@
 
 use super::super::affinity::{SessionAffinityMode, validate_dispatch_target};
 use super::hint::{hint_capable_partition, transfer_hint_for_selection};
+use crate::indexer::SharedCacheQuery;
 
 /// `try_acquire` then `join_initializing` attempts before a commit that finds
 /// the session initializing routes unpinned (see the module doc).
@@ -761,7 +762,16 @@ impl SelectionCore {
             };
             let started = Instant::now();
             let result = shared_cache
-                .check_blocks(tokens, entry.block_size, prompt.cache_namespace)
+                .check_blocks(SharedCacheQuery {
+                    block_hashes: &normalized.block_hashes,
+                    tokens,
+                    block_size: entry.block_size,
+                    cache_namespace: prompt.cache_namespace,
+                    shared_cache_eligible: prompt.shared_cache_eligible
+                        && !prompt.is_eagle.unwrap_or(entry.is_eagle)
+                        && prompt.mm_routing_info.is_none()
+                        && prompt.block_mm_infos.is_none(),
+                })
                 .instrument(tracing::info_span!("kv_router.shared_cache_check"))
                 .await;
             let elapsed = started.elapsed();
