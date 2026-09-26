@@ -555,7 +555,17 @@ def setup_fpm_relay(
     Returns:
         List of FpmEventRelay instances, or None if FPM is not enabled.
     """
-    if not (envs.is_set("DYN_FORWARDPASS_METRIC_PORT") or config.fpm_trace):
+    scheduler_cls = getattr(vllm_config, "scheduler_cls", None)
+    remote_kv_telemetry = (
+        getattr(vllm_config, "kv_transfer_config", None) is not None
+        and scheduler_cls is not None
+        and "InstrumentedScheduler" in str(scheduler_cls)
+    )
+    if not (
+        envs.is_set("DYN_FORWARDPASS_METRIC_PORT")
+        or config.fpm_trace
+        or remote_kv_telemetry
+    ):
         return None
 
     try:
