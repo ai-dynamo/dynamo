@@ -359,20 +359,34 @@ class VideoLoader:
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
+        # Validate the whole batch before creating coroutines so an invalid
+        # later item cannot leave earlier load coroutines unawaited.
+        for idx, item in enumerate(video_mm_items):
+            if not isinstance(item, dict) or not (
+                URL_VARIANT_KEY in item or DECODED_VARIANT_KEY in item
+            ):
+                raise ValueError(
+                    f"Invalid video multimodal item at index {idx}. "
+                    "Expected dict with 'Url' or 'Decoded' key."
+                )
+            if (
+                URL_VARIANT_KEY not in item
+                and DECODED_VARIANT_KEY in item
+                and not self._enable_frontend_decoding
+            ):
+                raise ValueError(
+                    "Received decoded video data but enable_frontend_decoding=False. "
+                    "Enable frontend decoding to transfer decoded video frames via NIXL."
+                )
+
         for item in video_mm_items:
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+            if URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
                 video_futures.append(self.load_video(url, media_io_kwargs))
                 logger.debug("Preparing to load video from URL: %s...", url[:80])
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                if self._enable_frontend_decoding:
-                    metadata = item[DECODED_VARIANT_KEY]
-                    video_futures.append(self._load_decoded_video(metadata))
-                else:
-                    raise ValueError(
-                        "Received decoded video data but enable_frontend_decoding=False. "
-                        "Enable frontend decoding to transfer decoded video frames via NIXL."
-                    )
+            else:
+                metadata = item[DECODED_VARIANT_KEY]
+                video_futures.append(self._load_decoded_video(metadata))
 
         results = await asyncio.gather(*video_futures, return_exceptions=True)
         loaded_videos: list[tuple[np.ndarray, Dict[str, Any]]] = []
