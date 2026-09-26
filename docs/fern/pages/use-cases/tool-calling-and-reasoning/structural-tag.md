@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Structural Tag (Guided Decoding for Tool Calls)
 subtitle: Constrain model output to valid tool call format using xgrammar structural tags
@@ -119,6 +119,37 @@ based on the request's `tool_choice`:
 | `auto` | Always |
 | `none` | Exclusion tag only |
 
+
+## Request Validation
+
+Dynamo validates supplied function parameter schemas with explicit `strict: true` before inference on `/v1/chat/completions` and `/v1/responses`. Invalid schemas now return HTTP 400 where earlier versions could accept them. This validation runs even when structural tags are disabled or `tool_choice` is `none`. Responses checks all submitted functions, including namespace members and functions excluded by `allowed_tools`.
+
+Use an object-only root. Close each object with `additionalProperties: false` and include every named property in `required`. These object checks also apply to nullable nested objects and schemas that declare `properties` or `patternProperties`. For example:
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {"type": "string", "minLength": 1}
+  },
+  "required": ["query"],
+  "additionalProperties": false
+}
+```
+
+Preflight checks schema shapes, object constraints, nesting depth, and size budgets. It rejects root `anyOf`, the composition keywords `allOf`, `oneOf`, `not`, `dependentRequired`, `dependentSchemas`, `if`, `then`, and `else`, and the array keywords `uniqueItems`, `contains`, `minContains`, `maxContains`, and `unevaluatedItems` at any schema location. String patterns and formats, numeric bounds, `minItems`, and `maxItems` can pass preflight.
+
+Each supplied schema can declare at most 5,000 properties and 1,000 enum entries. Property names, definition names, string enum values, and string const values together can contain at most 120,000 Unicode characters. An all-string enum with more than 250 entries has a separate 15,000-character limit. Unused definitions count toward these budgets; repeated references do not add counts.
+
+Object schemas can be nested at most 10 levels below the root object. Only object schemas add a level; array, `anyOf`, and other schema-bearing keywords add none of their own. Dynamo counts literal nesting in the submitted document: a recursive reference does not add levels, and an object under `$defs` starts one level below the root, like a root property. OpenAI documents the same ten-level limit without stating whether the root counts; Dynamo does not count the root.
+
+Dynamo supports `#` and URI-fragment JSON Pointers to schema locations in the same document, including recursive object schemas. A `$ref` that also declares an object type must reach a target that closes the object with `additionalProperties: false`. Remote references, named-anchor references, `$dynamicRef`, `$recursiveRef`, direct reference cycles (a `$ref` chain that returns to itself without passing through a child schema), and references in schemas with nested identifier scopes are outside Dynamo's reference support. Root types that require broader composition analysis are also unsupported. These are Dynamo support limits, not a claim that OpenAI rejects those representations.
+
+Omitted, `null`, or `false` strictness retains existing behavior. Omitted or `null` parameters also retain existing behavior; an explicit `{}` is a supplied schema and fails the object-root check. Dynamo does not normalize or fill in the submitted schema.
+
+Passing preflight does not establish complete OpenAI compatibility or guarantee backend enforcement of every constraint. Structural-tag activation and the deployment schema mode remain separate controls.
+
+The keyword and reference exclusions above are the complete list of keywords rejected solely because they are present. Traversing a keyword such as `propertyNames`, `unevaluatedProperties`, or `prefixItems` checks its nested schemas; it does not establish OpenAI support for that keyword. Backend schema compilation can still reject a schema that passes these checks.
 
 ## Schema Modes
 
