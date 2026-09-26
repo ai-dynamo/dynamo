@@ -62,7 +62,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-  Declares the Dynamo runtime version in the component's `main` image, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
+  Declares the Dynamo runtime version in the component's runtime image — `main` by default, or the init container named by `dynamoSidecar` when Dynamo sidecar mode is active — taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
@@ -74,7 +74,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 </ParamField>
 
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Pod template for the component's pods. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Pod template for the component's pods. Every component must include a container named `main` with a non-empty `image`. In standard mode the operator injects command, environment, port, probe, resource, and volume-mount defaults into `main`, merging your overrides by name. In Dynamo sidecar mode (`dynamoSidecar` is set), `main` is the engine container and is fully user-managed — the operator injects no Dynamo defaults into it. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults, unless it is the init container named by `dynamoSidecar`, which receives Dynamo runtime defaults. User-managed sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
@@ -141,6 +141,10 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   Designates a container in `podTemplate.spec.containers` as the frontend sidecar. The value must match a container `name` in that list; the operator merges its frontend-sidecar defaults (Dynamo env vars, ports, health probes) into that container the same way it merges into `main`. The validation webhook rejects values that match no container.
 </ParamField>
 
+<ParamField path="dynamoSidecar" type="string">
+  Designates a restartable init container (`restartPolicy: Always`) in `podTemplate.spec.initContainers` as the Dynamo runtime container, activating Dynamo sidecar mode. The value must match a container `name` in that list. In Dynamo sidecar mode the operator injects Dynamo defaults (env, identity, transport TLS, ports, startup, liveness, and readiness probes) into the named init container instead of `main`; `main` becomes the engine container and receives no Dynamo defaults. Dynamo sidecar mode is not compatible with multinode, checkpoint/restore, GPU memory service, or failover. The validation webhook rejects a value that matches no init container name in `podTemplate.spec.initContainers`.
+</ParamField>
+
 <ParamField path="compilationCache" type="CompilationCacheConfig">
   Configures a PVC-backed compilation cache. The operator handles backend-specific mount paths and environment variables, so you do not hand-wire them into `podTemplate`.
 </ParamField>
@@ -189,7 +193,7 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 
 ## Runtime Version Compatibility
 
-DGD admission requires `runtimeVersionOverride` when the `main` image has no parseable semantic-version tag. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
+DGD admission requires `runtimeVersionOverride` when the runtime image has no parseable semantic-version tag. The runtime image is the init container named by `dynamoSidecar` in Dynamo sidecar mode, or `main` otherwise. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
 
 When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
 

@@ -85,6 +85,25 @@ func GetMainContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *c
 	return nil
 }
 
+// GetDynamoContainer returns the container hosting the Dynamo runtime, or nil
+// when its template entry is absent. A nil component is treated as absent.
+func GetDynamoContainer(component *v1beta1.DynamoComponentDeploymentSharedSpec) *corev1.Container {
+	// Legacy components run the engine and Dynamo together in main.
+	if component == nil || component.DynamoSidecar == nil {
+		return GetMainContainer(component)
+	}
+
+	// Native sidecars are selected by name, independently of init-container order.
+	if component.PodTemplate != nil {
+		for i := range component.PodTemplate.Spec.InitContainers {
+			if component.PodTemplate.Spec.InitContainers[i].Name == *component.DynamoSidecar {
+				return &component.PodTemplate.Spec.InitContainers[i]
+			}
+		}
+	}
+	return nil
+}
+
 // GetMainContainerResources returns the main container resources, or an empty
 // resource requirements struct when no main container exists.
 func GetMainContainerResources(component *v1beta1.DynamoComponentDeploymentSharedSpec) corev1.ResourceRequirements {

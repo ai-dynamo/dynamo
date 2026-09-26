@@ -107,11 +107,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ComponentType ComponentType `json:"type,omitempty"`
 
-	// RuntimeVersionOverride declares the Dynamo runtime version in this component's
-	// main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
-	// no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
-	// parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-	// example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+	// RuntimeVersionOverride declares the Dynamo runtime compatibility version in the runtime
+	// image: main by default, or the init container selected by dynamoSidecar. DGD admission requires
+	// it when that image has no parseable semantic-version tag; controller-generated DCDs may omit it.
+	// Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical
+	// MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to
 	// version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
@@ -123,10 +123,12 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
-	// podTemplate defines the component's Pod configuration. New components must
-	// include a container named "main" with a non-empty image. Existing components
-	// created without a podTemplate may remain unchanged. The operator merges
-	// defaults into the main container.
+	// podTemplate defines the component's Pod configuration. Every component must
+	// include a container named "main" with a non-empty image. In standard mode
+	// the operator merges Dynamo defaults into main. In Dynamo sidecar mode
+	// (dynamoSidecar is set), main is the engine container and is fully
+	// user-managed — the operator injects no Dynamo defaults into it, and the
+	// named init container receives those defaults instead.
 	// For DGD components whose main image tag is not a Dynamo semantic version,
 	// set runtimeVersionOverride explicitly.
 	//
@@ -219,6 +221,18 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// name in `podTemplate.spec.containers`.
 	// +optional
 	FrontendSidecar *string `json:"frontendSidecar,omitempty"`
+
+	// dynamoSidecar names the restartable init container that carries the Dynamo
+	// runtime in Dynamo sidecar mode, the recommended architecture for vLLM and
+	// other engine integrations. Setting this field activates Dynamo sidecar mode:
+	// the engine runs in main with user-provided launch configuration, and the
+	// operator injects Dynamo configuration (env, identity, system port, probes)
+	// into the named init container instead. The init container must declare
+	// restartPolicy: Always. Multinode deployments, enabled checkpoint, GPU memory
+	// service, and failover are not yet supported in Dynamo sidecar mode. This
+	// field is preserved through v1alpha1 conversion annotations.
+	// +optional
+	DynamoSidecar *string `json:"dynamoSidecar,omitempty"`
 
 	// compilationCache configures a PVC-backed compilation cache. The operator
 	// handles backend-specific mount paths and environment variables, so

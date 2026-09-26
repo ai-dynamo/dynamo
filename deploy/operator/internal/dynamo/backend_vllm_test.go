@@ -582,103 +582,58 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 	}
 }
 
-func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
-	backend := &VLLMBackend{}
-
+func TestApplyCompilationCache_VLLMCacheEnvVar(t *testing.T) {
 	tests := []struct {
-		name                  string
-		component             *v1alpha1.DynamoComponentDeploymentSharedSpec
-		volumeMounts          []corev1.VolumeMount
-		expectCacheEnvVar     bool
-		expectCacheEnvVarName string
-		expectCacheEnvVarVal  string
+		name            string
+		component       *v1alpha1.DynamoComponentDeploymentSharedSpec
+		expectEnvVarVal string
 	}{
 		{
-			name: "VLLM backend with useAsCompilationCache volume mount",
+			name: "useAsCompilationCache sets VLLM_CACHE_ROOT",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:                  "vllm-cache",
-						MountPoint:            "/root/.cache/vllm",
-						UseAsCompilationCache: true,
-					},
+					{Name: "vllm-cache", MountPoint: "/root/.cache/vllm", UseAsCompilationCache: true},
 				},
 			},
-			volumeMounts:          []corev1.VolumeMount{},
-			expectCacheEnvVar:     true,
-			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
-			expectCacheEnvVarVal:  "/root/.cache/vllm",
+			expectEnvVarVal: "/root/.cache/vllm",
 		},
 		{
-			name: "VLLM backend with useAsCompilationCache at custom mount point",
+			name: "useAsCompilationCache at custom mount point sets VLLM_CACHE_ROOT",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:                  "custom-cache",
-						MountPoint:            "/custom/cache/path",
-						UseAsCompilationCache: true,
-					},
+					{Name: "custom-cache", MountPoint: "/custom/cache/path", UseAsCompilationCache: true},
 				},
 			},
-			volumeMounts:          []corev1.VolumeMount{},
-			expectCacheEnvVar:     true,
-			expectCacheEnvVarName: "VLLM_CACHE_ROOT",
-			expectCacheEnvVarVal:  "/custom/cache/path",
+			expectEnvVarVal: "/custom/cache/path",
 		},
 		{
-			name: "VLLM backend without useAsCompilationCache",
+			name: "regular volume does not set VLLM_CACHE_ROOT",
 			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
 				VolumeMounts: []v1alpha1.VolumeMount{
-					{
-						Name:       "regular-volume",
-						MountPoint: "/data",
-					},
+					{Name: "regular-volume", MountPoint: "/data"},
 				},
 			},
-			volumeMounts:      []corev1.VolumeMount{},
-			expectCacheEnvVar: false,
 		},
 		{
-			name: "VLLM backend with no volume mounts",
-			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
-				VolumeMounts: nil,
-			},
-			volumeMounts:      []corev1.VolumeMount{},
-			expectCacheEnvVar: false,
+			name:      "no volume mounts does not set VLLM_CACHE_ROOT",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
+			container := &corev1.Container{}
+			component := betaComponent(t, tt.component)
 
-			// Create a container with initial state including volume mounts
-			container := &corev1.Container{
-				Env:          []corev1.EnvVar{},
-				VolumeMounts: tt.volumeMounts,
-			}
+			require.NoError(t, applyCompilationCache(container, component, BackendFrameworkVLLM))
 
-			// Call UpdateContainer
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, tt.component), "test-service", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
-
-			if tt.expectCacheEnvVar {
-				// Check that the VLLM_CACHE_ROOT environment variable is set
-				found := false
-				for _, env := range container.Env {
-					if env.Name == tt.expectCacheEnvVarName {
-						found = true
-						g.Expect(env.Value).To(gomega.Equal(tt.expectCacheEnvVarVal))
-						break
-					}
-				}
-				if !found {
-					t.Errorf("Expected environment variable %s not found in container", tt.expectCacheEnvVarName)
-				}
+			if tt.expectEnvVarVal != "" {
+				g.Expect(container.Env).To(gomega.ContainElement(corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: tt.expectEnvVarVal}))
 			} else {
-				// Check that no cache environment variable is set
 				for _, env := range container.Env {
 					if env.Name == "VLLM_CACHE_ROOT" {
-						t.Errorf("Unexpected environment variable VLLM_CACHE_ROOT found: %s", env.Value)
+						t.Errorf("unexpected VLLM_CACHE_ROOT=%s", env.Value)
 					}
 				}
 			}

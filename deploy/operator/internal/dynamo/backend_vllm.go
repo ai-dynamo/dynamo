@@ -114,30 +114,6 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		}
 	}
 
-	// Set compilation cache environment variables for VLLM
-	cacheDir := ""
-	if component.CompilationCache != nil {
-		cacheDir = component.CompilationCache.MountPath
-	}
-
-	if cacheDir != "" {
-		// Set VLLM cache directory using the environment variable
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  "VLLM_CACHE_ROOT",
-			Value: cacheDir,
-		})
-
-		// Log confirmation that compilation cache is configured for VLLM
-		logger := log.Log.WithName("vllm-backend")
-		logger.Info("Compilation cache configured and enabled for VLLM backend",
-			"backend", "vllm",
-			"status", "fully-supported",
-			"cache-dir", cacheDir,
-			"use-as-compilation-cache", true,
-			"env-vars-set", true,
-			"env-vars", "VLLM_CACHE_ROOT")
-	}
-
 	return nil
 }
 
