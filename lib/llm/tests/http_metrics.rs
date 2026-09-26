@@ -158,6 +158,73 @@ impl
     }
 }
 
+/// Engine for pinning the non-streaming handler's observation order. It emits
+/// a data-less `llm_metrics` frame first, then holds the content chunk back
+/// until the test opens `gate`, so the test can read what the collector has
+/// observed while that frame sits in the backend-error preflight buffer.
+struct MockGatedMetricsEngine {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for MockGatedMetricsEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let mut generator = request.response_generator(ctx.id().to_string());
+        let gate = Arc::clone(&self.gate);
+
+        let stream = stream! {
+            // Leading data-less metrics frame: the shape the payload-capture
+            // fold forwards ahead of its folded chunk, and the shape the
+            // preflight buffers until the first data-bearing event.
+            let leading = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 1,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            yield leading
+                .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                .expect("metrics serialize");
+
+            // Hold the first data-bearing chunk until the test opens the gate.
+            gate.notified().await;
+
+            let output = generator.create_choice(
+                0,
+                Some("gated".to_string()),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+            );
+            let mut annotated = Annotated::from_data(output);
+            let metrics = LLMMetricAnnotation {
+                input_tokens: 5,
+                output_tokens: 2,
+                chunk_tokens: 1,
+                ..Default::default()
+            };
+            let ann = metrics
+                .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                .expect("metrics serialize");
+            annotated.event = ann.event;
+            annotated.comment = ann.comment;
+            yield annotated;
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
 #[tokio::test]
 async fn test_metrics_prefix_default() {
     // Test default prefix when no env var is set
@@ -606,6 +673,158 @@ async fn test_unknown_model_uses_sentinel_label() {
         cancel_token.cancel();
         task.await.unwrap().unwrap();
     })
+    .await;
+}
+
+/// #11349: a non-streaming handler must observe metrics before the
+/// backend-error preflight. The preflight buffers leading data-less
+/// annotation frames until the first data-bearing event, so an observer
+/// placed after it would stamp TTFT with release time rather than arrival
+/// time. The engine holds its first data chunk behind a gate; TTFT must
+/// already be exposed on `/metrics` while the gate is closed. With the
+/// observer after the preflight the frame sits unobserved in the buffer and
+/// the case times out.
+///
+/// `path` selects the handler under test; `request` is the non-streaming
+/// request body for that endpoint. Both handlers route to the same chat
+/// engine, so one gated engine serves both cases.
+async fn assert_non_streaming_observes_metrics_before_preflight(
+    path: &str,
+    request: serde_json::Value,
+) {
+    temp_env::async_with_vars([(METRICS_PREFIX_ENV, None::<&str>)], async {
+        let (listener, port) = bind_random_port().await;
+        let service = HttpService::builder()
+            .port(port)
+            .enable_chat_endpoints(true)
+            .enable_responses_endpoints(true)
+            .build()
+            .unwrap();
+
+        let state = service.state_clone();
+        let manager = state.manager();
+
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        let task =
+            tokio::spawn(async move { service.run_with_listener(token.clone(), listener).await });
+
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let card = ModelDeploymentCard::with_name_only("gatedmodel");
+        let engine = Arc::new(MockGatedMetricsEngine {
+            gate: Arc::clone(&gate),
+        });
+        manager
+            .add_chat_completions_model("gatedmodel", card.mdcsum(), engine)
+            .unwrap();
+
+        wait_for_metrics_ready(port).await;
+
+        let client = reqwest::Client::new();
+        let metrics_url = format!("http://localhost:{port}/metrics");
+        let request_task = {
+            let client = client.clone();
+            let url = format!("http://localhost:{port}{path}");
+            tokio::spawn(async move { client.post(url).json(&request).send().await })
+        };
+
+        // While the gate is closed, the only frame the handler has received is
+        // the leading metrics frame. Its TTFT must already be exposed.
+        let ttft_line =
+            "dynamo_frontend_time_to_first_token_seconds_count{model=\"gatedmodel\"} 1\n";
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut metrics_body = String::new();
+        while !metrics_body.contains(ttft_line) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{path}: TTFT was not observed while the leading metrics frame sat in the \
+                 backend-error preflight buffer; got:\n{metrics_body}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            metrics_body = client
+                .get(metrics_url.as_str())
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap();
+        }
+
+        gate.notify_one();
+
+        let response = request_task.await.unwrap().unwrap();
+        assert!(
+            response.status().is_success(),
+            "{path}: request failed: {response:?}"
+        );
+        let body = response.text().await.unwrap();
+        assert!(
+            body.contains("gated"),
+            "{path}: response body must carry the gated chunk's content; got:\n{body}"
+        );
+
+        // Give the handler time to drop the collector, which flushes OSL.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let metrics_body = client
+            .get(metrics_url.as_str())
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        // Both frames were observed exactly once: 1 + 1 output tokens, OSL 2,
+        // ISL 5, and still a single TTFT sample.
+        for needle in [
+            ttft_line,
+            "dynamo_frontend_output_tokens_total{model=\"gatedmodel\"} 2\n",
+            "dynamo_frontend_output_sequence_tokens_sum{model=\"gatedmodel\"} 2\n",
+            "dynamo_frontend_input_sequence_tokens_sum{model=\"gatedmodel\"} 5\n",
+        ] {
+            assert!(
+                metrics_body.contains(needle),
+                "{path}: expected `{}` in metrics; got:\n{metrics_body}",
+                needle.trim_end()
+            );
+        }
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    })
+    .await;
+}
+
+/// Non-streaming `/v1/chat/completions`: observe → preflight → aggregate.
+#[tokio::test]
+async fn test_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/chat/completions",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+}
+
+/// Non-streaming `/v1/responses` reaches the same fold through the chat
+/// engine and must keep the same order; reverting only that handler fails
+/// this case while the chat case stays green.
+#[tokio::test]
+async fn test_responses_non_streaming_observes_metrics_before_backend_error_preflight() {
+    assert_non_streaming_observes_metrics_before_preflight(
+        "/v1/responses",
+        serde_json::json!({
+            "model": "gatedmodel",
+            "stream": false,
+            "max_output_tokens": 8,
+            "input": "hi"
+        }),
+    )
     .await;
 }
 
