@@ -142,6 +142,16 @@ mode.
   Mooncake JSONL trace whose `output_token_ids` provide response replay annotations.
 </ParamField>
 
+<ParamField path="--dyn-tool-call-parser" type="string" default="DYN_TOOL_CALL_PARSER">
+  Tool-call parser the frontend applies to this worker's output, as on the engine backends. Use it
+  with `--response-replay-trace-path` to run replayed tool calls through the frontend parser.
+</ParamField>
+
+<ParamField path="--dyn-reasoning-parser" type="string" default="DYN_REASONING_PARSER">
+  Reasoning parser the frontend applies to this worker's output. When unset, no reasoning parsing
+  is performed.
+</ParamField>
+
 ## AIC performance model
 
 Opt-in flags for the AIConfigurator (AIC) latency model. Live Mocker workers do not use AIC by

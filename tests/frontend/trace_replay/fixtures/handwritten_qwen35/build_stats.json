@@ -1,0 +1,24 @@
+{
+  "teacher": "handwritten",
+  "repo": "Qwen/Qwen3.5-0.8B",
+  "tool_call_parser": "qwen3_coder",
+  "reasoning_parser": "qwen3",
+  "markup": [
+    "<think>",
+    "</think>",
+    "<tool_call>",
+    "<function=",
+    "<parameter="
+  ],
+  "stats": {
+    "case:full": 4,
+    "case:stop_in_reasoning": 4,
+    "case:trunc_content": 2,
+    "case:trunc_reasoning": 4,
+    "case:trunc_tool_args": 3,
+    "parallel_tool_call_turns": 1,
+    "tool_calls": 4,
+    "trajectories": 1,
+    "turns": 4
+  }
+}
