@@ -930,10 +930,7 @@ pub fn sanitize_prometheus_label(raw: &str) -> anyhow::Result<String> {
 
     // Prevent __ prefix (reserved for Prometheus internal use) but allow __ elsewhere
     if sanitized.starts_with("__") {
-        sanitized = sanitized
-            .strip_prefix("__")
-            .unwrap_or(&sanitized)
-            .to_string();
+        sanitized = sanitized.trim_start_matches('_').to_string();
         if sanitized.is_empty() || !sanitized.chars().next().unwrap().is_ascii_alphabetic() {
             sanitized = format!("_{}", sanitized);
         }
@@ -1173,6 +1170,21 @@ mod tests {
         // Test that strings with only invalid characters return error
         assert!(sanitize_prometheus_label("@#$%").is_err()); // @#$% -> ____ -> ___ -> all underscores error
         assert!(sanitize_prometheus_label("!!!!").is_err()); // !!!! -> ____ -> ___ -> all underscores error
+    }
+
+    #[test]
+    fn test_sanitize_prometheus_label_strips_every_leading_underscore() {
+        assert_eq!(sanitize_prometheus_label("___test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label("____test").unwrap(), "test");
+
+        // Same path when the leading characters only become underscores after
+        // invalid-character replacement.
+        assert_eq!(sanitize_prometheus_label("...test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label("-.-test").unwrap(), "test");
+        assert_eq!(sanitize_prometheus_label(":::test").unwrap(), "test");
+
+        // A leading digit still needs exactly one underscore in front of it.
+        assert_eq!(sanitize_prometheus_label("___1test").unwrap(), "_1test");
     }
 
     #[test]
