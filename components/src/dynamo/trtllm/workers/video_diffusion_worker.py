@@ -12,6 +12,7 @@ import logging
 from typing import Optional
 
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.utils.worker_shutdown import WorkerShutdown, serve_endpoint
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.args import Config
@@ -22,6 +23,7 @@ async def init_video_diffusion_worker(
     config: Config,
     shutdown_event: asyncio.Event,
     shutdown_endpoints: Optional[list] = None,
+    shutdown: WorkerShutdown | None = None,
 ) -> None:
     """Initialize and run the video diffusion worker.
 
@@ -107,8 +109,10 @@ async def init_video_diffusion_worker(
 
     # Serve the endpoint
     try:
-        await endpoint.serve_endpoint(
+        await serve_endpoint(
+            endpoint,
             handler.generate,
+            shutdown=shutdown,
             graceful_shutdown=True,
         )
     except asyncio.CancelledError:

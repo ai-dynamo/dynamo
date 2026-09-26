@@ -16,6 +16,7 @@ from dynamo.common.snapshot.restore_context import (
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.runtime import create_runtime
+from dynamo.common.utils.worker_shutdown import WorkerShutdown
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import parse_args
@@ -41,7 +42,7 @@ from dynamo.sglang.init_multimodal import (
 )
 from dynamo.sglang.init_rerank import init_rerank
 from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
-from dynamo.sglang.shutdown import install_graceful_shutdown
+from dynamo.sglang.shutdown import defer_engine_signals
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
 configure_dynamo_logging()
@@ -116,87 +117,91 @@ async def worker(argv: list[str] | None = None):
             snapshot_controller.pause_controller, runtime
         )
 
-    run_deferred_handlers = install_graceful_shutdown(
-        loop, runtime, shutdown_endpoints, shutdown_event
-    )
-    logger.info(
-        "Signal handlers set up for graceful shutdown "
-        "(discovery unregister + grace period, with chaining)"
+    shutdown = WorkerShutdown(
+        runtime,
+        shutdown_endpoints,
+        shutdown_event,
+        prefill=config.serving_mode == DisaggregationMode.PREFILL,
     )
 
-    if config.dynamo_args.image_diffusion_worker:
-        await init_image_diffusion(
-            runtime, config, shutdown_endpoints, run_deferred_handlers
-        )
-    elif config.dynamo_args.video_generation_worker:
-        await init_video_diffusion(
-            runtime, config, shutdown_endpoints, run_deferred_handlers
-        )
-    elif config.dynamo_args.rerank_worker:
-        await init_rerank(
-            runtime, config, shutdown_event, shutdown_endpoints, run_deferred_handlers
-        )
-    elif config.dynamo_args.embedding_worker:
-        await init_embedding(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-        )
-    elif config.dynamo_args.multimodal_encode_worker:
-        await init_multimodal_encode_worker(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-        )
-    elif config.dynamo_args.multimodal_worker:
-        if config.serving_mode != DisaggregationMode.PREFILL:
-            await init_multimodal_worker(
+    async def serve():
+        if config.dynamo_args.image_diffusion_worker:
+            await init_image_diffusion(
+                runtime, config, shutdown_endpoints, shutdown=shutdown
+            )
+        elif config.dynamo_args.video_generation_worker:
+            await init_video_diffusion(
+                runtime, config, shutdown_endpoints, shutdown=shutdown
+            )
+        elif config.dynamo_args.rerank_worker:
+            await init_rerank(
+                runtime, config, shutdown_event, shutdown_endpoints, shutdown=shutdown
+            )
+        elif config.dynamo_args.embedding_worker:
+            await init_embedding(
                 runtime,
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                run_deferred_handlers,
+                shutdown=shutdown,
+            )
+        elif config.dynamo_args.multimodal_encode_worker:
+            await init_multimodal_encode_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                shutdown=shutdown,
+            )
+        elif config.dynamo_args.multimodal_worker:
+            if config.serving_mode != DisaggregationMode.PREFILL:
+                await init_multimodal_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    shutdown=shutdown,
+                )
+            else:
+                await init_multimodal_prefill_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    shutdown=shutdown,
+                )
+        elif config.dynamo_args.diffusion_worker:
+            await init_llm_diffusion(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                shutdown=shutdown,
+            )
+        elif config.serving_mode != DisaggregationMode.PREFILL:
+            await init_decode(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                shutdown=shutdown,
+                snapshot_engine=snapshot_engine,
+                attached_engine=attached_engine,
             )
         else:
-            await init_multimodal_prefill_worker(
+            await init_prefill(
                 runtime,
                 config,
                 shutdown_event,
                 shutdown_endpoints,
-                run_deferred_handlers,
+                shutdown=shutdown,
+                snapshot_engine=snapshot_engine,
+                attached_engine=attached_engine,
             )
-    elif config.dynamo_args.diffusion_worker:
-        await init_llm_diffusion(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-        )
-    elif config.serving_mode != DisaggregationMode.PREFILL:
-        await init_decode(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-            snapshot_engine=snapshot_engine,
-            attached_engine=attached_engine,
-        )
-    else:
-        await init_prefill(
-            runtime,
-            config,
-            shutdown_event,
-            shutdown_endpoints,
-            run_deferred_handlers,
-            snapshot_engine=snapshot_engine,
-            attached_engine=attached_engine,
-        )
+
+    with defer_engine_signals(loop, shutdown) as deferred:
+        shutdown.post_shutdown = deferred
+        await shutdown.run(serve(), install_signals=False)
 
 
 def main():

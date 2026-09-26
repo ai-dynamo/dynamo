@@ -73,10 +73,7 @@ its own routing usage. Each child's model card carries `dynamo.sglang.gateway_en
 per-worker capacity from discovery can collapse the N instances of one engine. Only child 0's
 system port is fixed; sibling health lives on random ports, so fixed probes see one of N processes.
 
-Lifecycle: the leader owns the engine subprocesses and the shared memory, runs the deferred
-shutdown handlers, and terminates and reaps the children with the worker's own shutdown budget
-(`DYN_GRACEFUL_SHUTDOWN_GRACE_PERIOD_SECS` + drain + cleanup); a child exiting during shutdown is
-not an error. Children run a parent watchdog (`PR_SET_PDEATHSIG` plus a liveness poll) and
+Lifecycle: the leader owns the engine subprocesses and the shared memory, runs the deferred shutdown handlers, and terminates and reaps the children within the coordinator's total shutdown budget. Grace, drain, and cleanup consume that same budget; they do not extend it. A child exiting during shutdown is not an error. Children run a parent watchdog (`PR_SET_PDEATHSIG` plus a liveness poll) and
 SIGTERM themselves when the leader dies, since without the schedulers they would stay registered
 and fail every request.
 
@@ -256,11 +253,9 @@ Only leader nodes (node_rank==0) run the metrics loop. Non-leader nodes just wai
 
 ## Graceful Shutdown
 
-`shutdown.py:install_graceful_shutdown()` monkey-patches `loop.add_signal_handler()` to
-capture SGLang's internal signal registrations and defer them. On SIGTERM/SIGINT:
-1. Unregisters from discovery (stops new requests)
-2. Waits grace period for in-flight requests
-3. Runs deferred SGLang signal handlers
+`shutdown.py:defer_engine_signals()` captures SGLang's internal signal registrations. `WorkerShutdown` owns SIGTERM/SIGINT and runs discovery withdrawal, router grace, admission closure, request drain, prefill KV fallback, engine cleanup, and runtime teardown within one total deadline. Deferred SGLang signal handlers run only after successful cleanup and runtime teardown. A second signal forces termination.
+
+Gateway children run in separate sessions. The parent forwards shutdown once and waits for the children before releasing its shared engine; a terminal process-group signal must not also reach children directly.
 
 ## Request Flow
 

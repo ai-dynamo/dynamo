@@ -174,6 +174,10 @@ class _SnapshotRuntimeProxy:
         if self._runtime is not None:
             self._runtime.shutdown()
 
+    async def shutdown_and_wait(self) -> None:
+        if self._runtime is not None:
+            await self._runtime.shutdown_and_wait()
+
     def __getattr__(self, name: str) -> Any:
         if name == "snapshot_before_endpoint":
             raise AttributeError(name)
