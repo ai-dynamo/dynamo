@@ -510,7 +510,7 @@ async fn anthropic_messages(
     // parser is configured before converting the request.
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing(&model, None)
         .map_err(|e| match e {
             // Registered but not ready to serve yet → retryable 503 (mapped to
             // "overloaded_error" by `anthropic_error`). Reuses the OpenAI path's

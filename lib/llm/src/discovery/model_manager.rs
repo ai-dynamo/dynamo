@@ -110,6 +110,10 @@ pub enum ModelManagerError {
 
     #[error("Model already exists: {0}")]
     ModelAlreadyExists(String),
+
+    /// The model is served, but no worker advertises a capability the request needs.
+    #[error("Model {model} has no workers supporting `{capability}`")]
+    CapabilityUnsupported { model: String, capability: String },
 }
 
 /// Sentinel label value used in frontend Prometheus metrics for requests
@@ -1505,6 +1509,7 @@ impl ModelManager {
     pub fn get_chat_completions_engine_with_parsing(
         &self,
         model: &str,
+        required_capability: Option<&str>,
     ) -> Result<
         (
             OpenAIChatCompletionsStreamingEngine,
@@ -1517,12 +1522,13 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_chat_engine_with_parsing()
+            .get_chat_engine_with_parsing(required_capability)
     }
 
     pub fn get_completions_engine_with_parsing(
         &self,
         model: &str,
+        required_capability: Option<&str>,
     ) -> Result<
         (
             OpenAICompletionsStreamingEngine,
@@ -1535,7 +1541,7 @@ impl ModelManager {
             .models
             .get(model)
             .ok_or_else(|| ModelManagerError::ModelNotFound(model.to_string()))?
-            .get_completions_engine_with_parsing()
+            .get_completions_engine_with_parsing(required_capability)
     }
 
     pub fn get_generate_engine_with_parsing(

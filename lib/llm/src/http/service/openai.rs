@@ -87,6 +87,7 @@ use crate::protocols::openai::{
         NvCreateResponse, NvResponse, ResponseParams, ResponsesConversionError,
         chat_completion_to_response,
     },
+    validate,
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
 use crate::protocols::unified::UnifiedRequest;
@@ -506,6 +507,11 @@ impl ErrorMessage {
         match e {
             crate::discovery::ModelManagerError::ModelUnavailable(model) => {
                 Self::service_unavailable_with_body(model_not_ready_message(model))
+            }
+            crate::discovery::ModelManagerError::CapabilityUnsupported { capability, .. } => {
+                Self::unsupported_content_error(format!(
+                    "`{capability}` is not supported by the workers serving this model"
+                ))
             }
             _ => Self::model_not_found(),
         }
@@ -1295,7 +1301,10 @@ async fn completions_single(
     // todo - error handling should be more robust
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing(
+            &model,
+            validate::required_worker_capability(&request.unsupported_fields),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -1586,7 +1595,10 @@ async fn completions_batch(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(&model)
+        .get_completions_engine_with_parsing(
+            &model,
+            validate::required_worker_capability(&request.unsupported_fields),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -3544,7 +3556,10 @@ async fn chat_completions(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing(
+            &model,
+            validate::required_worker_capability(&request.unsupported_fields),
+        )
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4247,7 +4262,7 @@ async fn responses(
 
     let (engine, parsing_options) = state
         .manager()
-        .get_chat_completions_engine_with_parsing(&model)
+        .get_chat_completions_engine_with_parsing(&model, None)
         .map_err(|e| {
             let err_response = ErrorMessage::from_model_error(&e);
             inflight_guard.mark_error(extract_error_type_from_response(&err_response));
@@ -4566,8 +4581,6 @@ pub fn validate_response_unsupported_fields(
 
 /// Validates sampling and output parameters on the Responses API request.
 pub fn validate_responses_fields(request: &NvCreateResponse) -> Result<(), ErrorResponse> {
-    use crate::protocols::openai::validate;
-
     let map_err = |e: anyhow::Error| {
         ErrorMessage::from_http_error(
             ErrorClass::InvalidRequest,
@@ -8320,7 +8333,7 @@ mod tests {
     // 9. Invalid or Out of range temperature: Done
     // 10.Invalid or out of range top_p: Done
     // 11. Repetition Penalty: Should be a float between 0.0 and 2.0 : Done
-    // 12. Logprobs: Should be a positive integer between 0 and 5 : Done
+    // 12. Logprobs: Should be a positive integer between 0 and 20 : Done
     // invalid or non existing user : Only empty string is not allowed validation is there. How can we check non-extisting user ?
     // Unknown fields : Done (rejected via extra_fields catch-all)
     // guided_whitespace_pattern null or invalid : Not Done
@@ -8450,12 +8463,11 @@ mod tests {
             );
         }
 
-        // Logprobs: Should be a positive integer between 0 and 5
         let request = NvCreateCompletionRequest {
             inner: CreateCompletionRequest {
                 model: "test-model".to_string(),
                 prompt: "Hello".into(),
-                logprobs: Some(6),
+                logprobs: Some(21),
                 ..Default::default()
             },
             common: Default::default(),
@@ -8470,7 +8482,7 @@ mod tests {
             assert_eq!(error_response.0, StatusCode::BAD_REQUEST);
             assert_eq!(
                 error_response.1.message,
-                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 5, got 6")
+                format!("{VALIDATION_PREFIX}Logprobs must be between 0 and 20, got 21")
             );
         }
     }
@@ -9693,6 +9705,17 @@ mod tests {
         assert_eq!(
             ErrorMessage::from_model_error(&unavailable).0,
             StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        let unsupported = ModelManagerError::CapabilityUnsupported {
+            model: "x".to_string(),
+            capability: "vllm_xargs".to_string(),
+        };
+        let (status, body) = ErrorMessage::from_model_error(&unsupported);
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.message,
+            "`vllm_xargs` is not supported by the workers serving this model"
         );
     }
 

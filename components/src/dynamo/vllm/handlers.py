@@ -6,6 +6,7 @@ import base64
 import functools
 import importlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -153,6 +154,14 @@ def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
 
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
 _KV_HINT_EXTRA_ARGS_KEY: Final = "kv_hint"
+# Runtime capability advertising that build_sampling_params honors `vllm_xargs`.
+# The frontend routes requests carrying the field only to WorkerSets publishing it.
+VLLM_XARGS_CAPABILITY: Final = "vllm_xargs"
+# vLLM fills these extra_args keys from dedicated request fields; never from
+# client-supplied `vllm_xargs`.
+_RESERVED_VLLM_XARGS_KEYS: Final = frozenset(
+    {_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY, "ec_transfer_params"}
+)
 _DISTRIBUTED_WEIGHT_UPDATE_RESERVED_KEYS: Final = frozenset(
     {
         "allow_unpaused",
@@ -767,6 +776,18 @@ def build_sampling_params(
         passthrough_sampling_options = extra_args.get("sampling_options")
         if isinstance(passthrough_sampling_options, dict):
             sampling_options.update(passthrough_sampling_options)
+    # `vllm_xargs` becomes SamplingParams.extra_args, as in vLLM's OpenAI server.
+    # Connector inputs stay excluded: only the router hint below may set them.
+    vllm_xargs = sampling_options.pop("vllm_xargs", None)
+    if isinstance(vllm_xargs, dict) and vllm_xargs:
+        sampling_params.extra_args = {
+            **(sampling_params.extra_args or {}),
+            **{
+                key: value
+                for key, value in vllm_xargs.items()
+                if key not in _RESERVED_VLLM_XARGS_KEYS
+            },
+        }
     guided_decoding = sampling_options.get("guided_decoding")
     if guided_decoding is not None and isinstance(guided_decoding, dict):
         json_schema = guided_decoding.get("json")
@@ -2519,6 +2540,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             lora_needs_set.append(WorkerType.Encode)
 
         apply_data_parallel_runtime_config(runtime_config, self.dp_range)
+        runtime_config.set_engine_specific(VLLM_XARGS_CAPABILITY, json.dumps(True))
         publish_kv_hint_capabilities(
             runtime_config,
             self.config.engine_args,

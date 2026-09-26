@@ -89,7 +89,7 @@ pub async fn completion_response_stream(
     // todo - error handling should be more robust
     let (engine, parsing_options) = state
         .manager()
-        .get_completions_engine_with_parsing(model)
+        .get_completions_engine_with_parsing(model, None)
         .map_err(|e| match e {
             crate::discovery::ModelManagerError::ModelUnavailable(_) => {
                 Status::unavailable("model temporarily unavailable")
