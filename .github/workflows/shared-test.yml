@@ -320,7 +320,9 @@ jobs:
       - name: Run GPU tests (parallel)
         id: gpu-parallel-tests
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
-        if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
+        # Keep independent GPU coverage visible after a CPU-test failure, but do
+        # not run when the job was cancelled or checkout never succeeded.
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
         uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
