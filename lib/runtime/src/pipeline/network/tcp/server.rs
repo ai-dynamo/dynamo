@@ -34,7 +34,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::{
     CallHomeHandshake, ControlMessage, PendingConnections, RegisteredStream, StreamOptions,
-    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec,
+    StreamReceiver, StreamSender, TcpStreamConnectionInfo, TwoPartCodec, bind_listener,
 };
 use crate::discovery::EndpointInstanceId;
 use crate::engine::AsyncEngineContext;
@@ -760,8 +760,7 @@ async fn tcp_listener(
     tls_acceptor: Option<TlsAcceptor>,
     read_tx: tokio::sync::oneshot::Sender<Result<SocketAddr>>,
 ) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
+    let listener = bind_listener(addr)
         .map_err(|e| anyhow::anyhow!("Failed to start TcpListender on {}: {}", addr, e));
 
     let listener = match listener {

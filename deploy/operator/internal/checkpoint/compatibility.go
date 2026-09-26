@@ -68,6 +68,7 @@ var snapshotRestoreEnvironmentNames = map[string]struct{}{
 	"DYN_SYSTEM_PORT":                       {},
 	"DYN_SYSTEM_STARTING_HEALTH_STATUS":     {},
 	"DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS": {},
+	"DYN_TCP_LISTEN_BACKLOG":                {},
 	"DYN_TCP_RESPONSE_STREAM_HOST":          {},
 	"DYN_TCP_RESPONSE_STREAM_PORT":          {},
 	"DYN_TCP_RPC_HOST":                      {},
