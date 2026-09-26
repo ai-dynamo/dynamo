@@ -429,6 +429,10 @@ async def get_runtime_config(
             DISAGG_PREFILL_CANCEL_ANYTIME_V1,
             json.dumps(True),
         )
+        # The decode leg parks on the bootstrap room as soon as prefill hands
+        # back bootstrap info, so cancelling prefill is only safe because the
+        # decode leg is torn down by the same client disconnect.
+        runtime_config.prefill_cancel_until = "anytime"
     # Multimodal encode workers have no tokenizer manager and delegate
     # generation overflow handling to their downstream backend.
     if engine is not None:
