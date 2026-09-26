@@ -38,7 +38,10 @@ from dynamo.sglang.request_handlers import DecodeWorkerHandler, PrefillWorkerHan
 async def _warmup_prefill_engine(
     engine: sgl.Engine, server_args, metrics_task: asyncio.Task
 ) -> None:
-    """Warm the prefill engine and stop metrics if warmup fails."""
+    """Warm the prefill engine and stop metrics if warmup fails.
+
+    Raises on failure so the worker never registers with a broken engine.
+    """
     from dynamo.sglang._disagg import warmup_prefill_engine
 
     try:
