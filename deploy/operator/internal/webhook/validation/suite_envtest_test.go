@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -516,6 +517,11 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	return test.wantWebhookErrors
 }
 
+// goStructFieldType matches the Go type name that encoding/json prints before
+// the field path in an UnmarshalTypeError. Which type it names depends on the
+// JSON engine (Go 1.27 turns on jsonv2 by default), so assertions strip it.
+var goStructFieldType = regexp.MustCompile(`Go struct field [^\s.]*\.`)
+
 func assertAdmissionErrors(t *testing.T, err error, want []string, notWant string) {
 	t.Helper()
 	if len(want) == 0 {
@@ -548,6 +554,7 @@ func assertAdmissionErrors(t *testing.T, err error, want []string, notWant strin
 		}
 		message := strings.Replace(cause.Message, `Invalid value: "object": `, "Invalid value: ", 1)
 		message = strings.Replace(message, `Invalid value: "array": `, "Invalid value: ", 1)
+		message = goStructFieldType.ReplaceAllString(message, "Go struct field .")
 		got = append(got, fmt.Sprintf("%s: %s", cause.Field, message))
 	}
 	if !slices.Equal(got, want) {
