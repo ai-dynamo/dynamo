@@ -75,9 +75,12 @@ func podCliqueEventPredicates() predicate.Funcs {
 		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
 			oldPodClique, oldOK := updateEvent.ObjectOld.(*grovev1alpha1.PodClique)
 			newPodClique, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodClique)
+			// Native worker namespace cutover also consumes update completion.
 			return oldOK &&
 				newOK &&
-				commoncontroller.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique)
+				(commoncontroller.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique) ||
+					(oldPodClique.Status.UpdateProgress != nil && oldPodClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
+						(newPodClique.Status.UpdateProgress != nil && newPodClique.Status.UpdateProgress.UpdateEndedAt != nil))
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
@@ -90,9 +93,12 @@ func pcsgEventPredicates() predicate.Funcs {
 		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
 			oldScalingGroup, oldOK := updateEvent.ObjectOld.(*grovev1alpha1.PodCliqueScalingGroup)
 			newScalingGroup, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)
+			// Native worker namespace cutover also consumes update completion.
 			return oldOK &&
 				newOK &&
-				commoncontroller.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup)
+				(commoncontroller.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup) ||
+					(oldScalingGroup.Status.UpdateProgress != nil && oldScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) !=
+						(newScalingGroup.Status.UpdateProgress != nil && newScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil))
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}

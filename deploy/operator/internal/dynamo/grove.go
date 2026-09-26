@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -443,8 +444,30 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
 		return groveComponentReadiness{}, fmt.Errorf("failed to get PodClique %s/%s: %w", namespace, resourceName, err)
 	}
-	// The cache must observe the requested scale before readiness or namespace cutover.
+	// Only ordinary components publish PodClique counts and revision state.
 	componentReadiness := podCliqueReadiness(podClique, logger)
+	componentReadiness.status = v1beta1.ComponentReplicaStatus{
+		ComponentKind:   v1beta1.ComponentKindPodClique,
+		ComponentNames:  []string{resourceName},
+		Replicas:        podClique.Status.Replicas,
+		UpdatedReplicas: podClique.Status.UpdatedReplicas,
+		ReadyReplicas:   ptr.To(podClique.Status.ReadyReplicas),
+	}
+	componentReadiness.revision = groveComponentRevisionState{
+		generationObserved:     podClique.Status.ObservedGeneration != nil && *podClique.Status.ObservedGeneration >= podClique.Generation,
+		currentPCSRevisionHash: podClique.Status.CurrentPodCliqueSetGenerationHash,
+		replicas:               podClique.Status.Replicas,
+		updatedReplicas:        podClique.Status.UpdatedReplicas,
+		desiredReplicas:        podClique.Spec.Replicas,
+		updateInProgress:       podClique.Status.UpdateProgress != nil,
+		updateEnded: podClique.Status.UpdateProgress != nil &&
+			podClique.Status.UpdateProgress.UpdateEndedAt != nil,
+	}
+	if componentReadiness.revision.generationObserved {
+		componentReadiness.status.ScheduledReplicas = ptr.To(podClique.Status.ScheduledReplicas)
+	}
+
+	// The cache must observe the requested scale before readiness or namespace cutover.
 	if expectedReplicas != nil && podClique.Spec.Replicas != *expectedReplicas {
 		componentReadiness.revision.desiredReplicas = *expectedReplicas
 		componentReadiness.revision.generationObserved = false
@@ -476,26 +499,7 @@ func podCliqueReadiness(podClique *grovev1alpha1.PodClique, logger logr.Logger) 
 		"scheduleGatedReplicas", scheduleGatedReplicas,
 	)
 
-	componentReadiness := groveComponentReadiness{
-		status: v1beta1.ComponentReplicaStatus{
-			ComponentKind:   v1beta1.ComponentKindPodClique,
-			ComponentNames:  []string{resourceName},
-			Replicas:        replicas,
-			UpdatedReplicas: podClique.Status.UpdatedReplicas,
-			ReadyReplicas:   &readyReplicas,
-		},
-		revision: groveComponentRevisionState{
-			generationObserved:     observedGeneration != nil && *observedGeneration >= generation,
-			currentPCSRevisionHash: podClique.Status.CurrentPodCliqueSetGenerationHash,
-			replicas:               replicas,
-			updatedReplicas:        updatedReplicas,
-			desiredReplicas:        desiredReplicas,
-			updateInProgress:       podClique.Status.UpdateProgress != nil,
-			updateEnded: podClique.Status.UpdateProgress != nil &&
-				podClique.Status.UpdateProgress.UpdateEndedAt != nil,
-		},
-	}
-
+	componentReadiness := groveComponentReadiness{}
 	if observedGeneration == nil {
 		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
 		return componentReadiness.withResult(false, groveObservedGenerationNilReason, v1beta1.DGDReadyReasonSomeResourcesNotReady)
@@ -505,8 +509,6 @@ func podCliqueReadiness(podClique *grovev1alpha1.PodClique, logger logr.Logger) 
 		logger.V(1).Info("PodClique spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
 		return componentReadiness.withResult(false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), v1beta1.DGDReadyReasonSomeResourcesNotReady)
 	}
-
-	componentReadiness.status.ScheduledReplicas = &scheduledReplicas
 
 	if desiredReplicas == 0 {
 		return componentReadiness.withResult(true, "", "")

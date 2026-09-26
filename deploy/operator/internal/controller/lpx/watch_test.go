@@ -96,16 +96,19 @@ func TestGroveEventPredicates(t *testing.T) {
 		name      string
 		object    client.Object
 		observed  client.Object
+		completed client.Object
 		predicate predicate.Predicate
 	}{
 		{
 			"clique", &grovev1alpha1.PodClique{ObjectMeta: metadata},
 			&grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{ReadyReplicas: 1}},
+			&grovev1alpha1.PodClique{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueStatus{UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: ptr.To(metav1.Now())}}},
 			podCliquePredicate(),
 		},
 		{
 			"scaling group", &grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata},
 			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{ObservedGeneration: ptr.To(int64(2))}},
+			&grovev1alpha1.PodCliqueScalingGroup{ObjectMeta: metadata, Status: grovev1alpha1.PodCliqueScalingGroupStatus{UpdateProgress: &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: ptr.To(metav1.Now())}}},
 			podCliqueScalingGroupPredicate(),
 		},
 	} {
@@ -117,6 +120,10 @@ func TestGroveEventPredicates(t *testing.T) {
 			require.True(t, test.predicate.Update(event.UpdateEvent{ObjectOld: test.object, ObjectNew: test.observed}))
 			require.Equal(t, []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: "workloads", Name: "materialization"}}},
 				mapChildToLPXGraphDeployment(t.Context(), test.object), "Grove children need no DGD label for routing")
+
+			t.Log("Ignore completion-only changes because LPX does not consume native namespace cutover")
+			require.False(t, test.predicate.Update(event.UpdateEvent{ObjectOld: test.object, ObjectNew: test.completed}))
+			require.False(t, test.predicate.Update(event.UpdateEvent{ObjectOld: test.completed, ObjectNew: test.object}))
 
 			unrelated := test.object.DeepCopyObject().(client.Object)
 			unrelated.SetAnnotations(nil)

@@ -83,6 +83,9 @@ func projectV3PropSync(
 	if err != nil {
 		return nil, nil, err
 	}
+	if pipeline != PipelineLPX && len(edgePositions) != len(partitions)-1 {
+		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
+	}
 
 	// Project each physical partition into the V3 allocation metadata envelope.
 	partitionInfo := make(map[string]any, len(partitions)+1)
@@ -142,8 +145,5 @@ func projectV3PropSync(
 			"prop_sync_pairs": propSyncPairs,
 		},
 	})
-	if pipeline != PipelineLPX && len(connectors) != len(partitions)-1 {
-		return nil, nil, fmt.Errorf("V3 LPU-only workloads require a complete adjacent prop-sync connector chain")
-	}
 	return metadata, connectors, nil
 }

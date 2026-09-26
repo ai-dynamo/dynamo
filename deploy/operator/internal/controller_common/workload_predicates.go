@@ -66,8 +66,6 @@ func PodCliqueStatusChangeIsSignificant(
 		oldPodClique.Spec.Replicas != newPodClique.Spec.Replicas ||
 		!ptr.Equal(oldPodClique.Status.ObservedGeneration, newPodClique.Status.ObservedGeneration) ||
 		!ptr.Equal(oldPodClique.Status.CurrentPodCliqueSetGenerationHash, newPodClique.Status.CurrentPodCliqueSetGenerationHash) ||
-		(oldPodClique.Status.UpdateProgress != nil && oldPodClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
-			(newPodClique.Status.UpdateProgress != nil && newPodClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
 		groveScheduledConditionChanged(oldPodClique.Status.Conditions, newPodClique.Status.Conditions)
 }
 
@@ -84,7 +82,5 @@ func PodCliqueScalingGroupStatusChangeIsSignificant(
 		oldScalingGroup.Spec.Replicas != newScalingGroup.Spec.Replicas ||
 		!ptr.Equal(oldScalingGroup.Status.ObservedGeneration, newScalingGroup.Status.ObservedGeneration) ||
 		!ptr.Equal(oldScalingGroup.Status.CurrentPodCliqueSetGenerationHash, newScalingGroup.Status.CurrentPodCliqueSetGenerationHash) ||
-		(oldScalingGroup.Status.UpdateProgress != nil && oldScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) !=
-			(newScalingGroup.Status.UpdateProgress != nil && newScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) ||
 		groveScheduledConditionChanged(oldScalingGroup.Status.Conditions, newScalingGroup.Status.Conditions)
 }

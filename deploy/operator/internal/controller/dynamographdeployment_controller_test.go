@@ -3749,7 +3749,7 @@ func TestGroveWatchSetup_MapPodCliqueScalingGroupToRequests(t *testing.T) {
 	}
 }
 
-func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
+func TestPodCliqueEventStatusChanges(t *testing.T) {
 	base := func() *grovev1alpha1.PodClique {
 		return &grovev1alpha1.PodClique{
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
@@ -3856,10 +3856,11 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Wake native reconciliation for readiness and namespace cutover")
 			oldPC := base()
 			newPC := base()
 			tt.mutate(newPC)
-			assert.Equal(t, tt.want, controller_common.PodCliqueStatusChangeIsSignificant(oldPC, newPC))
+			assert.Equal(t, tt.want, podCliqueEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPC, ObjectNew: newPC}))
 		})
 	}
 
@@ -3873,10 +3874,10 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newPodClique := oldPodClique.DeepCopy()
 	newPodClique.Status.Conditions[0].Message = "two nodes unavailable"
-	assert.True(t, controller_common.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique))
+	assert.True(t, podCliqueEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPodClique, ObjectNew: newPodClique}))
 }
 
-func TestPCSGStatusChangeIsSignificant(t *testing.T) {
+func TestPCSGEventStatusChanges(t *testing.T) {
 	base := func() *grovev1alpha1.PodCliqueScalingGroup {
 		return &grovev1alpha1.PodCliqueScalingGroup{
 			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
@@ -3967,10 +3968,11 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Wake native reconciliation for readiness and namespace cutover")
 			oldPCSG := base()
 			newPCSG := base()
 			tt.mutate(newPCSG)
-			assert.Equal(t, tt.want, controller_common.PodCliqueScalingGroupStatusChangeIsSignificant(oldPCSG, newPCSG))
+			assert.Equal(t, tt.want, pcsgEventPredicates().Update(event.UpdateEvent{ObjectOld: oldPCSG, ObjectNew: newPCSG}))
 		})
 	}
 
@@ -3984,7 +3986,7 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 	}}
 	newScalingGroup := oldScalingGroup.DeepCopy()
 	newScalingGroup.Status.Conditions[0].Message = "two replicas unavailable"
-	assert.True(t, controller_common.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup))
+	assert.True(t, pcsgEventPredicates().Update(event.UpdateEvent{ObjectOld: oldScalingGroup, ObjectNew: newScalingGroup}))
 }
 
 func TestGroveChildEventPredicates(t *testing.T) {
