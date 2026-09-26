@@ -499,6 +499,25 @@ impl State {
             return self.defer_program(&session_id, now);
         }
 
+        let required = self.request_cost(input_tokens);
+        // A hard pin is the worker the router will Sent to. Resolve it before
+        // the empty-capacity and sticky-assignment releases, which would
+        // otherwise charge a different worker (issue #15280).
+        if let Some(pinned) = self
+            .requests
+            .get(request_id)
+            .and_then(|req| req.pinned_worker)
+        {
+            if !self.worker_has_room(pinned, required, capacities) {
+                return self.defer_program(&session_id, now);
+            }
+            // New programs still wait behind programs already paused for capacity.
+            if was_new && !self.paused_programs.is_empty() {
+                return self.defer_program(&session_id, now);
+            }
+            return self.release_request(request_id, Some(pinned));
+        }
+
         if !capacities.has_usable_capacity() {
             return self.release_request(
                 request_id,
@@ -516,30 +535,6 @@ impl State {
         }
 
         if was_new && !self.paused_programs.is_empty() {
-            return self.defer_program(&session_id, now) || changed;
-        }
-
-        let required = self.request_cost(input_tokens);
-
-        // If the caller supplied a hard pin, honor it as the authoritative
-        // destination instead of choosing a provisional least-used worker.
-        // This closes the window where a provisional charge on one worker and
-        // an authoritative Sent to another worker can cause a brief per-Worker
-        // logical ledger overrun (issue #15280).
-        if let Some(pinned) = self.requests.get(request_id).and_then(|req| req.pinned_worker) {
-            if capacities.is_live(pinned) {
-                let capacity = capacities
-                    .iter()
-                    .find(|(w, _)| w == &pinned)
-                    .map_or(0, |(_, c)| c);
-                let used = self.normal_usage.get(&pinned).copied().unwrap_or(0);
-                if capacity.checked_sub(used).is_some_and(|remaining| remaining >= required) {
-                    return self.release_request(request_id, Some(pinned)) || changed;
-                }
-            }
-            // Hard-pinned target is not live or lacks capacity; defer without
-            // falling through to the least-used selection so we never charge
-            // a different worker than the one the request will actually run on.
             return self.defer_program(&session_id, now) || changed;
         }
 
@@ -706,7 +701,6 @@ impl State {
         if remaining.is_empty() {
             return false;
         }
-        let original_remaining = remaining.clone();
         let mut paused: Vec<String> = self
             .paused_programs
             .iter()
@@ -728,12 +722,51 @@ impl State {
                 .then_with(|| left.cmp(right))
         });
 
+        // Place hard-pinned programs on their pin only. A pin that cannot take
+        // the program stays paused so a later pack cannot charge another worker.
+        let mut changed = false;
+        let mut unpinned_paused = Vec::new();
+        for session_id in paused {
+            let Some(pinned) = self.front_hard_pin(&session_id) else {
+                unpinned_paused.push(session_id);
+                continue;
+            };
+            let required = self.buffered_program_tokens(&session_id);
+            let Some(position) = remaining
+                .iter()
+                .position(|(worker, available)| *worker == pinned && required <= *available)
+            else {
+                continue;
+            };
+            if !self.resume_program(&session_id, Some(pinned), capacities) {
+                continue;
+            }
+            reserve_capacity(
+                &mut remaining,
+                position,
+                required,
+                self.config.buffer_per_program,
+            );
+            let Some(program) = self.programs.get(&session_id) else {
+                continue;
+            };
+            let worker_usage = usage.entry(pinned).or_default();
+            worker_usage.used = worker_usage.used.saturating_add(required);
+            worker_usage.decayed = worker_usage
+                .decayed
+                .saturating_add(self.program_tokens(program, true, now))
+                .saturating_add(self.config.buffer_per_program);
+            changed = true;
+        }
+
+        // Pack unpinned programs into whatever the pin placements did not reserve.
+        let original_remaining = remaining.clone();
         let total_capacity = remaining
             .iter()
             .map(|(_, available)| *available)
             .fold(0usize, usize::saturating_add);
         let mut cumulative = 0usize;
-        let mut selected = paused
+        let mut selected = unpinned_paused
             .into_iter()
             .filter_map(|session_id| {
                 let required = self.buffered_program_tokens(&session_id);
@@ -768,12 +801,11 @@ impl State {
             );
         }
 
-        let mut changed = false;
         for (session_id, required) in selected {
             let Some(&worker) = assignments.get(&session_id) else {
                 continue;
             };
-            if self.resume_program(&session_id, Some(worker)) {
+            if self.resume_program(&session_id, Some(worker), capacities) {
                 let Some(program) = self.programs.get(&session_id) else {
                     continue;
                 };
@@ -827,6 +859,22 @@ impl State {
 
         let mut forced_resumes = 0;
         for session_id in timed_out {
+            // A hard-pinned waiter stays deferred until its own worker can take
+            // the charge. Timing out must not release it onto another worker.
+            if let Some(pinned) = self.front_hard_pin(&session_id) {
+                if self.resume_program(&session_id, Some(pinned), capacities) {
+                    let Some(program) = self.programs.get(&session_id) else {
+                        continue;
+                    };
+                    usage.entry(pinned).or_default().add_program(
+                        self.program_tokens(program, false, now),
+                        self.program_tokens(program, true, now),
+                        self.config.buffer_per_program,
+                    );
+                    forced_resumes += 1;
+                }
+                continue;
+            }
             let target = capacities
                 .iter()
                 .filter(|(worker, _)| capacities.is_live(*worker))
@@ -841,7 +889,7 @@ impl State {
             if target.is_none() && !capacities.has_live_worker() {
                 continue;
             }
-            if self.resume_program(&session_id, target) {
+            if self.resume_program(&session_id, target, capacities) {
                 if let Some(worker) = target {
                     let Some(program) = self.programs.get(&session_id) else {
                         continue;
@@ -858,12 +906,23 @@ impl State {
         forced_resumes
     }
 
-    fn resume_program(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) -> bool {
+    fn resume_program(
+        &mut self,
+        session_id: &str,
+        worker: Option<WorkerWithDpRank>,
+        capacities: &WorkerCapacitySnapshot,
+    ) -> bool {
         let Some(program) = self.programs.get(session_id) else {
             return false;
         };
         if program.lifecycle != ProgramLifecycle::Paused {
             return false;
+        }
+        if let Some(pinned) = self.front_hard_pin(session_id) {
+            let required = self.buffered_program_tokens(session_id);
+            if worker != Some(pinned) || !self.worker_has_room(pinned, required, capacities) {
+                return false;
+            }
         }
         self.update_program(session_id, |program| {
             program.lifecycle = ProgramLifecycle::Active;
@@ -1268,6 +1327,45 @@ impl State {
 
     fn request_cost(&self, input_tokens: usize) -> usize {
         input_tokens.saturating_add(self.config.buffer_per_program)
+    }
+
+    /// True when `worker` is live, present in the capacity snapshot, and has
+    /// `required` tokens free on the normal ledger.
+    fn worker_has_room(
+        &self,
+        worker: WorkerWithDpRank,
+        required: usize,
+        capacities: &WorkerCapacitySnapshot,
+    ) -> bool {
+        if !capacities.is_live(worker) {
+            return false;
+        }
+        let Some(capacity) = capacities
+            .iter()
+            .find(|(candidate, _)| *candidate == worker)
+            .map(|(_, capacity)| capacity)
+        else {
+            return false;
+        };
+        let used = self.normal_usage.get(&worker).copied().unwrap_or(0);
+        capacity
+            .checked_sub(used)
+            .is_some_and(|remaining| remaining >= required)
+    }
+
+    /// Hard pin of the waiting request [`Self::resume_program`] would release.
+    fn front_hard_pin(&self, session_id: &str) -> Option<WorkerWithDpRank> {
+        let session = self.sessions.get(session_id)?;
+        if session.current.is_some() {
+            return None;
+        }
+        let waiting = session.waiting.front()?;
+        let request = self.requests.get(&waiting.request_id)?;
+        if request.phase != RequestPhase::Waiting || !Arc::ptr_eq(&waiting.notify, &request.notify)
+        {
+            return None;
+        }
+        request.pinned_worker
     }
 
     fn set_assignment(&mut self, session_id: &str, worker: Option<WorkerWithDpRank>) {
@@ -1718,7 +1816,10 @@ mod tests {
 
         // Simulate Sent confirming W0 (no ledger move should occur).
         state.on_event(
-            ClassifyEvent::Sent { request_id: "p1".into(), worker: w0 },
+            ClassifyEvent::Sent {
+                request_id: "p1".into(),
+                worker: w0,
+            },
             &caps,
             now,
         );
@@ -1744,5 +1845,174 @@ mod tests {
         );
         let w1_used = state.normal_usage.get(&w1).copied().unwrap_or(0);
         assert!(w1_used <= CAPACITY, "W1 overrun: {w1_used}/{CAPACITY}");
+    }
+
+    // A later request pinned to a different worker must not be released onto
+    // the session's existing assignment (issue #15280).
+    #[test]
+    fn hard_pin_overrides_existing_session_assignment() {
+        let now = Instant::now();
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let w1 = WorkerWithDpRank::new(1, 0);
+        let caps = capacities(&[(0, 64_000), (1, 64_000)]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        let mut program = Program::new(1_000);
+        program.status = ProgramStatus::Acting;
+        program.assigned_worker = Some(w0);
+        program.acting_since = Some(now);
+        state.insert_program("session".into(), program);
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "req".into(),
+                    "session".into(),
+                    2_000,
+                    RequestProgress::new(2_000).0,
+                    false,
+                )
+                .with_pinned_worker(w1),
+                &caps,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.wait_status("req", &notify),
+            WaitStatus::Released(Some(w1))
+        );
+        assert_eq!(state.programs["session"].assigned_worker, Some(w1));
+        assert_eq!(state.normal_usage.get(&w0).copied().unwrap_or(0), 0);
+        assert!(state.normal_usage.get(&w1).copied().unwrap_or(0) > 0);
+    }
+
+    // No live capacity card: do not release the pin onto a sticky worker or
+    // with an empty placement.
+    #[test]
+    fn hard_pin_defers_when_snapshot_cannot_charge_its_worker() {
+        let now = Instant::now();
+        let pinned = WorkerWithDpRank::new(0, 0);
+        let sticky = WorkerWithDpRank::new(1, 0);
+        let caps = WorkerCapacitySnapshot::new([]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        let mut program = Program::new(1_000);
+        program.assigned_worker = Some(sticky);
+        state.insert_program("session".into(), program);
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "req".into(),
+                    "session".into(),
+                    100,
+                    RequestProgress::new(100).0,
+                    false,
+                )
+                .with_pinned_worker(pinned),
+                &caps,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(state.wait_status("req", &notify), WaitStatus::Waiting);
+        assert_eq!(
+            state.programs["session"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        assert!(state.programs["session"].assigned_worker.is_none());
+        assert!(state.normal_usage.is_empty());
+    }
+
+    // Resume and the timeout escape must not move a deferred hard pin onto a
+    // worker that has room when the pin does not.
+    #[test]
+    fn deferred_hard_pin_stays_deferred_when_another_worker_has_room() {
+        let now = Instant::now();
+        let pinned = WorkerWithDpRank::new(0, 0);
+        let other = WorkerWithDpRank::new(1, 0);
+        let caps = capacities(&[(0, 100), (1, 10_000)]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            resume_timeout_seconds: 1.0,
+            ..Default::default()
+        });
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "pinned".into(),
+                    "session-pin".into(),
+                    500,
+                    RequestProgress::new(500).0,
+                    false,
+                )
+                .with_pinned_worker(pinned),
+                &caps,
+                now,
+            )
+            .unwrap();
+        state.insert_program("session-free".into(), paused_program(100, now));
+
+        assert_eq!(state.wait_status("pinned", &notify), WaitStatus::Waiting);
+
+        let outcome = state.reconcile(&caps, now + Duration::from_secs(2));
+
+        assert_eq!(state.wait_status("pinned", &notify), WaitStatus::Waiting);
+        assert_eq!(
+            state.programs["session-pin"].lifecycle,
+            ProgramLifecycle::Paused
+        );
+        assert!(state.programs["session-pin"].assigned_worker.is_none());
+        assert_eq!(state.normal_usage.get(&pinned).copied().unwrap_or(0), 0);
+        assert_eq!(
+            state.programs["session-free"].lifecycle,
+            ProgramLifecycle::Active
+        );
+        assert_eq!(state.programs["session-free"].assigned_worker, Some(other));
+        assert_eq!(state.normal_usage.get(&other).copied().unwrap_or(0), 100);
+        assert_eq!(outcome.forced_resumes, 0);
+    }
+
+    #[test]
+    fn deferred_hard_pin_resumes_onto_its_worker_when_capacity_returns() {
+        let now = Instant::now();
+        let pinned = WorkerWithDpRank::new(0, 0);
+        let other = WorkerWithDpRank::new(1, 0);
+        let tight = capacities(&[(0, 100), (1, 10_000)]);
+        let open = capacities(&[(0, 10_000), (1, 10_000)]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "pinned".into(),
+                    "session-pin".into(),
+                    500,
+                    RequestProgress::new(500).0,
+                    false,
+                )
+                .with_pinned_worker(pinned),
+                &tight,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("pinned", &notify), WaitStatus::Waiting);
+
+        state.reconcile(&open, now + Duration::from_millis(1));
+
+        assert_eq!(
+            state.wait_status("pinned", &notify),
+            WaitStatus::Released(Some(pinned))
+        );
+        assert_eq!(state.programs["session-pin"].assigned_worker, Some(pinned));
+        assert_eq!(state.normal_usage.get(&other).copied().unwrap_or(0), 0);
+        assert!(state.normal_usage.get(&pinned).copied().unwrap_or(0) >= 500);
     }
 }
