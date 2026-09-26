@@ -130,6 +130,149 @@ Each line uses the shared gzip JSONL envelope:
 the writer started. The nested `fpm` object is the canonical payload. A `counter_id` gap can result
 from sampling, local queue pressure, an upstream ZMQ drop, a crash, or node loss.
 
+## Consuming the Raw FPM Stream
+
+`_FpmPublisherThread` publishes each `ForwardPassMetrics` message on a ZMQ `PUB` socket as a three-frame multipart (`self._pub.send_multipart((topic, seq_bytes, payload), flags=zmq.NOBLOCK)`) with an empty topic frame (`topic = b""`), an 8-byte big-endian sequence number (`seq_bytes = seq.to_bytes(8, "big")`), and the payload last. The payload is MessagePack, not the JSON used by the trace schema above: `msgspec.msgpack.Encoder().encode(...)` on the same `ForwardPassMetrics` struct from `dynamo.common.forward_pass_metrics`. Subscribe with an empty topic filter to receive every message: ZMQ `SUB` topic matching is a byte-prefix match against the first frame, and an empty filter matches unconditionally.
+
+```python
+import zmq
+from dynamo.common.forward_pass_metrics import decode
+
+ctx = zmq.Context.instance()
+sock = ctx.socket(zmq.SUB)
+sock.connect("tcp://127.0.0.1:20380")  # base port + dp_rank
+sock.setsockopt(zmq.SUBSCRIBE, b"")
+
+while True:
+    topic, seq_bytes, payload = sock.recv_multipart()
+    seq = int.from_bytes(seq_bytes, "big")
+    metrics = decode(payload)  # ForwardPassMetrics, or None on an unrecognized schema version
+```
+
+Before encoding, the publisher stamps `counter_id` with its own send-time sequence number (`metrics = msgspec.structs.replace(metrics, counter_id=seq)`), the same value carried in the sequence frame: it is a per-publisher sequence, not a group step id, stamped from one `itertools.count()` per `_FpmPublisherThread`, and it drifts across data-parallel ranks because each rank's publisher counts from 0 independently. An idle publisher emits a heartbeat once per second, which also advances the sequence. Sends are non-blocking and are dropped rather than queued when the ZMQ send buffer is full, so this raw stream's `counter_id` can show the same kind of gap already described for the trace schema above. The self-benchmark (`--benchmark-mode`) is a separate path: while it runs, this publisher is paused and forward-pass metrics go into the benchmark artifact instead of the socket, with `counter_id` set to the benchmark point id rather than a publisher sequence; see [FPM self-benchmark collection](environment-variables.mdx#fpm-self-benchmark-collection) and Engine Provenance in the Self-Benchmark Artifact below.
+
+Each data-parallel rank binds `DYN_FORWARDPASS_METRIC_PORT + dp_rank`, defaulting to base port `20380`. Under attention data parallelism (`dp_size > 1`), the self-benchmark synchronizer additionally binds `DYN_FORWARDPASS_METRIC_PORT + dp_size`, but only rank 0 (the data-parallel master) binds it, as a ROUTER socket that every other rank's DEALER socket connects to as a client. The occupied block (the base port alone at `dp_size <= 1`, or through `base + dp_size` once the synchronizer also binds) must sit outside the kernel's ephemeral port range, which Dynamo reads from `/proc/sys/net/ipv4/ip_local_port_range` (commonly starting at `32768`). A port inside that range can be claimed by an unrelated outbound connection before the publisher binds it, so the bind then fails with `Address already in use` intermittently and only under load. Dynamo checks this once per engine-core process and logs one warning when the block overlaps the range, staying silent when the proc file cannot be read, such as on a non-Linux host: `FPM ports <first>-<last> overlap this host's ephemeral port range <low>-<high>; an outbound connection can take one of them first and the publisher bind then fails intermittently. Set DYN_FORWARDPASS_METRIC_PORT to a base below <low>.`
+
+## Engine Provenance in the Self-Benchmark Artifact
+
+A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured once when the instrumented scheduler starts and updated once more after the benchmark finishes, once a worker probe reports what actually ran. The artifact's `schema_version` stays `2`; the block sits between the existing `cudagraph` and `results` keys, and it is simply absent from an artifact whose capture never ran, including every artifact predating this feature.
+
+```json
+{
+  "engine": {
+    "attention": {
+      "backend_requested": null,
+      "backend_per_kind": {},
+      "mla_prefill_backend_requested": null,
+      "flash_attn_version": 3,
+      "use_trtllm_attention": false,
+      "indexer_kv_dtype": "fp8",
+      "indexer_kv_dtype_configured": "auto",
+      "backend_resolved": "FLASH_ATTN_MLA",
+      "mla_prefill_backend_resolved": "FlashAttnPrefillBackend",
+      "resolution": "worker_probe",
+      "indexer": {
+        "index_topk": 2048,
+        "index_n_heads": 1,
+        "index_head_dim": 128
+      }
+    },
+    "kv_cache": {
+      "cache_dtype": "auto",
+      "block_size": 64,
+      "enable_prefix_caching": true,
+      "groups": [
+        {
+          "type": "FullAttentionSpec",
+          "dtype": "bfloat16",
+          "head_size": 128,
+          "num_kv_heads": 8,
+          "block_size": 64,
+          "kv_quant_mode": "NONE"
+        }
+      ],
+      "kv_cache_layout": "LBHNC"
+    },
+    "quantization": {
+      "method": "fp8",
+      "checkpoint_config": {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic"
+      },
+      "quant_config_class": "Fp8Config"
+    },
+    "scheduler": {
+      "max_num_batched_tokens": 8192,
+      "max_num_seqs": 256,
+      "async_scheduling": true,
+      "enable_chunked_prefill": true,
+      "long_prefill_token_threshold": 0
+    },
+    "model": {
+      "dtype": "bfloat16",
+      "model_type": "deepseek_v3",
+      "architectures": ["DeepseekV3ForCausalLM"],
+      "model": "deepseek-ai/DeepSeek-V3"
+    },
+    "parallel": {
+      "data_parallel_size": 4,
+      "data_parallel_rank": 0,
+      "tensor_parallel_size": 1,
+      "pipeline_parallel_size": 1,
+      "enable_expert_parallel": true,
+      "enable_eplb": false,
+      "all2all_backend": "deepep_high_throughput",
+      "eplb_config": {
+        "window_size": 1000,
+        "step_interval": 3000,
+        "num_redundant_experts": 0,
+        "log_balancedness": false,
+        "log_balancedness_interval": 1,
+        "use_async": true,
+        "policy": "default",
+        "communicator": null
+      }
+    },
+    "speculative": null,
+    "graph": {
+      "cudagraph_mode": "FULL",
+      "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32],
+      "resolution": "pre_resolution"
+    },
+    "versions": {
+      "vllm": "0.29.0",
+      "vllm_build_commit": "abcdef0",
+      "dynamo": "0.9.0",
+      "python": "3.12.3"
+    },
+    "resolved": {
+      "tp_rank": 0,
+      "worker_rank": 0,
+      "dp_rank": 0,
+      "attention_backends": {
+        "model.layers.0.self_attn": "FLASH_ATTN_MLA"
+      },
+      "mla_prefill_backend": "FlashAttnPrefillBackend",
+      "cudagraph_mode_resolved": "FULL",
+      "cudagraph_capture_sizes_resolved": [1, 2, 4, 8, 16, 32]
+    },
+    "resolution": "worker_probe"
+  }
+}
+```
+
+- `attention` records what the engine-core process asked for. vLLM resolves the real attention backend inside the model workers and never writes it back into the engine-core config, so `backend_requested` and `mla_prefill_backend_requested` stay `null` whenever selection was automatic, and `backend_per_kind` stays `{}` unless a per-attention-kind override was set. `indexer` is present only for sparse-indexer models; `indexer_kv_dtype` is the resolved value and `indexer_kv_dtype_configured` is the raw configured one (`"auto"` resolves to the DeepSeek indexer default, `"fp8"`). `backend_resolved`, `mla_prefill_backend_resolved`, and this sub-block's own `resolution` start `null`, `null`, and `"pending_worker_probe"`, and are filled in by the worker probe described below.
+- `kv_cache.groups` has one entry per KV-cache group the workers reported (`type` is the spec class name, plus `dtype`, `head_size`, `num_kv_heads`, `block_size`, and `kv_quant_mode` when set). `num_gpu_blocks` is deliberately not here: it is decided per engine-core process after profiling with no cross-rank reduction, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.num_gpu_blocks`. `kv_cache_layout` is present starting vLLM 0.29.0 and simply absent on 0.28.0, which keeps it in a worker-process global the engine-core process cannot read. When vLLM reports a group as a `UniformTypeKVCacheSpecs` wrapper (several same-kind specs that differ only in per-layer attributes), the group's own `dtype`, `head_size`, and `num_kv_heads` stay `null`, and the entry additionally carries a `specs` list with one entry of this same shape per wrapped spec.
+- `quantization.checkpoint_config` is the normalized quantization dict the checkpoint itself declared, not the user-facing online-quantization spec (`model_config.quantization_config`, deliberately not read here). `method` is the kernel family vLLM resolved, and `quant_config_class` is that resolved config object's class name.
+- `scheduler` and `model` are read directly from the engine's own `scheduler_config` and `model_config` at startup and need no further resolution. `model.max_model_len` is deliberately not here: vLLM's `--max-model-len -1` auto-fit can resolve it differently per rank depending on each rank's free GPU memory, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.max_model_len`.
+- `parallel.data_parallel_rank` is the one field in this whole block that legitimately differs per rank of the same run; every other field must be identical across ranks, which is exactly what the cross-rank check described below enforces before a merge.
+- `speculative` is `null` unless speculative decoding is configured, in which case it is a four-field summary: `method`, `model`, `num_speculative_tokens`, `draft_tensor_parallel_size`.
+- `graph` freezes what the engine-core process believed about CUDA graphs before the model worker re-resolved them, tagged `"resolution": "pre_resolution"`. Under a multiprocess executor the engine-core process never sees that rewrite, so this sub-block is never updated after capture; the authoritative post-resolution values live only in the top-level `resolved` block, not here.
+- `versions` is a best-effort snapshot (`vllm`, `vllm_build_commit`, `dynamo`, `python`); a single lookup failure leaves just that one key `null` rather than failing the whole block.
+- `resolved` and the top-level `resolution` move through one lifecycle. `resolution` starts `"pending_worker_probe"` at capture time; a one-shot worker probe (a `collective_rpc` under a 30-second timeout, run once after the benchmark finishes) then fills `resolved` from the first worker's probe result (rank 0, since every rank of a run serves the same model with the same backends) and sets `resolution` to `"worker_probe"`, while a probe that times out or raises instead leaves `resolved` as `null` and sets `resolution` to `"probe_failed: <ExceptionType>: <message>"`. The probe result carries `tp_rank`, `worker_rank`, `dp_rank`, `attention_backends` (one entry per attention layer, keyed by layer name), `mla_prefill_backend`, `cudagraph_mode_resolved`, and `cudagraph_capture_sizes_resolved`. The same result back-fills `attention.backend_resolved` (the single backend name when every probed layer agrees, else `null`) and `attention.mla_prefill_backend_resolved`; when the probed layers disagree, `attention.resolution` reads `"worker_probe_mixed"` instead of following the top-level `resolution`, even though the probe itself succeeded.
+- `capture_error` appears only when the capture function itself raised partway through; it sits alongside whatever sub-blocks were already built, and a capture failure never costs the run its measurements.
+- The merged artifact keeps one copy of this block. Every contributing rank's block must be identical except `parallel.data_parallel_rank`, `resolved`, and `resolution`: a real disagreement anywhere else fails the merge rather than silently averaging measurements from two different engine configurations. The merged copy's `parallel.data_parallel_rank` is set to `null`, since the merged document describes every rank at once. A rank whose own capture failed or is missing never blocks the merge; each such rank is instead excluded from the cross-rank identity check and listed, by rank number, in a `capture_errors` map added to the merged block, valued with that rank's own capture error or the literal string `missing engine block`.
+
 ## Related
 
 - [Observe a Local Deployment](../../cli/operations/observability.mdx#capture-forward-pass-metrics)

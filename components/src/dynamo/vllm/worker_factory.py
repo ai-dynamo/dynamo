@@ -99,6 +99,11 @@ BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 # serving nor error propagation may hang on it.
 WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
 
+# Bound for the post-benchmark engine provenance probe. It reads attributes
+# off already-built layers, so a healthy worker answers immediately; a longer
+# wait means the engine is gone and provenance must not hold up teardown.
+ENGINE_PROBE_TIMEOUT_SECONDS = 30.0
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -187,6 +192,35 @@ def _validate_benchmark_rank_payload(data: dict, path: Path) -> str:
     return status
 
 
+def _benchmark_engine_identity(data: dict) -> Optional[dict]:
+    """The part of a rank artifact's ``engine`` block that every DP rank of a
+    run must agree on.
+
+    ``parallel.data_parallel_rank`` legitimately differs per rank, and
+    ``resolved`` / ``resolution`` are written after this merge by the
+    launcher's worker probe.
+    """
+    engine = data.get("engine")
+    if not isinstance(engine, dict):
+        return None
+    identity = copy.deepcopy(engine)
+    identity.pop("resolved", None)
+    identity.pop("resolution", None)
+    parallel = identity.get("parallel")
+    if isinstance(parallel, dict):
+        parallel.pop("data_parallel_rank", None)
+    return identity
+
+
+def _engine_degraded(engine_block: Any) -> bool:
+    """True when a rank's ``engine`` block cannot be trusted for an identity
+    comparison: no block at all, or the capture itself failed partway
+    through (``_bench_capture_engine`` still emits whatever sub-blocks it
+    built before the exception, alongside ``capture_error``).
+    """
+    return not isinstance(engine_block, dict) or "capture_error" in engine_block
+
+
 def _merge_benchmark_rank_results(
     rank_data: list[tuple[int, Path, dict]],
     merged_path: Path,
@@ -206,6 +240,34 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("Self-benchmark rank results are missing run_id")
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+    # A rank is "degraded" when its engine capture failed or is missing while
+    # at least one other rank has one: it cannot be trusted for an identity
+    # comparison, so it is excluded below and carried into the merged
+    # document's engine.capture_errors instead. A run where NO rank ever
+    # captured an engine block (e.g. a pre-Task-1 artifact) is not degraded
+    # -- it simply carries no engine provenance, so the merge stays
+    # byte-for-byte backward compatible (no engine key, no warning).
+    any_engine_present = any(isinstance(d.get("engine"), dict) for _, _, d in rank_data)
+    engine_capture_errors: dict[str, str] = {}
+    reference_engine: Optional[dict] = None
+    reference_engine_block: Optional[dict] = None
+    reference_engine_rank: Optional[int] = None
+    if any_engine_present:
+        for rank, _, data in rank_data:
+            engine_block = data.get("engine")
+            if _engine_degraded(engine_block):
+                engine_capture_errors[str(rank)] = (
+                    str(engine_block["capture_error"])
+                    if isinstance(engine_block, dict)
+                    else "missing engine block"
+                )
+            elif reference_engine is None:
+                # The first rank whose capture succeeded is the identity
+                # reference; a rank that comes first in rank_data but was
+                # itself degraded is not eligible to be the reference.
+                reference_engine = _benchmark_engine_identity(data)
+                reference_engine_block = engine_block
+                reference_engine_rank = rank
 
     reference_status = _validate_benchmark_rank_payload(reference, reference_path)
 
@@ -345,6 +407,26 @@ def _merge_benchmark_rank_results(
                 f"Self-benchmark grid mismatch at {path}: "
                 f"expected={grid_digest} actual={data.get('grid_digest')}"
             )
+        if reference_engine is not None and not _engine_degraded(data.get("engine")):
+            data_engine_identity = _benchmark_engine_identity(data) or {}
+            if data_engine_identity != reference_engine:
+                mismatched = sorted(
+                    key
+                    for key in set(data_engine_identity) | set(reference_engine)
+                    if data_engine_identity.get(key) != reference_engine.get(key)
+                )
+                # The two dicts can differ (`!=`) even when every key's
+                # .get() agrees, e.g. a top-level key present-with-None on
+                # one rank and absent on the other: .get() returns None
+                # either way, so no single key explains it. Name the whole
+                # block instead of indexing into a possibly empty list.
+                field = mismatched[0] if mismatched else "<top-level key set>"
+                raise RuntimeError(
+                    f"Self-benchmark engine provenance mismatch at {path}: "
+                    f"field={field} "
+                    f"reference_rank={reference_engine_rank}: the ranks of "
+                    "one run must share an engine configuration"
+                )
         recorded_rank = data.get("dp", {}).get("rank")
         if recorded_rank != dp_rank:
             raise RuntimeError(
@@ -466,6 +548,33 @@ def _merge_benchmark_rank_results(
             flattened_results.append(entry)
 
     merged = copy.deepcopy(reference)
+    if any_engine_present:
+        if (
+            _engine_degraded(reference.get("engine"))
+            and reference_engine_block is not None
+        ):
+            # The reference rank's own capture failed or was absent, but
+            # another rank's did not: reseed the merged block from that rank
+            # instead of losing the provenance the run did capture.
+            merged["engine"] = copy.deepcopy(reference_engine_block)
+        merged_engine = merged.get("engine")
+        if isinstance(merged_engine, dict) and isinstance(
+            merged_engine.get("parallel"), dict
+        ):
+            # The merged document describes every rank, so a single rank's
+            # own DP rank would be a lie here.
+            merged_engine["parallel"]["data_parallel_rank"] = None
+        if engine_capture_errors:
+            logger.warning(
+                "Self-benchmark engine provenance capture failed or was "
+                "absent on rank(s) %s; the merged artifact's engine "
+                "provenance is unverified across ranks",
+                ", ".join(sorted(engine_capture_errors, key=int)),
+            )
+            if not isinstance(merged_engine, dict):
+                merged_engine = {}
+                merged["engine"] = merged_engine
+            merged_engine["capture_errors"] = engine_capture_errors
     merged["artifact_type"] = "merged"
     merged["dp"] = {
         "ranks": global_ranks,
@@ -504,6 +613,165 @@ def _write_json_atomic(path: Path, data: dict) -> None:
     with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp_path, path)
+
+
+def _make_engine_probe() -> Callable[[Any], dict]:
+    """Build the worker-side engine probe.
+
+    The probe is defined *inside* this function so cloudpickle serialises it
+    by value: the model worker then runs it without importing
+    ``dynamo.vllm.worker_factory``, which would pull the whole launcher stack
+    into the model process. For the same reason its body may reference only
+    builtins and attributes of the worker object it is handed.
+
+    vLLM chooses the attention backend inside the worker
+    (``Attention.__init__`` -> ``get_attn_backend``) and never writes the
+    result back into ``VllmConfig``, so the layer registry in
+    ``compilation_config.static_forward_context`` is the only place the
+    resolved names exist. Same attribute names in vLLM 0.28.0 and 0.29.0.
+    """
+
+    def probe(self):
+        vllm_config = getattr(self, "vllm_config", None)
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        context = getattr(compilation_config, "static_forward_context", None) or {}
+        backends = {}
+        prefill_backends = []
+        for name, layer in context.items():
+            get_backend = getattr(layer, "get_attn_backend", None)
+            if not callable(get_backend):
+                continue
+            try:
+                backends[str(name)] = get_backend().get_name()
+            except Exception:
+                continue
+            prefill = getattr(layer, "prefill_backend", None)
+            if prefill is not None:
+                # MLA layers hold a backend instance; tolerate a bare class.
+                prefill_backends.append(
+                    getattr(prefill, "__name__", None) or type(prefill).__name__
+                )
+        unique_prefill = sorted(set(prefill_backends))
+        worker_rank = getattr(self, "rank", None)
+        # vLLM zeroes parallel_config.data_parallel_rank on every engine for a
+        # dense (non-MoE) model under external DP, keeping the true rank only
+        # in data_parallel_index -- the same trap
+        # InstrumentedScheduler._resolve_dp_rank already routes around, so
+        # engine.resolved.dp_rank does not silently disagree with
+        # engine.parallel.data_parallel_rank / dp.rank in the same artifact.
+        dp_rank = getattr(parallel_config, "data_parallel_index", None)
+        if dp_rank is None:
+            dp_rank = getattr(parallel_config, "data_parallel_rank", None)
+        # No live TP process group is guaranteed to be initialised wherever
+        # this callable runs, so the TP-local rank is derived from the
+        # worker's own global rank instead of queried from one; it must never
+        # simply be the global rank itself (that only happens to coincide
+        # without pipeline parallelism or multiple DP groups).
+        tensor_parallel_size = getattr(parallel_config, "tensor_parallel_size", None)
+        tp_rank = None
+        if (
+            isinstance(worker_rank, int)
+            and isinstance(tensor_parallel_size, int)
+            and tensor_parallel_size
+        ):
+            tp_rank = worker_rank % tensor_parallel_size
+        cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+        return {
+            "tp_rank": tp_rank,
+            "worker_rank": worker_rank,
+            "dp_rank": dp_rank,
+            "attention_backends": backends,
+            "mla_prefill_backend": (
+                unique_prefill[0] if len(unique_prefill) == 1 else None
+            ),
+            "cudagraph_mode_resolved": getattr(cudagraph_mode, "name", None),
+            "cudagraph_capture_sizes_resolved": [
+                int(size)
+                for size in (
+                    getattr(compilation_config, "cudagraph_capture_sizes", None) or []
+                )
+            ],
+        }
+
+    return probe
+
+
+def _apply_engine_resolved(
+    document: dict, resolved: Optional[dict], resolution: str
+) -> None:
+    """Write one probe result into a benchmark document's ``engine`` block."""
+    engine = document.get("engine")
+    if not isinstance(engine, dict):
+        return
+    engine["resolved"] = copy.deepcopy(resolved)
+    engine["resolution"] = resolution
+    attention = engine.get("attention")
+    if not isinstance(attention, dict):
+        return
+    backends = (resolved or {}).get("attention_backends") or {}
+    names = sorted({name for name in backends.values() if name})
+    attention["backend_resolved"] = names[0] if len(names) == 1 else None
+    attention["mla_prefill_backend_resolved"] = (resolved or {}).get(
+        "mla_prefill_backend"
+    )
+    attention["resolution"] = "worker_probe_mixed" if len(names) > 1 else resolution
+
+
+def _warn_provenance_write_failed(path: object) -> None:
+    logger.warning("Could not record engine provenance in %s", path, exc_info=True)
+
+
+async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None:
+    """Fill ``engine.resolved`` from a one-shot worker probe. Fail-soft.
+
+    Every DP rank runs the same model with the same backends, so rank 0's
+    answer describes them all. Everything that happens after the RPC returns
+    -- validating its shape, applying it to the merged document and to every
+    rank file, and writing them back out -- runs inside the same ``try`` as
+    the RPC itself: a malformed-but-dict-shaped probe result can raise from
+    deep inside that application logic just as easily as the RPC call can
+    time out, and either way it must be recorded in the artifact, never
+    propagated. The measurements are already on disk.
+    """
+    if not isinstance(merged.get("engine"), dict):
+        return
+
+    def write_all(resolved: Optional[dict], resolution: str) -> None:
+        _apply_engine_resolved(merged, resolved, resolution)
+        for rank_file in merged.get("rank_files") or []:
+            try:
+                rank_path = Path(rank_file)
+                with open(rank_path) as f:
+                    rank_document = json.load(f)
+                _apply_engine_resolved(rank_document, resolved, resolution)
+                _write_json_atomic(rank_path, rank_document)
+            except Exception:
+                _warn_provenance_write_failed(rank_file)
+        merged_output_path = merged.get("merged_output_path")
+        if merged_output_path:
+            try:
+                _write_json_atomic(Path(merged_output_path), merged)
+            except Exception:
+                _warn_provenance_write_failed(merged_output_path)
+
+    try:
+        results = await asyncio.wait_for(
+            engine_client.collective_rpc(
+                _make_engine_probe(), timeout=ENGINE_PROBE_TIMEOUT_SECONDS
+            ),
+            timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
+        )
+        if not results or not isinstance(results[0], dict):
+            raise RuntimeError("no worker returned an engine probe result")
+        write_all(results[0], "worker_probe")
+    except Exception as error:
+        # A bare TimeoutError's str() is empty, and it is the single most
+        # likely production failure (a dead or wedged engine) -- the
+        # exception type name keeps the recorded reason from being useless.
+        resolution = f"probe_failed: {type(error).__name__}: {error}"
+        logger.warning("Engine provenance probe failed: %s", resolution, exc_info=True)
+        write_all(None, resolution)
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:
@@ -643,6 +911,7 @@ async def _await_benchmark_then_restore_workers(
                 "handling a self-benchmark failure"
             )
         raise
+    await _attach_engine_resolved(results, engine_client)
     await asyncio.wait_for(
         _restore_benchmark_workers(bench_cfg, engine_client),
         timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
