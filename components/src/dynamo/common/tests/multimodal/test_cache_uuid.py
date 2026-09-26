@@ -3,7 +3,10 @@
 
 import pytest
 
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_backend_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -49,3 +52,15 @@ def test_rejects_malformed_cache_uuid_metadata(multi_modal_uuids: object) -> Non
         match="supported only by the vLLM backend",
     ):
         reject_unsupported_multimodal_uuids(multi_modal_uuids)
+
+
+def test_allows_requests_without_backend_multimodal_data() -> None:
+    reject_unsupported_backend_multimodal_data(None)
+
+
+def test_rejects_backend_multimodal_data() -> None:
+    with pytest.raises(
+        ValueError,
+        match="supported only by the vLLM backend",
+    ):
+        reject_unsupported_backend_multimodal_data({"custom_input": {"shape": [2, 4]}})

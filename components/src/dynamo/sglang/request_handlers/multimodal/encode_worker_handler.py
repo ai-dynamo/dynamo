@@ -31,7 +31,10 @@ from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
 )
 from dynamo.common.multimodal import EMBEDDING_SENDER_FACTORIES, ImageLoader
-from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.multimodal.cache_uuid import (
+    reject_unsupported_backend_multimodal_data,
+    reject_unsupported_multimodal_uuids,
+)
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
@@ -911,6 +914,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
             asynchronously by _prepare_image_inputs.
         """
         reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
+        reject_unsupported_backend_multimodal_data(
+            request.get("backend_multi_modal_data")
+        )
         mm_data = request.get("multi_modal_data")
         if not mm_data:
             raise ValueError("multi_modal_data is required for the encode worker.")
