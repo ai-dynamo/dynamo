@@ -295,11 +295,7 @@ func (r *graphReconciler) reconcileWorkloads(
 
 	// Failure blocks publication while each workload independently cleans up expired suffixes.
 	if len(expiredRequests) > 0 {
-		retained := slices.DeleteFunc(slices.Collect(maps.Values(requests)), func(request *lpxv1alpha1.LPUPipelineRequest) bool {
-			_, desired := desiredRequests[request.Name]
-			return !desired
-		})
-		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, retained, expiredRequests)
+		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, requests, desiredRequests, expiredRequests)
 	}
 
 	// Keep publication blocked after the failed requests have been removed.

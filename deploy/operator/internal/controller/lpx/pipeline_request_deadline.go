@@ -119,7 +119,7 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 	deployment *v1alpha1.LPXGraphDeployment,
 	pcsgs map[string]*grovev1alpha1.PodCliqueScalingGroup,
 	explicitReplicas map[string]*int32,
-	requests []*lpxv1alpha1.LPUPipelineRequest,
+	requests, desiredRequests map[string]*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
 ) (ctrl.Result, error) {
 	// Persist evidence covering every expired cycle before deleting any expired request.
@@ -137,6 +137,9 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 	}
 	requestsByGroup := make(map[string][]*lpxv1alpha1.LPUPipelineRequest)
 	for _, request := range requests {
+		if _, desired := desiredRequests[request.Name]; !desired {
+			continue
+		}
 		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
 		requestsByGroup[name] = append(requestsByGroup[name], request)
 	}
