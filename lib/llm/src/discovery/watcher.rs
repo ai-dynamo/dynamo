@@ -64,6 +64,7 @@ use super::readiness::normalize_legacy_prefill_topology;
 use super::{
     ModelManager,
     controller::{ControllerHost, DesiredInstance, GroupKey, GroupSpec, ModelDiscoveryController},
+    model_manager::RemovedDiscoveryGroup,
 };
 use crate::namespace::NamespaceFilter;
 use tokio_util::sync::CancellationToken;
@@ -1072,67 +1073,21 @@ impl ControllerHost for ModelWatcher {
     fn commit_group(
         &self,
         spec: &GroupSpec,
-        mut prepared: Self::Prepared,
+        prepared: Self::Prepared,
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
-        let adapter_was_available = adapters
-            .iter()
-            .map(|adapter| {
-                (
-                    adapter.card.name().to_string(),
-                    self.manager
-                        .get_committed_model(adapter.card.name())
-                        .is_some(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        let worker_set = prepared
-            .worker_set
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
-        let mut committed_members = members
-            .iter()
-            .map(|member| (member.key.clone(), member.card.clone()))
-            .collect::<Vec<_>>();
-        if let Some((_, card)) = committed_members
-            .iter_mut()
-            .find(|(key, _)| key == &spec.representative.key)
-        {
-            *card = prepared.card.clone();
-        }
-        self.manager.commit_discovery_group(
-            &spec.key.id(),
-            &spec.key.worker_set_key,
-            worker_set,
-            committed_members,
-            adapters
-                .iter()
-                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
-                .collect(),
-        )?;
-        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
-        let mut adapter_names = HashSet::new();
-        for adapter in adapters {
-            if adapter_names.insert(adapter.card.name().to_string())
-                && !adapter_was_available
-                    .get(adapter.card.name())
-                    .copied()
-                    .unwrap_or(false)
-            {
-                self.emit_update(ModelUpdate::Added(adapter.card.clone()));
-            }
-        }
-        if prepared.card.model_type.supports_chat() {
-            self.notify_on_model.notify_waiters();
-        }
-        tracing::info!(
-            model_name = prepared.card.name(),
-            group = %spec.key.id(),
-            members = members.len(),
-            "Committed discovered model group"
-        );
-        Ok(())
+        self.install_group(spec, prepared, members, adapters, false)
+    }
+
+    fn supersede_group(
+        &self,
+        spec: &GroupSpec,
+        prepared: Self::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        self.install_group(spec, prepared, members, adapters, true)
     }
 
     fn replace_group(
@@ -1141,54 +1096,7 @@ impl ControllerHost for ModelWatcher {
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
-        let group_id = key.id();
-        let previous = self
-            .manager
-            .discovery_group_adapter_cards(&group_id)
-            .into_iter()
-            .map(|card| (card.name().to_string(), card))
-            .collect::<HashMap<_, _>>();
-        let desired = adapters
-            .iter()
-            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
-            .collect::<HashMap<_, _>>();
-        let was_available = previous
-            .keys()
-            .chain(desired.keys())
-            .map(|name| {
-                (
-                    name.clone(),
-                    self.manager.get_committed_model(name).is_some(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        self.manager.replace_discovery_group(
-            &group_id,
-            None,
-            members
-                .iter()
-                .map(|member| (member.key.clone(), member.card.clone()))
-                .collect(),
-            adapters
-                .iter()
-                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
-                .collect(),
-        )?;
-        for (name, card) in &desired {
-            if !was_available.get(name).copied().unwrap_or(false)
-                && self.manager.get_committed_model(name).is_some()
-            {
-                self.emit_update(ModelUpdate::Added(card.clone()));
-            }
-        }
-        for (name, card) in previous {
-            if was_available.get(&name).copied().unwrap_or(false)
-                && self.manager.get_committed_model(&name).is_none()
-            {
-                self.emit_update(ModelUpdate::Removed(card));
-            }
-        }
-        Ok(())
+        self.replace_group_members(key, members, adapters)
     }
 
     fn replace_prepared_group(
@@ -1272,6 +1180,110 @@ impl ControllerHost for ModelWatcher {
         let Some(removed) = self.manager.remove_discovery_group(&key.id()) else {
             return;
         };
+        self.emit_group_removal(key, removed, true);
+    }
+
+    fn discard_prepared(&self, prepared: Self::Prepared) {
+        drop(prepared);
+    }
+
+    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
+        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    }
+}
+
+impl ModelWatcher {
+    /// Install a built group. `supersede` replaces the catalog entry a drained
+    /// predecessor left behind under the same key in one manager operation; a
+    /// plain commit requires the key to be uncommitted.
+    fn install_group(
+        &self,
+        spec: &GroupSpec,
+        mut prepared: <Self as ControllerHost>::Prepared,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+        supersede: bool,
+    ) -> anyhow::Result<()> {
+        let adapter_was_available = adapters
+            .iter()
+            .map(|adapter| {
+                (
+                    adapter.card.name().to_string(),
+                    self.manager
+                        .get_committed_model(adapter.card.name())
+                        .is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let worker_set = prepared
+            .worker_set
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("prepared WorkerSet was already consumed"))?;
+        let mut committed_members = members
+            .iter()
+            .map(|member| (member.key.clone(), member.card.clone()))
+            .collect::<Vec<_>>();
+        if let Some((_, card)) = committed_members
+            .iter_mut()
+            .find(|(key, _)| key == &spec.representative.key)
+        {
+            *card = prepared.card.clone();
+        }
+        let committed_adapters = adapters
+            .iter()
+            .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
+            .collect();
+        let withdrawn = if supersede {
+            self.manager.supersede_discovery_group(
+                &spec.key.id(),
+                &spec.key.worker_set_key,
+                worker_set,
+                committed_members,
+                committed_adapters,
+            )?
+        } else {
+            self.manager.commit_discovery_group(
+                &spec.key.id(),
+                &spec.key.worker_set_key,
+                worker_set,
+                committed_members,
+                committed_adapters,
+            )?;
+            None
+        };
+        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        let mut adapter_names = HashSet::new();
+        for adapter in adapters {
+            if adapter_names.insert(adapter.card.name().to_string())
+                && !adapter_was_available
+                    .get(adapter.card.name())
+                    .copied()
+                    .unwrap_or(false)
+            {
+                self.emit_update(ModelUpdate::Added(adapter.card.clone()));
+            }
+        }
+        // The base model was listed throughout, so a succession reports only the
+        // adapters the successor did not claim back.
+        if let Some(withdrawn) = withdrawn {
+            self.emit_group_removal(&spec.key, withdrawn, false);
+        }
+        if prepared.card.model_type.supports_chat() {
+            self.notify_on_model.notify_waiters();
+        }
+        tracing::info!(
+            model_name = prepared.card.name(),
+            group = %spec.key.id(),
+            members = members.len(),
+            "Committed discovered model group"
+        );
+        Ok(())
+    }
+
+    /// Report a withdrawn group's models. `base` is false when a successor has
+    /// already taken the key over, so only adapters that nothing committed back
+    /// are reported.
+    fn emit_group_removal(&self, key: &GroupKey, removed: RemovedDiscoveryGroup, base: bool) {
         let removed_members = removed.cards.len();
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
@@ -1286,6 +1298,9 @@ impl ControllerHost for ModelWatcher {
             }
         }
         let card = removed.representative;
+        if !base {
+            return;
+        }
         for removed_card in removed_model_cards(&self.manager, &card) {
             self.emit_update(ModelUpdate::Removed(removed_card));
         }
@@ -1297,12 +1312,60 @@ impl ControllerHost for ModelWatcher {
         );
     }
 
-    fn discard_prepared(&self, prepared: Self::Prepared) {
-        drop(prepared);
-    }
-
-    async fn list_instances(&self) -> anyhow::Result<Vec<DiscoveryInstance>> {
-        self.drt.discovery().list(DiscoveryQuery::AllModels).await
+    fn replace_group_members(
+        &self,
+        key: &GroupKey,
+        members: &[DesiredInstance],
+        adapters: &[DesiredInstance],
+    ) -> anyhow::Result<()> {
+        let group_id = key.id();
+        let previous = self
+            .manager
+            .discovery_group_adapter_cards(&group_id)
+            .into_iter()
+            .map(|card| (card.name().to_string(), card))
+            .collect::<HashMap<_, _>>();
+        let desired = adapters
+            .iter()
+            .map(|adapter| (adapter.card.name().to_string(), adapter.card.clone()))
+            .collect::<HashMap<_, _>>();
+        let was_available = previous
+            .keys()
+            .chain(desired.keys())
+            .map(|name| {
+                (
+                    name.clone(),
+                    self.manager.get_committed_model(name).is_some(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        self.manager.replace_discovery_group(
+            &group_id,
+            None,
+            members
+                .iter()
+                .map(|member| (member.key.clone(), member.card.clone()))
+                .collect(),
+            adapters
+                .iter()
+                .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
+                .collect(),
+        )?;
+        for (name, card) in &desired {
+            if !was_available.get(name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(name).is_some()
+            {
+                self.emit_update(ModelUpdate::Added(card.clone()));
+            }
+        }
+        for (name, card) in previous {
+            if was_available.get(&name).copied().unwrap_or(false)
+                && self.manager.get_committed_model(&name).is_none()
+            {
+                self.emit_update(ModelUpdate::Removed(card));
+            }
+        }
+        Ok(())
     }
 }
 
