@@ -90,6 +90,34 @@ worker_selection:
         }
     }
 
+    #[test]
+    fn resolves_soft_affinity_parameter() {
+        let yaml = |parameter: &str| {
+            format!(
+                r#"
+worker_selection:
+  aggregated: two-tier
+  instances:
+    - name: two-tier
+      type: dynamo-two-tier-cost-fn
+{parameter}
+"#
+            )
+        };
+
+        for parameter in [
+            "",
+            "      parameters:\n        respect_soft_affinity: false",
+            "      parameters:\n        respect_soft_affinity: true",
+        ] {
+            let (_config, resolved) = resolve(&yaml(parameter));
+            assert!(
+                resolved.unwrap().is_some(),
+                "parameter variant should resolve: {parameter}"
+            );
+        }
+    }
+
     /// An unknown parameter key is a mistake, most often a misremembered threshold name. It must
     /// fail startup rather than silently leaving the default in place.
     #[test]
@@ -102,7 +130,7 @@ worker_selection:
     - name: dynamo-two-tier-cost-fn
       type: dynamo-two-tier-cost-fn
       parameters:
-        cache_affinity_threshold: 0.8
+        respect_soft_affinitty: true
 "#,
         );
 
@@ -115,7 +143,7 @@ worker_selection:
             "unexpected error: {error}"
         );
         assert!(
-            error.to_string().contains("cache_affinity_threshold"),
+            error.to_string().contains("respect_soft_affinitty"),
             "the error should name the offending key: {error}"
         );
     }

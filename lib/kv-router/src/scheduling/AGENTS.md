@@ -122,6 +122,12 @@ PolicyClassQueue("agents")
 
 ## Public Worker-Selection API
 
+- `WorkerSelector::uses_exclusive_affinity_target()` is a one-off compatibility hook that
+  preserves the default selector's historical soft-affinity behavior. Custom
+  `WorkerSelectionPolicy` implementations must not override or make it configurable. They receive
+  the full eligible candidate set and use `WorkerSelectionContext::affinity_target()` to retain,
+  ignore, or replace a soft target.
+
 The `plugins::worker_selection` module contains the public Rust contract for custom worker filters, scorers, and pickers. Treat each public item as a versioned external API.
 
 - Do not add a public field, accessor, input group, type, or re-export unless the task explicitly requires a new external policy capability.

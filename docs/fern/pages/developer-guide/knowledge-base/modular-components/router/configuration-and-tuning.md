@@ -147,6 +147,7 @@ experimental router exactly. Add any subset to tune it:
         cache_threshold: 0.5
         balance_abs_threshold: 32
         balance_rel_threshold: 1.1
+        respect_soft_affinity: true
 ```
 
 | Parameter | Default | Meaning |
@@ -154,12 +155,19 @@ experimental router exactly. Add any subset to tune it:
 | `cache_threshold` | `0.5` | Fraction of the request's blocks that must be device-resident on the best worker before the cache tier applies. Compared strictly. Must be in `[0.0, 1.0]`. |
 | `balance_abs_threshold` | `32` | Minimum active-request spread before the load tier applies. |
 | `balance_rel_threshold` | `1.1` | Minimum ratio of largest to smallest active-request count before the load tier applies. Must be at least `1.0`. |
+| `respect_soft_affinity` | `false` | When `true`, the two-tier picker retains a soft session-affinity target found in its eligible candidates. When `false`, cache and load choose among the full eligible set. |
 
 Both load gates must hold before the load tier displaces the cache tier. Parameters are validated at
 startup, so an out-of-range value or an unknown key fails the process immediately, naming the key,
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+`respect_soft_affinity` affects soft affinity only. Custom policies always receive the full eligible
+candidate set plus the affinity target as context; this parameter tells the two-tier picker whether
+to retain a matching target before considering other workers. If the target is absent from that
+set, the policy falls back to normal two-tier selection. Hard session affinity and explicit request
+targets remain exact constraints for either value.
 
 #### Override the Selection
 
