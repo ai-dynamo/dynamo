@@ -18,6 +18,11 @@ on:
         description: 'Runtime image tag'
         type: string
         required: true
+      frontend_image_tag:
+        description: 'Optional frontend image tag'
+        type: string
+        required: false
+        default: ''
       namespace:
         description: 'Host namespace where the vCluster lives'
         type: string
@@ -31,10 +36,30 @@ on:
         type: string
         required: true
 
+      test_file:
+        description: 'Pytest file to run'
+        type: string
+        required: false
+        default: 'tests/deploy/test_dgd.py'
+      test_name:
+        description: 'Name used for test result artifacts'
+        type: string
+        required: false
+        default: ''
+      extra_pytest_args:
+        description: 'Additional pytest arguments'
+        type: string
+        required: false
+        default: '-m framework_only'
+      timeout_minutes:
+        description: 'Maximum duration of the deploy test job'
+        type: number
+        required: false
+        default: 25
 jobs:
   deploy-test:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 25
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
       contents: read
     strategy:
@@ -85,7 +110,11 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
-          extra_pytest_args: -m framework_only
+          test_file: ${{ inputs.test_file }}
+          test_name: ${{ inputs.test_name }}
+          extra_pytest_args: >-
+            ${{ inputs.extra_pytest_args }}
+            ${{ inputs.frontend_image_tag != '' && format('--frontend-image={0}/{1}:{2}', secrets.AZURE_ACR_HOSTNAME, vars.ACR_REPOSITORY, inputs.frontend_image_tag) || '' }}
           # Mount the shared model cache only when both endpoint vars are set
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
