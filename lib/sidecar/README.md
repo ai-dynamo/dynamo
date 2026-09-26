@@ -10,10 +10,12 @@ sglang/         SGLang sidecar
 trtllm/         TensorRT-LLM sidecar
 vllm/           vLLM sidecar
 Dockerfile      Builds all three sidecar executables into a CPU-only image
-dynamo-sidecar  Convenience entrypoint mapping vllm/sglang/trtllm to the above
+api/            Human-owned launch contract and ownership guide
 ```
 
-Engine protocols and request conversion remain in each engine's crate.
+Each crate keeps its human-owned contracts in `api/` and agent-owned
+implementation in `src/`. See [the API ownership guide](api/README.md) for
+the contract map, runtime boundary, and team setup required by this experiment.
 
 ## Build the image
 
