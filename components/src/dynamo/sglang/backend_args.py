@@ -187,6 +187,18 @@ class DynamoSGLangArgGroup(ArgGroup):
         # DynamoSGLangConfig.validate() below.
         add_frontend_decoding_arg(g, env_prefix="SGL")
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-after-init",
+            env_var="DYN_SGL_FREEZE_GC_AFTER_INIT",
+            default=False,
+            help=(
+                "Collect and freeze tracked objects in the decode/aggregated worker "
+                "before serving requests to reduce full-GC streaming stalls. "
+                "Opt in only after validating memory usage for the workload."
+            ),
+        )
+
         add_argument(
             g,
             flag_name="--sglang-trace-level",
@@ -221,6 +233,7 @@ class DynamoSGLangConfig(ConfigBase):
     enable_rl: bool
     engine_routes: list[str]
     frontend_decoding: bool = False
+    freeze_gc_after_init: bool = False
     sglang_trace_level: int
 
     # Extra served names beyond the primary, parsed from --served-model-name.
