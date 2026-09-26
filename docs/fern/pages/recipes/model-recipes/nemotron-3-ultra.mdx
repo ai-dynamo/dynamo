@@ -168,8 +168,35 @@ server token counts, seed 42, and `ignore_eos:true`. Benchmark artifacts are wri
 `shared-model-cache` PVC.
 
 See the [benchmark asset guide](https://github.com/ai-dynamo/dynamo/blob/main/recipes/nemotron-3-ultra/perf/README.md)
-for the source files. Performance and release-review evidence are maintained outside the recipe
-source tree.
+for the source files.
+
+## Expected Performance
+
+Each profile was benchmarked at the reference concurrency listed in the [Profiles](#profiles)
+table above, on the agentic Moontrace replay. `User output tok/s` is Gen TPS/user p50 from AIPerf;
+`System output tok/s/GPU` is aggregate output TPS divided by GPU count. All twelve profiles below
+met their TTFT and tok/s/user SLA.
+
+| GPU | Context | Topology | MTP | Concurrency | User output tok/s | System output tok/s/GPU | TTFT p50 (ms) |
+|---|---:|---|---|---:|---:|---:|---:|
+| B200 | 256K | Aggregated (2W) | 5-token | 94 | 50.89 | 637.41 | 526 |
+| B200 | 1M | Aggregated (2W) | none | 46 | 52.00 | 255.95 | 180 |
+| GB200 | 256K | Aggregated (2W) | 5-token | 96 | 51.15 | 665.95 | 612 |
+| GB200 | 1M | Aggregated (2W) | none | 48 | 51.21 | 269.55 | 274 |
+| H200 | 256K | Aggregated (2W) | 5-token | 64 | 51.94 | 203.58 | 565 |
+| H200 | 1M | Aggregated (2W) | none | 32 | 53.02 | 81.50 | 215 |
+| B200 | 256K | Disaggregated (1P2D) | none | 144 | 52.08 | 510.82 | 3681 |
+| B200 | 1M | Disaggregated (1P1D) | none | 38 | 53.57 | 223.49 | 1294 |
+| GB200 | 256K | Disaggregated (1P2D) | none | 140 | 55.47 | 534.82 | 3343 |
+| GB200 | 1M | Disaggregated (1P1D) | none | 48 | 50.55 | 270.93 | 1696 |
+| H200 | 256K | Disaggregated (1P2D) | none | 72 | 56.30 | 136.96 | 4576 |
+| H200 | 1M | Disaggregated (1P1D) | none | 30 | 60.71 | 88.13 | 4309 |
+
+Disaggregation trades TTFT for throughput and tail latency headroom differently by SKU and context:
+256K disaggregated profiles trail their aggregated counterpart on system output tok/s/GPU (prefill
+and decode run on separate workers instead of sharing GPUs), while 1M disaggregated profiles are
+roughly on par with or ahead of aggregated. Pick a topology based on which metric your workload
+needs to hold, not on tok/s/GPU alone.
 
 ## Known limitations
 
