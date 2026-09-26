@@ -3051,6 +3051,7 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-mocker",
  "dynamo-sglang-sidecar",
+ "dynamo-sidecar-testkit",
  "futures",
  "serde_json",
  "tokio",
@@ -3097,6 +3098,16 @@ dependencies = [
  "tonic 0.14.6",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "dynamo-sidecar-testkit"
+version = "1.5.0"
+dependencies = [
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "futures",
+ "tokio",
 ]
 
 [[package]]
@@ -3181,6 +3192,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-mocker",
  "dynamo-runtime",
+ "dynamo-sidecar-testkit",
  "dynamo-vllm-sidecar",
  "futures",
  "prost-types 0.14.3",

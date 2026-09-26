@@ -74,6 +74,30 @@ COPY examples/router/custom-policy-example/ examples/router/custom-policy-exampl
 COPY deploy/inference-gateway/ext-proc/ deploy/inference-gateway/ext-proc/
 COPY deploy/inference-gateway/sidecar/ deploy/inference-gateway/sidecar/
 
+# ---- CPU sidecar tests ------------------------------------------------------
+FROM builder-base AS sidecar-tests
+
+ARG TARGETARCH
+ARG CARGO_BUILD_JOBS=8
+
+ENV CARGO_PROFILE_DEV_DEBUG=0 \
+    CARGO_PROFILE_TEST_DEBUG=0 \
+    HF_HUB_OFFLINE=1
+
+RUN --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar --lib --no-run \
+    && cargo test --locked -p dynamo-vllm-mocker -p dynamo-sglang-mocker --test sidecar --no-run
+
+# Permit loopback RPCs while preventing model downloads and external services.
+RUN --network=none \
+    --mount=type=cache,id=dynamo-sidecar-cargo-registry-${TARGETARCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-cargo-git-${TARGETARCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=dynamo-sidecar-target-${TARGETARCH},target=/src/target,sharing=locked \
+    timeout --kill-after=10s 120s cargo test --locked --offline -p dynamo-sidecar-common -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar --lib \
+    && timeout --kill-after=10s 120s cargo test --locked --offline -p dynamo-vllm-mocker -p dynamo-sglang-mocker --test sidecar
+
 # ---- vLLM builder -----------------------------------------------------------
 FROM builder-base AS vllm-builder
 

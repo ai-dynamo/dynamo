@@ -4,13 +4,14 @@
 use tonic_health_v14 as tonic_health;
 use tonic_v14 as tonic;
 
-use std::sync::Arc;
+use std::time::Duration;
 
 use dynamo_backend_common::{
-    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, OutputOptions, PrefillResult,
-    PreprocessedRequest, SamplingOptions, StopConditions,
+    DisaggregationMode, FinishReason, GenerateContext, LLMEngine, PrefillResult,
+    PreprocessedRequest,
 };
 use dynamo_mocker::common::protocols::MockEngineArgs;
+use dynamo_sidecar_testkit::{self as testkit, request};
 use dynamo_vllm_mocker::{MockerServerConfig, ServerMode, VllmMockerService};
 use dynamo_vllm_sidecar::VllmSidecarEngine;
 use dynamo_vllm_sidecar::proto::control_server::ControlServer;
@@ -18,12 +19,15 @@ use dynamo_vllm_sidecar::proto::inference_server::InferenceServer;
 use futures::StreamExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_stream::wrappers::TcpListenerStream;
 
 struct RunningServer {
     endpoint: String,
     service: VllmMockerService,
     shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<()>,
 }
 
 impl RunningServer {
@@ -48,7 +52,7 @@ impl RunningServer {
         health
             .set_serving::<InferenceServer<VllmMockerService>>()
             .await;
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(InferenceServer::new(inference_service))
                 .add_service(ControlServer::new(control_service))
@@ -63,7 +67,22 @@ impl RunningServer {
             endpoint: format!("http://{address}"),
             service,
             shutdown: Some(shutdown),
+            task,
         }
+    }
+
+    async fn close(mut self, engine: impl LLMEngine) {
+        timeout(Duration::from_secs(5), async {
+            engine.cleanup().await.unwrap();
+            drop(engine);
+            self.service.shutdown().await.unwrap();
+            if let Some(shutdown) = self.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            (&mut self.task).await.expect("gRPC server task failed");
+        })
+        .await
+        .expect("sidecar and mocker teardown timed out");
     }
 }
 
@@ -72,6 +91,7 @@ impl Drop for RunningServer {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
+        self.task.abort();
     }
 }
 
@@ -109,26 +129,48 @@ async fn sidecar(endpoint: &str, mode: DisaggregationMode) -> VllmSidecarEngine 
         .0
 }
 
-fn request(max_tokens: u32) -> PreprocessedRequest {
-    PreprocessedRequest::builder()
-        .model("mocker-model".to_string())
-        .token_ids(vec![11, 22, 33, 44])
-        .stop_conditions(StopConditions {
-            max_tokens: Some(max_tokens),
-            ignore_eos: Some(true),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            temperature: Some(0.0),
-            ..Default::default()
-        })
-        .output_options(OutputOptions {
-            logprobs: Some(2),
-            prompt_logprobs: Some(1),
-            ..Default::default()
-        })
-        .build()
-        .unwrap()
+async fn native_output(endpoint: &str, request_id: &str) -> (Vec<u32>, Vec<f64>) {
+    use dynamo_vllm_sidecar::proto as pb;
+
+    timeout(Duration::from_secs(5), async {
+        let mut client = pb::inference_client::InferenceClient::connect(endpoint.to_string())
+            .await
+            .unwrap();
+        let mut stream = client
+            .generate_stream(pb::GenerateRequest {
+                request_id: request_id.to_string(),
+                prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                    ids: vec![11, 22, 33, 44],
+                })),
+                stopping: Some(pb::StoppingCriteria {
+                    max_new_tokens: 3,
+                    ..Default::default()
+                }),
+                response: Some(pb::ResponseOptions {
+                    output_token_ids: true,
+                    output_logprobs: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        let mut tokens = Vec::new();
+        let mut logprobs = Vec::new();
+        while let Some(response) = stream.message().await.unwrap() {
+            if let Some(output) = response.outputs {
+                assert_eq!(output.token_ids.len(), output.logprobs.len());
+                tokens.extend(output.token_ids);
+                logprobs.extend(output.logprobs.into_iter().map(f64::from));
+            }
+        }
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(logprobs.len(), 3);
+        (tokens, logprobs)
+    })
+    .await
+    .expect("native vLLM reference stream timed out")
 }
 
 async fn collect(
@@ -146,30 +188,84 @@ async fn collect(
 }
 
 #[tokio::test]
-async fn sidecar_streams_mocker_tokens_logprobs_and_usage() {
-    let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
+async fn shared_streaming_preserves_native_tokens_logprobs_and_usage() {
+    timeout(Duration::from_secs(30), async {
+        let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+        let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+        engine.start(0).await.unwrap();
 
-    let outputs = collect(&engine, request(3)).await;
-    assert_eq!(outputs.len(), 3);
-    assert!(outputs.iter().all(|output| output.token_ids.len() == 1));
-    assert!(
-        outputs
-            .iter()
-            .all(|output| output.log_probs.as_ref().unwrap().len() == 1)
-    );
-    assert!(
-        outputs
-            .iter()
-            .all(|output| output.top_logprobs.as_ref().unwrap()[0].len() == 3)
-    );
-    let terminal = outputs.last().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
-    let usage = terminal.completion_usage.as_ref().unwrap();
-    assert_eq!((usage.prompt_tokens, usage.completion_tokens), (4, 3));
-    assert!(terminal.engine_data.as_ref().unwrap()["prompt_logprobs"].is_array());
-    assert_eq!(server.service.active_request_count(), 0);
+        let context = dynamo_backend_common::testing::mock_context();
+        let (expected, expected_logprobs) = native_output(&server.endpoint, context.id()).await;
+        testkit::wait_idle(server.service.metrics_receiver(), || {
+            server.service.active_request_count()
+        })
+        .await;
+        testkit::streaming(&engine, context, &expected, &expected_logprobs, 3).await;
+        testkit::wait_idle(server.service.metrics_receiver(), || {
+            server.service.active_request_count()
+        })
+        .await;
+        server.close(engine).await;
+    })
+    .await
+    .expect("vllm shared_streaming_preserves_native_tokens_logprobs_and_usage timed out");
+}
+
+#[tokio::test]
+async fn shared_native_rejection_preserves_error_and_recovers() {
+    timeout(Duration::from_secs(30), async {
+        let server = RunningServer::start(ServerMode::Aggregated, fast_engine_args()).await;
+        let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+        engine.start(0).await.unwrap();
+        testkit::rejection(&engine).await;
+        testkit::wait_idle(server.service.metrics_receiver(), || {
+            server.service.active_request_count()
+        })
+        .await;
+        server.close(engine).await;
+    })
+    .await
+    .expect("vllm shared_native_rejection_preserves_error_and_recovers timed out");
+}
+
+#[tokio::test]
+async fn shared_cancellation_releases_scheduler_work_and_recovers() {
+    timeout(Duration::from_secs(30), async {
+        let mut args = fast_engine_args();
+        args.speedup_ratio = 0.1;
+        let server = RunningServer::start(ServerMode::Aggregated, args).await;
+        let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+        engine.start(0).await.unwrap();
+        testkit::cancellation(&engine, || server.service.active_request_count()).await;
+        testkit::wait_idle(server.service.metrics_receiver(), || {
+            server.service.active_request_count()
+        })
+        .await;
+        testkit::recovery(&engine).await;
+        server.close(engine).await;
+    })
+    .await
+    .expect("vllm shared_cancellation_releases_scheduler_work_and_recovers timed out");
+}
+
+#[tokio::test]
+async fn shared_consumer_drop_releases_scheduler_work_and_recovers() {
+    timeout(Duration::from_secs(30), async {
+        let mut args = fast_engine_args();
+        args.speedup_ratio = 0.1;
+        let server = RunningServer::start(ServerMode::Aggregated, args).await;
+        let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
+        engine.start(0).await.unwrap();
+        testkit::consumer_drop(&engine, || server.service.active_request_count()).await;
+        testkit::wait_idle(server.service.metrics_receiver(), || {
+            server.service.active_request_count()
+        })
+        .await;
+        testkit::recovery(&engine).await;
+        server.close(engine).await;
+    })
+    .await
+    .expect("vllm shared_consumer_drop_releases_scheduler_work_and_recovers timed out");
 }
 
 #[tokio::test]
@@ -208,46 +304,8 @@ async fn prefill_handoff_round_trips_through_a_decode_server() {
         decode_outputs.last().unwrap().finish_reason,
         Some(FinishReason::Length)
     );
-}
-
-#[tokio::test]
-async fn dropping_sidecar_stream_cancels_mocker_work() {
-    let mut args = fast_engine_args();
-    args.speedup_ratio = 0.1;
-    let server = RunningServer::start(ServerMode::Aggregated, args).await;
-    let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
-    engine.start(0).await.unwrap();
-
-    let context = dynamo_backend_common::testing::mock_context();
-    let mut stream = engine
-        .generate(
-            request(10_000),
-            GenerateContext::new(Arc::clone(&context), None),
-        )
-        .await
-        .unwrap();
-    let first = stream.next().await.unwrap().unwrap();
-    assert!(first.finish_reason.is_none());
-    context.stop_generating();
-    let terminal = stream.next().await.unwrap().unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
-    drop(stream);
-
-    let mut metrics = server.service.metrics_receiver();
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let snapshot = metrics.borrow_and_update().clone();
-            if server.service.active_request_count() == 0
-                && snapshot.running_requests == 0
-                && snapshot.waiting_requests == 0
-            {
-                break;
-            }
-            metrics.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("dropping the gRPC stream should cancel scheduler work promptly");
+    prefill_server.close(prefill).await;
+    decode_server.close(decode).await;
 }
 
 mod common;
@@ -262,4 +320,5 @@ async fn sidecar_relays_stored_and_evicted_blocks() {
     let engine = sidecar(&server.endpoint, DisaggregationMode::Aggregated).await;
     engine.start(0).await.unwrap();
     common::check_kv_events(&engine, block_size).await;
+    server.close(engine).await;
 }

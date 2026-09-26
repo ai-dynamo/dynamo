@@ -367,13 +367,42 @@ pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
 mod tests {
     use std::time::Duration;
 
+    use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
     use tokio::net::TcpListener;
     use tokio::time::Instant;
     use tonic::transport::Endpoint;
 
-    use super::{client_from_channel, discover, json_u32, json_u64, parse_discovery};
+    use super::{
+        client_from_channel, discover, json_u32, json_u64, parse_discovery, status_to_dynamo,
+    };
     use crate::proto as pb;
+
+    #[test]
+    fn maps_transport_statuses_to_backend_errors() {
+        for (code, expected) in [
+            (tonic::Code::InvalidArgument, BackendError::InvalidArgument),
+            (tonic::Code::NotFound, BackendError::InvalidArgument),
+            (tonic::Code::OutOfRange, BackendError::InvalidArgument),
+            (tonic::Code::FailedPrecondition, BackendError::Unknown),
+            (tonic::Code::AlreadyExists, BackendError::Unknown),
+            (tonic::Code::Unavailable, BackendError::CannotConnect),
+            (tonic::Code::Cancelled, BackendError::Cancelled),
+            (
+                tonic::Code::DeadlineExceeded,
+                BackendError::ConnectionTimeout,
+            ),
+            (tonic::Code::Internal, BackendError::Unknown),
+            (tonic::Code::Unknown, BackendError::Unknown),
+        ] {
+            let error = status_to_dynamo("Generate", tonic::Status::new(code, "peer failure"));
+            assert_eq!(error.error_type(), ErrorType::Backend(expected), "{code:?}");
+            assert_eq!(
+                error.message(),
+                format!("Generate: peer failure ({code:?})")
+            );
+        }
+    }
 
     #[test]
     fn numeric_discovery_fields_accept_numbers_and_strings() {

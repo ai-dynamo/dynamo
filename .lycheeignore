@@ -11,6 +11,11 @@
 # Private repos referenced in docs (404 to unauthenticated lychee)
 ^https://github\.com/ai-dynamo/pi-dynamo-provider
 
+# Authenticated sidecar test inventories and plan return 401 to anonymous CI.
+^https://docs\.google\.com/document/d/1CsltmzPcSNNCFuZEJVcUtG7lMwKcdHT-5FtezRTOwxI/edit(?:[?#].*)?$
+^https://docs\.google\.com/document/d/1Eex29sWCf-g3HsTdHVhJWkNiyfGQJUy0mDLjy91-WpM/edit(?:[?#].*)?$
+^https://docs\.google\.com/document/d/146cWxYabWmNAy-tx-sQ9i7JeQvDf-J_3aOg5kuk_a9E/edit(?:[?#].*)?$
+
 # Redirects to networking-docs.nvidia.com which refuses connections from
 # GitHub runners (network/firewall). The page loads from a normal browser.
 ^https://docs\.nvidia\.com/networking/display/cokan10/network\+operator

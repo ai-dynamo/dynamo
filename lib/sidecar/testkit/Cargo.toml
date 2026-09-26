@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-sidecar-testkit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Shared wire-contract assertions for Dynamo sidecar tests"
+
+[dependencies]
+dynamo-backend-common = { workspace = true, features = ["testing"] }
+dynamo-mocker = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
