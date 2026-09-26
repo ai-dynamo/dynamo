@@ -161,27 +161,46 @@ fn public_invalid_request_message(error: &DynamoError) -> Option<&str> {
     }
 }
 
+/// Read a non-empty string attribute, treating missing, `None`, and
+/// non-string values as absent.
+fn py_attr_string(value: &Bound<'_, PyAny>, name: &str) -> Option<String> {
+    let attr = value.getattr(name).ok()?;
+    if attr.is_none() {
+        return None;
+    }
+    let message = attr.extract::<String>().ok()?;
+    let message = message.trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(message.to_string())
+    }
+}
+
+/// Read a `u16` attribute, treating missing or non-integer values as absent.
+fn py_attr_u16(value: &Bound<'_, PyAny>, name: &str) -> Option<u16> {
+    value.getattr(name).ok()?.extract::<u16>().ok()
+}
 /// Read `(code, message)` off a Python exception carrying an HTTP-style
-/// status. Accepts `.code` (matches [`HttpError`] in `http.rs`) or `.status`
-/// (matches `dynamo.common.http.HttpStatusError`) plus `.message`.
+/// status. Accepts `.code` (matches [`HttpError`] in `http.rs` and
+/// `urllib.error.HTTPError`) or `.status` (matches
+/// `dynamo.common.http.HttpStatusError`).
 ///
-/// SECURITY: `.message` is diagnostic-only. HTTP-like exceptions can wrap remote
+/// The diagnostic text prefers `.message`, then urllib's `.msg` / `.reason`.
+/// It never falls back to `str(exc)`, because some HTTP libraries put the
+/// request URL (and signed query strings) in the exception text.
+///
+/// SECURITY: that text is diagnostic-only. HTTP-like exceptions can wrap remote
 /// fetch failures whose text includes URLs or internal connection details. The
 /// semantic status is preserved, but client renderers use the class catalog
 /// unless the producer raised an explicitly public Dynamo exception.
 pub fn extract_http_like_error(py: Python<'_>, err: &PyErr) -> Option<(u16, String)> {
     let value = err.value(py);
-    let code = value
-        .getattr("code")
-        .ok()
-        .and_then(|a| a.extract::<u16>().ok())
-        .or_else(|| {
-            value
-                .getattr("status")
-                .ok()
-                .and_then(|a| a.extract::<u16>().ok())
-        })?;
-    let message = value.getattr("message").ok()?.extract::<String>().ok()?;
+    let code = py_attr_u16(value, "code").or_else(|| py_attr_u16(value, "status"))?;
+    let message = py_attr_string(value, "message")
+        .or_else(|| py_attr_string(value, "msg"))
+        .or_else(|| py_attr_string(value, "reason"))
+        .unwrap_or_else(|| format!("HTTP {code}"));
     Some((code, message))
 }
 
@@ -211,11 +230,20 @@ pub fn error_class_for_http_status(code: u16) -> ErrorClass {
     }
 }
 
+/// Convert a Python HTTP-like exception into a catalog-classified [`DynamoError`].
+///
+/// Status selects [`ErrorClass`] (403 → [`ErrorClass::PermissionDenied`]). Extracted
+/// text is diagnostic-only so signed material URLs stay out of client bodies.
 pub(crate) fn http_like_error_to_dynamo(py: Python<'_>, err: &PyErr) -> Option<DynamoError> {
     let (code, message) = extract_http_like_error(py, err)?;
     Some(build_http_like_error(code, message))
 }
 
+/// Build the wire error for an HTTP-like Python exception.
+///
+/// Class comes from the status catalog. Diagnostic keeps the original
+/// `{message, code}` payload for legacy readers; `public_message` stays unset
+/// so HTTP renderers use the class catalog rather than raw fetch text.
 fn build_http_like_error(code: u16, message: String) -> DynamoError {
     let legacy_message = serde_json::json!({
         "message": message,
@@ -283,6 +311,7 @@ mod tests {
     #[test]
     fn http_like_errors_support_semantic_and_legacy_readers() {
         for (code, expected_class) in [
+            (403, ErrorClass::PermissionDenied),
             (409, ErrorClass::Conflict),
             (415, ErrorClass::UnsupportedMedia),
             (503, ErrorClass::Unavailable),
