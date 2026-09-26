@@ -30,6 +30,17 @@ const (
 	dataParallelBackendRay       = "ray"
 )
 
+// VLLMBackend renders vLLM launch commands.
+//
+// Deliberately carries no features.ElasticEPRayPoC gate. Both elastic-EP arms are ungated
+// on purpose: the leader's Ray head shipped in #12943, so a default-off gate arriving with
+// an operator upgrade would strip the Ray head and POD_IP from every live elastic-EP
+// leader and roll a serving deployment nobody edited; the follower's Ray-join fires only
+// on the operator-set follower annotation that synthesis alone writes -- so plumbing the
+// gate to this level would only invite someone to apply it. The gate governs exactly one
+// thing, the single-replica admission rule in internal/webhook/validation; synthesis, both
+// "<leader>-ray" Services and this render are ungated. See injectElasticEPRayLaunchFlags
+// and IsSinglePodElasticEPShape.
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
 }
@@ -84,7 +95,37 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// A single-pod elastic-EP component still needs a Ray head, so that
 		// follower pods created later have a cluster to join. Only the leader
 		// arm applies here: a lone pod is expanded as RoleMain, never RoleWorker.
-		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer) {
+		//
+		// Deliberately NOT gated on features.ElasticEPRayPoC -- see the VLLMBackend doc.
+		//
+		// followerReplicas is how many followers synthesis actually created, and everything
+		// multi-pod keys off it -- NOT off --data-parallel-size, which counts ranks, not
+		// PODS (a multi-GPU pod runs its ranks intra-pod). Absent means no follower was
+		// derived: the Grove pathway renders RoleMain through this arm but never
+		// synthesizes one (grove#676), nor does a component with replicas > 1. Keying on
+		// the flag is what broke a shipped manifest: any dp > 1 component that does NOT set
+		// nvidia.com/enable-grove "false" gets Grove wherever the Grove API is installed,
+		// so it waited 20 minutes for a second Ray node nothing would create, then exited
+		// -- CrashLoopBackOff on the default workload provider. (The demo fixture now opts
+		// out of Grove explicitly, which is why it no longer exhibits this; the hazard is
+		// the shape, not that file.)
+		followerReplicas := elasticEPSynthesizedFollowers(annotations)
+
+		// Pin the leader to one local rank -- the other half of the sizing rule synthesis
+		// derives the follower count from ("one pod is one node is one rank"). Done before
+		// injectElasticEPRayLaunchFlags collapses Command and Args into one shell string,
+		// so the flag is appended to the plain arg list rather than spliced into the middle
+		// of that string; the flag scan itself survives the wrap either way, since
+		// getExpandedCommandLine re-splits the collapsed string. Without the pin,
+		// vLLM's create_dp_placement_groups puts EVERY rank on the DP master and aborts
+		//   ValueError: Not enough resources to allocate N DP ranks on DP master node
+		//               <ip>, possible to fit 1 DP ranks.
+		// while N-1 follower pods sit idle in the Ray cluster it ignored; the message
+		// never names the missing flag.
+		if followerReplicas > 0 {
+			injectElasticEPDataParallelSizeLocal(container)
+		}
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "", followerReplicas) {
 			// Bind both addresses only when a Ray head was actually injected.
 			//
 			// Both resolve from status.podIP, which is the point: the Ray head
@@ -111,6 +152,45 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 				corev1.EnvVar{Name: commonconsts.PodIPEnvVar, ValueFrom: podIPRef()},
 				corev1.EnvVar{Name: commonconsts.VLLMDPMasterIPEnvVar, ValueFrom: podIPRef()},
 			)
+		}
+	} else if role == RoleFollower && IsElasticEPRayLaunch(container) {
+		// No gate term here either -- see the VLLMBackend doc. RoleFollower comes from the
+		// follower annotation only synthesis writes; a follower that reached this render
+		// without it would skip the Ray-join rewrite and run the leader's full serve
+		// command, carried verbatim from the deep copy that created it.
+		//
+		// Nothing else can mistake a follower for a leader: both the Service emitter and
+		// the role choice test that same annotation explicitly (generateElasticEPHeadlessService,
+		// generateDeployment) rather than inferring from the replica count -- a dp=2
+		// follower rests at replicas 1 and does satisfy IsSinglePodElasticEPShape.
+		//
+		// The leader's Service name is carried on the follower rather than rebuilt here.
+		// Its absence means synthesis and rendering are out of step; guessing an address
+		// would leave a pod polling a hostname nothing backs for thirty minutes, so fail.
+		leaderService := annotations[commonconsts.KubeAnnotationElasticEPLeaderService]
+		if leaderService == "" {
+			return fmt.Errorf(
+				"elastic-EP follower is missing the %s annotation carrying the leader Service name",
+				commonconsts.KubeAnnotationElasticEPLeaderService,
+			)
+		}
+
+		// Joins the leader's Ray cluster (injectElasticEPRayLaunchFlags, RoleFollower arm).
+		// POD_IP feeds the --node-ip-address it interpolates; no VLLM_DP_MASTER_IP -- a
+		// follower is a plain Ray node, not the DP master.
+		if injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, leaderService, 0) {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name: commonconsts.PodIPEnvVar,
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
+				},
+			})
+			// Drop the probes: this pod runs `ray start --block`, not the Dynamo system
+			// server, so nothing listens on DynamoSystemPort and liveness (FailureThreshold
+			// 1) would restart it forever. Ray reports raylet health to the leader instead.
+			container.LivenessProbe = nil
+			container.ReadinessProbe = nil
+			container.StartupProbe = nil
 		}
 	}
 
@@ -318,17 +398,12 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
 	} else if hasFlag(expandedArgs, enableElasticEPFlag) {
-		// Elastic EP requires a single Ray cluster spanning all nodes.
-		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
-		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
-		// if both are present. Instead we set up a cross-node Ray cluster:
-		//   Leader: ray start --head --block & <tcp-poll-ray-ready> && <vllm cmd>
-		//   Worker: <poll /live until 200> && ray start --address=<leader>:6379 --block
-		// Note: --data-parallel-size-local is intentionally NOT injected. With the
-		// worker's health-gate delaying its Ray join until dynamo.vllm is fully ready,
-		// only the leader node is in the Ray cluster when create_dp_placement_groups runs,
-		// so vLLM naturally places all initial DP workers on the leader node.
-		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer)
+		// Elastic EP needs one Ray cluster spanning all nodes: vLLM raises
+		// NotImplementedError if the operator's RPC-based DP coordination
+		// (--data-parallel-hybrid-lb) is combined with it. --data-parallel-size-local is
+		// intentionally NOT injected on this path. See injectElasticEPRayLaunchFlags for
+		// the leader/worker shape and the worker health-gate that makes both true.
+		injectElasticEPRayLaunchFlags(container, role, serviceName, multinodeDeployer, "", 0)
 	} else if needsDataParallelMultinodeLaunch(expandedArgs, containerGPUs) {
 		injectDataParallelLaunchFlags(container, role, serviceName, multinodeDeployer, containerGPUs, numberOfNodes)
 	} else {
@@ -428,6 +503,23 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 
 // injectElasticEPRayLaunchFlags sets up a cross-node Ray cluster for elastic EP.
 //
+// TWO DIFFERENT TOPOLOGIES SHARE THIS FUNCTION. They are not one feature at two scales,
+// and the "RoleLeader, RoleMain" arm below is the only thing they have in common:
+//
+//	RoleMain + RoleFollower  (numberOfNodes <= 1, non-Grove) -- the ELASTIC path.
+//	  One pod per rank. Followers are separate Deployments that can be added and removed
+//	  while the leader serves, so the pod count is what changes. The leader is pinned to
+//	  one local rank and waits for its declared width before starting.
+//
+//	RoleLeader + RoleWorker  (numberOfNodes > 1) -- the STANDBY path.
+//	  One LeaderWorkerSet gang of fixed size. Every initial rank lands on the LEADER node
+//	  and the worker nodes idle, holding GPUs for a later scale_elastic_ep. The pod count
+//	  never changes; only the engine's rank count can. See the health-gate note below.
+//
+// So a multinode component is not "elastic EP with more nodes": it cannot add or remove a
+// pod at all, and it only starts if the leader node alone can host every declared rank.
+// Every RoleMain-only behaviour below is guarded for that reason, not by oversight.
+//
 // Elastic EP requires --data-parallel-backend ray so that vLLM's Ray executor
 // manages dynamic worker lifecycle. It is explicitly incompatible with
 // --data-parallel-hybrid-lb (the operator's normal multinode DP path), because
@@ -449,9 +541,20 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 //   - Waiting for HTTP 200 ensures the worker joins AFTER placement groups are
 //     set, so the leader's GPUs hold all initial DP workers (warm standby).
 //
-// Note: --data-parallel-size-local is intentionally NOT injected. With the
-// health-gate ensuring only the leader is in Ray at vLLM startup, vLLM
-// naturally places all --data-parallel-size workers on the leader node.
+// Note: --data-parallel-size-local is intentionally NOT injected here, and that omission --
+// not the health-gate -- is what actually puts every initial rank on the leader. Absent the
+// flag, vLLM defaults data_parallel_size_local to the full data_parallel_size under the
+// default VLLM_RAY_DP_PACK_STRATEGY=strict, and allocates that many groups on the DP master
+// before considering any other node. Ray membership does not enter into it.
+//
+// The consequence worth knowing: this path only starts if the LEADER NODE ALONE can host
+// every declared rank. One rank per node -- 4 nodes of 1 GPU at dp=4 -- does not warm-stand-
+// by, it fails before any worker matters:
+//
+//	ValueError: Not enough resources to allocate 4 DP ranks on DP master node <ip>,
+//	            possible to fit 1 DP ranks.
+//
+// That shape is what the single-pod + follower path exists to serve.
 //
 // Leader (or a single-pod RoleMain): ray start --head --port=6379 --block & <tcp-poll-ray-ready 150×2s> && <vllm cmd>
 // Worker: <poll /live HTTP until 200> && ray start --address=<leader>:6379 --block
@@ -460,7 +563,11 @@ func injectRayDistributedLaunchFlags(container *corev1.Container, role Role, ser
 // container untouched (see the empty-Command case below), so callers can gate
 // side effects such as the VLLM_DP_MASTER_IP injection on whether a Ray head was
 // actually set up.
-func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer) bool {
+// leaderService is read only for RoleFollower: the resolved headless Ray Service name the
+// follower must join, carried from synthesis. Other roles pass "".
+// synthesizedFollowers is how many follower pods the operator created for this leader, the
+// only switch on the RoleMain width wait. Every other caller passes 0, emitting no wait.
+func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, serviceName string, multinodeDeployer MultinodeDeployer, leaderService string, synthesizedFollowers int) bool {
 	switch role {
 	// RoleMain is a component deployed as a single pod; it heads the Ray
 	// cluster exactly as a multi-node leader does.
@@ -510,32 +617,67 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 		if role == RoleMain {
 			nodeIPFlag = fmt.Sprintf(` --node-ip-address="$%s"`, commonconsts.PodIPEnvVar)
 		}
+		// Wait for the declared data-parallel width to be present in Ray before starting
+		// the engine, so a full-width launch is deterministic rather than lucky.
+		//
+		// vLLM's create_dp_placement_groups reads the cluster ONCE at engine start and
+		// never retries, so followers that have not joined yet do not exist to it:
+		//
+		//   ValueError: Not enough resources to allocate 4 placement groups,
+		//               only created 2 placement groups
+		//
+		// Without the wait the launch races the followers being scheduled, pulled and
+		// joined -- on gb300 the same manifest reached 4 nodes on one attempt and 2 on the
+		// next. Counted in nodes, not GPUs: the sizing rule is one pod per node per rank,
+		// the same rule ElasticEPFollowerReplicas uses, so both agree on "full width".
+		// Emitted only when synthesis actually created a follower -- so dp=1, and every
+		// other shape that derives none (Grove, replicas > 1), renders exactly as before.
+		widthGate := ""
+		if role == RoleMain {
+			// dp is the number of PODS the engine will span: this leader plus its
+			// synthesized followers. Zero followers means intra-pod -- see the caller.
+			if dp := int64(synthesizedFollowers) + 1; synthesizedFollowers > 0 {
+				widthGate = fmt.Sprintf(
+					` && i=0; until [ "$(python3 -c "import ray; ray.init(address='127.0.0.1:%s', log_to_driver=False); `+
+						`print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null)" -ge %d ] 2>/dev/null; `+
+						`do i=$((i+1)); [ "$i" -ge 240 ] && { echo "ERROR: only $(python3 -c "import ray; `+
+						`ray.init(address='127.0.0.1:%s', log_to_driver=False); print(sum(1 for n in ray.nodes() if n['Alive']))" 2>/dev/null) `+
+						`of %d data-parallel ranks joined Ray within 20m. The follower pods are probably `+
+						`Pending for lack of GPUs -- check with: kubectl get pods -l nvidia.com/dynamo-component. `+
+						`Note this can deadlock during a rolling update on a full cluster: this leader stays `+
+						`unready until its followers join, the followers cannot schedule until a GPU frees, `+
+						`and the GPU is held by the previous leader that is waiting for THIS one to become `+
+						`ready. Free capacity, or retire the previous generation first." >&2; exit 1; }; `+
+						`echo 'waiting for %d Ray nodes before starting the engine (followers Pending? this can `+
+						`deadlock a rolling update when no GPU is free)...'; sleep 5; done`,
+					VLLMPort, dp, VLLMPort, dp, dp,
+				)
+			}
+		}
 		// Poll Ray head readiness with a bounded retry loop (150 × 2 s = 5 min max).
 		// An unbounded `until` loop would spin forever if `ray start --head` crashes
 		// silently or the port never opens.
 		container.Args = []string{fmt.Sprintf(
 			`ray start --head --port=%s%s --block & `+
 				`i=0; until python3 -c "import socket; s=socket.create_connection(('127.0.0.1',%s),timeout=1); s.close()" 2>/dev/null; `+
-				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done && %s`,
+				`do i=$((i+1)); [ "$i" -ge 150 ] && { echo "ERROR: Ray head did not start within 300s" >&2; exit 1; }; sleep 2; done%s && %s`,
 			VLLMPort,
 			nodeIPFlag,
 			VLLMPort,
+			widthGate,
 			vllmCommand,
 		)}
 	case RoleWorker:
 		leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
-		// Health-gate: poll GET /live on DynamoSystemPort (9090) until HTTP 200.
-		// /live returns 503 during vLLM initialization and 200 when the engine is
-		// fully ready. This ensures the worker joins Ray AFTER create_dp_placement_groups
-		// has run (which requires only the leader's GPUs to be in the cluster).
-		// Uses Python's urllib (always available) instead of curl.
-		// Prerequisite: DYN_SYSTEM_ENABLED=true must be set on the leader pod so
-		// that the Dynamo system server listens on port 9090. The operator injects
-		// this env var unconditionally via component_worker.go.
+		// Health-gate: poll GET /live on DynamoSystemPort (9090) until HTTP 200, so the
+		// worker joins Ray only AFTER create_dp_placement_groups has run (see the function
+		// doc). Uses Python's urllib (always available) instead of curl.
+		// Prerequisite: DYN_SYSTEM_ENABLED=true on the leader pod, so the Dynamo system
+		// server listens on 9090; component_worker.go injects it unconditionally.
 		// Bounded at 720 × 15s = 3 hours to cover large models with slow disk I/O.
-		// Without a bound, a permanently broken leader leaves the worker looping
-		// forever with no Kubernetes liveness probe to detect it (probes are removed
-		// from vLLM multinode containers in UpdateContainer).
+		// Unbounded, a permanently broken leader would leave the worker looping forever
+		// with no liveness probe to detect it (probes are removed from vLLM multinode
+		// containers in UpdateContainer).
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+
 				`2>/dev/null; do `+
@@ -547,25 +689,110 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 			"%s && ray start --address=%s:%s --block",
 			healthGate, leaderHostname, VLLMPort,
 		)}
+	case RoleFollower:
+		// The follower lends the leader a GPU and nothing else, so it replaces the serve
+		// command with a bare Ray join. Three details make that work:
+		//
+		//   - It reaches the leader through the headless elastic-EP Service, not the
+		//     framework's leader hostname, because it is not in the leader's gang.
+		//   - --node-ip-address is pinned to the pod IP so the leader can find this rank's
+		//     GPU. The follower never serves; the leader spawns the real DP-rank worker
+		//     there as a Ray actor.
+		//   - It waits for the leader's RAY HEAD, not its engine -- deliberately the
+		//     opposite of the RoleWorker arm above.
+		//
+		// RoleWorker's /live gate keeps workers out of Ray until create_dp_placement_groups
+		// has run, so every initial rank lands on the leader (warm standby). Followers
+		// sized to --data-parallel-size need the reverse: all ranks in Ray *before* the
+		// engine places them. Gating them on /live deadlocks a full-width launch -- the
+		// leader blocks on GPUs only followers supply, so /live never returns 200 and they
+		// never join. The Ray head is satisfiable at once (`ray start --head` runs first),
+		// and joining early is harmless: the follower just idles until scale_elastic_ep
+		// places a rank on it.
+		//
+		// leaderService is carried on the follower, not rebuilt here: the name is DGD- and
+		// generation-scoped and may be hash-truncated, and deriving it locally is what let
+		// the emitter and the joiner drift apart.
+		leaderHostname := leaderService
+		// 360 x 5s = 30 min, covering the leader's scheduling and image pull, not just its
+		// startup -- followers are created at the same moment the leader is. Bounded so a
+		// leader that never schedules surfaces as a failed follower instead of a pod that
+		// waits forever. Until the leader's Service has an endpoint the address does not
+		// resolve at all, which raises inside python and the same retry swallows it.
+		readyGate := fmt.Sprintf(
+			`i=0; until python3 -c "import socket; s=socket.create_connection(('%s',%s),timeout=5); s.close()" `+
+				`2>/dev/null; do `+
+				`i=$((i+1)); [ "$i" -ge 360 ] && { echo "ERROR: leader Ray head did not accept connections within 30m" >&2; exit 1; }; `+
+				`echo 'waiting for leader Ray head on %s:%s...'; sleep 5; done`,
+			leaderHostname, VLLMPort, leaderHostname, VLLMPort,
+		)
+		container.Args = []string{fmt.Sprintf(
+			`%s && ray start --address=%s:%s --node-ip-address="$%s" --block`,
+			readyGate, leaderHostname, VLLMPort, commonconsts.PodIPEnvVar,
+		)}
 	}
 	container.Command = []string{"/bin/sh", "-c"}
 	return true
 }
 
+// elasticEPSynthesizedFollowers reports how many follower pods the operator created for
+// this leader, read from the annotation synthesis stamps on its pod template.
+//
+// Absent or unparseable means zero, the safe answer: the leader then renders exactly as it
+// did before this feature. The Grove pathway and any replicas > 1 component need that --
+// both reach the same RoleMain arm but never get a follower, so a wait would never end.
+func elasticEPSynthesizedFollowers(annotations map[string]string) int {
+	raw, ok := annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas]
+	if !ok {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// injectElasticEPDataParallelSizeLocal pins an elastic-EP leader to one local
+// data-parallel rank, completing the sizing rule the follower count is derived from.
+//
+// Deliberately no-ops when the leader declares one rank or none (no followers, so vLLM
+// decides the local split and deployments predating this render unchanged), and when the
+// user already set --data-parallel-size-local (the operator supplies a default, it does not
+// overrule an explicit choice). A flag hidden behind an env-var expansion the operator
+// cannot see leaves the duplicate for vLLM to reject -- the same exposure every other
+// injection here already has.
+//
+// Reads Command AND Args, for the same reason ElasticEPFollowerReplicas does: the two must
+// agree on where a flag may live, or a leader gets followers without the local-rank pin
+// that makes them reachable.
+func injectElasticEPDataParallelSizeLocal(container *corev1.Container) {
+	expandedArgs := getExpandedCommandLine(container)
+	if getFlagValue(expandedArgs, dataParallelSizeFlag) <= 1 {
+		return
+	}
+	if hasFlag(expandedArgs, dataParallelSizeLocalFlag) {
+		return
+	}
+	injectFlagsIntoContainerCommand(
+		container,
+		fmt.Sprintf("%s 1", dataParallelSizeLocalFlag),
+		false,
+		"vllm",
+	)
+}
+
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray
-// topology.
+// topology: both --enable-elastic-ep and the Ray data-parallel backend.
 //
-// Elastic EP only works on the Ray data-parallel backend: vLLM's Ray executor is
-// what grows and shrinks workers at runtime, and the engine refuses a scale
-// request on any other backend. Requiring both flags keeps a Ray head off pods
-// that pass --enable-elastic-ep while running the default backend, where it
-// would launch a process nothing ever talks to.
+// Both flags are required. Elastic EP only works on the Ray backend -- vLLM's Ray
+// executor is what grows and shrinks workers at runtime, and the engine refuses a scale
+// request on any other backend -- so a pod passing only --enable-elastic-ep would get a
+// Ray head nothing ever talks to.
 //
-// Detection scans the full command line (Command + Args) so the flags are found
-// whether the manifest carries them in Command or Args, and it accepts vLLM's
-// long --data-parallel-backend flag and its documented -dpb alias in both the
-// "flag value" and "flag=value" spellings — vLLM's argparse treats all of these
-// as equivalent, so any of them must trigger Ray-head injection.
+// Detection scans the full command line (Command + Args) and accepts vLLM's long
+// --data-parallel-backend flag and its documented -dpb alias in both the "flag value" and
+// "flag=value" spellings — vLLM's argparse treats all of these as equivalent.
 func IsElasticEPRayLaunch(container *corev1.Container) bool {
 	expanded := getExpandedCommandLine(container)
 	return hasFlag(expanded, enableElasticEPFlag) &&

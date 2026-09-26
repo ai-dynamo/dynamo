@@ -23,6 +23,8 @@ import (
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -167,13 +169,17 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	if oldDCD != nil {
 		oldSpec = &oldDCD.Spec
 	}
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, field.NewPath("spec"))
+	// The follower marker lives on the object, not the spec, so the single-replica rule
+	// can only be scoped to leaders from here.
+	isFollower := dcd.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] == consts.KubeLabelValueTrue
+	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, oldSpec, isFollower, field.NewPath("spec"))
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentSpec(
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
 	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSpec,
+	isElasticEPFollower bool,
 	fldPath *field.Path,
 ) field.ErrorList {
 	// Standalone DCDs use neither Grove nor live InferencePool discovery.
@@ -185,7 +191,27 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 	if oldSpec != nil {
 		oldSharedSpec = &oldSpec.DynamoComponentDeploymentSharedSpec
 	}
+	// Shipped in #12943 and not gated: it guards the Phase 2/3 Ray head, which renders
+	// whether or not this PoC gate is on. Gating it would retire a live rule.
 	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
+	// The single-replica rule is new here, and it only describes the topology the PoC
+	// renderer manages: one follower and one <leader>-ray Service are derived per
+	// component, so two leader replicas would share one DNS name. Gated because it is the
+	// only new RESTRICTION this PoC adds, and an operator that has not opted in must not
+	// start rejecting manifests the merge base accepted. Generation itself is ungated, so
+	// the follower and the Service are still derived at either gate position.
+	//
+	// It applies to LEADERS only. A follower is a deep copy of its leader and therefore
+	// carries the same --enable-elastic-ep flags, so an unscoped rule reads it as a
+	// second leader and rejects it -- blocking the one operation this feature exists to
+	// perform. Caught on a cluster: scaling a follower to 3 was refused with "supports a
+	// single leader replica ... capacity is added by scaling followers", by the rule whose
+	// own message says to scale followers.
+	if !isElasticEPFollower && features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
+		allErrs = append(allErrs, validateElasticEPSingleReplicaRatcheted(
+			spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, oldSharedSpec, fldPath,
+		)...)
+	}
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,

@@ -113,6 +113,35 @@ const (
 	// Default: true when provider is istio and DestinationRule is detected; false otherwise
 	Istio Name = "istio"
 
+	// ElasticEPRayPoC enforces the elastic-EP single-replica admission rule: a single-node
+	// elastic-EP WORKER component (--enable-elastic-ep with --data-parallel-backend ray) may
+	// declare at most one replica, because one follower and one "<leader>-ray" Service are
+	// derived per component and two leader replicas would share one DNS name. It fires on
+	// exactly the shapes that derive a follower -- a multinode component (LWS path) or a
+	// non-worker component carrying the flags is left alone. Ratcheted, so enabling it
+	// on a live cluster does not freeze an existing violating object against every edit.
+	//
+	// It governs NOTHING ELSE, and that is deliberate rather than an oversight. The
+	// single-pod Ray head shipped in #12943, the headless leader Service in #13178, and
+	// follower synthesis renders a deployment's DECLARED width -- so gating any of them
+	// would mean a default-off operator silently strips a live deployment's Ray head on
+	// upgrade, or renders a fraction of the engine the user asked for. See the VLLMBackend
+	// doc and synthesizeElasticEPFollowerDCD. Turning this gate off therefore does not
+	// remove followers, Services, or Ray heads; a follower's replica count simply freezes
+	// wherever it is (preserveExistingDCDState), at either gate position.
+	//
+	// Owner: @tzulingk
+	// Experimental since: v1.5.0
+	// Beta since: N/A
+	// GA since: N/A
+	// Configuration: elasticEPRayPoC.enabled
+	// Auto-detection: N/A -- the path rewrites launch commands and synthesizes
+	// workloads, which is an administrator's grant to give, not something to infer
+	// from a cluster capability or from the engine flags a user happens to have set.
+	// Requires: vLLM with --enable-elastic-ep and --data-parallel-backend ray
+	// Default: false
+	ElasticEPRayPoC Name = "elasticEPRayPoC"
+
 	// GPUDiscovery enables automatic GPU hardware discovery.
 	//
 	// Owner: @hhzhang16
@@ -135,6 +164,7 @@ var allNames = [...]Name{
 	VolcanoScheduler,
 	DRA,
 	Istio,
+	ElasticEPRayPoC,
 	GPUDiscovery,
 }
 
@@ -152,6 +182,7 @@ type Gates struct {
 	VolcanoScheduler bool `json:"volcanoScheduler"`
 	DRA              bool `json:"dra"`
 	Istio            bool `json:"istio"`
+	ElasticEPRayPoC  bool `json:"elasticEPRayPoC"`
 	GPUDiscovery     bool `json:"gpuDiscovery"`
 }
 
@@ -166,6 +197,9 @@ func Defaults() Gates {
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
 	gates := Defaults()
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
+	// No capability detection: the path needs no cluster API beyond core Kubernetes, so
+	// the administrator's setting is the whole answer.
+	gates.ElasticEPRayPoC = config.ElasticEPRayPoC.Enabled
 
 	var err error
 	// Enable Checkpoint only when explicitly configured and both standalone

@@ -76,6 +76,7 @@ func SetupDynamoComponentDeployment(mgr ctrl.Manager, opts DynamoComponentDeploy
 		Config:                opts.Config,
 		RuntimeConfig:         opts.RuntimeConfig,
 		DockerSecretRetriever: opts.DockerSecretRetriever,
+		NodeReader:            mgr.GetAPIReader(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create DynamoComponentDeployment controller: %w", err)
 	}

@@ -260,6 +260,14 @@ func GenerateDynamoComponentsDeployments(
 		return nil, err
 	}
 
+	// Collected up front so a derived follower name is checked against every declared
+	// component, not just the ones generated before it. Lowercased because the derived name
+	// is normalized: "Decode" plus a declared "DECODE-FLW" collide on "decode-flw".
+	declaredComponentNames := make(map[string]bool, len(parentDGD.Spec.Components))
+	for i := range parentDGD.Spec.Components {
+		declaredComponentNames[strings.ToLower(parentDGD.Spec.Components[i].ComponentName)] = true
+	}
+
 	// Generate DCDs for each component.
 	for i := range parentDGD.Spec.Components {
 		component := &parentDGD.Spec.Components[i]
@@ -282,10 +290,288 @@ func GenerateDynamoComponentsDeployments(
 		if err != nil {
 			return nil, err
 		}
+		// Drop any elastic-EP annotation the user supplied, BEFORE synthesis writes the real
+		// ones. These four keys are operator-set control signals, and a DGD component's
+		// annotations reach the generated DCD verbatim -- both its object metadata
+		// (applyDGDComponentAlphaCompatibilityToDCD copies them) and its pod template (the
+		// component's PodTemplate is deep-copied). Without this strip a user could forge any
+		// of them, and each has a consumer that acts on it:
+		//
+		//   elastic-ep-follower          preserveExistingDCDState stops enforcing the
+		//                                declared replica count, so `replicas: 8` is
+		//                                silently ignored on every reconcile; the renderer
+		//                                also runs the component as RoleFollower, replacing
+		//                                its serve command with a bare `ray start`; and
+		//                                admission exempts it from the single-replica rule
+		//   elastic-ep-follower-replicas the leader waits for Ray nodes nothing will create
+		//   elastic-ep-leader-service    the follower joins an arbitrary address
+		//   elastic-ep-leader-component  per-component lookups resolve to the wrong component
+		//
+		// Stripping at the source rather than at each consumer is what makes the annotations
+		// trustworthy everywhere they are read. consts documents them as "Operator-set,
+		// never user-set"; this is what enforces it.
+		stripOperatorOwnedElasticEPAnnotations(dcd)
+
 		deployments[componentName] = dcd
+
+		// An elastic-EP leader also gets a follower DCD, scaled on demand without
+		// gang-blocking the leader. It renders here rather than as a Grove clique because
+		// a clique cannot rest at zero (grove#676).
+		follower := synthesizeElasticEPFollowerDCD(dcd, componentName)
+		if follower == nil {
+			continue
+		}
+
+		// The derived name is not reserved, so a graph may already declare a component by
+		// it. Storing it unchecked would drop one of the two from rendering, worker
+		// hashing, and status depending on component order.
+		followerComponentName := GetDCDComponentName(follower)
+		if declaredComponentNames[strings.ToLower(followerComponentName)] {
+			return nil, fmt.Errorf(
+				"elastic-EP component %q derives a follower named %q, which collides with a component declared in this graph (compared case-insensitively); rename that component",
+				componentName, followerComponentName,
+			)
+		}
+		if _, exists := deployments[followerComponentName]; exists {
+			return nil, fmt.Errorf(
+				"elastic-EP component %q derives a follower named %q, which collides with an already-generated component",
+				componentName, followerComponentName,
+			)
+		}
+		deployments[followerComponentName] = follower
 	}
 
 	return deployments, nil
+}
+
+// maxKubeNameLength is the DNS-1123 label limit for both resource names and label values.
+const maxKubeNameLength = 63
+
+// operatorOwnedElasticEPAnnotations are the elastic-EP keys only the operator may set. Each
+// is a control signal some consumer acts on, so a user-supplied copy is a forged instruction
+// rather than inert metadata. See stripOperatorOwnedElasticEPAnnotations' call site.
+var operatorOwnedElasticEPAnnotations = []string{
+	commonconsts.KubeAnnotationElasticEPFollower,
+	commonconsts.KubeAnnotationElasticEPFollowerReplicas,
+	commonconsts.KubeAnnotationElasticEPLeaderService,
+	commonconsts.KubeAnnotationElasticEPLeaderComponent,
+}
+
+// stripOperatorOwnedElasticEPAnnotations removes user-supplied elastic-EP control
+// annotations from a generated DCD, on both the object and its pod template.
+//
+// Called before synthesis, which then writes the genuine values, so stripping cannot erase
+// the operator's own stamp.
+func stripOperatorOwnedElasticEPAnnotations(dcd *v1beta1.DynamoComponentDeployment) {
+	if dcd == nil {
+		return
+	}
+	for _, key := range operatorOwnedElasticEPAnnotations {
+		delete(dcd.Annotations, key)
+		if dcd.Spec.PodTemplate != nil {
+			delete(dcd.Spec.PodTemplate.Annotations, key)
+		}
+	}
+}
+
+// elasticEPFollowerName derives a follower identity from the leader's, bounded to the
+// Kubernetes name limit. A 60-63 character leader name is valid, but the suffix pushes it
+// past the limit and the API server rejects the DCD, stalling the whole reconcile. The hash
+// is deterministic so the truncated name stays unique and stable across reconciles.
+// Truncating is safe only because the follower carries the leader's address explicitly
+// (KubeAnnotationElasticEPLeaderService).
+func elasticEPFollowerName(leaderName string) string {
+	name := NormalizeKubeResourceName(leaderName + "-" + commonconsts.GroveRoleSuffixFollower)
+	if len(name) <= maxKubeNameLength {
+		return name
+	}
+
+	hash := fnv.New32a()
+	hash.Write([]byte(name))
+	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
+	// Keep the follower suffix last so the identity stays recognizable.
+	keep := maxKubeNameLength - len(suffix) - len(commonconsts.GroveRoleSuffixFollower) - 2
+	return NormalizeKubeResourceName(leaderName[:keep] + "-" + suffix + "-" + commonconsts.GroveRoleSuffixFollower)
+}
+
+// ElasticEPComponentIdentity returns the component name per-component GPU infrastructure
+// resolves under: the component's own, except for a synthesized elastic-EP follower, which
+// resolves under its leader's. The GMS DRA claim template exists only for components in
+// dgd.Spec.Components, so under the follower's invented "<leader>-flw" name the lookup finds
+// nothing and the pod never schedules. Sharing still gives each pod its own GPU, since
+// Kubernetes instantiates one ResourceClaim per pod from a template. Not for checkpoints
+// though -- that lookup must keep missing, or the follower (a bare Ray join) becomes a CRIU
+// restore target for an engine it never runs.
+func ElasticEPComponentIdentity(component *v1beta1.DynamoComponentDeploymentSharedSpec, componentName string) string {
+	if leader := GetPodTemplateAnnotations(component)[commonconsts.KubeAnnotationElasticEPLeaderComponent]; leader != "" {
+		return leader
+	}
+	return componentName
+}
+
+// IsSinglePodElasticEPShape reports whether a component has the topology the headless Ray
+// Service addresses and a follower can join. Shape only; it never consults the gate.
+//
+// The Service selector matches every pod carrying the component labels, so it resolves to
+// one Ray head only while the component renders as one pod: replicas > 1 puts an independent
+// head behind one DNS name per replica, and numberOfNodes > 1 renders leader plus worker
+// pods that share those labels, take the LWS path, and already reach their leader through
+// the framework hostname.
+//
+// No caller gates on features.ElasticEPRayPoC. The leader render and the Grove Service
+// shipped before the gate existed (#12943, #13178), so gating them would rewrite or delete a
+// running deployment's resources on an upgrade that merely defaulted the gate off. Follower
+// synthesis is ungated for its own reason -- see synthesizeElasticEPFollowerDCD.
+func IsSinglePodElasticEPShape(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	// Elastic EP is a worker topology, but admission accepts the launch flags on any
+	// component: a global-vLLM graph could otherwise put them on a planner or frontend and
+	// have a follower derived for it.
+	if !IsWorkerComponent(string(component.ComponentType)) {
+		return false
+	}
+	container := GetMainContainer(component)
+	if container == nil || !IsElasticEPRayLaunch(container) {
+		return false
+	}
+	if component.GetNumberOfNodes() > 1 {
+		return false
+	}
+	return component.Replicas == nil || *component.Replicas == 1
+}
+
+// ElasticEPFollowerReplicas returns how many follower pods a leader's declared data-parallel
+// size implies at launch. Sizing is one pod per node per rank and the leader is rank 0, so
+// --data-parallel-size N needs N-1 followers to reach the declared width. EP16 at TP4 is
+// DP4: one leader, three followers, four pods. This is the launch footprint, not a ceiling
+// (see synthesizeElasticEPFollowerDCD). No --data-parallel-size yields zero followers, since
+// getFlagValue defaults an absent flag to 1, which keeps every pre-existing single-rank
+// deployment rendering exactly as before.
+func ElasticEPFollowerReplicas(leaderContainer *corev1.Container) int32 {
+	// Command AND Args, matching IsElasticEPRayLaunch. Reading only Args made the two halves
+	// of this feature disagree about where a flag may live: the predicate would see
+	// --enable-elastic-ep in `command:` and enable the whole path, while this read saw
+	// nothing and defaulted to one rank. A declared --data-parallel-size 4 then rendered as
+	// ONE pod with no width gate and no local-rank pin, and vLLM aborted placing four ranks
+	// on the master. Admission requires a non-empty command, so that manifest shape is one
+	// users are actively pushed toward.
+	dataParallelSize := getFlagValue(getExpandedCommandLine(leaderContainer), dataParallelSizeFlag)
+	if dataParallelSize <= 1 {
+		return 0
+	}
+	return int32(dataParallelSize - 1)
+}
+
+// synthesizeElasticEPFollowerDCD derives the follower DCD for an elastic-EP leader, or nil
+// when the leader is not a single-pod elastic-EP Ray launch or declares no explicit
+// Command (see the body for why the second case gets no follower). The follower is a deep copy of
+// the leader (same image, GPU, model args) seeded at the declared launch width -- N-1 for
+// --data-parallel-size N -- and rendered as RoleFollower rather than a serve. Its component
+// identity is "<leader>-flw", so its Deployment, Service, and
+// selector never collide with the leader's, and it carries the leader's Service name on an
+// annotation rather than deriving it.
+//
+// Deliberately NOT gated on features.ElasticEPRayPoC: followers are the deployment's
+// declared width, not extra capacity the PoC invents. --data-parallel-size 4 asks for four
+// ranks, which is four pods, so a gated-off operator would silently render a quarter of the
+// requested engine and the leader would wait forever for ranks nothing created. The gate
+// does not govern this count either: once the follower object exists, preserveExistingDCDState
+// keeps the live value at BOTH gate positions -- see that function.
+//
+// Gated on IsSinglePodElasticEPShape, not the launch flags alone: a follower is only useful
+// where a leader Service exists to join, and the rejected shapes never get one -- replicas >
+// 1, or multinode, which takes the LWS path and never renders RoleFollower at all.
+func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment, leaderComponentName string) *v1beta1.DynamoComponentDeployment {
+	if !IsSinglePodElasticEPShape(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec) {
+		return nil
+	}
+	// Synthesis needs more than Service emission: a Ray head must actually start. A leader
+	// with no explicit Command runs its image ENTRYPOINT, which the operator cannot
+	// reconstruct, so injectElasticEPRayLaunchFlags injects no head -- and a follower would
+	// then poll a Ray port that never opens. Such a leader still gets the Service (harmless,
+	// and it may gain a Command later), but no follower.
+	leaderContainer := GetMainContainer(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
+	if leaderContainer == nil || len(leaderContainer.Command) == 0 {
+		return nil
+	}
+	followerReplicas := ElasticEPFollowerReplicas(leaderContainer)
+
+	// Tell the LEADER how many followers it is getting, before deep-copying it. This
+	// annotation licenses the backend's multi-pod launch: the wait for the declared width and
+	// the --data-parallel-size-local pin. Only this function knows a follower will exist;
+	// --data-parallel-size alone would be wrong, because a single pod with several GPUs runs
+	// its ranks intra-pod -- what the Grove pathway does (no follower, grove#676) and what any
+	// replicas > 1 component does -- and those shapes would wait forever for pods nothing
+	// creates.
+	//
+	// Written ONLY when there is at least one follower: it lives on the leader's POD TEMPLATE,
+	// so writing it rolls the deployment, while absent and "0" behave identically
+	// (elasticEPSynthesizedFollowers maps both to zero). Stamping "0" would restart every
+	// existing single-rank elastic-EP deployment on operator upgrade for nothing -- on
+	// dynamo-aws-gb300 that rolled two serving deployments into generations that could not
+	// schedule, and neither served again until capacity was freed.
+	if followerReplicas > 0 {
+		leaderPodTemplate := ensurePodTemplate(&leaderDCD.Spec.DynamoComponentDeploymentSharedSpec)
+		leaderPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPFollowerReplicas] =
+			strconv.Itoa(int(followerReplicas))
+	}
+
+	followerComponentName := elasticEPFollowerName(leaderComponentName)
+	follower := leaderDCD.DeepCopy()
+	follower.Name = elasticEPFollowerName(leaderDCD.Name)
+	follower.Spec.Replicas = ptr.To(followerReplicas)
+
+	// Drop the leader's checkpoint config, which the deep copy carries verbatim: the renderer
+	// resolves an explicit spec.experimental.checkpoint checkpointRef whatever the reconciler
+	// looks up, restore-shaping the follower's main container, so once scaled it would restore
+	// a leader engine image instead of running its bare Ray join. Withholding the leader's
+	// checkpointInfo is not enough on its own.
+	if follower.Spec.Experimental != nil {
+		follower.Spec.Experimental.Checkpoint = nil
+	}
+	// GetDCDComponentName prefers Spec.ComponentName over the label, so both must carry
+	// the follower name or its resources and worker hash collide with the leader's.
+	if follower.Spec.ComponentName != "" {
+		follower.Spec.ComponentName = followerComponentName
+	}
+	if follower.Labels == nil {
+		follower.Labels = map[string]string{}
+	}
+	follower.Labels[commonconsts.KubeLabelDynamoComponent] = followerComponentName
+	if follower.Annotations == nil {
+		follower.Annotations = map[string]string{}
+	}
+	follower.Annotations[commonconsts.KubeAnnotationElasticEPFollower] = commonconsts.KubeLabelValueTrue
+
+	// Carry the leader's exact Service name rather than rebuilding it: it is DGD- and
+	// generation-scoped and may be hash-truncated, so it is not recoverable from the
+	// follower's identity. On the pod template, which the backend reads when it rewrites the
+	// launch command.
+	followerPodTemplate := ensurePodTemplate(&follower.Spec.DynamoComponentDeploymentSharedSpec)
+	followerPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPLeaderService] =
+		ElasticEPLeaderServiceNameForDCD(leaderDCD)
+
+	// Carry the leader's component name too: anything keyed by it (GMS DRA claim template,
+	// checkpoint info) exists only for declared components. See ElasticEPComponentIdentity.
+	followerPodTemplate.Annotations[commonconsts.KubeAnnotationElasticEPLeaderComponent] = leaderComponentName
+
+	// Pin the follower into the leader's NVLink partition and off the leader's node, merged
+	// with any user affinity inherited from the deep copy.
+	if follower.Spec.PodTemplate != nil {
+		injectElasticEPFollowerAffinity(
+			&follower.Spec.PodTemplate.Spec,
+			leaderComponentName,
+			// GetDCDDynamoNamespace, not the DCD's own label: it prefers the shared
+			// spec's dynamoNamespace and only falls back to the label, and it is what
+			// the pods are stamped with. The two can disagree -- a graph setting the
+			// deprecated v1alpha1 field gets "ep-gate" on its pods while the DCD label
+			// reads "<k8s-ns>-ep-gate" -- so a label-built term matches no pod and the
+			// NVLink affinity is silently dropped as unsatisfiable. Seen on
+			// dynamo-aws-gb300; fixtures where the two agree cannot catch it.
+			GetDCDDynamoNamespace(leaderDCD),
+			leaderDCD.Name,
+		)
+	}
+	return follower
 }
 
 // gmsExtraClientContainersError returns a deterministic error for invalid
@@ -860,6 +1146,11 @@ type ComponentServiceParams struct {
 	Labels          map[string]string
 	Annotations     map[string]string
 	IsK8sDiscovery  bool
+	// DCDSelector, when set, narrows the selector to one DCD generation via
+	// KubeLabelDynamoSelector. Only the non-Grove elastic-EP leader Service sets it: it must
+	// address exactly one Ray head, and component labels alone match every generation. The
+	// Grove emitter publishes one Service per component and does not narrow.
+	DCDSelector string
 }
 
 func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, error) {
@@ -931,14 +1222,18 @@ func GenerateComponentService(params ComponentServiceParams) (*corev1.Service, e
 const maxServiceNameLength = 63
 
 // ElasticEPLeaderServiceName returns the name a single-pod elastic-EP leader is
-// reachable at: its component service name plus a "-ray" suffix.
+// reachable at: the base it is given plus a "-ray" suffix.
 //
-// That suffix can push a long name past the DNS-1035 limit, which the API server
-// rejects, failing the whole stable-resources reconcile. Truncate with a hash suffix
-// instead, as PCSNameForDGD does. The hash must be deterministic because the follower
-// derives this name independently rather than reading it back from the Service.
-func ElasticEPLeaderServiceName(componentServiceName string) string {
-	name := NormalizeKubeResourceName(componentServiceName + "-ray")
+// The base must be DGD-scoped and per-generation -- the leader's DCD resource name, never
+// the bare component name. Two DGDs in one Kubernetes namespace can both declare a "decode"
+// component, and two generations coexist during a worker rollout; a component-derived name
+// collides in both cases, so one deployment's Service silently takes over or deletes
+// another's and a follower joins the wrong Ray head.
+//
+// A long base plus the suffix can exceed the DNS-1035 limit, which the API server rejects,
+// failing the reconcile; truncate with a deterministic hash, as PCSNameForDGD does.
+func ElasticEPLeaderServiceName(base string) string {
+	name := NormalizeKubeResourceName(base + "-ray")
 	if len(name) <= maxServiceNameLength {
 		return name
 	}
@@ -947,6 +1242,15 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 	hash.Write([]byte(name))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
 	return name[:maxServiceNameLength-len(suffix)-1] + "-" + suffix
+}
+
+// ElasticEPLeaderServiceNameForDCD is the authoritative source for an elastic-EP leader's
+// headless Ray Service name, and the only intended caller of ElasticEPLeaderServiceName.
+// Both the reconciler that emits the Service and the synthesis that stamps the address onto
+// the follower go through it, so truncation or scoping changes cannot leave the follower
+// polling a hostname no Service backs.
+func ElasticEPLeaderServiceNameForDCD(leaderDCD *v1beta1.DynamoComponentDeployment) string {
+	return ElasticEPLeaderServiceName(leaderDCD.Name)
 }
 
 // GenerateElasticEPHeadlessService returns a headless Service that gives a single-pod
@@ -960,9 +1264,10 @@ func ElasticEPLeaderServiceName(componentServiceName string) string {
 //   - PublishNotReadyAddresses, because the leader's engine only starts once its
 //     data-parallel ranks join, so gating the address on readiness would deadlock.
 //
-// The selector matches every pod carrying the component labels, so the caller must emit
-// this only while the component renders as one pod. A follower clique sharing that label
-// would have to narrow the selector to the leader role.
+// Emit this only for a single-pod shape (IsSinglePodElasticEPShape): the selector matches
+// every pod carrying the component labels. The follower is its own "<leader>-flw" component
+// and never matches -- keep those identities distinct, or this Service resolves to followers
+// and the Ray join flaps between them.
 func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Service {
 	// Copy the caller's metadata so the Service carries the component's labels and
 	// annotations without aliasing the caller's maps.
@@ -982,6 +1287,13 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 		commonconsts.KubeLabelDynamoComponentType: params.ComponentType,
 		commonconsts.KubeLabelDynamoNamespace:     params.DynamoNamespace,
 		commonconsts.KubeLabelDynamoComponent:     params.ComponentName,
+	}
+
+	// Narrow to one DCD generation when the caller supplies its identity. Without it the
+	// component labels also match the other generation's pod mid-rollout, publishing two Ray
+	// heads under one name.
+	if params.DCDSelector != "" {
+		selector[commonconsts.KubeLabelDynamoSelector] = params.DCDSelector
 	}
 
 	return &corev1.Service{
@@ -1005,7 +1317,12 @@ func GenerateElasticEPHeadlessService(params ComponentServiceParams) *corev1.Ser
 					Protocol:   corev1.ProtocolTCP,
 				},
 				{
-					// Leader system/health port; the follower's /live gate polls it.
+					// Leader system/health port. Nothing polls it through this Service
+					// today -- the follower waits on the Ray GCS port above, and the
+					// multinode worker's /live gate reaches its leader by the LWS
+					// hostname, not here. It is published so the leader's engine-control
+					// endpoint is reachable at the same stable name a scale client
+					// already has to know (Phase 6/7 calls scale_elastic_ep on it).
 					Name:       commonconsts.DynamoSystemPortName,
 					Port:       commonconsts.DynamoSystemPort,
 					TargetPort: intstr.FromString(commonconsts.DynamoSystemPortName),
@@ -1205,6 +1522,11 @@ const (
 	RoleMain       Role = "main"
 	RoleCheckpoint Role = "checkpoint"
 	RoleGMS        Role = "gms"
+	// RoleFollower is an on-demand elastic-EP follower: a separate single-pod DCD --
+	// rendered as its own Deployment rather than a Grove clique, see expandRolesForComponent
+	// -- seeded at the leader's declared width minus one, that joins the leader's Ray
+	// cluster and lends its GPU as an extra data-parallel rank.
+	RoleFollower Role = "follower"
 )
 
 // ServiceRole describes one PodClique (PCLQ) to be materialised for a
@@ -1274,6 +1596,19 @@ func expandRolesForComponent(componentName string, componentReplicas *int32, num
 	case component.IsGroveScalingGroupForced():
 		return expandSingleNodeScalingGroupRoles(componentName)
 	default:
+		// The elastic-EP follower is deliberately NOT emitted here: a Grove clique cannot rest
+		// at zero, so it renders on the non-Grove pathway (synthesizeElasticEPFollowerDCD).
+		//
+		// The blocker is gang membership, not minAvailable: a clique at replicas: 0 still
+		// counts as a required PodGang member, so kai-scheduler marks the PodGroup stale and
+		// evicts the survivors -- hence grove#676 was closed working-as-designed. Raising
+		// minAvailable is not the remedy either; grove#677 rejected that framing and GREP-0677
+		// lists "Allow minAvailable: 0" under Non-Goals. Track grove#677; grove#686 would make
+		// replicas: 0 a first-class idle state.
+		//
+		// A plain Grove clique would not close the identity gap either -- its replicas are
+		// fungible. The identity-bearing target is a PodCliqueScalingGroup member clique,
+		// which needs grove#793 / grove#823.
 		return expandSingleNodeRoles(componentName, componentReplicas)
 	}
 }
@@ -1368,10 +1703,13 @@ func LongestPodCliqueNameForDGDComponent(
 	component *v1beta1.DynamoComponentDeploymentSharedSpec,
 ) string {
 	lowerComponentName := strings.ToLower(componentName)
-	if component == nil || !component.UsesPCSG() {
+	if component == nil {
 		return lowerComponentName
 	}
 
+	// Iterate every component's concrete roles, not just PCSG ones, so the budget matches what
+	// expandRolesForComponent renders. A no-op today -- a non-PCSG expansion is named after
+	// the component -- but gating on UsesPCSG would undercount once a pathway adds a suffix.
 	longestName := lowerComponentName
 	for _, role := range expandRolesForComponent(componentName, component.Replicas, component.GetNumberOfNodes(), component) {
 		roleName := strings.ToLower(role.Name)
@@ -1472,6 +1810,8 @@ func BackendFactory(backendFramework BackendFramework, operatorConfig *configv1a
 	case BackendFrameworkSGLang:
 		return &SGLangBackend{}
 	case BackendFrameworkVLLM:
+		// No elastic-EP gate passed down: both arms the backend renders are ungated by
+		// design. See the VLLMBackend doc comment.
 		return &VLLMBackend{ParentGraphDeploymentName: parentGraphDeploymentName}
 	case BackendFrameworkTRTLLM:
 		return &TRTLLMBackend{
@@ -1775,7 +2115,12 @@ func GenerateBasePodSpec(
 			return nil, err
 		}
 
-		claimTemplateName := dra.ResourceClaimTemplateName(parentGraphDeploymentName, serviceName)
+		// A synthesized follower resolves the leader's claim template, not one under its own
+		// invented name -- see ElasticEPComponentIdentity.
+		claimTemplateName := dra.ResourceClaimTemplateName(
+			parentGraphDeploymentName,
+			ElasticEPComponentIdentity(component, serviceName),
+		)
 		if err := dra.ApplyClaim(&podSpec, claimTemplateName); err != nil {
 			return nil, fmt.Errorf("failed to apply DRA claim for GMS: %w", err)
 		}
@@ -2365,6 +2710,65 @@ type cliqueParams struct {
 	validatedQueueName          string
 	groveClusterTopologyDomains []v1beta1.TopologyDomain
 	containerGPUs               ContainerGPUCount
+}
+
+// injectElasticEPFollowerAffinity injects the two placement terms an elastic-EP follower
+// needs, appending to (never overwriting) any user-supplied affinity:
+//
+//   - pod affinity on topology key nvidia.com/gpu.clique selecting the leader, pinning the
+//     follower into the leader's NVLink partition.
+//   - pod anti-affinity on kubernetes.io/hostname selecting the leader, keeping the
+//     follower off the leader's node so each node-sized rank keeps its node's NVLink.
+//
+// The clique affinity cannot be dropped: a follower in a different partition still joins
+// the ComputeDomain and reports healthy, but has no NVLink route to the leader, so the
+// cross-node EP collective fails only once it runs -- a scale that looks successful and then
+// serves wrong or failing inference. The hostname anti-affinity is redundant under
+// node-sized pods and may be relaxed if it ever fights the scheduler.
+func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentName, dynamoNamespace, leaderDCDName string) {
+	if podSpec.Affinity == nil {
+		podSpec.Affinity = &corev1.Affinity{}
+	}
+	// Both terms select the leader; a fresh selector per term avoids aliasing one mutable
+	// struct. Narrowed to a single DCD generation by KubeLabelDynamoSelector, as the leader's
+	// Ray Service is: component and dynamo-namespace labels alone match every generation, so
+	// mid-rollout these terms would also select the old leader -- pinning the follower into
+	// its partition while it joins the new leader's Service.
+	leaderSelector := func() *metav1.LabelSelector {
+		return &metav1.LabelSelector{
+			MatchLabels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent: leaderComponentName,
+				commonconsts.KubeLabelDynamoNamespace: dynamoNamespace,
+				commonconsts.KubeLabelDynamoSelector:  leaderDCDName,
+			},
+		}
+	}
+
+	// Inter-pod affinity rather than a node affinity on a literal value, because the leader's
+	// nvidia.com/gpu.clique depends on where the leader lands and is unknown at render time.
+	// Same effect: "schedule me on a node whose gpu.clique matches a node running a leader".
+	if podSpec.Affinity.PodAffinity == nil {
+		podSpec.Affinity.PodAffinity = &corev1.PodAffinity{}
+	}
+	podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		podSpec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			TopologyKey:   commonconsts.NodeLabelGPUClique,
+			LabelSelector: leaderSelector(),
+		},
+	)
+
+	// One node-sized rank per node.
+	if podSpec.Affinity.PodAntiAffinity == nil {
+		podSpec.Affinity.PodAntiAffinity = &corev1.PodAntiAffinity{}
+	}
+	podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = append(
+		podSpec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution,
+		corev1.PodAffinityTerm{
+			TopologyKey:   "kubernetes.io/hostname",
+			LabelSelector: leaderSelector(),
+		},
+	)
 }
 
 // buildCliqueForRole generates a single PodCliqueTemplateSpec for the given role,
