@@ -127,6 +127,17 @@ pub enum ErrorClass {
     /// other workers may. Distinct from [`Self::Unavailable`] so the request
     /// can migrate; both surface as HTTP 503.
     WorkerUnavailable,
+    /// The selected worker is intentionally draining and cannot admit this
+    /// request. Frontends may reselect another worker.
+    ///
+    /// Raised by the admission gate and yielded as the response stream's single
+    /// item rather than returned before the stream exists — a pre-stream error
+    /// travels in the wire prologue, which carries only an opaque string, and
+    /// would arrive relabelled as `CannotConnect`.
+    ///
+    /// Migration is not free: `is_migratable` retries consume the per-request
+    /// migration budget.
+    WorkerDraining,
     /// Error originating from a backend engine.
     Backend(BackendError),
     /// The client request is malformed or fails request-level validation.
@@ -180,6 +191,7 @@ impl ErrorClass {
             "WorkerOverloaded" => Self::WorkerOverloaded,
             "Unavailable" => Self::Unavailable,
             "WorkerUnavailable" => Self::WorkerUnavailable,
+            "WorkerDraining" => Self::WorkerDraining,
             "InvalidRequest" => Self::InvalidRequest,
             "Unauthenticated" => Self::Unauthenticated,
             "PermissionDenied" => Self::PermissionDenied,
@@ -224,6 +236,7 @@ impl fmt::Display for ErrorClass {
             ErrorClass::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorClass::Unavailable => write!(f, "Unavailable"),
             ErrorClass::WorkerUnavailable => write!(f, "WorkerUnavailable"),
+            ErrorClass::WorkerDraining => write!(f, "WorkerDraining"),
             ErrorClass::Backend(sub) => write!(f, "Backend{sub}"),
             ErrorClass::InvalidRequest => write!(f, "InvalidRequest"),
             ErrorClass::Unauthenticated => write!(f, "Unauthenticated"),
@@ -257,6 +270,7 @@ impl ErrorClass {
             Self::WorkerOverloaded => "WorkerOverloaded",
             Self::Unavailable => "Unavailable",
             Self::WorkerUnavailable => "WorkerUnavailable",
+            Self::WorkerDraining => "WorkerDraining",
             Self::Backend(BackendError::Unknown) => "BackendUnknown",
             Self::Backend(BackendError::InvalidArgument) => "BackendInvalidArgument",
             Self::Backend(BackendError::CannotConnect) => "BackendCannotConnect",
@@ -289,7 +303,10 @@ impl ErrorClass {
         match self {
             Self::Unknown => Self::Internal,
             Self::InvalidArgument => Self::InvalidRequest,
-            Self::CannotConnect | Self::Disconnected | Self::WorkerUnavailable => Self::Unavailable,
+            Self::CannotConnect
+            | Self::Disconnected
+            | Self::WorkerUnavailable
+            | Self::WorkerDraining => Self::Unavailable,
             Self::ConnectionTimeout | Self::ResponseTimeout => Self::DeadlineExceeded,
             Self::ResourceExhausted | Self::WorkerOverloaded => Self::CapacityExhausted,
             Self::Backend(error) => match error {
@@ -411,6 +428,7 @@ impl ErrorReason {
             | "transport.disconnected"
             | "backend.unavailable"
             | "backend.worker_unavailable"
+            | "backend.worker_draining"
             | "backend.cannot_connect"
             | "backend.disconnected"
             | "backend.engine_shutdown"
@@ -460,6 +478,7 @@ impl ErrorReason {
             ErrorClass::WorkerOverloaded => "capacity.worker_overloaded",
             ErrorClass::Unavailable => "backend.unavailable",
             ErrorClass::WorkerUnavailable => "backend.worker_unavailable",
+            ErrorClass::WorkerDraining => "backend.worker_draining",
             ErrorClass::Backend(error) => match error {
                 BackendError::Unknown => "backend.unknown",
                 BackendError::InvalidArgument => "backend.invalid_argument",
@@ -695,7 +714,15 @@ impl Serialize for DynamoError {
         )?;
         state.serialize_field("error_type", &self.legacy_wire_error_type())?;
         state.serialize_field("class", &self.class())?;
-        state.serialize_field("reason", self.reason())?;
+        // N-2 frontends reject unknown reasons even when the class is known.
+        // Keep drain admission failures on the established worker-unavailable
+        // wire identity until the supported readers understand draining.
+        let wire_reason = if self.reason().as_str() == "backend.worker_draining" {
+            ErrorReason::for_class(ErrorClass::WorkerUnavailable)
+        } else {
+            self.reason().clone()
+        };
+        state.serialize_field("reason", &wire_reason)?;
         state.serialize_field("message", &self.message())?;
         if let Some(diagnostic) = &self.diagnostic {
             state.serialize_field("diagnostic", diagnostic)?;
@@ -854,6 +881,7 @@ impl DynamoError {
             | ErrorClass::RateLimited => ErrorClass::ResourceExhausted,
             ErrorClass::Unavailable => ErrorClass::Unavailable,
             ErrorClass::WorkerUnavailable => ErrorClass::WorkerUnavailable,
+            ErrorClass::WorkerDraining => ErrorClass::WorkerUnavailable,
             ErrorClass::Backend(error) => ErrorClass::Backend(error),
         }
     }
@@ -1117,6 +1145,23 @@ mod tests {
             assert_static::<DynamoError>();
         }
     };
+
+    #[test]
+    fn draining_uses_compatible_worker_unavailable_wire_identity() {
+        // Regression: an older frontend rejects unknown reason keys and loses
+        // migration eligibility even when the canonical class is Unavailable.
+        let error = DynamoError::builder()
+            .error_type(ErrorClass::WorkerDraining)
+            .message("worker is draining")
+            .build();
+        let wire = serde_json::to_value(error).unwrap();
+        assert_eq!(wire["class"], "Unavailable");
+        assert_eq!(wire["error_type"], "WorkerUnavailable");
+        assert_eq!(wire["reason"], "backend.worker_unavailable");
+        let received: DynamoError = serde_json::from_value(wire).unwrap();
+        assert_eq!(received.error_type(), ErrorClass::WorkerUnavailable);
+        assert_eq!(received.reason().as_str(), "backend.worker_unavailable");
+    }
 
     #[test]
     fn test_msg_constructor() {

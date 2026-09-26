@@ -190,6 +190,25 @@ pub mod worker {
     /// Total SIGTERM-to-exit budget, including router grace and cleanup.
     pub const DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS: &str =
         "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS";
+
+    pub const DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS: &str = "DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS";
+    pub const DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS";
+
+    /// Upper bound on `engine.cleanup()` during shutdown, in seconds.
+    /// Defaults to five seconds, reserved inside the total shutdown budget.
+    pub const DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS";
+
+    /// Upper bound on waiting for request-plane in-flight requests during
+    /// shutdown, in seconds.
+    pub const DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS";
+
+    /// Policy for prefill engines that cannot report KV-transfer state:
+    /// `wait` (the default) or `skip`.
+    pub const DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK: &str =
+        "DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK";
 }
 
 /// NATS transport environment variables
@@ -1053,6 +1072,11 @@ mod tests {
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             worker::DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_ROUTER_GRACE_SECS,
+            worker::DYN_WORKER_SHUTDOWN_KV_TRANSFER_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_CLEANUP_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_INFLIGHT_TIMEOUT_SECS,
+            worker::DYN_WORKER_SHUTDOWN_KV_TRANSFER_FALLBACK,
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,

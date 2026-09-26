@@ -3515,6 +3515,32 @@ class backend:
             event_plane: Optional[str] = None,
         ) -> None: ...
 
+    class ShutdownConfig:
+        """Shutdown timing overrides; unset fields fall back to the environment."""
+
+        @property
+        def total_secs(self) -> Optional[float]: ...
+        @property
+        def router_grace_secs(self) -> Optional[float]: ...
+        @property
+        def inflight_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def kv_transfer_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def cleanup_timeout_secs(self) -> Optional[float]: ...
+        @property
+        def kv_transfer_fallback(self) -> Optional[str]: ...
+
+        def __init__(
+            self,
+            total_secs: Optional[float] = None,
+            router_grace_secs: Optional[float] = None,
+            inflight_timeout_secs: Optional[float] = None,
+            kv_transfer_timeout_secs: Optional[float] = None,
+            cleanup_timeout_secs: Optional[float] = None,
+            kv_transfer_fallback: Optional[str] = None,
+        ) -> None: ...
+
     class WorkerConfig:
         def __init__(
             self,
@@ -3543,6 +3569,7 @@ class backend:
             media_fetcher: Optional[MediaFetcher] = None,
             kv_state_endpoint: Optional[str] = None,
             default_thinking_mode: Optional[str] = None,
+            shutdown: Optional["backend.ShutdownConfig"] = None,
         ) -> None: ...
 
     class Worker:

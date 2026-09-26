@@ -102,6 +102,11 @@ fn is_migration_eligible(reason: &ErrorReason) -> bool {
             | "backend.engine_shutdown"
             | "backend.stream_incomplete"
             | "backend.worker_unavailable"
+            // The worker closed admission because it is shutting down. It
+            // refused before doing any work, so retrying elsewhere is always
+            // safe — and not migrating would turn every request caught in the
+            // stop-admission window into a user-visible failure.
+            | "backend.worker_draining"
             | "capacity.worker_overloaded"
     )
 }
