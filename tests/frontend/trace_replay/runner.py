@@ -105,6 +105,7 @@ class Replay:
         self.results: list[Result] = []
         self.turns: dict[tuple[str, str, str], Turn] = {}
         self.disconnects = 0
+        self._raw_examples: collections.Counter = collections.Counter()
         self._semaphore = asyncio.Semaphore(config.concurrency)
 
     def selected_cases(self) -> dict[str, list[JsonDict]]:
@@ -210,9 +211,16 @@ class Replay:
         result.events = turn.events
         result.completion_tokens = turn.completion_tokens
         self.turns[(case["key"], endpoint, mode)] = turn
+        # Keep every mismatch, but only a few examples of each stream violation.
+        signatures = [
+            f"{endpoint}/{mode}:{v}"
+            for v in set(result.violations)
+            if self._raw_examples[f"{endpoint}/{mode}:{v}"] < _EXAMPLES_PER_CATEGORY
+        ]
         if self.config.raw_dir is not None and (
-            result.tier == "mismatch" or result.violations
+            result.tier == "mismatch" or signatures
         ):
+            self._raw_examples.update(signatures)
             self._save_raw(result, body, payload)
         return result
 
