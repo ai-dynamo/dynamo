@@ -108,7 +108,7 @@ impl Drop for TopologyAdapter {
     }
 }
 
-fn worker_request(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRequest {
+pub(crate) fn worker_request(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRequest {
     WorkerRequest {
         worker_id: w.worker_id,
         model_name: defaults.model_name.clone(),
