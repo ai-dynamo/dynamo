@@ -19,8 +19,9 @@
 //!
 //! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
 //!   tokens, KV hit rate, and non-max-overlap routing decisions).
-//!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
-//!   Eagerly created so they appear as zeros before any requests arrive.
+//!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`
+//!   or on the standalone EPP's private `prometheus::Registry` without a DRT.
+//!   Eagerly created so registered families appear as zeros before requests.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
 //!   the streaming response (TTFT on first token, ITL per output block,
 //!   ISL/OSL/kv_hit_rate at routing and completion).
@@ -30,6 +31,8 @@
 //!     8000 via the `drt_metrics` bridge, populated per-request
 //!   - Standalone router (`python -m dynamo.router`): available on `DYN_SYSTEM_PORT`
 //!     when set (default is `-1`, disabled), populated per-request
+//!   - Standalone EPP: available on `DYN_EPP_METRICS_PORT`, with admitted-request
+//!     and input/output token observations populated when those values exist
 //!
 //! - `KvPublisherMetrics`: Worker-local KV event publisher and ZMQ relay counters.
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
@@ -1016,8 +1019,9 @@ impl RoutingOverheadMetrics {
 ///
 /// # Why component-scoped
 ///
-/// These metrics MUST be registered through the Component hierarchy (not a standalone
-/// registry). In global planner deployments, the frontend's router is the global
+/// DRT callers continue to register through the Component hierarchy. Standalone
+/// EPP uses [`Self::from_registry`] with its private registry and deployment labels.
+/// In global planner deployments, the frontend's router is the global
 /// entry point, but each worker pool has its own local router (e.g. prefill pool,
 /// decode pool). Component-scoped metrics let each local router emit metrics with
 /// distinct `dynamo_component` labels, so pools can be monitored and scaled
@@ -1041,6 +1045,77 @@ pub struct RouterRequestMetrics {
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
 
+// Keep names, help text, buckets and eager series identical across both paths.
+enum RequestMetricsRegistration<'a> {
+    Hierarchy(&'a dyn MetricsHierarchy),
+    Registry(&'a prometheus::Registry, &'a str, Option<&'a [&'a str]>),
+}
+
+impl RequestMetricsRegistration<'_> {
+    fn includes(&self, name: &str) -> bool {
+        match self {
+            Self::Hierarchy(_) | Self::Registry(_, _, None) => true,
+            Self::Registry(_, _, Some(names)) => names.contains(&name),
+        }
+    }
+
+    fn create<T: dynamo_runtime::metrics::PrometheusMetric>(
+        &self,
+        name: &str,
+        help: &str,
+        const_labels: &[(&str, &str)],
+        buckets: Option<Vec<f64>>,
+        label_names: Option<&[&str]>,
+    ) -> anyhow::Result<T> {
+        match self {
+            Self::Hierarchy(hierarchy) => dynamo_runtime::metrics::create_metric(
+                *hierarchy,
+                name,
+                help,
+                const_labels,
+                buckets,
+                label_names,
+            ),
+            Self::Registry(registry, prefix, _) => {
+                let labels = const_labels
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect();
+                let metric = match (buckets, label_names) {
+                    (Some(buckets), Some(names)) => {
+                        let opts = HistogramOpts::new(name, help)
+                            .namespace(*prefix)
+                            .const_labels(labels);
+                        T::with_histogram_opts_buckets_and_label_names(opts, Some(buckets), names)?
+                    }
+                    (Some(buckets), None) => {
+                        let opts = HistogramOpts::new(name, help)
+                            .namespace(*prefix)
+                            .const_labels(labels);
+                        T::with_histogram_opts_and_buckets(opts, Some(buckets))?
+                    }
+                    (None, Some(names)) => {
+                        let opts = Opts::new(name, help)
+                            .namespace(*prefix)
+                            .const_labels(labels);
+                        T::with_opts_and_label_names(opts, names)?
+                    }
+                    (None, None) => {
+                        let opts = Opts::new(name, help)
+                            .namespace(*prefix)
+                            .const_labels(labels);
+                        T::with_opts(opts)?
+                    }
+                };
+                if self.includes(name) {
+                    registry.register(Box::new(metric.clone()))?;
+                }
+                Ok(metric)
+            }
+        }
+    }
+}
+
 impl RouterRequestMetrics {
     /// Returns the registered metrics if `from_component()` was called earlier.
     pub fn get() -> Option<Arc<Self>> {
@@ -1056,124 +1131,172 @@ impl RouterRequestMetrics {
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
-                let instance_id = component.drt().discovery().instance_id();
-                let router_id = instance_id.to_string();
-                let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, &router_id)];
-
-                let metrics = component.metrics();
-                let requests_started_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
-                        "Total number of requests admitted by the router scheduler",
-                        extra_labels,
+                let router_id = component.drt().discovery().instance_id().to_string();
+                Arc::new(
+                    Self::build(
+                        RequestMetricsRegistration::Hierarchy(component),
+                        &[(labels::ROUTER_ID, &router_id)],
                     )
-                    .expect("failed to create router_requests_started_total");
-                let requests_total = metrics
-                    .create_intcounter(
-                        &router_metric(frontend_service::REQUESTS_TOTAL),
-                        "Total number of requests processed by the router",
-                        extra_labels,
-                    )
-                    .expect("failed to create router_requests_total");
-                let time_to_first_token_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
-                        "Time to first token observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 480.0, 18)),
-                    )
-                    .expect("failed to create router_time_to_first_token_seconds");
-                let inter_token_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
-                        "Average inter-token latency observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 2.0, 13)),
-                    )
-                    .expect("failed to create router_inter_token_latency_seconds");
-                let input_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
-                        "Input sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 128000.0, 12)),
-                    )
-                    .expect("failed to create router_input_sequence_tokens");
-                let output_sequence_tokens = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
-                        "Output sequence length in tokens observed at the router",
-                        extra_labels,
-                        Some(generate_log_buckets(50.0, 32000.0, 10)),
-                    )
-                    .expect("failed to create router_output_sequence_tokens");
-                let kv_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_HIT_RATE),
-                        "Predicted KV cache hit rate at routing time (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_kv_hit_rate");
-                let kv_transfer_estimated_latency_seconds = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
-                        "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
-                        extra_labels,
-                        Some(generate_log_buckets(0.001, 10.0, 15)),
-                    )
-                    .expect("failed to create router_kv_transfer_estimated_latency_seconds");
-                let shared_cache_hit_rate = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
-                        "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
-                        extra_labels,
-                        Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_hit_rate");
-                let shared_cache_beyond_blocks = metrics
-                    .create_histogram(
-                        &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
-                        "Shared cache blocks beyond device overlap for the selected worker",
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
-                    )
-                    .expect("failed to create router_shared_cache_beyond_blocks");
-                let non_max_overlap_selections_total = metrics
-                    .create_intcountervec(
-                        &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
-                        "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
-                        &[labels::WORKER_TYPE],
-                        extra_labels,
-                    )
-                    .expect("failed to create router_non_max_overlap_selections_total");
-                let overlap_blocks_lost = metrics
-                    .create_histogramvec(
-                        &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
-                        "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
-                        &[labels::WORKER_TYPE],
-                        extra_labels,
-                        Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
-                    )
-                    .expect("failed to create router_overlap_blocks_lost");
-                non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
-                overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
-                Arc::new(Self {
-                    requests_started_total,
-                    requests_total,
-                    time_to_first_token_seconds,
-                    inter_token_latency_seconds,
-                    input_sequence_tokens,
-                    output_sequence_tokens,
-                    kv_hit_rate,
-                    kv_transfer_estimated_latency_seconds,
-                    shared_cache_hit_rate,
-                    shared_cache_beyond_blocks,
-                    non_max_overlap_selections_total,
-                    overlap_blocks_lost,
-                })
+                    .expect("failed to create router request metrics"),
+                )
             })
             .clone()
+    }
+
+    /// Register the same metric families without a DistributedRuntime.
+    ///
+    /// `prefix` precedes `router_*`; use `dynamo_component` for the existing
+    /// names. Labels must be deployment-bound, never taken from a request.
+    /// Each call creates independent handles and leaves [`Self::get`] unchanged.
+    /// Register once per label set: duplicate registration returns an error.
+    pub fn from_registry(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::from_registry_with_filter(registry, prefix, const_labels, None)
+    }
+
+    /// Register only the named `router_*` families while retaining the shared
+    /// handles and definitions. Unregistered handles cannot appear in scrapes.
+    /// Intended for observers that can populate only part of the metric set.
+    pub fn from_registry_subset(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: &[(&str, &str)],
+        names: &[&str],
+    ) -> anyhow::Result<Arc<Self>> {
+        Self::from_registry_with_filter(registry, prefix, const_labels, Some(names))
+    }
+
+    fn from_registry_with_filter(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: &[(&str, &str)],
+        names: Option<&[&str]>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let mut keys = std::collections::HashSet::new();
+        for (key, _) in const_labels {
+            anyhow::ensure!(keys.insert(*key), "duplicate router metric label: {key}");
+            anyhow::ensure!(
+                *key != labels::WORKER_TYPE,
+                "worker_type is a variable router metric label"
+            );
+        }
+        Ok(Arc::new(Self::build(
+            RequestMetricsRegistration::Registry(registry, prefix, names),
+            const_labels,
+        )?))
+    }
+
+    fn build(
+        registration: RequestMetricsRegistration<'_>,
+        extra_labels: &[(&str, &str)],
+    ) -> anyhow::Result<Self> {
+        let requests_started_total = registration.create(
+            &router_metric(frontend_service::REQUESTS_STARTED_TOTAL),
+            "Total number of requests admitted by the router scheduler",
+            extra_labels,
+            None,
+            None,
+        )?;
+        let requests_total = registration.create(
+            &router_metric(frontend_service::REQUESTS_TOTAL),
+            "Total number of requests processed by the router",
+            extra_labels,
+            None,
+            None,
+        )?;
+        let time_to_first_token_seconds = registration.create(
+            &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
+            "Time to first token observed at the router",
+            extra_labels,
+            Some(generate_log_buckets(0.001, 480.0, 18)),
+            None,
+        )?;
+        let inter_token_latency_seconds = registration.create(
+            &router_metric(frontend_service::INTER_TOKEN_LATENCY_SECONDS),
+            "Average inter-token latency observed at the router",
+            extra_labels,
+            Some(generate_log_buckets(0.001, 2.0, 13)),
+            None,
+        )?;
+        let input_sequence_tokens = registration.create(
+            &router_metric(frontend_service::INPUT_SEQUENCE_TOKENS),
+            "Input sequence length in tokens observed at the router",
+            extra_labels,
+            Some(generate_log_buckets(50.0, 128000.0, 12)),
+            None,
+        )?;
+        let output_sequence_tokens = registration.create(
+            &router_metric(frontend_service::OUTPUT_SEQUENCE_TOKENS),
+            "Output sequence length in tokens observed at the router",
+            extra_labels,
+            Some(generate_log_buckets(50.0, 32000.0, 10)),
+            None,
+        )?;
+        let kv_hit_rate = registration.create(
+            &router_metric(frontend_service::KV_HIT_RATE),
+            "Predicted KV cache hit rate at routing time (0.0-1.0)",
+            extra_labels,
+            Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            None,
+        )?;
+        let kv_transfer_estimated_latency_seconds = registration.create(
+            &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
+            "Upper-bound estimation of KV cache transfer latency in disaggregated serving (prefill_complete to first_token)",
+            extra_labels,
+            Some(generate_log_buckets(0.001, 10.0, 15)),
+            None,
+        )?;
+        let shared_cache_hit_rate = registration.create(
+            &router_metric(frontend_service::SHARED_CACHE_HIT_RATE),
+            "Fraction of request blocks found in the shared KV cache (0.0-1.0)",
+            extra_labels,
+            Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
+            None,
+        )?;
+        let shared_cache_beyond_blocks = registration.create(
+            &router_metric(frontend_service::SHARED_CACHE_BEYOND_BLOCKS),
+            "Shared cache blocks beyond device overlap for the selected worker",
+            extra_labels,
+            Some(prometheus::exponential_buckets(1.0, 2.0, 12).unwrap()),
+            None,
+        )?;
+        let non_max_overlap_selections_total: IntCounterVec = registration.create(
+            &router_metric(frontend_service::NON_MAX_OVERLAP_SELECTIONS_TOTAL),
+            "Total admitted prefill scheduler selections with less KV cache overlap than another eligible worker",
+            extra_labels,
+            None,
+            Some(&[labels::WORKER_TYPE]),
+        )?;
+        let overlap_blocks_lost: HistogramVec = registration.create(
+            &router_metric(frontend_service::OVERLAP_BLOCKS_LOST),
+            "Difference in effective KV cache overlap between the highest-overlap eligible prefill worker and selected worker",
+            extra_labels,
+            Some(prometheus::exponential_buckets(0.25, 2.0, 16).unwrap()),
+            Some(&[labels::WORKER_TYPE]),
+        )?;
+        if registration.includes(router::NON_MAX_OVERLAP_SELECTIONS_TOTAL) {
+            non_max_overlap_selections_total.with_label_values(&[WORKER_TYPE_PREFILL]);
+        }
+        if registration.includes(router::OVERLAP_BLOCKS_LOST) {
+            overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
+        }
+        Ok(Self {
+            requests_started_total,
+            requests_total,
+            time_to_first_token_seconds,
+            inter_token_latency_seconds,
+            input_sequence_tokens,
+            output_sequence_tokens,
+            kv_hit_rate,
+            kv_transfer_estimated_latency_seconds,
+            shared_cache_hit_rate,
+            shared_cache_beyond_blocks,
+            non_max_overlap_selections_total,
+            overlap_blocks_lost,
+        })
     }
 
     /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
@@ -1729,7 +1852,7 @@ dynamo_frontend_router_queue_pending_requests{model=\"model\",policy_class=\"def
 }
 
 #[cfg(test)]
-mod kv_publisher_registration_tests {
+mod registration_tests {
     //! Regression coverage for silently-unregistered KV publisher metrics.
     //!
     //! `engines_dropped_events_total` was once declared with `worker_id` as a
@@ -1899,5 +2022,156 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn router_registry_matches_component_schema_and_observations() {
+        let hierarchy = FakeHierarchy::component("dynamo", "frontend", 0x123);
+        let component = RouterRequestMetrics::build(
+            RequestMetricsRegistration::Hierarchy(&hierarchy),
+            &[("router_id", "291")],
+        )
+        .unwrap();
+        let registry = prometheus::Registry::new();
+        let standalone = RouterRequestMetrics::from_registry(
+            &registry,
+            name_prefix::COMPONENT,
+            &[
+                ("dynamo_namespace", "dynamo"),
+                ("dynamo_component", "frontend"),
+                ("worker_id", "123"),
+                ("router_id", "291"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(registry.gather().len(), 12);
+        assert_eq!(
+            registry.gather(),
+            hierarchy.registry.get_prometheus_registry().gather()
+        );
+        for metrics in [&component, standalone.as_ref()] {
+            metrics.requests_started_total.inc();
+            metrics.requests_total.inc();
+            metrics.time_to_first_token_seconds.observe(0.2);
+            metrics.inter_token_latency_seconds.observe(0.01);
+            metrics.input_sequence_tokens.observe(128.0);
+            metrics.output_sequence_tokens.observe(16.0);
+            metrics.kv_hit_rate.observe(0.5);
+            metrics.kv_transfer_estimated_latency_seconds.observe(0.03);
+            metrics.shared_cache_hit_rate.observe(0.25);
+            metrics.shared_cache_beyond_blocks.observe(2.0);
+            metrics.observe_non_max_overlap_selection(WORKER_TYPE_PREFILL, 2.0);
+        }
+        assert_eq!(
+            registry.gather(),
+            hierarchy.registry.get_prometheus_registry().gather()
+        );
+    }
+
+    #[test]
+    fn router_registry_handles_stay_local_and_report_registration_errors() {
+        let first = prometheus::Registry::new();
+        let second = prometheus::Registry::new();
+        let labels = &[("model", "served-model"), ("inference_pool", "pool")];
+        let a =
+            RouterRequestMetrics::from_registry(&first, name_prefix::COMPONENT, labels).unwrap();
+        let b =
+            RouterRequestMetrics::from_registry(&second, name_prefix::COMPONENT, labels).unwrap();
+        a.requests_started_total.inc_by(3);
+        a.input_sequence_tokens.observe(64.0);
+        assert_eq!(b.requests_started_total.get(), 0);
+        assert_eq!(b.input_sequence_tokens.get_sample_count(), 0);
+        assert!(!Arc::ptr_eq(&a, &b));
+        let error = RouterRequestMetrics::from_registry(&first, name_prefix::COMPONENT, labels)
+            .err()
+            .expect("duplicate registration must fail");
+        assert!(matches!(
+            error.downcast_ref::<prometheus::Error>(),
+            Some(prometheus::Error::AlreadyReg)
+        ));
+        assert_eq!(a.requests_started_total.get(), 3);
+        for family in first.gather() {
+            assert!(family.name().starts_with("dynamo_component_router_"));
+            for metric in family.get_metric() {
+                for label in metric.get_label() {
+                    assert!(matches!(
+                        label.name(),
+                        "model" | "inference_pool" | "worker_type"
+                    ));
+                }
+            }
+        }
+
+        let custom = prometheus::Registry::new();
+        RouterRequestMetrics::from_registry(&custom, "custom", labels).unwrap();
+        assert!(
+            custom
+                .gather()
+                .iter()
+                .all(|family| family.name().starts_with("custom_router_"))
+        );
+        let invalid = prometheus::Registry::new();
+        assert!(RouterRequestMetrics::from_registry(&invalid, "invalid.prefix", labels).is_err());
+        assert!(invalid.gather().is_empty());
+        let collision = prometheus::Registry::new();
+        assert!(
+            RouterRequestMetrics::from_registry(
+                &collision,
+                name_prefix::COMPONENT,
+                &[("worker_type", "prefill")]
+            )
+            .is_err()
+        );
+        assert!(collision.gather().is_empty());
+        let duplicate = prometheus::Registry::new();
+        assert!(
+            RouterRequestMetrics::from_registry(
+                &duplicate,
+                name_prefix::COMPONENT,
+                &[("model", "a"), ("model", "b")],
+            )
+            .is_err()
+        );
+        assert!(duplicate.gather().is_empty());
+    }
+
+    #[test]
+    fn router_registry_subset_keeps_the_selected_family_schema() {
+        let full_registry = prometheus::Registry::new();
+        let subset_registry = prometheus::Registry::new();
+        let labels = &[("model", "served-model"), ("inference_pool", "pool")];
+        let full =
+            RouterRequestMetrics::from_registry(&full_registry, name_prefix::COMPONENT, labels)
+                .unwrap();
+        let subset = RouterRequestMetrics::from_registry_subset(
+            &subset_registry,
+            name_prefix::COMPONENT,
+            labels,
+            &[
+                router::REQUESTS_STARTED_TOTAL,
+                router::INPUT_SEQUENCE_TOKENS,
+                router::OUTPUT_SEQUENCE_TOKENS,
+            ],
+        )
+        .unwrap();
+        for metrics in [&full, &subset] {
+            metrics.requests_started_total.inc();
+            metrics.input_sequence_tokens.observe(19.0);
+            metrics.output_sequence_tokens.observe(8.0);
+        }
+        let full_selected: Vec<_> = full_registry
+            .gather()
+            .into_iter()
+            .filter(|family| {
+                matches!(
+                    family.name(),
+                    "dynamo_component_router_requests_started_total"
+                        | "dynamo_component_router_input_sequence_tokens"
+                        | "dynamo_component_router_output_sequence_tokens"
+                )
+            })
+            .collect();
+        assert_eq!(subset_registry.gather(), full_selected);
+        assert_eq!(subset_registry.gather().len(), 3);
     }
 }

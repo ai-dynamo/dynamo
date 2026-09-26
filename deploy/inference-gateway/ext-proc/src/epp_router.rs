@@ -28,6 +28,7 @@ use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::{SelectionError, WorkerSelectionPolicyRegistry};
 use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
+use dynamo_llm::kv_router::metrics::RouterRequestMetrics;
 use dynamo_llm::protocols::agents::HEADER_DYNAMO_SESSION_ID;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
@@ -37,7 +38,7 @@ use serde::Deserialize;
 use crate::epp_standalone_config::{EppStandaloneConfig, RendererProtocol};
 use crate::picker::{
     CacheSaltForwarding, Endpoint, EndpointPicker, PickError, PickResult, RequestInfo,
-    resolve_cache_namespace,
+    ResponseUsage, resolve_cache_namespace,
 };
 use crate::pod_discovery::PodDiscovery;
 use crate::render_http::RenderError;
@@ -83,6 +84,7 @@ pub struct EppRouter {
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
     model_name: String,
+    request_metrics: Arc<RouterRequestMetrics>,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
     /// requests, so without this a burst could fan out unbounded tokenizer/render
@@ -107,6 +109,8 @@ impl EppRouter {
         cfg: EppStandaloneConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
+        let request_metrics =
+            crate::metrics::register_router_metrics(&cfg.model_name, &cfg.inference_pool_name)?;
         let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let timeout = Duration::from_millis(cfg.tokenization_timeout_ms);
         let max_response_bytes = cfg.tokenizer_max_response_bytes;
@@ -138,6 +142,7 @@ impl EppRouter {
             _adapter: adapter,
             reflector_ready,
             model_name: cfg.model_name,
+            request_metrics,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
     }
@@ -351,6 +356,7 @@ impl EndpointPicker for EppRouter {
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
         let policy_class = requested_policy_class(&req.headers)?;
+        let input_tokens = tokens.len();
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -390,6 +396,10 @@ impl EndpointPicker for EppRouter {
             }
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
         };
+        self.request_metrics.requests_started_total.inc();
+        self.request_metrics
+            .input_sequence_tokens
+            .observe(input_tokens as f64);
 
         // The reflector owns the address + readiness. If it can no longer resolve
         // the selected worker, the pod left Ready in the race, so the selection is
@@ -428,6 +438,15 @@ impl EndpointPicker for EppRouter {
         if let Err(e) = self.selector.free_reservation(booking_id).await {
             tracing::warn!(reservation_id = booking_id, error = %e, "Failed to free reservation");
         }
+    }
+
+    async fn on_request_complete_with_usage(&self, booking_id: &str, usage: Option<ResponseUsage>) {
+        if let Some(tokens) = usage.and_then(|usage| usage.completion_tokens) {
+            self.request_metrics
+                .output_sequence_tokens
+                .observe(tokens as f64);
+        }
+        self.on_request_complete(booking_id).await;
     }
 
     /// First token: release prefill load, keep decode booked until completion.
@@ -538,6 +557,9 @@ impl TokenizeError {
         }
     }
 }
+
+#[cfg(test)]
+mod metrics_tests;
 
 #[cfg(test)]
 mod tests {
