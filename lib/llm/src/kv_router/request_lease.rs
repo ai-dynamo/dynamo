@@ -255,6 +255,14 @@ impl RequestLeaseManager {
         debug_assert!(installed, "request lease manager scheduler set twice");
     }
 
+    pub(crate) fn replica_observer(&self) -> Arc<dyn ReplicaRequestLeaseObserver> {
+        // The scheduler actor owns slots and their observer. A strong manager reference
+        // here would keep the actor's own command sender alive through booking cleanup.
+        Arc::new(WeakRequestLeaseObserver {
+            manager: Arc::downgrade(&self.inner),
+        })
+    }
+
     pub(crate) fn register_local(
         &self,
         booking: SchedulerBookingDescriptor,
@@ -377,17 +385,27 @@ impl RequestLeaseManager {
     }
 }
 
-impl ReplicaRequestLeaseObserver for RequestLeaseManager {
+struct WeakRequestLeaseObserver {
+    manager: Weak<RequestLeaseManagerInner>,
+}
+
+impl ReplicaRequestLeaseObserver for WeakRequestLeaseObserver {
     fn admitted(&self, booking: SchedulerBookingDescriptor) {
-        self.register_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.register_remote(booking);
+        }
     }
 
     fn progressed(&self, booking: &SchedulerBookingDescriptor) {
-        self.touch_booking(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.touch_booking(booking);
+        }
     }
 
     fn completed(&self, booking: &SchedulerBookingDescriptor) {
-        self.complete_remote(booking);
+        if let Some(inner) = self.manager.upgrade() {
+            RequestLeaseManager { inner }.complete_remote(booking);
+        }
     }
 }
 
@@ -477,6 +495,77 @@ fn start_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn replica_observer_forwards_live_callbacks_without_retaining_manager() {
+        use dynamo_kv_router::protocols::WorkerWithDpRank;
+
+        use crate::kv_router::{sequence::SequenceRequest, tests::tracked_router};
+
+        let router = tracked_router("replica-lease-observer").await;
+        let request_id = "replica-lease-callbacks".to_string();
+        let worker = WorkerWithDpRank::new(0, 0);
+        let attempt_id = router
+            .selection
+            .scheduler()
+            .add_request_admitted(SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: None,
+                track_prefill_tokens: false,
+                expected_output_tokens: None,
+                prefill_load_hint: None,
+                worker,
+                lora_name: None,
+            })
+            .await
+            .unwrap();
+        let booking = SchedulerBookingDescriptor {
+            request_id: request_id.clone(),
+            worker,
+            attempt_id,
+        };
+        let manager = Arc::downgrade(&router.request_leases.inner);
+        let observer = router.request_leases.replica_observer();
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        observer.admitted(booking.clone());
+        let record = router
+            .request_leases
+            .inner
+            .matching_record(&booking)
+            .unwrap();
+        assert!(!record.clock.reap());
+        observer.progressed(&booking);
+        assert!(!record.clock.reap());
+        assert!(record.clock.is_active());
+        observer.completed(&booking);
+        assert!(!record.clock.is_active());
+        assert!(
+            router
+                .request_leases
+                .inner
+                .matching_record(&booking)
+                .is_none()
+        );
+        router
+            .selection
+            .scheduler()
+            .free(&request_id)
+            .await
+            .unwrap();
+        router.cancellation_token.cancel();
+        drop(router);
+        assert!(manager.upgrade().is_none());
+        observer.admitted(booking.clone());
+        observer.progressed(&booking);
+        observer.completed(&booking);
+        assert!(manager.upgrade().is_none());
+    }
 
     #[test]
     fn clock_coalesces_progress_and_cannot_resurrect_a_claimed_lease() {
