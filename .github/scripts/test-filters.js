@@ -171,6 +171,26 @@ const testCases = [
     expect: { sidecar: true, rust: true },
     desc: 'root lockfile is a sidecar image build input'
   },
+  {
+    file: '.github/codeowners/areas.yaml',
+    expect: { core: true, ignore: true },
+    desc: 'pytest ownership routing changes exercise the full CI fallback'
+  },
+  {
+    file: '.github/codeowners/pytest_markers.py',
+    expect: { core: true, ignore: true },
+    desc: 'pytest marker vocabulary changes exercise the full CI fallback'
+  },
+  {
+    file: '.github/codeowners/codeowners_match.py',
+    expect: { core: true, ignore: true },
+    desc: 'pytest ownership matching changes exercise the full CI fallback'
+  },
+  {
+    file: '.github/codeowners/select_pytest.py',
+    expect: { core: true, ignore: true },
+    desc: 'pytest selector changes exercise the full CI fallback'
+  },
 
   // Doc files should be excluded from core (negation patterns)
   {

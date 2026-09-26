@@ -144,8 +144,8 @@ ignore:
   - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
-  # CODEOWNERS generation tooling (data + scripts). Validated by its own
-  # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
+  # CODEOWNERS tooling is validated by codeowners.yml. The selector inputs
+  # listed in the ci anchor below also trigger backend CI; other files here do not.
   - '.github/codeowners/**'
   # Excluded from `sidecar` (no image build) and from `docs` (not on the Fern site).
   - 'lib/sidecar/**/*.md'
@@ -155,6 +155,11 @@ ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
+  # Ownership areas also define changed-path -> pytest marker routing.
+  - '.github/codeowners/areas.yaml'
+  - '.github/codeowners/codeowners_match.py'
+  - '.github/codeowners/pytest_markers.py'
+  - '.github/codeowners/select_pytest.py'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'

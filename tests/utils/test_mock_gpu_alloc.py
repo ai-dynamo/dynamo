@@ -14,12 +14,16 @@ import time
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("CI") is not None
-    or os.environ.get("GITHUB_ACTIONS") is not None
-    or os.environ.get("GITLAB_CI") is not None,
-    reason="Mock GPU allocation test is for local profiling only, not CI",
-)
+pytestmark = [
+    pytest.mark.local_only,
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        os.environ.get("CI") is not None
+        or os.environ.get("GITHUB_ACTIONS") is not None
+        or os.environ.get("GITLAB_CI") is not None,
+        reason="Mock GPU allocation test is for local profiling only, not CI",
+    ),
+]
 
 torch = pytest.importorskip("torch", reason="torch required for GPU allocation test")
 
