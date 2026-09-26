@@ -3197,6 +3197,20 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
         let continue_final = request.get_continue_final_message() == Some(true);
+        if continue_final
+            && self
+                .formatter
+                .media_message_order(request)
+                .is_some_and(|order| {
+                    order
+                        .last()
+                        .is_some_and(|&source| source != order.len() - 1)
+                })
+        {
+            return Err(invalid_argument_error(
+                "Cannot continue the final message because the prompt formatter moves it before other messages",
+            ));
+        }
         let formatted_prompt = if self.normalize_tool_call_args || continue_final {
             self.apply_template_inner(&NormalizedArgsRequest {
                 inner: request,
@@ -7674,6 +7688,68 @@ mod extra_args_media_copy_tests {
             })
             .collect();
         assert_eq!(urls, [first.as_str(), second.as_str()]);
+    }
+
+    #[tokio::test]
+    async fn continue_final_message_rejects_reordered_tool_results() {
+        use crate::engines::ValidateRequest;
+        use dynamo_renderer::deepseek::v41::DeepSeekV41Formatter;
+
+        let mut preprocessor = test_preprocessor();
+        preprocessor.formatter = Arc::new(DeepSeekV41Formatter);
+        let image = inline_data_url();
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "continue_final_message":true, "add_generation_prompt":false,
+            "reasoning_effort":"none", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result B"}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":image}}, {"type":"text","text":"Result A"}
+                ]}
+            ]
+        })).unwrap();
+        ValidateRequest::validate(&request).unwrap();
+        let error = preprocessor
+            .preprocess_request(&request, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Cannot continue the final message"),
+            "{error:#}"
+        );
+        assert_eq!(
+            error.downcast_ref::<DynamoError>().unwrap().error_type(),
+            ErrorType::InvalidArgument
+        );
+
+        request.inner.messages.swap(1, 2);
+        let ordered = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordered.as_str().matches("<｜deepseek_image｜>").count(), 2);
+        assert!(ordered.as_str().ends_with("Result B"));
+
+        request.inner.messages.swap(1, 2);
+        request.inner.messages.push(
+            serde_json::from_value(serde_json::json!({
+                "role":"assistant","content":"Answer:"
+            }))
+            .unwrap(),
+        );
+        let assistant = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(
+            assistant.as_str().matches("<｜deepseek_image｜>").count(),
+            2
+        );
+        assert!(assistant.as_str().ends_with("Answer:"));
+
+        request.inner.messages.pop();
+        request.common.continue_final_message = Some(false);
+        let ordinary = preprocessor.apply_template(&request).unwrap().unwrap();
+        assert_eq!(ordinary.as_str().matches("<｜deepseek_image｜>").count(), 2);
     }
 
     #[tokio::test]
