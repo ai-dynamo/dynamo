@@ -32,6 +32,8 @@ pub fn load_weka_trace(path: &std::path::Path) -> Result<AgenticTrace> {
 
 fn agentic_mooncake_row(row: dynamo_data_gen::AgenticMooncakeRow) -> AgenticMooncakeRow {
     AgenticMooncakeRow {
+        source_play_ordinal: None,
+        recorded_api_time_ms: None,
         request_id: row.request_id,
         play_id: row.play_id,
         session_id: row.session_id,

@@ -6,8 +6,6 @@
 //! This module lowers Dynamo configuration into Replay-owned contracts. It
 //! must never include or compile implementation sources from another crate.
 
-use std::collections::VecDeque;
-
 use aisimulate_core::replay::{
     CURRENT_REPLAY_SPEC_VERSION, ProviderSpec, ReplayAdapters, ReplayCaptureOptions,
     ReplayEngineConfig, ReplayRuntimeInput, ReplayScalingPolicy, ReplaySpec, ReplayTopology,
@@ -402,7 +400,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
     args: MockEngineArgs,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
+    requests: ReplayRuntimeInput,
     max_in_flight: usize,
     num_workers: usize,
     router_mode: ReplayRouterMode,
@@ -415,7 +413,7 @@ pub(crate) fn simulate_concurrency_with_scaling_policy(
         args,
         router_config,
         prefill_load_estimator,
-        ReplayRuntimeInput::Requests(VecDeque::from(requests)),
+        requests,
         num_workers,
         Some(max_in_flight),
         router_mode,
@@ -686,7 +684,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
     config: OfflineDisaggReplayConfig,
     router_config: Option<ReplayKvRouterConfig>,
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
-    requests: Vec<DirectRequest>,
+    requests: ReplayRuntimeInput,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
@@ -698,7 +696,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
         config,
         router_config,
         prefill_load_estimator,
-        ReplayRuntimeInput::Requests(VecDeque::from(requests)),
+        requests,
         Some(max_in_flight),
         router_mode,
         record_per_request,

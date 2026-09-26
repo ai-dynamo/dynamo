@@ -16,7 +16,46 @@ use dynamo_kv_router::PrefillLoadEstimator;
 
 /// Backward-compatible Dynamo Mocker name for [`aisimulate_core::ReplayReport`].
 pub use aisimulate_core::ReplayReport as TraceSimulationReport;
+pub use aisimulate_core::replay::ReplayError;
 pub(crate) use aisimulate_core::replay::TraceCollector;
+pub use aisimulate_core::replay::loadgen::GeneratedRequests;
+
+/// Input for closed-loop offline replay. Generated requests are materialized
+/// only when the runtime admits them into the concurrency window.
+pub enum ReplayConcurrencyRequests {
+    Materialized(Vec<DirectRequest>),
+    Generated(GeneratedRequests),
+}
+
+impl From<Vec<DirectRequest>> for ReplayConcurrencyRequests {
+    fn from(requests: Vec<DirectRequest>) -> Self {
+        Self::Materialized(requests)
+    }
+}
+
+impl From<GeneratedRequests> for ReplayConcurrencyRequests {
+    fn from(requests: GeneratedRequests) -> Self {
+        Self::Generated(requests)
+    }
+}
+
+impl ReplayConcurrencyRequests {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Materialized(requests) => requests.is_empty(),
+            Self::Generated(requests) => requests.is_empty(),
+        }
+    }
+
+    fn into_runtime_input(self) -> aisimulate_core::replay::ReplayRuntimeInput {
+        use aisimulate_core::replay::ReplayRuntimeInput;
+        match self {
+            Self::Materialized(requests) => ReplayRuntimeInput::Requests(requests.into()),
+            Self::Generated(requests) => ReplayRuntimeInput::GeneratedRequests(requests),
+        }
+    }
+}
+
 pub use aisimulate_core::replay::{
     CanonicalReplayCoverage, CanonicalReplayRecord, LifecycleOperation, OfflineRuntimeEvidence,
     PerRequestRecord, ReplayCaptureOptions, ReplayDeterminism, ReplayTerminalStatus, SlaThresholds,
