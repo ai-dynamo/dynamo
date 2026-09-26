@@ -351,6 +351,7 @@ def _guided_output_requires_reasoning(
     request: dict[str, Any],
     force_reasoning: bool,
     reasoning_parser_name: str | None = None,
+    guided_decoding: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether SGLang should reason before guided output."""
     if not force_reasoning:
@@ -365,9 +366,12 @@ def _guided_output_requires_reasoning(
         return False
 
     response_format = request.get("response_format")
-    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt-oss":
-        return False
-    return response_format.get("type") != "text"
+    if isinstance(response_format, dict) and response_format.get("type") != "text":
+        return reasoning_parser_name != "gpt-oss"
+
+    # An auto tool-call grammar forbids the end-of-thinking marker, so it must
+    # also wait for thinking to finish.
+    return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
 def _normalize_deepseek_v4_hint(value: Any) -> str:

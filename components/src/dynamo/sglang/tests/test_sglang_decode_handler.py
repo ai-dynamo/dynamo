@@ -263,25 +263,246 @@ def _new_decode_handler(
 @pytest.mark.parametrize(
     "processor_name", ["_process_token_stream", "_process_text_stream"]
 )
-async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
+@pytest.mark.parametrize(
+    "finish_reason",
+    [
+        pytest.param({"type": "abort"}, id="cancellation"),
+        pytest.param(
+            {
+                "type": "abort",
+                "message": "Failed to compile json grammar",
+                "status_code": 400,
+                "err_type": "BadRequestError",
+            },
+            id="validation-error",
+        ),
+    ],
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(
+    processor_name, finish_reason
+):
+    """Shutdown remains retryable even when its abort carries validation details."""
     handler = _new_decode_handler()
     handler.shutdown_event = asyncio.Event()
     handler.shutdown_event.set()
     context = SimpleNamespace(id=lambda: "request-id", is_stopped=lambda: False)
 
     async def stream():
+        """Yield the terminal abort from the shutting-down backend."""
         yield {
             "text": "",
             "output_ids": [],
             "meta_info": {
                 "id": "sglang-request-id",
-                "finish_reason": {"type": "abort"},
+                "finish_reason": finish_reason,
             },
         }
 
     with pytest.raises(EngineShutdown, match="shut down during token generation"):
         async for _ in getattr(handler, processor_name)(stream(), context):
             pass
+
+
+@pytest.fixture
+def abort_context():
+    """Track first-token notification without cancelling the test request."""
+    return SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=Mock(),
+    )
+
+
+def _abort_chunk(finish_reason):
+    """Model the placeholder token and text SGLang can emit after grammar failure."""
+    return {
+        "output_ids": [101],
+        "text": "_color",
+        "meta_info": {
+            "id": "sglang-request-id",
+            "finish_reason": finish_reason,
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+        },
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    ("status_code", "message", "err_type"),
+    [
+        pytest.param(
+            400,
+            "Failed to compile json grammar: [04:33:48] "
+            '/project/cpp/json_schema_converter.cc:2999: Unsupported type "invalid_type"\n',
+            "BadRequestError",
+            id="invalid-schema-type",
+        ),
+        pytest.param(
+            422,
+            "Request validation failed",
+            "UnprocessableEntityError",
+            id="other-client-error",
+        ),
+        pytest.param(
+            500,
+            "Grammar compiler failed internally",
+            "InternalServerError",
+            id="backend-server-error",
+        ),
+    ],
+)
+async def test_error_abort_preserves_http_error_before_output(
+    processor_name, status_code, message, err_type, abort_context
+):
+    """Raise the backend error before exposing placeholder output or token timing."""
+    handler = _new_decode_handler()
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "status_code": status_code,
+        "err_type": err_type,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    expected_error = InvalidArgument if status_code == 400 else HttpError
+    with pytest.raises(expected_error) as error:
+        await anext(stream)
+
+    if status_code == 400:
+        assert str(error.value) == message
+    else:
+        assert error.value.code == status_code
+        assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_error_abort_after_output_preserves_error_and_stops(
+    processor_name, abort_context
+):
+    """Preserve an earlier delta, then terminate with the original validation error."""
+    handler = _new_decode_handler()
+    normal_chunk = _abort_chunk(None)
+    normal_chunk["output_ids"] = [42]
+    normal_chunk["text"] = "hello"
+    message = "Failed to compile json grammar: unsupported schema type"
+    error_chunk = _abort_chunk(
+        {
+            "type": "abort",
+            "message": message,
+            "status_code": 400,
+            "err_type": "BadRequestError",
+        }
+    )
+    stream = getattr(handler, processor_name)(
+        _stream([normal_chunk, error_chunk]), abort_context
+    )
+
+    first = await anext(stream)
+    if processor_name == "_process_token_stream":
+        assert first["token_ids"] == [42]
+        assert first.get("finish_reason") is None
+    else:
+        assert first["choices"][0]["delta"]["content"] == "hello"
+        assert first["choices"][0]["finish_reason"] is None
+
+    with pytest.raises(InvalidArgument) as error:
+        await anext(stream)
+    assert str(error.value) == message
+
+    # Neither the abort's placeholder nor a successful terminal chunk can follow.
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+    abort_context.notify_first_token.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "status_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"status_code": None}, id="null"),
+        pytest.param({"status_code": "400"}, id="string"),
+        pytest.param({"status_code": True}, id="boolean"),
+        pytest.param({"status_code": 400.0}, id="float"),
+        pytest.param({"status_code": 200}, id="success-status"),
+        pytest.param({"status_code": 302}, id="redirect-status"),
+        pytest.param({"status_code": 600}, id="out-of-range"),
+    ],
+)
+async def test_error_abort_with_missing_or_invalid_status_uses_server_error(
+    processor_name, status_fields, abort_context
+):
+    """Malformed error metadata fails as a server error instead of a completion."""
+    handler = _new_decode_handler()
+    message = "Failed to compile json grammar"
+    finish_reason = {
+        "type": "abort",
+        "message": message,
+        "err_type": "BadRequestError",
+        **status_fields,
+    }
+    stream = getattr(handler, processor_name)(
+        _stream([_abort_chunk(finish_reason)]), abort_context
+    )
+
+    with pytest.raises(HttpError) as error:
+        await anext(stream)
+
+    assert error.value.code == 500
+    assert error.value.message == message
+    abort_context.notify_first_token.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+@pytest.mark.parametrize(
+    "finish_fields",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"message": None}, id="null"),
+        pytest.param({"message": ""}, id="empty"),
+        pytest.param(
+            {"message": "Aborted", "status_code": None, "err_type": None},
+            id="sglang-cancellation",
+        ),
+    ],
+)
+async def test_abort_without_error_details_remains_cancelled(
+    processor_name, finish_fields, abort_context
+):
+    """An ordinary SGLang cancellation keeps its existing finish mapping."""
+    handler = _new_decode_handler()
+    chunk = _abort_chunk({"type": "abort", **finish_fields})
+    chunk["output_ids"] = []
+    chunk["text"] = ""
+
+    chunks = await _collect(
+        getattr(handler, processor_name)(_stream([chunk]), abort_context)
+    )
+
+    assert len(chunks) == 1
+    if processor_name == "_process_token_stream":
+        assert chunks[0]["finish_reason"] == "cancelled"
+        assert chunks[0]["token_ids"] == []
+    else:
+        assert chunks[0]["choices"][0]["finish_reason"] == "cancelled"
+        assert chunks[0]["choices"][0]["delta"]["content"] == ""
+    abort_context.notify_first_token.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -2080,3 +2301,77 @@ async def test_supported_sampling_reaches_engine(mode, n):
     assert [output["index"] for output in outputs] == list(range(n))
     assert handler.engine.async_generate.await_args.kwargs["sampling_params"]["n"] == n
     assert all(output["finish_reason"] for output in outputs)
+
+
+def test_prefill_dp_rank_kwargs_follows_engine_signature():
+    from dynamo.sglang._compat import prefill_dp_rank_kwargs
+
+    class Engine:
+        async def async_generate(
+            self, *, bootstrap_room=None, disagg_prefill_dp_rank=None
+        ):
+            pass
+
+    class OlderEngine:
+        async def async_generate(self, *, bootstrap_room=None):
+            pass
+
+    assert prefill_dp_rank_kwargs(Engine(), 3) == {"disagg_prefill_dp_rank": 3}
+    assert prefill_dp_rank_kwargs(Engine(), None) == {}
+    assert prefill_dp_rank_kwargs(OlderEngine(), 3) == {}
+
+
+@pytest.mark.asyncio
+async def test_disagg_decode_passes_prefill_dp_rank_to_engine():
+    handler = _new_decode_handler()
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._engine_supports_priority = False
+    handler._routed_experts_kwargs = {}
+    handler.enable_trace = False
+    handler._get_input_param = lambda request: {"input_ids": [1, 2]}
+    handler._resolve_lora = lambda request: None
+    chunk = {
+        "index": 0,
+        "output_ids": [42],
+        "meta_info": {"id": "sample-0", "finish_reason": {"type": "length"}},
+    }
+    handler.engine = SimpleNamespace(
+        async_generate=AsyncMock(return_value=_stream([chunk]))
+    )
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        trace_id="trace-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+    request = {
+        "sampling_options": {"n": 1},
+        "stop_conditions": {"max_tokens": 1},
+        "routing": {"dp_rank": 1, "prefill_dp_rank": 3},
+        "bootstrap_info": {
+            "bootstrap_host": "prefill.invalid",
+            "bootstrap_port": 1234,
+            "bootstrap_room": 23,
+        },
+    }
+    [output async for output in handler.generate(request, context)]
+    kwargs = handler.engine.async_generate.await_args.kwargs
+    assert kwargs["disagg_prefill_dp_rank"] == 3
+    assert kwargs["data_parallel_rank"] == 1
+
+
+def test_build_native_generate_request_forwards_prefill_dp_rank():
+    native = build_native_generate_request(
+        {"sampling_params": {"max_new_tokens": 1}},
+        input_ids=[7, 8],
+        request_id="internal-request-id",
+        priority=None,
+        bootstrap_host="prefill.internal",
+        bootstrap_port=1234,
+        bootstrap_room=23,
+        routed_dp_rank=1,
+        prefill_dp_rank=3,
+    )
+    assert native.disagg_prefill_dp_rank == 3

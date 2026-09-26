@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dynamo_backend_common::{
-    GenerateContext, KvEventSource, LLMEngine, PreprocessedRequest, StopConditions,
+    GenerateContext, KvEventSource, LLMEngine, PreprocessedRequest, SamplingOptions, StopConditions,
 };
 use dynamo_kv_router::indexer::{KvIndexerInterface, KvIndexerMetrics, LocalKvIndexer};
 use dynamo_kv_router::protocols::{
@@ -23,7 +23,10 @@ async fn generate(engine: &impl LLMEngine, tokens: Vec<u32>) {
     let request = PreprocessedRequest::builder()
         .model("mocker-model".to_string())
         .token_ids(tokens)
-        .sampling_options(Default::default())
+        .sampling_options(SamplingOptions {
+            temperature: Some(0.0),
+            ..Default::default()
+        })
         .output_options(Default::default())
         .stop_conditions(StopConditions {
             max_tokens: Some(1),
@@ -49,6 +52,7 @@ pub async fn check_kv_events(engine: &impl LLMEngine, block_size: u32) {
         endpoint: source_endpoint,
         topic,
         dp_rank,
+        ..
     } = &sources[0]
     else {
         panic!("expected a native ZMQ source");
