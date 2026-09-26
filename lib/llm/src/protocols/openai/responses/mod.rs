@@ -587,6 +587,12 @@ fn convert_input_items_to_messages(
                     ));
                 }
                 Item::Reasoning(r) => {
+                    // `encrypted_content` is always None (see #14069), so a caller
+                    // replaying a prior turn's reasoning item echoes this raw
+                    // chain-of-thought text back into the next prompt in plaintext.
+                    // That is a real per-turn context/token cost for any multi-turn
+                    // conversation that keeps reasoning items in its input, not
+                    // specific to this coalescing step.
                     let content = r
                         .content
                         .as_ref()
@@ -1079,13 +1085,6 @@ pub(crate) fn responses_incomplete_reason(
 }
 
 impl ResponseParams {
-    fn reasoning_summary_requested(&self) -> bool {
-        self.reasoning
-            .as_ref()
-            .and_then(|reasoning| reasoning.summary)
-            .is_some()
-    }
-
     fn namespace_for_function(&self, name: &str) -> Option<String> {
         let tools = self.tools.as_deref()?;
         if tools
@@ -1191,12 +1190,20 @@ pub fn chat_completion_to_response(
         incomplete_reason = responses_incomplete_reason(choice.finish_reason);
 
         // Reasoning precedes tool calls so output order matches the decoded turn.
+        //
+        // Raw reasoning_content is preserved regardless of reasoning.summary; see #14069.
+        // A whitespace-only value (e.g. a bare "\n\n" left by a parser that does not
+        // trim) is treated as no reasoning at all, matching aggregator.rs's
+        // `move_reasoning_to_content_when_empty` convention.
         if let Some(reasoning_text) = choice.message.reasoning_content
-            && !reasoning_text.is_empty()
-            && params.reasoning_summary_requested()
+            && !reasoning_text.trim().is_empty()
         {
             output.push(OutputItem::Reasoning(ReasoningItem {
                 id: Some(format!("rs_{}", Uuid::new_v4().simple())),
+                // Always empty: this surfaces the backend's raw reasoning content,
+                // not a model-generated summary. Nothing populates `summary` on
+                // this path, so a caller requesting `reasoning.summary` still
+                // gets `[]` here -- only the raw `content` below is meaningful.
                 summary: vec![],
                 content: Some(vec![ReasoningItemContent::ReasoningText(
                     ReasoningTextContent {
@@ -1246,7 +1253,18 @@ pub fn chat_completion_to_response(
             output.push(make_text_message(message_id.clone(), content_text));
         }
 
-        if output.is_empty() {
+        // Reasoning is now always included above, so `output.is_empty()` alone
+        // would never fire again for a reasoning-only turn -- that turn already
+        // has a `Reasoning` item. A completed turn still needs an assistant
+        // `Message`, even an empty one, so callers that only look for one are
+        // not left with just a reasoning item; an incomplete turn (Length or
+        // ContentFilter) is left as reasoning-only, since the model was cut off
+        // mid-thought and never got to an answer.
+        if incomplete_reason.is_none()
+            && !output
+                .iter()
+                .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)))
+        {
             output.push(make_text_message(message_id, String::new()));
         }
     } else {
@@ -3615,20 +3633,24 @@ mod tests {
     }
 
     #[test]
-    fn test_reasoning_text_requires_explicit_request() {
+    fn test_reasoning_text_preserved_without_explicit_summary_request() {
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
             None,
         )
         .unwrap();
-        assert!(
-            unrequested
-                .inner
-                .output
-                .iter()
-                .all(|item| !matches!(item, OutputItem::Reasoning(_)))
-        );
+        let reasoning = unrequested
+            .inner
+            .output
+            .iter()
+            .find_map(|item| match item {
+                OutputItem::Reasoning(reasoning) => Some(reasoning),
+                _ => None,
+            })
+            .expect("reasoning output even without a requested summary");
+        assert!(reasoning.summary.is_empty());
+        assert_eq!(reasoning_text(reasoning), "private reasoning");
 
         let params = requested_reasoning_params();
         let requested =
@@ -3645,6 +3667,49 @@ mod tests {
             .expect("requested reasoning output");
         assert!(reasoning.summary.is_empty());
         assert_eq!(reasoning_text(reasoning), "summary");
+    }
+
+    /// A reasoning-only completed turn (no visible text, no tool call) with
+    /// nothing requesting a summary: the reasoning item is still surfaced, and
+    /// the empty-output backstop still adds a `Message` so callers that only
+    /// look for one are not left with just a reasoning item.
+    #[test]
+    fn test_reasoning_only_output_with_default_params() {
+        let mut chat_resp = make_chat_resp_with_reasoning("private reasoning");
+        chat_resp.inner.choices[0].message.content = None;
+
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default(), None)
+            .unwrap()
+            .inner;
+        assert_eq!(response.status, Status::Completed);
+        assert_eq!(response.output.len(), 2);
+        let OutputItem::Reasoning(reasoning) = &response.output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert_eq!(reasoning_text(reasoning), "private reasoning");
+        let OutputItem::Message(message) = &response.output[1] else {
+            panic!("expected a trailing empty message from the backstop");
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
+    }
+
+    /// A whitespace-only `reasoning_content` (e.g. a bare "\n\n" from a parser
+    /// that does not trim) is treated as no reasoning at all, matching
+    /// aggregator.rs's `move_reasoning_to_content_when_empty` convention.
+    #[test]
+    fn test_reasoning_whitespace_only_is_dropped() {
+        let chat_resp = make_chat_resp_with_reasoning("  \n\t  ");
+
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default(), None)
+            .unwrap()
+            .inner;
+        assert!(
+            response
+                .output
+                .iter()
+                .all(|item| !matches!(item, OutputItem::Reasoning(_))),
+            "whitespace-only reasoning must not produce a reasoning item"
+        );
     }
 
     #[test]
@@ -3924,6 +3989,29 @@ mod tests {
             .unwrap()
             .inner;
         assert_eq!(response.status, Status::Incomplete);
+        let OutputItem::Reasoning(reasoning) = &response.output[0] else {
+            panic!("expected reasoning output");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
+    }
+
+    /// Same Length-truncation, reasoning-only shape as above, but on the
+    /// default (no `reasoning.summary` requested) path: since reasoning is no
+    /// longer gated on a requested summary, this arm is reachable there too.
+    /// The empty-output backstop must stay silent here -- the turn was cut off
+    /// mid-thought and never reached an answer, so reasoning-only is correct.
+    #[test]
+    fn test_length_finish_reason_marks_terminal_reasoning_incomplete_without_requested_summary() {
+        let mut chat_resp = make_chat_resp_with_reasoning("partial reasoning");
+        chat_resp.inner.choices[0].message.content = None;
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::Length);
+
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default(), None)
+            .unwrap()
+            .inner;
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(response.output.len(), 1);
         let OutputItem::Reasoning(reasoning) = &response.output[0] else {
             panic!("expected reasoning output");
         };
