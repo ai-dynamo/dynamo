@@ -1546,19 +1546,28 @@ impl<
             self.subtract_class_counters(popped.class_index(), snapshot);
             let class_index = popped.class_index();
             let queued = popped.payload_mut();
+            let Some(resp_tx) = queued.request.resp_tx.as_mut() else {
+                continue;
+            };
             // NOTE: Overlap refresh is expected to be very short. We intentionally
             // accept load crossing the class threshold during this await: busy
             // thresholds guide admission, not reservation. This differs from main
             // to avoid reversing counters, heap state, and charged DRR credit.
-            let refreshed = refresh_overlap(
-                self.overlap_scores_refresh.as_deref(),
-                self.overlap_refresh_after,
-                queued.block_hashes.as_deref(),
-                queued.request.retain_kv_transfer_chain,
-                queued.enqueue_at,
-                decay_now,
-            )
-            .await;
+            let refreshed = tokio::select! {
+                // Do not let an indexer lookup for a cancelled request hold up
+                // the actor's admission and cleanup commands. Check closure
+                // first so an already-cancelled request never starts a lookup.
+                biased;
+                _ = resp_tx.closed() => continue,
+                refreshed = refresh_overlap(
+                    self.overlap_scores_refresh.as_deref(),
+                    self.overlap_refresh_after,
+                    queued.block_hashes.as_deref(),
+                    queued.request.retain_kv_transfer_chain,
+                    queued.enqueue_at,
+                    decay_now,
+                ) => refreshed,
+            };
             // Deadlines can pass while the refresh is awaited and the actor
             // timer cannot fire mid-command. Sweep the still-queued entries so
             // a stalled refresh delays their rejection by at most one refresh,
@@ -4655,6 +4664,100 @@ policy_classes:
                 .unwrap();
             slots.free(&request_id.to_string(), decay_now()).unwrap();
         }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cancellation_during_overlap_refresh_unblocks_admission() {
+        for with_lifecycle in [false, true] {
+            let isl = 64;
+            let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+            let (queue, slots) =
+                make_queue_with_blocking_refresher(1, 16, isl, Some(0.0), refresher.clone(), 1);
+
+            let (active, active_rx) = make_request("active", isl);
+            queue.enqueue(active).await;
+            active_rx.await.unwrap().unwrap();
+
+            let (mut cancelled, cancelled_rx) = make_request("cancelled", isl);
+            let lease = if with_lifecycle {
+                cancelled.mode = ScheduleMode::TrackedWithLifecycle {
+                    request_id: "cancelled".to_owned(),
+                };
+                queue.new_request_lifecycle_lease(Some("cancelled"))
+            } else {
+                None
+            };
+            let lease = queue
+                .enqueue_with_block_hashes_and_lease(
+                    cancelled,
+                    Some(vec![LocalBlockHash(42)]),
+                    lease,
+                )
+                .await;
+            slots.free(&"active".to_owned(), decay_now()).unwrap();
+            tokio::time::advance(Duration::from_secs(11)).await;
+
+            let update = {
+                let queue = Arc::clone(&queue);
+                tokio::spawn(async move { queue.update().await })
+            };
+            refresher.wait_for_calls(1).await;
+
+            let (following, following_rx) = make_request("following", isl);
+            let enqueue = {
+                let queue = Arc::clone(&queue);
+                tokio::spawn(async move { queue.enqueue(following).await })
+            };
+            tokio::task::yield_now().await;
+            assert_eq!(queue.admission_tx.capacity(), 0);
+            drop(cancelled_rx);
+            drop(lease);
+
+            // The indexer remains blocked. Cancellation alone must let the actor
+            // acknowledge the update and process unrelated admission commands.
+            tokio::time::timeout(Duration::from_secs(1), async {
+                update.await.unwrap();
+                enqueue.await.unwrap();
+                following_rx.await.unwrap().unwrap();
+                queue.update().await;
+            })
+            .await
+            .expect("cancelled overlap refresh blocked following admission");
+            assert_eq!(queue.pending_count(), 0);
+            assert_eq!(queue.pending_isl_tokens(), 0);
+            let stats = queue.class_queue_stats(0).unwrap();
+            assert_eq!(stats.pending_count, 0);
+            assert_eq!(stats.pending_isl_tokens, 0);
+            assert_eq!(stats.pending_cached_tokens, 0);
+            slots.free(&"following".to_owned(), decay_now()).unwrap();
+            slots.assert_completely_drained(decay_now());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn cancellation_before_dequeue_skips_overlap_refresh() {
+        let isl = 64;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, 16, isl, Some(0.0), refresher.clone(), 1);
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (cancelled, cancelled_rx) = make_request("cancelled", isl);
+        queue
+            .enqueue_with_block_hashes(cancelled, Some(vec![LocalBlockHash(42)]))
+            .await;
+        drop(cancelled_rx);
+        slots.free(&"active".to_owned(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        tokio::time::timeout(Duration::from_secs(1), queue.update())
+            .await
+            .expect("cancelled request started a blocking overlap refresh");
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
