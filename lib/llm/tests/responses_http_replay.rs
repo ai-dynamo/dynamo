@@ -9,7 +9,8 @@ use std::time::Duration;
 use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
-    ChatCompletionRequestUserMessageContent, ChatCompletionToolChoiceOption,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionToolChoiceOption, ImageDetail,
 };
 use dynamo_runtime::config::environment_names::llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
@@ -849,6 +850,65 @@ async fn function_call_output_round_trip_reaches_the_chat_engine() {
             other => panic!("unexpected translated round-trip messages: {other:#?}"),
         }
 
+        svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn function_call_output_image_without_detail_reaches_the_chat_engine() {
+    temp_env::async_with_vars(ENV, async {
+        let script = load_agent_fixture("text.sse").await.unwrap();
+        let svc = HarnessService::start([script.clone(), script]).await;
+        let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+
+        for stream in [false, true] {
+            let response = post_responses(
+                &svc,
+                &json!({
+                    "model": MODEL,
+                    "stream": stream,
+                    "max_output_tokens": 64,
+                    "input": [
+                        {"role": "user", "content": "What is the dominant color?"},
+                        {"type": "function_call", "call_id": "call_1", "name": "screenshot", "arguments": "{}"},
+                        {"type": "function_call_output", "call_id": "call_1", "output": [
+                            {"type": "input_image", "image_url": image_url}
+                        ]}
+                    ],
+                    "tools": [tool("screenshot")]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let _ = response.bytes().await.unwrap();
+        }
+
+        let requests = svc.engine.take_requests().await;
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            let [
+                ChatCompletionRequestMessage::User(_),
+                ChatCompletionRequestMessage::Assistant(_),
+                ChatCompletionRequestMessage::Tool(tool_result),
+            ] = &request.inner.messages[..]
+            else {
+                panic!("unexpected translated messages: {:#?}", request.inner.messages);
+            };
+            assert_eq!(tool_result.tool_call_id, "call_1");
+            let ChatCompletionRequestToolMessageContent::Array(parts) = &tool_result.content else {
+                panic!("expected multimodal tool content");
+            };
+            assert_eq!(parts.len(), 1);
+            let ChatCompletionRequestToolMessageContentPart::ImageUrl(image) = &parts[0] else {
+                panic!("expected image part");
+            };
+            let image = image.image_url.as_ref().unwrap();
+            assert_eq!(image.url.as_str(), image_url);
+            assert_eq!(image.detail, Some(ImageDetail::Auto));
+        }
+        assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })
     .await;
