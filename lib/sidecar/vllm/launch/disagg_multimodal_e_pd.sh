@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PD_GRPC_PORT       PD vLLM gRPC port (default: 50052)"
             echo "  VLLM_ENCODER_GPU        Encoder GPU index (default: 0)"
             echo "  VLLM_PD_GPU             PD GPU index (default: 1)"
+            echo "  MAX_MODEL_LEN           Maximum model length (default: 4096)"
             exit 0
             ;;
         *)

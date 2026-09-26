@@ -1437,21 +1437,59 @@ fn canonical_dynamo_priority_is_converted_for_vllm() {
     }
 }
 
-fn epd_image_request() -> PreprocessedRequest {
+const IMAGE_A_URI: &str = "data:image/png;base64,aW1hZ2UtYQ==";
+const IMAGE_B_URI: &str = "data:image/png;base64,aW1hZ2UtYg==";
+const VIDEO_URL: &str = "https://example.com/sample.mp4";
+
+fn epd_request(media: Vec<(&str, Vec<MultimodalData>)>) -> PreprocessedRequest {
     let mut request = request();
     request.output_options.prompt_logprobs = None;
-    request.multi_modal_data = Some(std::collections::HashMap::from([(
-        "image_url".to_string(),
+    request.multi_modal_data = Some(
+        media
+            .into_iter()
+            .map(|(key, items)| (key.to_string(), items))
+            .collect(),
+    );
+    request
+}
+
+fn epd_image_request() -> PreprocessedRequest {
+    let mut request = epd_request(vec![(
+        "image_url",
         vec![
-            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2UtYQ==".to_string()),
-            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2UtYg==".to_string()),
+            MultimodalData::RawUrl(IMAGE_A_URI.to_string()),
+            MultimodalData::RawUrl(IMAGE_B_URI.to_string()),
         ],
-    )]));
+    )]);
     request.multi_modal_uuids = Some(std::collections::HashMap::from([(
         "image_url".to_string(),
         vec![Some("image-a".to_string()), Some("image-b".to_string())],
     )]));
     request
+}
+
+fn url_media(sources: &[&str]) -> Vec<MultimodalData> {
+    sources
+        .iter()
+        .map(|source| MultimodalData::Url(source.parse().expect("valid media URL")))
+        .collect()
+}
+
+fn video_media() -> Vec<MultimodalData> {
+    url_media(&[VIDEO_URL])
+}
+
+fn epd_video_request() -> PreprocessedRequest {
+    epd_request(vec![("video_url", video_media())])
+}
+
+// The frontend passes media URLs through without UUIDs. A video also disables
+// exact multimodal routing, so the frontend sends no `mm_hashes`.
+fn epd_image_video_request() -> PreprocessedRequest {
+    epd_request(vec![
+        ("image_url", url_media(&[IMAGE_A_URI, IMAGE_B_URI])),
+        ("video_url", video_media()),
+    ])
 }
 
 fn decode_request() -> PreprocessedRequest {
@@ -2534,27 +2572,142 @@ fn unsafe_media_uuids_are_rejected() {
     }
 }
 
-#[test]
-fn encode_requests_reject_non_image_media() {
-    let mut request = epd_image_request();
-    request.multi_modal_data.as_mut().unwrap().insert(
-        "audio_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/sample.wav".to_string(),
-        )],
-    );
+type WireMedia = Vec<(pb::Modality, String, Option<pb::media_item::Source>)>;
 
-    let error = build_generate_request(
-        request,
-        "encode-audio".to_string(),
-        DisaggregationMode::Encode,
-    )
-    .expect_err("Encode must remain image-only");
-    assert!(error.to_string().contains("image media only"));
+fn wire_media(request: &pb::GenerateRequest) -> WireMedia {
+    let mut media = request
+        .media
+        .iter()
+        .map(|item| (item.modality(), item.uuid.clone(), item.source.clone()))
+        .collect::<Vec<_>>();
+    // Stable sort: vLLM binds the items of one modality to placeholders in order.
+    media.sort_by_key(|(modality, _, _)| *modality);
+    media
+}
+
+/// The input media of a request without `mm_hashes`, grouped by modality in
+/// input order, to compare with `wire_media`.
+fn expected_wire_media(request: &PreprocessedRequest) -> WireMedia {
+    let media = request.multi_modal_data.as_ref().expect("raw media");
+    let mut expected = Vec::new();
+    for (key, modality) in [
+        ("image_url", pb::Modality::Image),
+        ("video_url", pb::Modality::Video),
+        ("audio_url", pb::Modality::Audio),
+    ] {
+        let uuids = request
+            .multi_modal_uuids
+            .as_ref()
+            .and_then(|uuids| uuids.get(key));
+        for (index, item) in media.get(key).into_iter().flatten().enumerate() {
+            let source = match item {
+                MultimodalData::Url(url) => url.to_string(),
+                MultimodalData::RawUrl(source) => source.clone(),
+                _ => panic!("test media must carry a source"),
+            };
+            let source = if source.starts_with("data:") {
+                pb::media_item::Source::DataUri(source)
+            } else {
+                pb::media_item::Source::Url(source)
+            };
+            let uuid = uuids
+                .and_then(|uuids| uuids[index].clone())
+                .unwrap_or_default();
+            expected.push((modality, uuid, Some(source)));
+        }
+    }
+    expected
+}
+
+#[test]
+fn encode_requests_accept_image_and_video_media_only() {
+    let mut image_uuids_video = epd_image_request();
+    image_uuids_video
+        .multi_modal_data
+        .as_mut()
+        .expect("image media")
+        .insert("video_url".to_string(), video_media());
+    for (shape, request) in [
+        ("video", epd_video_request()),
+        ("image+video", epd_image_video_request()),
+        ("image with UUIDs+video", image_uuids_video),
+    ] {
+        let wire = build_generate_request(
+            request.clone(),
+            format!("encode-{shape}"),
+            DisaggregationMode::Encode,
+        )
+        .unwrap_or_else(|error| panic!("{shape}: {error}"));
+        assert_eq!(wire_media(&wire), expected_wire_media(&request), "{shape}");
+    }
+
+    let audio = vec![MultimodalData::RawUrl(
+        "https://example.com/sample.wav".to_string(),
+    )];
+    let audio_only = epd_request(vec![("audio_url", audio.clone())]);
+    let mut image_audio = epd_image_request();
+    image_audio
+        .multi_modal_data
+        .as_mut()
+        .expect("image media")
+        .insert("audio_url".to_string(), audio);
+    let preprocessed_audio = request_with_preprocessed_features(json!({
+        "mm_hashes": {"audio": ["producer-audio-hash"]},
+        "mm_placeholders": {"audio": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"audio": [VALID_MM_KWARGS_BASE64]}
+    }));
+    for (shape, request) in [
+        ("audio", audio_only),
+        ("image+audio", image_audio.clone()),
+        ("preprocessed audio", preprocessed_audio),
+    ] {
+        let Err(error) = build_generate_request(
+            request,
+            format!("encode-{shape}"),
+            DisaggregationMode::Encode,
+        ) else {
+            panic!("{shape}: Encode must reject audio");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("encode requests support image and video media only"),
+            "{shape}: {error}"
+        );
+    }
+
+    // After the Encode rejection, the frontend sends the same request to the
+    // downstream engine, which must accept it and encode all media inline.
+    let mut decode_image_audio = image_audio.clone();
+    decode_image_audio.prefill_result = decode_request().prefill_result;
+    for (mode, request) in [
+        (DisaggregationMode::Aggregated, image_audio.clone()),
+        (DisaggregationMode::Prefill, image_audio.clone()),
+        (DisaggregationMode::Decode, decode_image_audio),
+    ] {
+        let wire = build_generate_request(request, "inline-image+audio".to_string(), mode)
+            .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
+        assert_eq!(
+            wire_media(&wire),
+            expected_wire_media(&image_audio),
+            "{mode:?}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_image_request()).await;
+}
+
+#[tokio::test]
+async fn video_encoder_cache_handoff_for_e_pd_and_e_p_d() {
+    assert_encoder_cache_handoff(epd_video_request()).await;
+    assert_encoder_cache_handoff(epd_image_video_request()).await;
+}
+
+async fn assert_encoder_cache_handoff(mut source_request: PreprocessedRequest) {
+    let expected_media = expected_wire_media(&source_request);
     let service = FakeVllm::default();
     service.encoder_response.store(true, Ordering::SeqCst);
     let discovered = multimodal_model_info();
@@ -2568,7 +2721,6 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
         discovered.clone(),
     );
     encoder.start(0).await.expect("start encoder");
-    let mut source_request = epd_image_request();
     source_request
         .routing
         .as_mut()
@@ -2599,9 +2751,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
     {
         let requests = server.service.requests.lock().await;
         let encode_wire = requests.last().expect("encode request");
-        assert_eq!(encode_wire.media.len(), 2);
-        assert_eq!(encode_wire.media[0].uuid, "image-a");
-        assert_eq!(encode_wire.media[1].uuid, "image-b");
+        assert_eq!(wire_media(encode_wire), expected_media);
         assert!(
             encode_wire
                 .kv
@@ -2640,9 +2790,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
             .last()
             .cloned()
             .expect("downstream request");
-        assert_eq!(downstream_wire.media.len(), 2, "{topology}");
-        assert_eq!(downstream_wire.media[0].uuid, "image-a", "{topology}");
-        assert_eq!(downstream_wire.media[1].uuid, "image-b", "{topology}");
+        assert_eq!(wire_media(&downstream_wire), expected_media, "{topology}");
         let forwarded_ec = struct_to_json(
             downstream_wire
                 .kv
@@ -2684,9 +2832,7 @@ async fn encoder_cache_handoff_is_opaque_for_e_pd_and_e_p_d() {
                 .last()
                 .cloned()
                 .expect("decode request");
-            assert_eq!(decode_wire.media.len(), 2);
-            assert_eq!(decode_wire.media[0].uuid, "image-a");
-            assert_eq!(decode_wire.media[1].uuid, "image-b");
+            assert_eq!(wire_media(&decode_wire), expected_media);
             let decode_cache = decode_wire.kv.expect("decode cache parameters");
             assert!(decode_cache.kv_transfer_params.is_some());
             let decode_ec =
