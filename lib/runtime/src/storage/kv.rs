@@ -106,10 +106,16 @@ impl KeyValue {
     }
 }
 
+/// One change reported by a [`Bucket::watch`] stream.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WatchEvent {
+    /// A key was created or its value changed after the last snapshot.
     Put(KeyValue),
+    /// A key was deleted after the last snapshot.
     Delete(Key),
+    /// The full bucket at one moment: the first event of every stream, possibly empty, and again
+    /// after the backend fell behind. It replaces any state held from earlier events. The NATS
+    /// store is the exception: it sends no initial `Resync` and replays existing keys as `Put`.
     Resync(HashMap<Key, bytes::Bytes>),
 }
 
@@ -336,7 +342,11 @@ impl Manager {
         }
     }
 
-    /// Returns a receiver for all the existing keys of a bucket, and then for every later change.
+    /// Returns a receiver for one snapshot of a bucket, and then for every later change.
+    ///
+    /// The first event is one [`WatchEvent::Resync`] with every existing key, empty when the
+    /// bucket is empty. The NATS store is the exception: it sends no initial `Resync` and replays
+    /// existing keys as [`WatchEvent::Put`] events.
     ///
     /// This method establishes the watch before it returns: [`Bucket::watch`] has captured the
     /// initial snapshot, so every change that follows reaches the receiver, as its own event or
@@ -499,8 +509,12 @@ pub trait Bucket: Send + Sync {
     ///
     /// Implementations must establish the snapshot and incremental watch without a gap and must
     /// never emit an incremental value older than a value already emitted in the initial snapshot.
-    /// Existing entries may be emitted as individual WatchEvent::Put events or as one
-    /// WatchEvent::Resync.
+    /// The first event is exactly one [`WatchEvent::Resync`] with every existing entry, empty for
+    /// an empty bucket. Later events are changes that follow it, or a further `Resync` after the
+    /// backend fell behind.
+    ///
+    /// The NATS store is the exception: it sends no initial `Resync` and replays existing keys as
+    /// [`WatchEvent::Put`] events. Discovery does not select it.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = WatchEvent> + Send + '_>>, StoreError>;
@@ -633,10 +647,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
-            panic!("expected initial put");
+        let WatchEvent::Resync(snapshot) = first else {
+            panic!("expected the initial resync, got {first:?}");
         };
-        assert_eq!(first.value(), b"old");
+        assert_eq!(
+            snapshot.get(&key).map(|value| value.as_ref()),
+            Some(b"old".as_slice())
+        );
 
         bucket.insert(&key, "new".into(), 2).await.unwrap();
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -678,10 +695,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let WatchEvent::Put(first) = first else {
+        let WatchEvent::Resync(snapshot) = first else {
             panic!("expected the existing key in the initial snapshot, got {first:?}");
         };
-        assert_eq!(first.key_str(), key.as_ref());
+        assert!(
+            snapshot.contains_key(&key),
+            "snapshot {snapshot:?} lacks {key}"
+        );
 
         let second = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -824,7 +844,7 @@ mod tests {
         assert_eq!(res, StoreOutcome::Created(0));
 
         let expected = [
-            WatchEvent::Put(KeyValue::new(Key::new("test1".into()), "value1".into())),
+            WatchEvent::Resync(HashMap::from([(Key::new("test1".into()), "value1".into())])),
             WatchEvent::Put(KeyValue::new(Key::new("test2".into()), "value2".into())),
             WatchEvent::Put(KeyValue::new(
                 Key::new("test2".into()),

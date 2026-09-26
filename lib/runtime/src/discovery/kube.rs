@@ -11,7 +11,7 @@ pub use crd::{DynamoWorkerMetadata, DynamoWorkerMetadataSpec};
 pub use utils::{hash_container_name, hash_pod_name};
 
 use crd::{apply_cr, build_cr};
-use daemon::DiscoveryDaemon;
+use daemon::{DaemonOutputs, DaemonState, DiscoveryDaemon, ListState};
 use utils::{KubeDiscoveryMode, PodInfo};
 
 use crate::CancellationToken;
@@ -26,7 +26,7 @@ use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, watch};
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
@@ -73,13 +73,42 @@ where
 pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
-    list_state: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
+    list_state: ListState,
     event_tx: broadcast::Sender<DiscoveryEvent>,
+    /// The daemon's readiness; `list` and `list_and_watch` wait for `Ready` on it.
+    daemon_state: watch::Receiver<DaemonState>,
     kube_client: KubeClient,
     pod_info: PodInfo,
 }
 
 impl KubeDiscoveryClient {
+    /// Waits until the daemon holds its first complete view of the cluster.
+    ///
+    /// Fails when the daemon stopped or failed first, or when `cancel_token` fires.
+    async fn await_daemon_ready(&self, cancel_token: Option<&CancellationToken>) -> Result<()> {
+        let mut daemon_state = self.daemon_state.clone();
+        let settled = daemon_state.wait_for(|state| *state != DaemonState::Pending);
+        let state = match cancel_token {
+            Some(token) => token.run_until_cancelled(settled).await.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the watch was cancelled before the Kubernetes discovery daemon was ready"
+                )
+            })?,
+            None => settled.await,
+        }
+        .map_err(|_| {
+            anyhow::anyhow!("the Kubernetes discovery daemon ended without reporting its state")
+        })?;
+        match &*state {
+            DaemonState::Ready => Ok(()),
+            DaemonState::Stopped => anyhow::bail!("the Kubernetes discovery daemon is stopped"),
+            DaemonState::Failed(reason) => {
+                anyhow::bail!("the Kubernetes discovery daemon failed: {reason}")
+            }
+            DaemonState::Pending => unreachable!("wait_for returns once the daemon left Pending"),
+        }
+    }
+
     /// Create a new Kubernetes discovery client
     ///
     /// # Arguments
@@ -128,17 +157,16 @@ impl KubeDiscoveryClient {
             }
         }
 
-        let list_state = Arc::new(RwLock::new(HashMap::new()));
+        let list_state: ListState = Arc::new(RwLock::new(HashMap::new()));
         let (event_tx, _) = broadcast::channel::<DiscoveryEvent>(4096);
+        let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
 
         let daemon = DiscoveryDaemon::new(kube_client.clone(), pod_info.clone(), cancel_token)?;
-        let daemon_list_state = list_state.clone();
-        let daemon_event_tx = event_tx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = daemon.run(daemon_list_state, daemon_event_tx).await {
-                tracing::error!("Discovery daemon failed: {e}");
-            }
-        });
+        tokio::spawn(daemon.run(DaemonOutputs {
+            list_state: list_state.clone(),
+            event_tx: event_tx.clone(),
+            state_tx,
+        }));
 
         tracing::info!("Discovery daemon started");
 
@@ -147,6 +175,7 @@ impl KubeDiscoveryClient {
             metadata,
             list_state,
             event_tx,
+            daemon_state,
             kube_client,
             pod_info,
         })
@@ -370,6 +399,8 @@ impl Discovery for KubeDiscoveryClient {
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
+        // Before the initial sync, list_state is empty whatever the cluster holds.
+        self.await_daemon_ready(None).await?;
         let state = self.list_state.read().await;
         let instances: Vec<DiscoveryInstance> =
             state.values().flat_map(|m| m.filter(&query)).collect();
@@ -396,6 +427,8 @@ impl Discovery for KubeDiscoveryClient {
             query
         );
 
+        // Before the initial sync, the snapshot would be a false empty set.
+        self.await_daemon_ready(cancel_token.as_ref()).await?;
         let (out_tx, out_rx) = mpsc::unbounded_channel();
         let stream_id = uuid::Uuid::new_v4();
 
@@ -441,6 +474,12 @@ impl Discovery for KubeDiscoveryClient {
                 {
                     return;
                 }
+            }
+            if out_tx
+                .send(Ok(DiscoveryEvent::Resync(initial_instances)))
+                .is_err()
+            {
+                return;
             }
 
             loop {
@@ -536,6 +575,7 @@ impl Discovery for KubeDiscoveryClient {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
     use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
@@ -560,6 +600,160 @@ mod tests {
                 "runtime_config": {"taints": [taint]}
             }),
             model_suffix: None,
+        }
+    }
+
+    /// A client over `instances` with no cluster behind it, and the sender for its daemon
+    /// state, which starts `Pending`.
+    fn client_with(
+        instances: &[DiscoveryInstance],
+    ) -> (KubeDiscoveryClient, watch::Sender<DaemonState>) {
+        let kube_client =
+            KubeClient::try_from(kube::Config::new("http://127.0.0.1:1".parse().unwrap())).unwrap();
+        let list_state = instances
+            .iter()
+            .map(|instance| {
+                let mut metadata = DiscoveryMetadata::new();
+                metadata.register_endpoint(instance.clone()).unwrap();
+                (instance.instance_id(), Arc::new(metadata))
+            })
+            .collect();
+        let (event_tx, _) = broadcast::channel(16);
+        let (state_tx, daemon_state) = watch::channel(DaemonState::Pending);
+        let client = KubeDiscoveryClient {
+            instance_id: 1,
+            metadata: Arc::new(RwLock::new(DiscoveryMetadata::new())),
+            list_state: Arc::new(RwLock::new(list_state)),
+            event_tx,
+            daemon_state,
+            kube_client,
+            pod_info: PodInfo {
+                pod_name: "worker-a".to_string(),
+                pod_namespace: "ns".to_string(),
+                pod_uid: "pod-uid".to_string(),
+                system_port: 0,
+                mode: KubeDiscoveryMode::Pod,
+                target: utils::KubeDiscoveryTarget::Pod("worker-a".to_string()),
+            },
+        };
+        (client, state_tx)
+    }
+
+    #[tokio::test]
+    async fn watch_reports_the_initial_set_as_added_events_then_one_resync() {
+        let first = endpoint_instance(1, "127.0.0.1:8000");
+        let second = endpoint_instance(2, "127.0.0.1:9000");
+        let (client, state_tx) = client_with(&[first.clone(), second.clone()]);
+        state_tx.send_replace(DaemonState::Ready);
+        let mut events = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+
+        let mut added = HashSet::new();
+        for _ in 0..2 {
+            let DiscoveryEvent::Added(instance) = contract::next(&mut events).await else {
+                panic!("expected an initial Added event");
+            };
+            added.insert(instance.id());
+        }
+        assert_eq!(added, HashSet::from([first.id(), second.id()]));
+        let DiscoveryEvent::Resync(snapshot) = contract::next(&mut events).await else {
+            panic!("expected the establishment snapshot after the Added burst");
+        };
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(DiscoveryInstance::id)
+                .collect::<HashSet<_>>(),
+            HashSet::from([first.id(), second.id()])
+        );
+
+        let third = endpoint_instance(3, "127.0.0.1:9100");
+        client
+            .event_tx
+            .send(DiscoveryEvent::Added(third.clone()))
+            .unwrap();
+        assert_eq!(
+            contract::next(&mut events).await,
+            DiscoveryEvent::Added(third)
+        );
+    }
+
+    #[tokio::test]
+    async fn list_and_watch_waits_for_ready_unless_cancelled_or_the_daemon_ended() {
+        let (client, state_tx) = client_with(&[]);
+        let client = Arc::new(client);
+        let open_watch = |token: Option<CancellationToken>| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .list_and_watch(DiscoveryQuery::AllEndpoints, token)
+                    .await
+            })
+        };
+        let finish = |task| tokio::time::timeout(std::time::Duration::from_secs(1), task);
+
+        let token = CancellationToken::new();
+        let cancelled = open_watch(Some(token.clone()));
+        tokio::task::yield_now().await;
+        assert!(
+            !cancelled.is_finished(),
+            "a pending daemon must hold the watch"
+        );
+        token.cancel();
+        let Err(error) = finish(cancelled)
+            .await
+            .expect("cancellation must release the wait")
+            .unwrap()
+        else {
+            panic!("a watch cancelled before Ready must fail");
+        };
+        assert!(
+            error.to_string().contains("cancelled"),
+            "unexpected error: {error}"
+        );
+
+        let waiting = open_watch(None);
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "a pending daemon must hold the watch"
+        );
+        state_tx.send_replace(DaemonState::Ready);
+        let mut events = finish(waiting)
+            .await
+            .expect("Ready must release the wait")
+            .unwrap()
+            .unwrap();
+        contract::expect_empty_snapshot(&mut events).await;
+
+        for (state, expected) in [
+            (
+                DaemonState::Failed("reflector stopped".to_string()),
+                "daemon failed: reflector stopped",
+            ),
+            (DaemonState::Stopped, "daemon is stopped"),
+        ] {
+            state_tx.send_replace(state);
+            let Err(error) = client
+                .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+                .await
+            else {
+                panic!("a daemon that ended before Ready must fail the watch");
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
+            let error = client
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .expect_err("a daemon that ended before Ready must fail the list");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected error: {error}"
+            );
         }
     }
 

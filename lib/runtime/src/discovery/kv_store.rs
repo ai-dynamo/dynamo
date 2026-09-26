@@ -277,6 +277,7 @@ impl KVStoreDiscovery {
         prefix: &str,
         bucket_name: &str,
         known_instances: &mut HashMap<DiscoveryInstanceId, DiscoveryInstance>,
+        is_established: bool,
     ) -> Vec<DiscoveryEvent> {
         match event {
             kv::WatchEvent::Put(kv) => {
@@ -365,12 +366,21 @@ impl KVStoreDiscovery {
                 let old_count = known_instances.len();
                 let events = resync_discovery_events(known_instances, next_instances);
 
-                tracing::warn!(
-                    old_count,
-                    new_count = known_instances.len(),
-                    emitted_events = events.len(),
-                    "KVStoreDiscovery::list_and_watch resynced discovery state"
-                );
+                if is_established {
+                    tracing::warn!(
+                        prefix,
+                        old_count,
+                        new_count = known_instances.len(),
+                        emitted_events = events.len(),
+                        "KVStoreDiscovery::list_and_watch resynced discovery state"
+                    );
+                } else {
+                    tracing::debug!(
+                        prefix,
+                        count = known_instances.len(),
+                        "KVStoreDiscovery::list_and_watch established from the initial snapshot"
+                    );
+                }
 
                 events
             }
@@ -737,6 +747,8 @@ impl Discovery for KVStoreDiscovery {
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
             let mut known_instances = HashMap::<DiscoveryInstanceId, DiscoveryInstance>::new();
+            // The first storage event is the establishment snapshot.
+            let mut is_established = false;
 
             while let Some(event) = rx.recv().await {
                 let discovery_events = Self::discovery_events_from_watch_event(
@@ -744,7 +756,9 @@ impl Discovery for KVStoreDiscovery {
                     &prefix,
                     bucket_name,
                     &mut known_instances,
+                    is_established,
                 );
+                is_established = true;
 
                 for event in discovery_events {
                     yield Ok(event);
@@ -763,6 +777,7 @@ impl Discovery for KVStoreDiscovery {
 mod tests {
     use super::*;
     use crate::component::TransportType;
+    use crate::discovery::startup_contract as contract;
     use crate::discovery::{
         EventChannelQuery, EventSourceQuery, EventTransport, ModelTaintsUpdate,
     };
@@ -828,6 +843,7 @@ mod tests {
             &prefix,
             INSTANCES_BUCKET,
             &mut known_instances,
+            true,
         );
 
         assert!(!events.contains(&DiscoveryEvent::Added(second)));
@@ -867,6 +883,7 @@ mod tests {
             &prefix,
             INSTANCES_BUCKET,
             &mut known_instances,
+            true,
         );
 
         assert_eq!(events.len(), 1);
@@ -894,6 +911,7 @@ mod tests {
             &prefix,
             MODELS_BUCKET,
             &mut known_instances,
+            true,
         );
 
         assert_eq!(events.len(), 2);
@@ -1078,6 +1096,7 @@ mod tests {
             "kv-events",
         ));
         let mut stream = client.list_and_watch(query, None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
         let spec = |publisher_id| DiscoverySpec::EventSource {
             scope: EventScope::Endpoint {
                 endpoint: endpoint.clone(),
@@ -1200,6 +1219,7 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let client_clone = client.clone();
         let register_task = tokio::spawn(async move {
@@ -1261,6 +1281,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+        assert_eq!(
+            contract::next(&mut stream).await,
+            DiscoveryEvent::Resync(vec![instance.clone()])
+        );
 
         let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
             .await
@@ -1284,6 +1308,8 @@ mod tests {
             .list_and_watch(DiscoveryQuery::AllEndpoints, None)
             .await
             .unwrap();
+        // Consume the startup snapshot so the resync asserted below can only come from the lag.
+        contract::expect_empty_snapshot(&mut stream).await;
 
         let instance = client
             .register(DiscoverySpec::Endpoint {
@@ -1317,6 +1343,22 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event, DiscoveryEvent::Resync(vec![]));
+    }
+
+    #[tokio::test]
+    async fn memory_backend_keeps_the_startup_contract() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        contract::check(&client).await;
+    }
+
+    #[tokio::test]
+    async fn file_backend_keeps_the_startup_contract() {
+        let cancel_token = CancellationToken::new();
+        let root = tempfile::tempdir().unwrap();
+        let store = kv::Manager::file(cancel_token.clone(), root.path());
+        let client = KVStoreDiscovery::new(store, cancel_token.clone());
+        contract::check(&client).await;
+        cancel_token.cancel();
     }
 
     fn model_spec(taint: &str) -> DiscoverySpec {
@@ -1422,6 +1464,7 @@ mod tests {
             endpoint: "generate".to_string(),
         };
         let mut stream = client.list_and_watch(query.clone(), None).await.unwrap();
+        contract::expect_empty_snapshot(&mut stream).await;
 
         client.register(model_spec("first")).await.unwrap();
         let DiscoveryEvent::Added(first) = stream.next().await.unwrap().unwrap() else {
