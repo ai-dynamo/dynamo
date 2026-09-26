@@ -1191,6 +1191,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
@@ -1209,6 +1210,7 @@ mod tests {
             turn_index: None,
             metadata: Value::Null,
             prompt_token_source: ReplayPromptTokenSource::LengthOnlySynthetic,
+            agentic: None,
         });
 
         let error =
