@@ -141,7 +141,9 @@ func (r *graphReconciler) reconcileSchedulingFailure(
 			continue
 		}
 		name := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.Name
-		requestsByGroup[name] = append(requestsByGroup[name], request)
+		if len(expiredByGroup[name]) > 0 {
+			requestsByGroup[name] = append(requestsByGroup[name], request)
+		}
 	}
 
 	// An interior failure in one workload does not prevent another workload's suffix cleanup.
