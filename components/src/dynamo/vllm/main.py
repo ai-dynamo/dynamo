@@ -70,7 +70,7 @@ from .embedding_worker_processes import (
     start_embedding_parent_watchdog,
 )
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config
+from .handlers import VLLM_XARGS_CAPABILITY, apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -852,6 +852,10 @@ async def register_vllm_model(
         publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    # Text-input workers receive the raw OpenAI request without passthrough
+    # extra fields, so only token-input workers can honor `vllm_xargs`.
+    if model_input == ModelInput.Tokens:
+        runtime_config.set_engine_specific(VLLM_XARGS_CAPABILITY, json.dumps(True))
     tower_connector_lora_enabled = bool(
         vllm_config.lora_config
         and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
