@@ -814,6 +814,9 @@ impl<
         if let Some(session_context) = request.session_context.clone() {
             classification = classification.with_session_context(session_context);
         }
+        if let Some(pinned) = request.pinned_worker {
+            classification.pinned_worker = Some(pinned);
+        }
         classification
     }
 

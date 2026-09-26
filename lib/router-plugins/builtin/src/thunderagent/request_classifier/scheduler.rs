@@ -70,6 +70,7 @@ pub(crate) struct RequestState {
     prior_program: Option<Program>,
     began_program: bool,
     placement_target: Option<WorkerWithDpRank>,
+    pinned_worker: Option<WorkerWithDpRank>,
     pub(crate) notify: Arc<Notify>,
 }
 
@@ -79,6 +80,7 @@ pub(crate) struct RequestRegistration {
     input_tokens: usize,
     progress: RequestProgress,
     session_final: bool,
+    pinned_worker: Option<WorkerWithDpRank>,
 }
 
 impl RequestRegistration {
@@ -95,7 +97,13 @@ impl RequestRegistration {
             input_tokens,
             progress,
             session_final,
+            pinned_worker: None,
         }
+    }
+
+    pub(crate) fn with_pinned_worker(mut self, worker: WorkerWithDpRank) -> Self {
+        self.pinned_worker = Some(worker);
+        self
     }
 }
 
@@ -209,6 +217,7 @@ impl State {
             input_tokens,
             progress,
             session_final,
+            pinned_worker,
         } = request;
         if self.requests.contains_key(&request_id) {
             return Err(ThunderAgentError::DuplicateRequestId(request_id));
@@ -249,6 +258,7 @@ impl State {
                 prior_program: None,
                 began_program: false,
                 placement_target: None,
+                pinned_worker,
                 notify: Arc::clone(&notify),
             },
         );
@@ -510,6 +520,29 @@ impl State {
         }
 
         let required = self.request_cost(input_tokens);
+
+        // If the caller supplied a hard pin, honor it as the authoritative
+        // destination instead of choosing a provisional least-used worker.
+        // This closes the window where a provisional charge on one worker and
+        // an authoritative Sent to another worker can cause a brief per-Worker
+        // logical ledger overrun (issue #15280).
+        if let Some(pinned) = self.requests.get(request_id).and_then(|req| req.pinned_worker) {
+            if capacities.is_live(pinned) {
+                let capacity = capacities
+                    .iter()
+                    .find(|(w, _)| w == &pinned)
+                    .map_or(0, |(_, c)| c);
+                let used = self.normal_usage.get(&pinned).copied().unwrap_or(0);
+                if capacity.checked_sub(used).is_some_and(|remaining| remaining >= required) {
+                    return self.release_request(request_id, Some(pinned)) || changed;
+                }
+            }
+            // Hard-pinned target is not live or lacks capacity; defer without
+            // falling through to the least-used selection so we never charge
+            // a different worker than the one the request will actually run on.
+            return self.defer_program(&session_id, now) || changed;
+        }
+
         let selected = capacities
             .iter()
             .filter(|(worker, _)| capacities.is_live(*worker))
@@ -1632,5 +1665,84 @@ mod tests {
                 samples[samples.len() * 95 / 100],
             );
         }
+    }
+
+    // Regression for issue #15280: hard-pinned request must be charged to the
+    // authoritative (pinned) Worker, not a provisional least-used selection.
+    #[test]
+    fn hard_pin_is_charged_to_authoritative_worker_not_provisional() {
+        let now = Instant::now();
+        let w0 = WorkerWithDpRank::new(0, 0);
+        let w1 = WorkerWithDpRank::new(1, 0);
+        const CAPACITY: usize = 64_000;
+
+        let caps = capacities(&[(0, CAPACITY), (1, CAPACITY)]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 100,
+            ..Default::default()
+        });
+
+        // Pre-load W0 so the provisional least-used selection would prefer W1.
+        let mut existing = Program::new(30_000);
+        existing.status = ProgramStatus::Acting;
+        existing.assigned_worker = Some(w0);
+        existing.acting_since = Some(now);
+        state.insert_program("session-existing".into(), existing);
+
+        // Register P1 hard-pinned to W0; with the fix it must charge W0, not W1.
+        let p1_notify = state
+            .register(
+                RequestRegistration::new(
+                    "p1".into(),
+                    "session-p1".into(),
+                    16_000,
+                    RequestProgress::new(16_000).0,
+                    false,
+                )
+                .with_pinned_worker(w0),
+                &caps,
+                now,
+            )
+            .unwrap();
+
+        // Must be released to W0 immediately.
+        assert_eq!(
+            state.wait_status("p1", &p1_notify),
+            WaitStatus::Released(Some(w0))
+        );
+        // W0 ledger must stay within bounds.
+        let w0_used = state.normal_usage.get(&w0).copied().unwrap_or(0);
+        assert!(w0_used <= CAPACITY, "W0 overrun: {w0_used}/{CAPACITY}");
+        // W1 must carry no charge.
+        assert_eq!(state.normal_usage.get(&w1).copied().unwrap_or(0), 0);
+
+        // Simulate Sent confirming W0 (no ledger move should occur).
+        state.on_event(
+            ClassifyEvent::Sent { request_id: "p1".into(), worker: w0 },
+            &caps,
+            now,
+        );
+
+        // Newcomer pinned to W1 (which still has headroom) must be admitted.
+        let newcomer_notify = state
+            .register(
+                RequestRegistration::new(
+                    "newcomer".into(),
+                    "session-newcomer".into(),
+                    31_000,
+                    RequestProgress::new(31_000).0,
+                    false,
+                )
+                .with_pinned_worker(w1),
+                &caps,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            state.wait_status("newcomer", &newcomer_notify),
+            WaitStatus::Released(Some(w1))
+        );
+        let w1_used = state.normal_usage.get(&w1).copied().unwrap_or(0);
+        assert!(w1_used <= CAPACITY, "W1 overrun: {w1_used}/{CAPACITY}");
     }
 }

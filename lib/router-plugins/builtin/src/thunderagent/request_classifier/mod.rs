@@ -21,6 +21,7 @@ use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::sync::Notify;
 
+use dynamo_kv_router::protocols::WorkerWithDpRank;
 use self::scheduler::{RequestRegistration, State, WaitStatus};
 use super::{ConfigError, ThunderAgentConfig};
 
@@ -99,19 +100,20 @@ impl Inner {
         input_tokens: usize,
         progress: RequestProgress,
         session_final: bool,
+        pinned_worker: Option<WorkerWithDpRank>,
     ) -> Result<Arc<Notify>, ThunderAgentError> {
         let capacities = self.capacity_provider.snapshot();
-        self.state.lock().register(
-            RequestRegistration::new(
-                request_id,
-                session_id,
-                input_tokens,
-                progress,
-                session_final,
-            ),
-            &capacities,
-            Instant::now(),
-        )
+        let mut reg = RequestRegistration::new(
+            request_id,
+            session_id,
+            input_tokens,
+            progress,
+            session_final,
+        );
+        if let Some(worker) = pinned_worker {
+            reg = reg.with_pinned_worker(worker);
+        }
+        self.state.lock().register(reg, &capacities, Instant::now())
     }
 
     fn start_scheduler(self: &Arc<Self>) {
@@ -294,12 +296,14 @@ impl RequestClassifier for ThunderAgentClassifier {
         let session_final = session.session_final() == Some(true);
         let input_tokens = request.input_tokens();
         let progress = request.progress().clone();
+        let pinned_worker = request.pinned_worker();
         let notify = match self.inner.register(
             request_id.clone(),
             session_id,
             input_tokens,
             progress,
             session_final,
+            pinned_worker,
         ) {
             Ok(notify) => notify,
             Err(error) => {
@@ -533,6 +537,7 @@ mod tests {
                 tokens,
                 progress,
                 session_final,
+                None,
             )
             .unwrap();
     }
@@ -1178,6 +1183,7 @@ mod tests {
             100,
             RequestProgress::new(100).0,
             false,
+            None,
         );
         assert!(matches!(
             result,
