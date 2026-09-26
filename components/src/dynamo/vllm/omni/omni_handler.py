@@ -300,6 +300,7 @@ class OmniHandler(BaseOmniHandler):
             base_model_path=self.config.model,
             worker_type=WorkerType.Aggregated,
             needs=[],
+            revision=self.config.engine_args.revision,
             max_gpu_lora_count=self._advertised_gpu_lora_capacity,
         )
 

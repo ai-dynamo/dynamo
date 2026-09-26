@@ -400,6 +400,19 @@ impl LocalModelBuilder {
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
         }
+
+        // Record the commit SHA from an HF snapshot path so the frontend
+        // can resolve hf:// URIs at the same revision. Only once the SHA is on the card
+        // is it safe to rewrite `source_path` to the repo id: that rewrite is what sends
+        // the frontend to `hf://` for metadata, and without a pin it would land on the
+        // latest revision instead of the one this worker loaded.
+        if let Some(repo) = super::hub::hf_repo_from_snapshot_path(&model_path)
+            && card.set_hf_commit_sha(&repo, &model_path)
+        {
+            // align source_path with hf_commit_sha's key so hf:// fallback URIs resolve correctly.
+            card.set_source_path(PathBuf::from(&repo));
+        }
+
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
         let alt = card.source_path().to_string();
@@ -529,8 +542,17 @@ impl LocalModel {
     /// If ignore_weights is true, model weight files will be skipped and only the model config
     /// will be downloaded.
     /// Returns the path to the model files
-    pub async fn fetch(remote_name: &str, ignore_weights: bool) -> anyhow::Result<PathBuf> {
-        super::hub::from_hf(remote_name, ignore_weights).await
+    pub async fn fetch(
+        remote_name: &str,
+        revision: Option<&str>,
+        ignore_weights: bool,
+    ) -> anyhow::Result<PathBuf> {
+        match revision {
+            Some(rev) => {
+                super::hub::from_hf_at_revision(remote_name, rev, None, ignore_weights).await
+            }
+            None => super::hub::from_hf(remote_name, ignore_weights).await,
+        }
     }
 
     pub fn card(&self) -> &ModelDeploymentCard {

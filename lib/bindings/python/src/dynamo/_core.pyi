@@ -2293,6 +2293,7 @@ async def register_model(
     needs: Optional[List[List[WorkerType]]] = None,
     self_host_metadata: Optional[bool] = None,
     ignore_weights: bool = False,
+    revision: Optional[str] = None,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
 ) -> None:
@@ -2392,7 +2393,11 @@ class MediaFetcher:
     def allowed_media_domains(self, domains: List[str]) -> None: ...
     def timeout_ms(self, timeout_ms: int) -> None: ...
 
-async def fetch_model(remote_name: str, ignore_weights: bool = False) -> str:
+async def fetch_model(
+    remote_name: str,
+    ignore_weights: bool = False,
+    revision: Optional[str] = None,
+) -> str:
     """
     Download a model from Hugging Face, returning its local path.
     If `ignore_weights` is True, only fetches tokenizer and config files.
