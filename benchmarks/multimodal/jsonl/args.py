@@ -37,6 +37,15 @@ def _common_parser() -> argparse.ArgumentParser:
         help=f"Target user text tokens per request (default: {USER_TEXT_TOKENS})",
     )
     p.add_argument(
+        "--shared-user-text",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Emit the SAME user text in every row instead of fresh random text "
+        "(default: False). Identical text forms a KV prefix shared by every "
+        "request, so it is prefilled once and the benchmark measures the media "
+        "path rather than per-request text prefill.",
+    )
+    p.add_argument(
         "--seed",
         type=int,
         default=None,
@@ -79,7 +88,7 @@ def _image_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Emit `image_uuids` parallel to `images` in each JSONL row (default: False). "
-        "Pass --uuid to enable for aiperf --mm-cache-mode {uuid-only,uuid-and-strip} runs.",
+        "Pass --uuid to enable AIPerf --uuid-and-strip runs.",
     )
     return p
 
