@@ -50,15 +50,11 @@ KVBM offloads KV blocks GPU (G1) → host/CPU (G2) → disk (G3) → object stor
   Minimum prefix priority a block must have to be offloaded to the host tier. Raises the bar for what gets offloaded.
 </ParamField>
 
-<ParamField path="DYN_KVBM_TRANSFER_BATCH_SIZE" type="integer" default="unset">
+<ParamField path="DYN_KVBM_MAX_TRANSFER_BATCH_SIZE" type="integer" default="16">
   Maximum number of blocks per transfer batch.
 </ParamField>
 
-<ParamField path="DYN_KVBM_MAX_TRANSFER_BATCH_SIZE" type="integer" default="unset">
-  Upper bound on the transfer batch size.
-</ParamField>
-
-<ParamField path="DYN_KVBM_MAX_CONCURRENT_TRANSFERS" type="integer" default="unset">
+<ParamField path="DYN_KVBM_MAX_CONCURRENT_TRANSFERS" type="integer" default="4">
   Maximum number of block transfers in flight at once.
 </ParamField>
 
