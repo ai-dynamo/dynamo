@@ -160,6 +160,18 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
   Environment variable: `DYN_TRTLLM_PUBLISH_KV_EVENTS`
 </ParamField>
 
+<ParamField path="--connector" type="string" default="null">
+  KV cache connector for the TensorRT-LLM engine. Accepts at most one value: `kvbm` enables the [KVBM](../components/kvbm-configuration.mdx) integration, `none` disables it. When unset, no connector is configured. This flag is specific to TensorRT-LLM; other backends configure KV transfer through their own engine options.
+
+  <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>kvbm</Badge> <Badge intent="note" minimal>none</Badge></span>
+
+  <Warning>
+  KVBM is deprecated as of v1.5.0, with removal targeted for v1.6.0.
+  </Warning>
+
+  Environment variable: `DYN_CONNECTOR`
+</ParamField>
+
 <ParamField path="--publish-metrics" type="boolean" default="false">
   Expose TensorRT-LLM iteration and request metrics on this worker's Prometheus endpoint, and publish the Planner's forward-pass metrics, which read the same iteration statistics. This flag does not publish KV cache events. It enables `enable_iter_perf_stats` and the per-request `SamplingParams.return_perf_metrics`, but keeps the engine's `return_perf_metrics` disabled. The same iteration statistics carry the per-rank used-block count read by the frontend's optional `--active-decode-blocks-threshold`. The KV router's per-worker scoring never reads that sample, so this flag does not change KV-aware ranking; with that threshold set, the count is OR-ed with the router's own decode-block estimate and can mark a worker overloaded, which removes it from the candidate set until it recovers.
 

@@ -64,7 +64,6 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     # Routing this worker set advertises in its model card; None inherits the
     # frontend's configuration.
     router_advertisement: Optional[WorkerRouterConfig] = None
-    connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -74,22 +73,19 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
             self.publish_metrics or _forward_pass_metrics_enabled(self)
         )
 
-        # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
-        # while the runtime args accepts a list of connectors
+        # DynamoTrtllmArgGroup parses a list, but TensorRT-LLM accepts at most
+        # one connector from VALID_TRTLLM_CONNECTORS.
         if self.connector:
             if len(self.connector) > 1:
                 raise ValueError(
                     "TRT-LLM supports at most one connector entry. Use `--connector none` or `--connector kvbm`."
                 )
             elif self.connector[0] not in VALID_TRTLLM_CONNECTORS:
-                source = (
-                    f"DYN_CONNECTOR environment variable ('{os.environ['DYN_CONNECTOR']}')"
-                    if "DYN_CONNECTOR" in os.environ
-                    else f"shared runtime default ('{self.connector[0]}')"
-                )
                 logging.warning(
-                    f"TRT-LLM does not support connector '{self.connector[0]}' (set via {source}). "
-                    f"Supported connectors: {VALID_TRTLLM_CONNECTORS}. Falling back to 'none'."
+                    "TRT-LLM does not support connector '%s'. "
+                    "Supported connectors: %s. Falling back to 'none'.",
+                    self.connector[0],
+                    VALID_TRTLLM_CONNECTORS,
                 )
                 self.connector = ["none"]
 
