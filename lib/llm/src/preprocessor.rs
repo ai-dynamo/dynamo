@@ -5896,16 +5896,34 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
+                        // An EOS inside a tool call is incomplete even if the engine reports stop.
+                        let dropped_call_reported_as_length = choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Stop)
+                            && choice.delta.tool_calls.is_none()
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
+                        if dropped_call_reported_as_length {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "dropped_native_tool_call_reported_as_length",
+                                dropped_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: reporting length instead of stop for a tool call dropped at end of stream"
+                            );
+                            choice.finish_reason =
+                                Some(dynamo_protocols::types::FinishReason::Length);
+                        }
                         if choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Length)
                             && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                         {
-                            tracing::warn!(
-                                choice_index = choice.index,
-                                why = "truncated_native_tool_call_suppressed",
-                                suppressed_bytes = state.input_text.len() - desired_content.len(),
-                                "glm47 streaming: suppressing incomplete native tool output on length finish"
-                            );
+                            // Count EOS drops separately from max_tokens truncation.
+                            if !dropped_call_reported_as_length {
+                                tracing::warn!(
+                                    choice_index = choice.index,
+                                    why = "truncated_native_tool_call_suppressed",
+                                    suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                    "glm47 streaming: suppressing incomplete native tool output on length finish"
+                                );
+                            }
                             let replacement = desired_content
                                 .strip_prefix(&state.emitted_text)
                                 .unwrap_or_default();
@@ -8111,8 +8129,9 @@ mod tests {
         chunk
     }
 
-    async fn apply_glm47_streaming_length(
+    async fn apply_glm47_streaming_with_terminal(
         chunks: &[&str],
+        terminal: FinishReason,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
         let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
         let chunk_count = chunks.len();
@@ -8123,14 +8142,40 @@ mod tests {
             false,
             false,
             stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
-                glm47_stream_chunk(
-                    &content,
-                    (index + 1 == chunk_count).then_some(FinishReason::Length),
-                )
+                glm47_stream_chunk(&content, (index + 1 == chunk_count).then_some(terminal))
             })),
         )
         .collect()
         .await
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        apply_glm47_streaming_with_terminal(chunks, FinishReason::Length).await
+    }
+
+    fn has_finish_reason(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        reason: FinishReason,
+    ) -> bool {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .any(|choice| choice.finish_reason == Some(reason))
+    }
+
+    fn emitted_tool_call_count(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+    ) -> usize {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| choice.delta.tool_calls.as_ref())
+            .map(|tool_calls| tool_calls.len())
+            .sum()
     }
 
     fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
@@ -8199,6 +8244,83 @@ mod tests {
             let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
             assert_glm47_streaming_length_output(&output, "I can help. ", split);
         }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_bare_tool_call_marker_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. ", "<tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_function_name_reports_length() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["I'll check. <tool_call>ipy"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "I'll check. ");
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_after_partial_arguments_reports_length_without_markup() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert!(stream_content(&output).is_empty());
+        assert!(has_finish_reason(&output, FinishReason::Length));
+        assert!(!has_finish_reason(&output, FinishReason::Stop));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_without_marker_keeps_stop() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["Done. ", "The worker exited normally."],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(stream_content(&output), "Done. The worker exited normally.");
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_stop_with_quoted_marker_keeps_stop() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        let output = apply_glm47_streaming_with_terminal(&[content], FinishReason::Stop).await;
+
+        assert!(has_finish_reason(&output, FinishReason::Stop));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
+        assert_eq!(emitted_tool_call_count(&output), 0);
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_complete_call_on_stop_keeps_tool_calls() {
+        let output = apply_glm47_streaming_with_terminal(
+            &["<tool_call>get_weather<arg_key>city</arg_key><arg_value>Paris</arg_value></tool_call>"],
+            FinishReason::Stop,
+        )
+        .await;
+
+        assert_eq!(emitted_tool_call_count(&output), 1);
+        assert!(has_finish_reason(&output, FinishReason::ToolCalls));
+        assert!(!has_finish_reason(&output, FinishReason::Length));
     }
 
     /// A prose-only answer never completes a call, so nothing drains the recovery
