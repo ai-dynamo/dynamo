@@ -405,19 +405,49 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     @staticmethod
     def _resolve_routed_experts_kwargs(engine: Any, server_args: Any) -> Dict[str, Any]:
-        """Resolve the return_routed_experts kwarg for this engine.
+        """Resolve the routed-experts kwargs for this engine.
 
-        Returns ``{"return_routed_experts": True}`` only when the user opted in
-        via ``enable_return_routed_experts=True`` AND the engine's
-        ``async_generate`` signature declares the kwarg. Returns ``{}`` for the
-        default-off path and for sglang builds that do not declare the kwarg
+        Returns them only when the user opted in via
+        ``enable_return_routed_experts=True`` AND the engine's
+        ``async_generate`` signature declares them. Returns ``{}`` for the
+        default-off path and for sglang builds that do not declare them
         (e.g. the ``deepseek_v4`` branch).
         """
         if not getattr(server_args, "enable_return_routed_experts", False):
             return {}
+        # Probe both: an engine declaring only the flag must never get the offset.
         return filter_supported_async_generate_kwargs(
-            engine, {"return_routed_experts": True}
+            engine, {"return_routed_experts": True, "routed_experts_start_len": 0}
         )
+
+    def _routed_experts_kwargs_for(
+        self, request: Dict[str, Any], input_param: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Prefer the request's nvext start offset over the probed default."""
+        if "routed_experts_start_len" not in self._routed_experts_kwargs:
+            return self._routed_experts_kwargs
+        extra_args = request.get("extra_args") or {}
+        extra_nvext = extra_args.get("nvext") if isinstance(extra_args, dict) else None
+        for source in (request.get("nvext"), extra_nvext):
+            if not isinstance(source, dict):
+                continue
+            start_len = source.get("routed_experts_start_len")
+            if start_len is None:
+                continue
+            start_len = int(start_len)
+            # Out of range aborts in-engine and surfaces as a normal short reply; reject instead.
+            input_ids = input_param.get("input_ids")
+            if isinstance(input_ids, list) and start_len > len(input_ids):
+                raise HttpError(
+                    400,
+                    f"routed_experts_start_len={start_len} exceeds the "
+                    f"{len(input_ids)}-token prompt",
+                )
+            return {
+                **self._routed_experts_kwargs,
+                "routed_experts_start_len": start_len,
+            }
+        return self._routed_experts_kwargs
 
     @staticmethod
     def _resolve_mm_hashes_supported(engine: Any) -> bool:
@@ -810,7 +840,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 sampling_params=sampling_params,
                 stream=True,
                 **require_reasoning_kwargs(self.engine, request),
-                **self._routed_experts_kwargs,
+                **self._routed_experts_kwargs_for(request, input_param),
                 **mm_hashes_kwargs,
                 external_trace_header=trace_header,
                 rid=sglang_request_id,
