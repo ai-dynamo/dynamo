@@ -65,6 +65,7 @@ print_launch_banner --multimodal "Launching Disaggregated Multimodal P/D ($GPU_L
 echo "Starting frontend..."
 env -u DYN_SYSTEM_PORT -u DYN_SYSTEM_PORT1 -u DYN_SYSTEM_PORT2 \
     python -m dynamo.frontend &
+dyn_track_worker frontend
 
 EXTRA_ARGS=""
 PD_EXTRA_ARGS=""
@@ -121,6 +122,7 @@ python -m "$WORKER_MODULE" \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_PREFILL}\"}" &
+dyn_track_worker prefill
 
 # Start decode worker
 echo "Starting decode worker on GPU $DYN_DECODE_WORKER_GPU (${DECODE_GPU_MEM_ARGS})..."
@@ -137,6 +139,7 @@ python -m "$WORKER_MODULE" \
   $PD_EXTRA_ARGS \
   --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' \
   --kv-events-config "{\"publisher\":\"zmq\",\"topic\":\"kv-events\",\"endpoint\":\"tcp://*:${KV_PORT_DECODE}\"}" &
+dyn_track_worker decode
 
 echo "=================================================="
 echo "All components started. Waiting for initialization..."

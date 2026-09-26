@@ -30,6 +30,7 @@
 # Functions:
 #   print_launch_banner    Print startup banner with model info and example curl
 #   print_curl_footer      Print a custom curl example with standard framing (heredoc)
+#   dyn_track_worker       Label a backgrounded process so its exit is named
 #   wait_any_exit          Wait for any background process to exit, propagate its code
 
 if [[ "${BASH_VERSINFO[0]}" -lt 4 || ( "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -lt 3 ) ]]; then
@@ -131,16 +132,72 @@ dynamo_exit_trap() {
     dynamo_reap_and_exit "$_rc"
 }
 
+# pid -> label, filled in by dyn_track_worker. Declared here so the lookup in
+# wait_any_exit is safe in scripts that never label anything.
+declare -A DYN_TRACKED_WORKERS=()
+
+# dyn_track_worker <label> [pid]
+# Labels the process just backgrounded ($! by default); call it right after `&`.
+dyn_track_worker() {
+    local _label="$1"
+    local _pid="${2:-$!}"
+    if [[ -z "$_pid" ]]; then
+        echo "dyn_track_worker: no pid to label as '$_label' (missing '&'?)" >&2
+        return 1
+    fi
+    DYN_TRACKED_WORKERS["$_pid"]="$_label"
+}
+
 wait_any_exit() {
     trap 'dynamo_reap_and_exit 0' TERM INT
-    if ! jobs -p | grep -q .; then
-        echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
-        exit 1
-    fi
     # `|| _rc=$?` keeps set -e from swallowing the child's exit code.
     local _rc=0
-    wait -n || _rc=$?
-    echo "A background process exited with code $_rc"
+    local _pid=""
+    local _candidate_pid _candidate_rc
+    # Bash can remove a child that exited during startup from `jobs -p` and
+    # skip it in `wait -n`, while retaining its status for `wait <pid>`.
+    # Check saved PIDs before rejecting an empty job table or waiting again.
+    for _candidate_pid in "${!DYN_TRACKED_WORKERS[@]}"; do
+        if ! kill -0 "$_candidate_pid" 2>/dev/null; then
+            _candidate_rc=0
+            wait "$_candidate_pid" || _candidate_rc=$?
+            # Associative-array order is arbitrary; a clean exit must not
+            # hide another worker's startup failure.
+            if [[ -z "$_pid" ]] || (( _rc == 0 && _candidate_rc != 0 )); then
+                _pid="$_candidate_pid"
+                _rc=$_candidate_rc
+            fi
+        fi
+    done
+    if [[ -z "$_pid" ]]; then
+        if ! jobs -p | grep -q .; then
+            echo "wait_any_exit: no background processes found (script bug: did you forget '&'?)" >&2
+            exit 1
+        fi
+        if (( BASH_VERSINFO[0] > 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] >= 1) )); then
+            # `-p VAR` reports which child exited but needs bash 5.1+; the file's
+            # floor is 4.3, so fall back to a plain `wait -n` below.
+            wait -n -p _pid || _rc=$?
+        else
+            wait -n || _rc=$?
+        fi
+    fi
+    if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+        _pid=""
+    fi
+    # A child that had already been reaped before we got here is no longer in
+    # the jobs table, and `wait -n` can then return a pid that is still up.
+    # Naming a live worker as the one that left sends the reader after the
+    # wrong process, so fall back to the unnamed message instead.
+    if [[ -n "$_pid" ]] && kill -0 "$_pid" 2>/dev/null; then
+        _pid=""
+    fi
+    local _label="${DYN_TRACKED_WORKERS[${_pid:-0}]:-}"
+    if [[ -n "$_label" ]]; then
+        echo "Worker '$_label' (pid $_pid) exited with code $_rc"
+    else
+        echo "A background process exited with code $_rc"
+    fi
     # Backstop signal trap; double quotes bake _rc in before it goes out of scope.
     # shellcheck disable=SC2064  # intentional expand-at-set-time
     trap "dynamo_reap_and_exit $_rc" TERM INT
