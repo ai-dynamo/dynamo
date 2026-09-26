@@ -172,37 +172,73 @@ spec:
 
 You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
-<!--
-Maintenance: The DynamoGraphDeployment examples below use the legacy v1alpha1 API and are stale.
-Track their update or removal in GitHub issue #13852.
--->
-
 ## Usage with Dynamo
 
-Mount the Fluid-generated PVC in your DynamoGraphDeployment:
+Use the current [aggregate vLLM deployment](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg.yaml)
+with the Fluid-generated PVC mounted in both the frontend and worker. The worker
+loads the model from `/model`; the frontend needs the same files for tokenization.
+Create the deployment in the PVC's namespace, and wait for the model files to be
+available before starting it. Replace the image tag in both containers with the
+Dynamo runtime version used by your deployment.
+
+These examples use the `nvidia.com/v1beta1` DGD API and are validated against the
+operator's schema and admission rules. This validation does not exercise Fluid
+installation, model loading, or inference on a cluster.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: model-caching
 spec:
-  pvcs:
-    - name: s3-model
-  envs:
-    - name: HF_HOME
-      value: /model
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '{"Common": {"model": "/model", ...}}'
-  services:
-    worker:
-      volumeMounts:
-        - name: s3-model
-          mountPoint: /model
-    Processor:
-      volumeMounts:
-        - name: s3-model
-          mountPoint: /model
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: s3-model
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - /model
+          - --served-model-name
+          - cached-model
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '1'
+            requests:
+              ephemeral-storage: 2Gi
+          workingDir: /workspace/examples/backends/vllm
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: s3-model
+    replicas: 1
+    type: worker
 ```
 
 
@@ -277,47 +313,83 @@ spec:
       replicas: 1
 ```
 
-and the associated DynamoGraphDeployment with pod affinity to schedule the vllm worker on the same node than the Alluxio cache worker
+Create the associated DGD in `my-namespace`. The worker's node affinity targets
+the Fluid cache node; verify that the label below matches the nodes labeled by
+your Fluid installation. Adjust the GPU and memory requests for your hardware.
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: my-hello-world
+  namespace: my-namespace
 spec:
-  envs:
-  - name: DYN_LOG
-    value: "debug"
-  - name: DYN_DEPLOYMENT_CONFIG
-    value: '{"Common": {"model": "/model", "block-size": 64, "max-model-len": 16384},
-      "Frontend": {"served_model_name": "meta-llama/Llama-3.3-70B-Instruct", "endpoint":
-      "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router":
-      "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
-      "max-model-len"]}, "worker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
-      16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
-      {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
-      "Planner": {"environment": "kubernetes", "no-operation": true}}'
-  pvcs:
-    - name: llama-3-3-70b-instruct-model
-  services:
-    Processor:
-      volumeMounts:
-        - name: llama-3-3-70b-instruct-model
-          mountPoint: /model
-    worker:
-      volumeMounts:
-        - name: llama-3-3-70b-instruct-model
-          mountPoint: /model
-      extraPodSpec:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          name: main
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: llama-3-3-70b-instruct-model
+    replicas: 1
+    type: frontend
+  - name: VllmDecodeWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --model
+          - /model
+          - --served-model-name
+          - meta-llama/Llama-3.3-70B-Instruct
+          - --tensor-parallel-size
+          - '4'
+          - --enforce-eager
+          - --max-model-len
+          - '16384'
+          - --max-num-batched-tokens
+          - '16384'
+          - --enable-prefix-caching
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: '4'
+            requests:
+              ephemeral-storage: 2Gi
+              memory: 40Gi
+          workingDir: /workspace/examples/backends/vllm
+          volumeMounts:
+          - name: model-cache
+            mountPath: /model
+            readOnly: true
+        volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: llama-3-3-70b-instruct-model
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
-                - matchExpressions:
-                  - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
-                    operator: In
-                    values:
-                      - "true"
+              - matchExpressions:
+                - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
+                  operator: In
+                  values:
+                  - 'true'
+    replicas: 1
+    type: worker
 ```
 
 
