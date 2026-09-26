@@ -1,0 +1,139 @@
+<svg viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Dynamo Search UI mock</title>
+  <desc id="desc">A mock search dashboard with run progress, a parallel-coordinates search-space plot, a Pareto plot, ranked deployment candidates, and an expandable Sweeper log.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="8" flood-color="#091425" flood-opacity="0.12"/>
+    </filter>
+    <clipPath id="search-clip">
+      <rect x="55" y="276" width="825" height="285" rx="8"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F7FA"/>
+  <rect x="0" y="0" width="1440" height="72" fill="#111827"/>
+  <circle cx="38" cy="36" r="18" fill="#76B900"/>
+  <path d="M29 37 L35 43 L47 29" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="70" y="43" font-family="Inter, Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="#FFFFFF">Dynamo Search</text>
+  <text x="1174" y="42" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#CBD5E1">namespace</text>
+  <rect x="1250" y="20" width="156" height="34" rx="6" fill="#273449"/>
+  <text x="1266" y="42" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#FFFFFF">inference</text>
+  <path d="M1384 34 l6 6 l6 -6" fill="none" stroke="#CBD5E1" stroke-width="2"/>
+
+  <text x="32" y="116" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#64748B">DGDR / minimax-planner-search /</text>
+  <text x="263" y="116" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#334155">run-4</text>
+  <text x="32" y="151" font-family="Inter, Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#0F172A">MiniMax-M2.5 · B200 search</text>
+  <rect x="1255" y="118" width="151" height="38" rx="19" fill="#E8F7D0" stroke="#76B900"/>
+  <circle cx="1277" cy="137" r="6" fill="#76B900"/>
+  <text x="1292" y="142" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#3F6212">SEARCHING</text>
+
+  <g filter="url(#shadow)">
+    <rect x="32" y="178" width="1374" height="72" rx="10" fill="#FFFFFF"/>
+  </g>
+  <text x="55" y="204" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">ROUND PROGRESS</text>
+  <text x="55" y="232" font-family="Inter, Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#0F172A">23 / 80</text>
+  <rect x="165" y="213" width="480" height="13" rx="6.5" fill="#E2E8F0"/>
+  <rect x="165" y="213" width="138" height="13" rx="6.5" fill="#76B900"/>
+  <line x1="303" y1="210" x2="303" y2="229" stroke="#4D7C0F" stroke-width="2"/>
+  <text x="705" y="204" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">EVALUATIONS</text>
+  <text x="705" y="232" font-family="Inter, Helvetica, Arial, sans-serif" font-size="22" font-weight="700" fill="#0F172A">54 / 640</text>
+  <g font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+    <circle cx="890" cy="220" r="5" fill="#16A34A"/><text x="903" y="225" fill="#334155">41 feasible</text>
+    <circle cx="1000" cy="220" r="5" fill="#F59E0B"/><text x="1013" y="225" fill="#334155">8 infeasible</text>
+    <circle cx="1128" cy="220" r="5" fill="#DC2626"/><text x="1141" y="225" fill="#334155">2 failed</text>
+    <circle cx="1218" cy="220" r="5" fill="#64748B"/><text x="1231" y="225" fill="#334155">3 cache hits</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="32" y="270" width="870" height="330" rx="10" fill="#FFFFFF"/>
+  </g>
+  <text x="55" y="304" font-family="Inter, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#0F172A">Search-space exploration</text>
+  <text x="55" y="327" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#64748B">Each line is one evaluated configuration · color is outcome · opacity is objective score</text>
+
+  <g clip-path="url(#search-clip)">
+    <rect x="55" y="342" width="825" height="226" fill="#FAFBFC"/>
+    <g stroke="#CBD5E1" stroke-width="1">
+      <line x1="95" y1="365" x2="95" y2="530"/>
+      <line x1="245" y1="365" x2="245" y2="530"/>
+      <line x1="395" y1="365" x2="395" y2="530"/>
+      <line x1="545" y1="365" x2="545" y2="530"/>
+      <line x1="695" y1="365" x2="695" y2="530"/>
+      <line x1="845" y1="365" x2="845" y2="530"/>
+    </g>
+    <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="95,390 245,430 395,475 545,405 695,455 845,385" stroke="#16A34A" stroke-width="2.6" opacity="0.86"/>
+      <polyline points="95,500 245,390 395,410 545,455 695,385 845,430" stroke="#16A34A" stroke-width="2.1" opacity="0.52"/>
+      <polyline points="95,390 245,475 395,365 545,500 695,455 845,475" stroke="#16A34A" stroke-width="2" opacity="0.36"/>
+      <polyline points="95,500 245,430 395,475 545,405 695,385 845,385" stroke="#2563EB" stroke-width="3.4" opacity="0.95"/>
+      <polyline points="95,390 245,390 395,410 545,455 695,455 845,430" stroke="#2563EB" stroke-width="2.8" opacity="0.78"/>
+      <polyline points="95,500 245,475 395,365 545,405 695,385 845,475" stroke="#F59E0B" stroke-width="2.2" opacity="0.7" stroke-dasharray="7 5"/>
+      <polyline points="95,390 245,430 395,475 545,500 695,455 845,430" stroke="#DC2626" stroke-width="2.2" opacity="0.7" stroke-dasharray="4 5"/>
+      <polyline points="95,500 245,390 395,410 545,405 695,385 845,385" stroke="#16A34A" stroke-width="1.8" opacity="0.28"/>
+      <polyline points="95,390 245,475 395,410 545,455 695,455 845,475" stroke="#16A34A" stroke-width="1.8" opacity="0.28"/>
+    </g>
+    <g font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#64748B">
+      <text x="74" y="353">agg</text><text x="66" y="551">disagg</text>
+      <text x="235" y="353">TP 1</text><text x="235" y="551">TP 8</text>
+      <text x="385" y="353">EP 1</text><text x="385" y="551">EP 8</text>
+      <text x="531" y="353">1 repl.</text><text x="531" y="551">8 repl.</text>
+      <text x="677" y="353">round robin</text><text x="682" y="551">KV router</text>
+      <text x="827" y="353">planner off</text><text x="826" y="551">planner on</text>
+    </g>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="924" y="270" width="482" height="330" rx="10" fill="#FFFFFF"/>
+  </g>
+  <text x="947" y="304" font-family="Inter, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#0F172A">Pareto front</text>
+  <text x="947" y="327" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#64748B">Goodput per GPU vs. mean end-to-end latency</text>
+  <line x1="984" y1="536" x2="1368" y2="536" stroke="#94A3B8"/>
+  <line x1="984" y1="365" x2="984" y2="536" stroke="#94A3B8"/>
+  <g fill="#CBD5E1">
+    <circle cx="1034" cy="410" r="5"/><circle cx="1092" cy="452" r="5"/><circle cx="1160" cy="431" r="5"/>
+    <circle cx="1245" cy="478" r="5"/><circle cx="1295" cy="394" r="5"/><circle cx="1340" cy="455" r="5"/>
+    <circle cx="1080" cy="495" r="5"/><circle cx="1195" cy="503" r="5"/><circle cx="1320" cy="510" r="5"/>
+  </g>
+  <path d="M1015 485 C1080 450 1115 425 1168 413 S1250 392 1324 374" fill="none" stroke="#2563EB" stroke-width="2.5"/>
+  <g fill="#2563EB" stroke="#FFFFFF" stroke-width="2">
+    <circle cx="1015" cy="485" r="8"/><circle cx="1078" cy="450" r="8"/><circle cx="1168" cy="413" r="8"/>
+    <circle cx="1246" cy="392" r="8"/><circle cx="1324" cy="374" r="8"/>
+  </g>
+  <circle cx="1168" cy="413" r="12" fill="none" stroke="#76B900" stroke-width="3"/>
+  <text x="1185" y="405" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#4D7C0F">selected</text>
+  <text x="1121" y="572" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#64748B">goodput / GPU →</text>
+  <text x="950" y="485" transform="rotate(-90 950 485)" font-family="Inter, Helvetica, Arial, sans-serif" font-size="11" fill="#64748B">lower latency →</text>
+
+  <g filter="url(#shadow)">
+    <rect x="32" y="624" width="870" height="154" rx="10" fill="#FFFFFF"/>
+  </g>
+  <text x="55" y="658" font-family="Inter, Helvetica, Arial, sans-serif" font-size="17" font-weight="700" fill="#0F172A">Published candidates</text>
+  <g font-family="Inter, Helvetica, Arial, sans-serif" font-size="12">
+    <text x="55" y="688" font-weight="700" fill="#64748B">RANK</text><text x="118" y="688" font-weight="700" fill="#64748B">CANDIDATE</text>
+    <text x="464" y="688" font-weight="700" fill="#64748B">TOPOLOGY</text><text x="590" y="688" font-weight="700" fill="#64748B">GPUS</text>
+    <text x="680" y="688" font-weight="700" fill="#64748B">GOODPUT/GPU</text><text x="820" y="688" font-weight="700" fill="#64748B">STATE</text>
+    <line x1="55" y1="698" x2="880" y2="698" stroke="#E2E8F0"/>
+    <text x="67" y="723" font-weight="700" fill="#0F172A">1</text><text x="118" y="723" fill="#2563EB">minimax-planner-search-g4-0</text>
+    <text x="464" y="723" fill="#334155">agg TP4/EP4</text><text x="590" y="723" fill="#334155">8.3 avg</text><text x="680" y="723" fill="#334155">87.7 tok/s</text>
+    <rect x="815" y="706" width="65" height="22" rx="11" fill="#E8F7D0"/><text x="829" y="721" font-weight="700" fill="#4D7C0F">visible</text>
+    <line x1="55" y1="737" x2="880" y2="737" stroke="#F1F5F9"/>
+    <text x="67" y="761" font-weight="700" fill="#0F172A">2</text><text x="118" y="761" fill="#2563EB">minimax-planner-search-g4-7</text>
+    <text x="464" y="761" fill="#334155">disagg P8/D16</text><text x="590" y="761" fill="#334155">24 avg</text><text x="680" y="761" fill="#334155">82.1 tok/s</text>
+    <rect x="815" y="744" width="65" height="22" rx="11" fill="#E8F7D0"/><text x="829" y="759" font-weight="700" fill="#4D7C0F">visible</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="924" y="624" width="482" height="222" rx="10" fill="#111827"/>
+  </g>
+  <text x="947" y="658" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#F8FAFC">Sweeper log</text>
+  <text x="1335" y="658" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Hide</text>
+  <g font-family="SFMono-Regular, Consolas, monospace" font-size="11" fill="#CBD5E1">
+    <text x="947" y="690"><tspan fill="#64748B">14:28:12</tspan> round 23 started: 8 evaluations</text>
+    <text x="947" y="714"><tspan fill="#64748B">14:29:04</tspan> candidate 51 feasible score=87.70</text>
+    <text x="947" y="738"><tspan fill="#64748B">14:29:47</tspan> candidate 52 rejected: memory fit</text>
+    <text x="947" y="762"><tspan fill="#64748B">14:31:02</tspan> candidate 53 replay failed: timeout</text>
+    <text x="947" y="786"><tspan fill="#64748B">14:32:10</tspan> round 23 complete; pareto=17</text>
+    <text x="947" y="817" fill="#76B900">▌ waiting for round 24</text>
+  </g>
+
+  <text x="32" y="873" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#64748B">Mock interface for the experimental DGDR v1beta2 search workflow</text>
+</svg>
