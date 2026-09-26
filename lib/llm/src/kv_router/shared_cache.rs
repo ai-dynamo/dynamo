@@ -11,11 +11,17 @@
 //!    SGLang uses for the configured TP/PP/MLA layout.
 //! 4. Tracks those object keys from the Mooncake master's KV event stream.
 
+#[cfg(test)]
+mod ha_tests;
+mod mooncake_ha;
+
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
@@ -37,9 +43,17 @@ use dynamo_kv_router::{
     protocols::{SharedCacheHits, WorkerId},
 };
 
+use self::mooncake_ha::{MooncakeHaConfig, MooncakeHaResolver, is_mooncake_leader_unavailable};
+
 const SGLANG_HICACHE_MOONCAKE_RUNTIME_KEY: &str = "sglang_hicache_mooncake";
 const MOONCAKE_EVENT_RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const MOONCAKE_LEADER_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const MOONCAKE_LEADER_RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+const MOONCAKE_LEADER_WARNING_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_MOONCAKE_INDEX_ENTRIES: usize = 1_000_000;
+
+type MooncakeEndpointResolution =
+    Pin<Box<dyn Future<Output = anyhow::Result<Option<String>>> + Send>>;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct SglangHicacheMooncakeConfig {
@@ -56,6 +70,8 @@ struct SglangHicacheMooncakeConfig {
     extra_backend_tag: Option<String>,
     #[serde(default)]
     kv_events_endpoint: Option<String>,
+    #[serde(flatten)]
+    ha: MooncakeHaConfig,
 }
 
 impl SglangHicacheMooncakeConfig {
@@ -69,6 +85,7 @@ impl SglangHicacheMooncakeConfig {
             && self.tp_lcm_size == other.tp_lcm_size
             && self.should_split_heads == other.should_split_heads
             && self.extra_backend_tag == other.extra_backend_tag
+            && self.ha.is_compatible_with(&other.ha)
     }
 }
 
@@ -104,6 +121,8 @@ pub struct HicacheSharedKvCache {
     last_layout: Arc<ArcSwapOption<SglangHicacheMooncakeConfig>>,
     cancellation_token: CancellationToken,
     frontend_kv_events_endpoint: Option<String>,
+    ha_resolver: MooncakeHaResolver,
+    last_leader_resolution_warning: Arc<Mutex<Option<Instant>>>,
 }
 
 impl HicacheSharedKvCache {
@@ -132,6 +151,8 @@ impl HicacheSharedKvCache {
             last_layout: Arc::new(ArcSwapOption::empty()),
             cancellation_token,
             frontend_kv_events_endpoint,
+            ha_resolver: MooncakeHaResolver::default(),
+            last_leader_resolution_warning: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -148,14 +169,23 @@ impl HicacheSharedKvCache {
 
     fn clear_on_layout_change(&self, layout: &SglangHicacheMooncakeConfig) {
         let last_layout = self.last_layout.load();
-        if last_layout
-            .as_ref()
-            .is_some_and(|previous| previous.has_same_layout(layout))
+        if let Some(previous) = last_layout.as_ref()
+            && previous.has_same_layout(layout)
         {
+            // During a rolling upgrade, old workers omit the HA fields. Enrich the saved
+            // snapshot once a new worker advertises them so a later locator change is no
+            // longer compared against a permanent wildcard.
+            let enriched_ha = layout.ha.enriched_with(&previous.ha);
+            if enriched_ha != previous.ha {
+                let mut enriched = layout.clone();
+                enriched.ha = enriched_ha;
+                self.last_layout.store(Some(Arc::new(enriched)));
+            }
             return;
         }
         if last_layout.is_some() {
             self.clear();
+            self.ha_resolver.config_changed();
             tracing::warn!("SGLang Mooncake HiCache layout changed; cleared shared-cache state");
         }
         self.last_layout.store(Some(Arc::new(layout.clone())));
@@ -186,10 +216,23 @@ impl HicacheSharedKvCache {
             return None;
         }
 
-        self.clear_on_layout_change(first);
+        let mut resolved = first.clone();
+        resolved.ha = match MooncakeHaConfig::merge(configs.iter().map(|(_, config)| &config.ha)) {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(
+                    workers = ?configs.iter().map(|(worker_id, _)| *worker_id).collect::<Vec<_>>(),
+                    %error,
+                    "SGLang Mooncake HA runtime configs differ across workers; skipping shared-cache lookup"
+                );
+                return None;
+            }
+        };
+
+        self.clear_on_layout_change(&resolved);
 
         if let Some(endpoint) = &self.frontend_kv_events_endpoint {
-            return Some((first.clone(), endpoint.clone()));
+            return Some((resolved, endpoint.clone()));
         }
 
         let mut endpoints = configs
@@ -203,12 +246,50 @@ impl HicacheSharedKvCache {
             );
             return None;
         }
-        Some((first.clone(), endpoint.to_string()))
+        Some((resolved, endpoint.to_string()))
     }
 
+    #[cfg(test)]
     fn kv_events_endpoint(&self) -> Option<String> {
         self.resolve_mooncake_config_and_endpoint()
             .map(|(_, endpoint)| endpoint)
+    }
+
+    async fn resolved_kv_events_endpoint(
+        &self,
+        force_refresh: bool,
+    ) -> anyhow::Result<Option<String>> {
+        let Some((config, configured_endpoint)) = self.resolve_mooncake_config_and_endpoint()
+        else {
+            return Ok(None);
+        };
+        // This environment variable is an explicit frontend-side override and may point to a
+        // stable Service or relay which already follows the leader. Only worker-advertised
+        // endpoints are treated as host templates for direct leader discovery.
+        if self.frontend_kv_events_endpoint.is_some() {
+            return Ok(Some(configured_endpoint));
+        }
+        self.ha_resolver
+            .resolve_event_endpoint(&config.ha, &configured_endpoint, force_refresh)
+            .await
+            .map(Some)
+    }
+
+    fn endpoint_resolution(&self, force_refresh: bool) -> MooncakeEndpointResolution {
+        let cache = self.clone();
+        Box::pin(async move {
+            tokio::time::timeout(
+                MOONCAKE_LEADER_RESOLVE_TIMEOUT,
+                cache.resolved_kv_events_endpoint(force_refresh),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Mooncake leader resolution exceeded {:?}",
+                    MOONCAKE_LEADER_RESOLVE_TIMEOUT
+                )
+            })?
+        })
     }
 
     fn apply_batch(&self, sequence: u64, events: Vec<MooncakeObjectEvent>) {
@@ -290,11 +371,92 @@ impl HicacheSharedKvCache {
         }
     }
 
+    fn should_warn_leader_resolution_failure(&self) -> bool {
+        self.should_warn_leader_resolution_failure_at(Instant::now())
+    }
+
+    fn should_warn_leader_resolution_failure_at(&self, now: Instant) -> bool {
+        let mut last_warned_at = self
+            .last_leader_resolution_warning
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last_warned_at.is_some_and(|last| {
+            now.saturating_duration_since(last) < MOONCAKE_LEADER_WARNING_INTERVAL
+        }) {
+            return false;
+        }
+        *last_warned_at = Some(now);
+        true
+    }
+
+    fn reset_leader_resolution_warning(&self) {
+        *self
+            .last_leader_resolution_warning
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn should_reconnect_after_endpoint_resolution(
+        &self,
+        endpoint: &str,
+        result: anyhow::Result<Option<String>>,
+    ) -> bool {
+        match result {
+            Ok(next_endpoint) => {
+                self.reset_leader_resolution_warning();
+                if next_endpoint.as_deref() != Some(endpoint) {
+                    tracing::info!(%endpoint, next_endpoint = ?next_endpoint, "Mooncake HA leader changed; reconnecting KV events");
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(error) if is_mooncake_leader_unavailable(&error) => {
+                self.record_subscriber_error();
+                self.clear();
+                if self.should_warn_leader_resolution_failure() {
+                    tracing::warn!(%endpoint, %error, "Mooncake HA cluster has no active leader; cleared shared-cache state and reconnecting");
+                }
+                true
+            }
+            Err(error) => {
+                self.record_subscriber_error();
+                if self.should_warn_leader_resolution_failure() {
+                    tracing::warn!(%endpoint, %error, "Failed to refresh Mooncake HA leader; keeping current KV event subscription");
+                }
+                false
+            }
+        }
+    }
+
     async fn run_subscriber(mut self, cancellation_token: CancellationToken) {
         loop {
             let endpoint = loop {
-                if let Some(endpoint) = self.kv_events_endpoint() {
-                    break endpoint;
+                let mut resolution = self.endpoint_resolution(false);
+                let result = tokio::select! {
+                    _ = cancellation_token.cancelled() => return,
+                    result = self.runtime_configs.changed() => {
+                        if result.is_err() {
+                            self.clear();
+                            return;
+                        }
+                        continue;
+                    }
+                    result = &mut resolution => result,
+                };
+
+                match result {
+                    Ok(Some(endpoint)) => {
+                        self.reset_leader_resolution_warning();
+                        break endpoint;
+                    }
+                    Ok(None) => self.reset_leader_resolution_warning(),
+                    Err(error) => {
+                        self.record_subscriber_error();
+                        if self.should_warn_leader_resolution_failure() {
+                            tracing::warn!(%error, "Failed to resolve Mooncake KV event leader; retrying");
+                        }
+                    }
                 }
 
                 tokio::select! {
@@ -305,6 +467,7 @@ impl HicacheSharedKvCache {
                             return;
                         }
                     }
+                    _ = tokio::time::sleep(MOONCAKE_EVENT_RECONNECT_DELAY) => {}
                 }
             };
 
@@ -321,6 +484,10 @@ impl HicacheSharedKvCache {
                 }
             };
             tracing::info!(%endpoint, "Connected to Mooncake KV events");
+            let mut leader_refresh = tokio::time::interval(MOONCAKE_LEADER_REFRESH_INTERVAL);
+            leader_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            leader_refresh.tick().await;
+            let mut endpoint_resolution: Option<MooncakeEndpointResolution> = None;
 
             loop {
                 tokio::select! {
@@ -330,9 +497,21 @@ impl HicacheSharedKvCache {
                             self.clear();
                             return;
                         }
-                        let next_endpoint = self.kv_events_endpoint();
-                        if next_endpoint.as_deref() != Some(endpoint.as_str()) {
-                            tracing::info!(%endpoint, next_endpoint = ?next_endpoint, "Mooncake KV event endpoint changed; reconnecting");
+                        if endpoint_resolution.is_none() {
+                            endpoint_resolution = Some(self.endpoint_resolution(false));
+                        }
+                    }
+                    _ = leader_refresh.tick(), if endpoint_resolution.is_none() => {
+                        endpoint_resolution = Some(self.endpoint_resolution(true));
+                    }
+                    result = async {
+                        endpoint_resolution
+                            .as_mut()
+                            .expect("endpoint resolution is present when branch is enabled")
+                            .await
+                    }, if endpoint_resolution.is_some() => {
+                        endpoint_resolution = None;
+                        if self.should_reconnect_after_endpoint_resolution(&endpoint, result) {
                             break;
                         }
                     }
@@ -361,6 +540,7 @@ impl HicacheSharedKvCache {
                 }
             }
 
+            self.clear();
             tokio::select! {
                 _ = cancellation_token.cancelled() => return,
                 _ = tokio::time::sleep(MOONCAKE_EVENT_RECONNECT_DELAY) => {}
@@ -631,6 +811,7 @@ mod tests {
             should_split_heads: false,
             extra_backend_tag: None,
             kv_events_endpoint: Some("tcp://127.0.0.1:5557".to_string()),
+            ha: MooncakeHaConfig::default(),
         }
     }
 
@@ -1086,6 +1267,23 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[test]
+    fn test_leader_resolution_warnings_are_throttled_and_reset() {
+        let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
+        let now = Instant::now();
+
+        assert!(cache.should_warn_leader_resolution_failure_at(now));
+        assert!(!cache.should_warn_leader_resolution_failure_at(now + Duration::from_secs(1)));
+        assert!(
+            cache.should_warn_leader_resolution_failure_at(now + MOONCAKE_LEADER_WARNING_INTERVAL)
+        );
+
+        cache.reset_leader_resolution_warning();
+        assert!(cache.should_warn_leader_resolution_failure_at(
+            now + MOONCAKE_LEADER_WARNING_INTERVAL + Duration::from_secs(1)
+        ));
     }
 
     #[tokio::test]
