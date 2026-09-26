@@ -2259,6 +2259,7 @@ def _test_router_decisions_disagg(
     request_plane: str = "nats",
     router_aic_config: Optional[dict[str, Any]] = None,
     enable_bootstrap: bool = False,
+    require_kv_hit: bool = False,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup via HTTP frontend.
 
@@ -2281,6 +2282,10 @@ def _test_router_decisions_disagg(
         test_payload: Base test payload to send to /v1/chat/completions
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
         router_aic_config: Optional AIC router perf-model config for frontend KV routing.
+        require_kv_hit: If True, also assert the router predicted a KV cache hit
+            (nvext.timing.kv_hit_rate > 0) for requests 2-4, which share a prefix
+            with the previous request. This catches worker/router block-hash
+            mismatches that routing to the same worker alone would not.
 
     Raises:
         AssertionError: If prefill_worker_ids differ across requests (prefix reuse failure)
@@ -2392,6 +2397,13 @@ def _test_router_decisions_disagg(
                             timing_info is not None
                         ), f"Request {i + 1}: Expected timing info in final chunk, got None"
                         verify_response_timing(timing_info, disagg=not enable_bootstrap)
+                        if require_kv_hit and i > 0:
+                            kv_hit_rate = timing_info.get("kv_hit_rate")
+                            assert kv_hit_rate is not None and kv_hit_rate > 0, (
+                                f"Request {i + 1}: expected kv_hit_rate > 0 on a shared "
+                                f"prefix, got {kv_hit_rate}; worker KV event hashes "
+                                f"may not match the router's"
+                            )
 
                     # Small delay between requests
                     await asyncio.sleep(1)
