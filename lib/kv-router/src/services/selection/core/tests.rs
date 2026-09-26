@@ -2277,6 +2277,15 @@ async fn queued_selection_returns_refreshed_overlap_snapshot() {
     }
     let key = default_key();
     let entry = core.entry(&key).expect("entry");
+    // Upserts publish membership before the scheduler's watch task applies it.
+    wait_until("scheduler worker registration", || {
+        entry
+            .scheduler
+            .get_potential_loads(None, 8, Default::default(), true)
+            .len()
+            == 2
+    })
+    .await;
     entry
         .indexer
         .apply_event_routed(store_event(1, 0, 1, &[], &[11], StorageTier::Device))
