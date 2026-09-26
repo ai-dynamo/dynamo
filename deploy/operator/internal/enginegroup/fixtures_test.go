@@ -34,6 +34,7 @@ const (
 
 type testCapacityAdapter struct {
 	observation CapacityObservation
+	observeErr  error
 	planned     map[ReplicaID]ReplicaIncarnation
 	firstTarget *CapacityTarget
 	lastTarget  *CapacityTarget
@@ -45,6 +46,9 @@ type testCapacityAdapter struct {
 }
 
 func (a *testCapacityAdapter) Observe(context.Context, GroupID) (CapacityObservation, error) {
+	if a.observeErr != nil {
+		return CapacityObservation{}, a.observeErr
+	}
 	return cloneCapacityObservation(a.observation), nil
 }
 
@@ -132,6 +136,7 @@ func convergeReleaseFences(existing []ReleaseFence, target CapacityTarget) []Rel
 
 type testTrafficAdapter struct {
 	observation     TrafficObservation
+	observeErr      error
 	lastTarget      *TrafficTarget
 	applyCalls      int
 	autoDrain       bool
@@ -141,6 +146,9 @@ type testTrafficAdapter struct {
 }
 
 func (a *testTrafficAdapter) Observe(context.Context, GroupID) (TrafficObservation, error) {
+	if a.observeErr != nil {
+		return TrafficObservation{}, a.observeErr
+	}
 	return cloneTrafficObservation(a.observation), nil
 }
 
@@ -193,6 +201,7 @@ func (a *testTrafficAdapter) Apply(
 
 type testMembershipAdapter struct {
 	topology              MembershipTopology
+	observeErr            error
 	transitions           map[string]MembershipTransitionObservation
 	targets               map[string]MembershipTarget
 	lastPlanValidation    *PlanValidationRequest
@@ -245,6 +254,9 @@ func (a *testMembershipAdapter) Observe(
 	_ GroupID,
 	transitionID string,
 ) (MembershipObservation, error) {
+	if a.observeErr != nil {
+		return MembershipObservation{}, a.observeErr
+	}
 	observation := MembershipObservation{
 		CommittedTopology:     cloneTopology(a.topology),
 		RequestedTransitionID: transitionID,
@@ -328,7 +340,7 @@ func (v *testServingVerifier) Verify(
 	}
 	return VerificationResult{Proof: &ServingProof{
 		TopologyGeneration: topology.Generation,
-		RuntimeDigest:      topologyRuntimeDigest(topology),
+		RuntimeDigest:      TopologyRuntimeDigest(topology),
 		ObservedAt:         time.Unix(100, 0),
 	}}, nil
 }
