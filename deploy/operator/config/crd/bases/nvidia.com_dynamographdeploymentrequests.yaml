@@ -605,6 +605,7 @@ spec:
                         - enum:
                             - gb200_sxm
                             - gb10
+                            - b300_sxm
                             - b200_sxm
                             - h200_sxm
                             - h100_sxm
@@ -623,6 +624,7 @@ spec:
                         - enum:
                             - gb200_sxm
                             - gb10
+                            - b300_sxm
                             - b200_sxm
                             - h200_sxm
                             - h100_sxm
