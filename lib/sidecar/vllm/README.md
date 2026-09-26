@@ -40,6 +40,7 @@ It is a standalone Rust executable and is also compiled into
 - Preprocessed image features with dense placeholders, plus sparse placeholders when the renderer preserves `is_embed`. Sparse layouts such as Nemotron-H Omni require a vLLM revision containing [vllm-project/vllm#54548](https://github.com/vllm-project/vllm/pull/54548) on Python renderer round-trips.
 - Dynamic LoRA load, unload, list, discovery, and request selection when vLLM enables LoRA
 - Opaque encoder-cache handoff through vLLM `ec_transfer_params`
+- Multimodal-aware KV routing for images
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
@@ -202,6 +203,19 @@ The RL endpoint, engine routes, and raw HTTP compatibility surface are administr
 The sidecar discovers `model_id`, the served name, context length, KV capacity, scheduler limits, data-parallel topology, and KV-event sources through `vllm.Control`. `model_id` must be readable locally or fetchable by Dynamo for tokenization and chat templates. Parser defaults are not advertised because the current inference protocol cannot preserve all parser-related request semantics.
 
 For hybrid data parallelism, run one vLLM gRPC frontend and sidecar per node with `--data-parallel-hybrid-lb` and the node's local DP size and starting rank. Point each sidecar's `--grpc-endpoint` at its local frontend. This requires a vLLM build that reports local DP size.
+
+For a multimodal model, the sidecar resolves the model's chat image-placeholder
+token from its local or Hugging Face configuration and attaches it to every ZMQ
+source. This lets backend events use the same canonical image hash as frontend
+routing. If the model configuration or exact-routing prerequisites cannot be
+resolved, inference remains available but falls back to ordinary text-prefix KV
+routing.
+
+The forwarded 64-hex vLLM media identifier contains Dynamo's 64-bit routing hash
+and becomes part of vLLM's encoder and prefix-cache identity. Treat passed-through
+HTTP URLs as immutable: changing the bytes behind one URL can reuse stale media
+cache state. User-supplied media UUIDs retain their vLLM semantics and disable
+exact Dynamo multimodal credit.
 
 Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
 

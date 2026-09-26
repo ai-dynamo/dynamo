@@ -15,6 +15,13 @@ description = "Rust sidecar for vLLM's native gRPC server"
 name = "dynamo-vllm-sidecar"
 path = "src/main.rs"
 
+[features]
+# On for the standalone binary. The Python bindings turn it off by default and
+# forward their own opt-in `mm-routing` feature, so the default wheel stays lean.
+default = ["mm-routing"]
+# Resolve the image placeholder token for exact multimodal KV routing.
+mm-routing = ["dynamo-llm/mm-routing"]
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
 dynamo-llm = { path = "../../llm", default-features = false }

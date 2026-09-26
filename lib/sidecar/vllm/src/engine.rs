@@ -40,6 +40,7 @@ pub struct VllmSidecarEngine {
     is_lora_enabled: bool,
     is_hot_swap_requested: bool,
     lifecycle: lora::LoraLifecycle,
+    routing_image_token_id: OnceCell<Option<u32>>,
     cancel: CancellationToken,
 }
 
@@ -68,6 +69,7 @@ impl VllmSidecarEngine {
             runtime_endpoint: OnceCell::new(),
             lora_downloader: OnceCell::new(),
             lifecycle: lora::LoraLifecycle::default(),
+            routing_image_token_id: OnceCell::new(),
             cancel: CancellationToken::new(),
         }
     }
@@ -693,6 +695,11 @@ impl LLMEngine for VllmSidecarEngine {
         let observed = DiscoveredModel::from_proto(model, server)?;
         self.model.ensure_startup_compatible(&observed)?;
         let engine_config = observed.engine_config(!self.mode.is_encode())?;
+        let routing_image_token_id =
+            resolve_routing_image_token_id(&observed, startup_deadline).await;
+        self.routing_image_token_id
+            .set(routing_image_token_id)
+            .map_err(|_| client::engine_shutdown("vLLM sidecar has already started"))?;
         let connection_count = client.connection_count();
         self.client
             .set(client)
@@ -1067,6 +1074,7 @@ impl LLMEngine for VllmSidecarEngine {
         if reported_sources.is_empty() {
             return Ok(Vec::new());
         }
+        let image_token_id = self.routing_image_token_id.get().copied().flatten();
         for source in reported_sources {
             if source.transport != "zmq" {
                 tracing::warn!(
@@ -1100,6 +1108,7 @@ impl LLMEngine for VllmSidecarEngine {
                 endpoint: zmq_connect_endpoint(&source.endpoint, &self.endpoint),
                 topic: source.topic,
                 dp_rank,
+                image_token_id,
             });
         }
         if ranks.len() != expected_dp_size as usize {
@@ -1109,6 +1118,100 @@ impl LLMEngine for VllmSidecarEngine {
             )));
         }
         Ok(sources)
+    }
+}
+
+#[cfg(feature = "mm-routing")]
+const MM_ROUTING_CONFIG_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(feature = "mm-routing")]
+fn routing_config_fetch_deadline(now: Instant, startup_deadline: Instant) -> Instant {
+    now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+        .map_or(startup_deadline, |deadline| deadline.min(startup_deadline))
+}
+
+#[cfg(feature = "mm-routing")]
+async fn resolve_routing_image_token_id(
+    model: &DiscoveredModel,
+    startup_deadline: Instant,
+) -> Option<u32> {
+    use dynamo_llm::local_model::LocalModel;
+    use dynamo_llm::preprocessor::mm_routing::image::resolve_exact_routing_image_token_id;
+    use std::path::PathBuf;
+    use tokio::time::timeout_at;
+
+    if !model.supports_multimodal {
+        return None;
+    }
+
+    let source_path = PathBuf::from(&model.source);
+    let model_dir = if source_path.is_dir() {
+        source_path
+    } else {
+        let fetch_deadline = routing_config_fetch_deadline(Instant::now(), startup_deadline);
+        let fetched = timeout_at(fetch_deadline, LocalModel::fetch(&model.source, true))
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("model configuration fetch timed out")));
+        match fetched {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    model = %model.source,
+                    fetch_timeout_secs = MM_ROUTING_CONFIG_FETCH_TIMEOUT.as_secs(),
+                    %error,
+                    "Unable to fetch model configuration; exact multimodal KV routing is disabled"
+                );
+                return None;
+            }
+        }
+    };
+    let image_token_id = resolve_exact_routing_image_token_id(&model.source, &model_dir);
+    match image_token_id {
+        Some(image_token_id) => tracing::info!(
+            model = %model.source,
+            image_token_id,
+            "Resolved image placeholder token for multimodal KV routing"
+        ),
+        None => tracing::warn!(
+            model = %model.source,
+            model_dir = %model_dir.display(),
+            "Exact multimodal routing prerequisites are unavailable; source metadata will omit the image token"
+        ),
+    }
+    image_token_id
+}
+
+#[cfg(not(feature = "mm-routing"))]
+async fn resolve_routing_image_token_id(
+    _model: &DiscoveredModel,
+    _startup_deadline: Instant,
+) -> Option<u32> {
+    None
+}
+
+#[cfg(all(test, feature = "mm-routing"))]
+mod mm_routing_tests {
+    use super::*;
+
+    #[test]
+    fn config_fetch_deadline_is_capped_independently_of_startup() {
+        let now = Instant::now();
+        let long_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(30 * 60))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, long_startup_deadline),
+            now.checked_add(MM_ROUTING_CONFIG_FETCH_TIMEOUT)
+                .expect("test config fetch deadline")
+        );
+
+        let short_startup_deadline = now
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("test startup deadline");
+        assert_eq!(
+            routing_config_fetch_deadline(now, short_startup_deadline),
+            short_startup_deadline
+        );
     }
 }
 
