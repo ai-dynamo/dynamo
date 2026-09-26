@@ -829,6 +829,8 @@ pub mod response_plane {
     /// Response transport used by every runtime in this process: "tcp" or "quic".
     /// Defaults to "tcp".
     pub const DYN_RESPONSE_PLANE: &str = "DYN_RESPONSE_PLANE";
+    /// Messenger transport for Velo responses: tcp (default) or ucx.
+    pub const DYN_VELO_RESPONSE_TRANSPORT: &str = "DYN_VELO_RESPONSE_TRANSPORT";
 }
 
 /// TCP request callback listener environment variables. Names are retained for compatibility.
@@ -1172,6 +1174,7 @@ mod tests {
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
             response_plane::DYN_RESPONSE_PLANE,
+            response_plane::DYN_VELO_RESPONSE_TRANSPORT,
             request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
             request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             request_plane::DYN_TCP_RPC_HOST,

@@ -42,6 +42,7 @@ select-service = ["dep:clap", "dep:tracing-subscriber", "dynamo-kv-router/standa
 replay-bench = ["dynamo-mocker/replay-bench"]
 aic-forward-pass = ["dep:aisimulate-core"]
 nvtx = ["dynamo-runtime/nvtx"]
+velo-ucx = ["dynamo-runtime/velo-ucx"]
 # Enable in-process MM-aware KV routing
 # (per-image token-count + placeholder expansion + block-level mm_hash).
 # Opt-in at the wheel build (`maturin build --features mm-routing`)

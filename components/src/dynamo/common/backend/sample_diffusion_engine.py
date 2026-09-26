@@ -57,7 +57,7 @@ class SampleDiffusionEngine(DiffusionEngine):
         parser.add_argument("--request-plane", default="tcp")
         parser.add_argument(
             "--response-plane",
-            choices=["tcp", "quic"],
+            choices=["tcp", "quic", "velo"],
             default=os.environ.get("DYN_RESPONSE_PLANE", "tcp"),
         )
         parser.add_argument("--event-plane", default=None)

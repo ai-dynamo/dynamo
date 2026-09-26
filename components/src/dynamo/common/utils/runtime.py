@@ -60,7 +60,7 @@ def create_runtime(
         use_kv_events: Deprecated. NATS enablement is now determined automatically
             from the event-plane configuration. This parameter is accepted for
             backwards compatibility but will be removed in a future release.
-        response_plane: Response transport (tcp or quic). Frontend and workers
+        response_plane: Response transport (tcp, quic, or velo). Frontend and workers
             must use the same value.
 
     Returns:
@@ -75,8 +75,8 @@ def create_runtime(
             stacklevel=2,
         )
 
-    if response_plane not in {"tcp", "quic"}:
-        raise ValueError("response_plane must be 'tcp' or 'quic'")
+    if response_plane not in {"tcp", "quic", "velo"}:
+        raise ValueError("response_plane must be 'tcp', 'quic', or 'velo'")
 
     loop = asyncio.get_running_loop()
 

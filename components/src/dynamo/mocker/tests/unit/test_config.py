@@ -835,6 +835,7 @@ def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
 
     assert parse_args([]).response_plane == "tcp"
     assert parse_args(["--response-plane", "quic"]).response_plane == "quic"
+    assert parse_args(["--response-plane", "velo"]).response_plane == "velo"
     monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
     assert parse_args([]).response_plane == "quic"
 
