@@ -170,6 +170,12 @@ pub mod frontend_service {
     /// Whether the frontend can route at least one inference request for a model
     pub const MODEL_READY: &str = "model_ready";
 
+    /// Number of discovered physical workers by router admission state
+    pub const ROUTER_WORKERS: &str = "router_workers";
+
+    /// Current router admission state and reason for a discovered worker
+    pub const ROUTER_WORKER_STATE: &str = "router_worker_state";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
