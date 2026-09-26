@@ -41,7 +41,7 @@ Coverage matrix:
   decode sweep within agg mode; ``gpu_1``).
 * ``test_self_benchmark_disagg_serves_after_bench`` -- prefill worker
   (``--benchmark-mode prefill``) + decode worker
-  (``--benchmark-mode decode``, NixlConnector ``kv_both``); the
+  (``--benchmark-mode decode``, NixlConnector ``kv_consumer``); the
   user-reported configuration. Exercises BOTH fixes simultaneously
   (``gpu_2``).
 
@@ -275,7 +275,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
                 ]
             )
             health_check_urls = [
@@ -286,7 +286,7 @@ class _DynamoBenchmarkWorker(ManagedProcess):
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    '{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}',
                 ]
             )
             health_check_urls = [
@@ -504,7 +504,7 @@ def test_self_benchmark_disagg_serves_after_bench(
     This is the user-reported configuration. Exercises:
 
     * connector-metadata fix on the decode worker (NixlConnector
-      kv_both -- worker would die on the first synthetic decode batch
+      ``kv_consumer`` -- worker would die on the first synthetic decode batch
       if the metadata isn't attached);
     * prompt-padding fix on both workers' decode sweeps (the prefill
       worker also runs decode warmup steps via ``_bench_step_warmup``).

@@ -199,7 +199,7 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -237,10 +237,28 @@ def test_removed_multimodal_role_flags_are_rejected(flag, mock_vllm_cli):
 # --connector removal tests
 
 
-def test_connector_nixl_raises_error_with_migration_hint(mock_vllm_cli):
-    """Test that --connector nixl raises ValueError with --kv-transfer-config hint."""
+def test_connector_nixl_raises_error_without_mode(mock_vllm_cli):
     mock_vllm_cli("--model", "Qwen/Qwen3-0.6B", "--connector", "nixl")
     with pytest.raises(ValueError, match="--connector is no longer supported"):
+        parse_args()
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_role"),
+    [("prefill", "kv_producer"), ("decode", "kv_consumer")],
+)
+def test_connector_nixl_migration_hint_uses_disaggregation_role(
+    mock_vllm_cli, mode, expected_role
+):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--connector",
+        "nixl",
+        "--disaggregation-mode",
+        mode,
+    )
+    with pytest.raises(ValueError, match=f'"kv_role": "{expected_role}"'):
         parse_args()
 
 
@@ -294,18 +312,20 @@ def test_prefill_worker_without_kv_transfer_config_raises(mock_vllm_cli):
 
 def test_connector_to_kv_transfer_json_single():
     """Test _connector_to_kv_transfer_json returns valid JSON for a single connector."""
-    result = json.loads(_connector_to_kv_transfer_json(["nixl"]))
-    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+    result = json.loads(_connector_to_kv_transfer_json(["nixl"], "kv_producer"))
+    assert result == {"kv_connector": "NixlConnector", "kv_role": "kv_producer"}
 
 
 def test_connector_to_kv_transfer_json_multi():
     """Test _connector_to_kv_transfer_json wraps multiple connectors in PdConnector."""
-    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"]))
+    result = json.loads(_connector_to_kv_transfer_json(["kvbm", "nixl"], "kv_consumer"))
     assert result["kv_connector"] == "PdConnector"
+    assert result["kv_role"] == "kv_both"
     nested = result["kv_connector_extra_config"]["connectors"]
-    nested_names = [c["kv_connector"] for c in nested]
-    assert "DynamoConnector" in nested_names
-    assert "NixlConnector" in nested_names
+    assert {c["kv_connector"]: c["kv_role"] for c in nested} == {
+        "DynamoConnector": "kv_both",
+        "NixlConnector": "kv_consumer",
+    }
 
 
 # _uses_nixl_connector / _uses_dynamo_connector tests
@@ -326,7 +346,7 @@ def _make_engine_cfg(kv_connector=None, extra_config=None):
 _PD_KVBM_NIXL = {
     "connectors": [
         {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
-        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
     ]
 }
 
@@ -666,7 +686,7 @@ def test_disaggregation_mode_prefill(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
@@ -2053,7 +2073,7 @@ class TestEmbeddingWorkerFlag:
             "--disaggregation-mode",
             "prefill",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
         )
         with pytest.raises(ValueError, match="--embedding-worker is only valid"):
             parse_args()

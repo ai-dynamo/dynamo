@@ -304,10 +304,11 @@ class DynamoWorkerProcess(ManagedProcess):
             command.extend(["--disaggregation-mode", "decode"])
 
         if is_prefill is not None:
+            nixl_role = "kv_producer" if is_prefill else "kv_consumer"
             command.extend(
                 [
                     "--kv-transfer-config",
-                    '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+                    json.dumps({"kv_connector": "NixlConnector", "kv_role": nixl_role}),
                 ]
             )
 
