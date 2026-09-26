@@ -508,6 +508,15 @@ impl State {
             .get(request_id)
             .and_then(|req| req.pinned_worker)
         {
+            // An empty capacity map is MDC cold start, not a full worker. Release
+            // to the pin when it is still live so the request is not held until
+            // the client deadline. Do not fall through to another worker.
+            if capacities.is_empty() {
+                if capacities.is_live(pinned) {
+                    return self.release_request(request_id, Some(pinned));
+                }
+                return self.defer_program(&session_id, now);
+            }
             if !self.worker_has_room(pinned, required, capacities) {
                 return self.defer_program(&session_id, now);
             }
@@ -1765,8 +1774,6 @@ mod tests {
         }
     }
 
-    // Regression for issue #15280: hard-pinned request must be charged to the
-    // authoritative (pinned) Worker, not a provisional least-used selection.
     #[test]
     fn hard_pin_is_charged_to_authoritative_worker_not_provisional() {
         let now = Instant::now();
@@ -1787,7 +1794,6 @@ mod tests {
         existing.acting_since = Some(now);
         state.insert_program("session-existing".into(), existing);
 
-        // Register P1 hard-pinned to W0; with the fix it must charge W0, not W1.
         let p1_notify = state
             .register(
                 RequestRegistration::new(
@@ -1803,15 +1809,12 @@ mod tests {
             )
             .unwrap();
 
-        // Must be released to W0 immediately.
         assert_eq!(
             state.wait_status("p1", &p1_notify),
             WaitStatus::Released(Some(w0))
         );
-        // W0 ledger must stay within bounds.
         let w0_used = state.normal_usage.get(&w0).copied().unwrap_or(0);
         assert!(w0_used <= CAPACITY, "W0 overrun: {w0_used}/{CAPACITY}");
-        // W1 must carry no charge.
         assert_eq!(state.normal_usage.get(&w1).copied().unwrap_or(0), 0);
 
         // Simulate Sent confirming W0 (no ledger move should occur).
@@ -1847,8 +1850,6 @@ mod tests {
         assert!(w1_used <= CAPACITY, "W1 overrun: {w1_used}/{CAPACITY}");
     }
 
-    // A later request pinned to a different worker must not be released onto
-    // the session's existing assignment (issue #15280).
     #[test]
     fn hard_pin_overrides_existing_session_assignment() {
         let now = Instant::now();
@@ -1889,10 +1890,8 @@ mod tests {
         assert!(state.normal_usage.get(&w1).copied().unwrap_or(0) > 0);
     }
 
-    // No live capacity card: do not release the pin onto a sticky worker or
-    // with an empty placement.
     #[test]
-    fn hard_pin_defers_when_snapshot_cannot_charge_its_worker() {
+    fn hard_pin_cold_start_releases_to_pinned_worker() {
         let now = Instant::now();
         let pinned = WorkerWithDpRank::new(0, 0);
         let sticky = WorkerWithDpRank::new(1, 0);
@@ -1920,17 +1919,49 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(state.wait_status("req", &notify), WaitStatus::Waiting);
         assert_eq!(
-            state.programs["session"].lifecycle,
-            ProgramLifecycle::Paused
+            state.wait_status("req", &notify),
+            WaitStatus::Released(Some(pinned))
         );
-        assert!(state.programs["session"].assigned_worker.is_none());
-        assert!(state.normal_usage.is_empty());
+        assert_eq!(state.programs["session"].assigned_worker, Some(pinned));
+        assert_eq!(state.normal_usage.get(&sticky).copied().unwrap_or(0), 0);
+        assert!(state.normal_usage.get(&pinned).copied().unwrap_or(0) > 0);
     }
 
-    // Resume and the timeout escape must not move a deferred hard pin onto a
-    // worker that has room when the pin does not.
+    #[test]
+    fn hard_pin_cold_start_does_not_release_a_removed_pin_to_the_sticky_worker() {
+        let now = Instant::now();
+        let pinned = WorkerWithDpRank::new(0, 0);
+        let sticky = WorkerWithDpRank::new(1, 0);
+        let caps = WorkerCapacitySnapshot::new([]).with_live_workers([sticky]);
+        let mut state = state(ThunderAgentConfig {
+            buffer_per_program: 0,
+            ..Default::default()
+        });
+        let mut program = Program::new(1_000);
+        program.assigned_worker = Some(sticky);
+        state.insert_program("session".into(), program);
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "req".into(),
+                    "session".into(),
+                    100,
+                    RequestProgress::new(100).0,
+                    false,
+                )
+                .with_pinned_worker(pinned),
+                &caps,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(state.wait_status("req", &notify), WaitStatus::Waiting);
+        assert_eq!(state.normal_usage.get(&sticky).copied().unwrap_or(0), 0);
+        assert_eq!(state.normal_usage.get(&pinned).copied().unwrap_or(0), 0);
+    }
+
     #[test]
     fn deferred_hard_pin_stays_deferred_when_another_worker_has_room() {
         let now = Instant::now();
