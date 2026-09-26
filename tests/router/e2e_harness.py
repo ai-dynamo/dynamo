@@ -423,7 +423,14 @@ def run_disagg_router_decisions_test(
     | None = None,
     test_payload: dict[str, Any] | None = None,
     test_kwargs: dict[str, Any] | None = None,
+    post_check: Callable[[Any, Any], None] | None = None,
 ):
+    """Run the disagg router decisions test against prefill and decode workers.
+
+    ``post_check(prefill_workers, decode_workers)``, if set, runs after the
+    routing assertions while the workers are still up (e.g. to scrape their
+    /metrics).
+    """
     shared_namespace = f"test-namespace-{generate_random_suffix()}"
     frontend_port = allocate_frontend_ports(request, 1)[0]
 
@@ -447,6 +454,8 @@ def run_disagg_router_decisions_test(
             request_plane=request_plane,
             **(test_kwargs or {}),
         )
+        if post_check is not None:
+            post_check(prefill_workers, decode_workers)
 
     if worker_context_factory is not None:
         with worker_context_factory(shared_namespace) as workers:

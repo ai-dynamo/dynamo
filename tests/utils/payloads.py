@@ -2150,6 +2150,46 @@ class SGLangMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class SGLangSpecDecodeMetricsPayload(SGLangMetricsPayload):
+    """Metrics validation for an SGLang worker running speculative decoding.
+
+    Both checks use cumulative counters rather than the windowed
+    ``sglang:spec_accept_length`` gauge, which only refreshes on SGLang's decode
+    log interval and can be stale after short requests.
+    """
+
+    # Loose floor on tokens per verify step; a working EAGLE3 draft measures ~2.2.
+    min_tokens_per_verify: float = 1.2
+
+    @staticmethod
+    def _sum_counter(name: str, content: str) -> float:
+        values = find_metric_samples(content, name)
+        if not values:
+            raise AssertionError(f"Metric '{name}' not found in metrics output")
+        return sum(values)
+
+    def validate(self, response: Any, content: str) -> None:
+        super().validate(response, content)
+
+        verify_calls = self._sum_counter("sglang:spec_verify_calls_total", content)
+        if verify_calls <= 0:
+            raise AssertionError(
+                "sglang:spec_verify_calls_total is 0; speculative decoding did not run"
+            )
+        logger.info(f"SUCCESS: sglang:spec_verify_calls_total = {verify_calls}")
+
+        generated = self._sum_counter("sglang:generation_tokens_total", content)
+        tokens_per_verify = generated / verify_calls
+        if tokens_per_verify <= self.min_tokens_per_verify:
+            raise AssertionError(
+                f"{generated} generated tokens over {verify_calls} verify calls is "
+                f"{tokens_per_verify:.2f} tokens/verify, expected > "
+                f"{self.min_tokens_per_verify}; draft tokens are not being accepted"
+            )
+        logger.info(f"SUCCESS: {tokens_per_verify:.2f} tokens per verify step")
+
+
+@dataclass
 class SGLangDisaggMetricsPayload(SGLangMetricsPayload):
     """Metrics validation for SGLang disaggregated workers.
 
