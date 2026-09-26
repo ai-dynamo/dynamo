@@ -671,8 +671,13 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_DEBUG_PERF`
 </ParamField>
 
-<ParamField path="--dyn-preprocess-workers" type="integer" default="0">
-  Worker processes for CPU-bound preprocessing. `0` uses the main event loop (vllm processor only).
+<ParamField path="--dyn-preprocess-workers" type="integer" default="auto for SGLang; 0 otherwise">
+  Experimental. For the SGLang processor, the default is `min(2, max(0, available CPUs - 1))`,
+  where available CPUs account for process affinity and visible cgroup CPU quotas. The automatic
+  count applies to each model's preprocessing pool, just like an explicit value. With multiple
+  models, the total number of workers grows with the model count and can exceed the available CPU
+  count. Set `0` to run preprocessing on the main event loop. Nonzero values are supported only
+  with the SGLang processor.
 
   Environment variable: `DYN_PREPROCESS_WORKERS`
 </ParamField>

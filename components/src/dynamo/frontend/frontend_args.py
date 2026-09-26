@@ -34,6 +34,123 @@ _U32_MAX = 2**32 - 1
 _MAX_SESSION_AFFINITY_TTL_SECS = 31_536_000
 
 
+def _mountinfo_path(value: str) -> str:
+    for escape, character in (
+        (r"\040", " "),
+        (r"\011", "\t"),
+        (r"\012", "\n"),
+        (r"\134", "\\"),
+    ):
+        value = value.replace(escape, character)
+    return value
+
+
+def _cpu_quota_count() -> Optional[int]:
+    memberships: dict[str, pathlib.PurePosixPath] = {}
+    try:
+        for line in pathlib.Path("/proc/self/cgroup").read_text().splitlines():
+            parts = line.split(":", 2)
+            if len(parts) != 3 or not parts[2].startswith("/"):
+                continue
+            if parts[0] == "0" and not parts[1]:
+                memberships["v2"] = pathlib.PurePosixPath(parts[2])
+            elif "cpu" in parts[1].split(","):
+                memberships["v1"] = pathlib.PurePosixPath(parts[2])
+
+        mount_lines = pathlib.Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        mount_lines = []
+
+    ambiguous_mount = False
+    for line in mount_lines:
+        if " - " not in line:
+            continue
+        mount, filesystem = line.split(" - ", 1)
+        fields = mount.split()
+        fs_fields = filesystem.split()
+        if len(fields) < 5 or len(fs_fields) < 3:
+            continue
+        if fs_fields[0] == "cgroup2":
+            version = "v2"
+        elif fs_fields[0] == "cgroup" and "cpu" in fs_fields[2].split(","):
+            version = "v1"
+        else:
+            continue
+        membership = memberships.get(version)
+        if membership is None:
+            continue
+
+        mount_root = pathlib.PurePosixPath(_mountinfo_path(fields[3]))
+        if (
+            ".." in mount_root.parts
+            or ".." in membership.parts
+            or not membership.is_relative_to(mount_root)
+        ):
+            # An inherited mount may not expose the process's cgroup.
+            ambiguous_mount = True
+            continue
+        relative = membership.relative_to(mount_root)
+        root = pathlib.Path(_mountinfo_path(fields[4]))
+        found, quota_count = _quota_in_cgroup_hierarchy(root / relative, root, version)
+        if found:
+            return quota_count
+
+    if ambiguous_mount:
+        return 1  # Unknown effective quota: keep automatic workers disabled.
+
+    for root, version in (
+        (pathlib.Path("/sys/fs/cgroup"), "v2"),
+        (pathlib.Path("/sys/fs/cgroup/cpu"), "v1"),
+        (pathlib.Path("/sys/fs/cgroup/cpu,cpuacct"), "v1"),
+    ):
+        found, quota_count = _quota_in_cgroup_hierarchy(root, root, version)
+        if found:
+            return quota_count
+    return None
+
+
+def _quota_in_cgroup_hierarchy(
+    current: pathlib.Path, root: pathlib.Path, version: str
+) -> tuple[bool, Optional[int]]:
+    found = False
+    limit: Optional[int] = None
+    while current.is_relative_to(root):
+        try:
+            if version == "v2":
+                quota_text, period_text = (current / "cpu.max").read_text().split()
+                found = True
+                if quota_text == "max":
+                    quota = -1
+                else:
+                    quota = int(quota_text)
+                period = int(period_text)
+            else:
+                quota = int((current / "cpu.cfs_quota_us").read_text())
+                period = int((current / "cpu.cfs_period_us").read_text())
+                found = True
+            if quota > 0 and period > 0:
+                count = max(1, quota // period)
+                limit = count if limit is None else min(limit, count)
+        except (OSError, ValueError, ZeroDivisionError):
+            pass
+        if current == root:
+            break
+        current = current.parent
+    return found, limit
+
+
+def _default_sglang_preprocess_workers() -> int:
+    try:
+        cpu_count = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpu_count = os.cpu_count() or 1
+
+    quota_count = _cpu_quota_count()
+    if quota_count is not None:
+        cpu_count = min(cpu_count, quota_count)
+    return min(2, max(0, cpu_count - 1))
+
+
 def validate_model_name(value: str) -> str:
     """Validate that model-name is a non-empty string."""
     if not value or not isinstance(value, str) or len(value.strip()) == 0:
@@ -98,7 +215,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     enable_streaming_reasoning_dispatch: bool
     reasoning_field_name: str
     exclude_tools_when_tool_choice_none: bool
-    preprocess_workers: int
+    preprocess_workers: Optional[int]
     tokenizer_backend: str
     tokenizer_fallback: bool
     trust_remote_code: bool
@@ -107,6 +224,15 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
     def validate(self) -> None:
+        if self.preprocess_workers is None:
+            self.preprocess_workers = (
+                _default_sglang_preprocess_workers()
+                if self.chat_processor == "sglang"
+                else 0
+            )
+        elif self.preprocess_workers < 0:
+            raise ValueError("--dyn-preprocess-workers must be >= 0")
+
         if self.load_aware:
             self.router_mode = "kv"
         self.apply_load_aware_preset()
@@ -656,20 +782,20 @@ class FrontendArgGroup(ArgGroup):
             ),
         )
 
-        add_argument(
-            g,
-            flag_name="--dyn-preprocess-workers",
-            env_var="DYN_PREPROCESS_WORKERS",
-            default=0,
+        g.add_argument(
+            "--dyn-preprocess-workers",
             dest="preprocess_workers",
+            type=int,
+            default=env_or_default("DYN_PREPROCESS_WORKERS", None, value_type=int),
             help=(
-                "[EXPERIMENTAL] Number of worker processes for preprocessing and output processing. "
-                "When > 0, offloads CPU-bound work (tokenization, template rendering, "
-                "detokenization) to a ProcessPoolExecutor with N workers, each with its "
-                "own GIL. 0 (default) keeps all processing on the main event loop. "
-                "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
+                "[EXPERIMENTAL] SGLang preprocessing worker processes per model. "
+                "When unset, selects up to 2 workers per model from visible CPU capacity, "
+                "leaving one CPU out of the per-model calculation. "
+                "Multiple models each create a pool. "
+                "0 runs preprocessing on the main event loop. "
+                "Nonzero values are supported only with '--dyn-chat-processor sglang'.\n"
+                "env var: DYN_PREPROCESS_WORKERS | default: auto for SGLang, 0 otherwise"
             ),
-            arg_type=int,
         )
 
         add_argument(
