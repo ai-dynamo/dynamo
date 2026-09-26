@@ -109,7 +109,8 @@ exports over OTLP.
 
 Canceled and failed chat requests retain the request payload and omit the response. Set
 `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` to capture selected request headers. Captured values
-are unredacted, so do not allowlist credentials.
+are redacted by header name according to `DYN_REQUEST_TRACE_HTTP_HEADER_REDACT_LIST`.
+Include custom credential header names in the redact list; values are not scanned for credentials.
 
 For limits and record semantics, see [Request Trace Reference](request-traces.mdx).
 
