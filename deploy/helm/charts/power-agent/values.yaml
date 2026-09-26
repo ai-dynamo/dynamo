@@ -47,6 +47,8 @@ agent:
   # exposed as a CLI flag, so plumbing it through values.yaml would create
   # a dead knob. If a future power_agent.py revision adds a
   # --reconcile-interval flag, add the matching key here at that time.
+  # Must not be 8081 — the readiness server binds that port and a collision is
+  # fatal at startup.
   prometheusPort: 9100
 
   # Power-cap actuator. Mutually exclusive — exactly one path is active
@@ -216,6 +218,14 @@ daemonset:
   # (or any percentage / integer). The trade-off is more concurrent
   # enforcement gaps during a rollout; safe when the agent's reconcile
   # interval (15s) is much shorter than the rollout duration anyway.
+  #
+  # Rollout coupling (chart >=1.4.0): Power Agent pods now carry a readiness
+  # probe tied to cap enforcement. An agent that is not enforcing goes
+  # NotReady, which consumes the rollout budget under the `maxUnavailable`
+  # below and can stall a `helm upgrade` that previously completed. This is
+  # intended — an upgrade rolling over a node whose agent is not enforcing
+  # should not be reported as progress. The update strategy itself is
+  # unchanged.
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:

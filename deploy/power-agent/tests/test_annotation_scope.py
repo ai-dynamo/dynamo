@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import power_agent
+from actuator import CapWriteResult
 from power_agent import POWER_ANNOTATION_KEY, PowerAgent
 
 SAFE_DEFAULT = 500
@@ -232,7 +233,7 @@ class _FakeDcgmActuator:
         self._default_w = default_w
         self._restore_result = restore_result
         self.list_running_pids = MagicMock(return_value=[1234])
-        self.apply_cap = MagicMock()
+        self.apply_cap = MagicMock(return_value=CapWriteResult(300, True))
         # Index-addressed restore must NOT be used by the runtime release path
         # any more; the by-UUID list is what the same-GPU branch now drives.
         self.restore_calls = []
