@@ -5,6 +5,10 @@ title: DynamoGraphDeploymentRequest (DGDR) Reference
 subtitle: Field reference and lifecycle for the DynamoGraphDeploymentRequest custom resource — Dynamo's deploy-by-intent generator.
 ---
 
+import { EnumStyles } from "@/components/EnumStyles";
+
+<EnumStyles />
+
 A `DynamoGraphDeploymentRequest` (DGDR) is Dynamo's deploy-by-intent generator for [`DynamoGraphDeployment`](dynamo-graph-deployment.mdx) (DGD) resources. You describe what you want to run and your performance targets; the profiler determines a configuration and produces the DGD that serves traffic.
 
 For the task-oriented walkthrough — authoring a request step by step — see [Auto Deploy with DGDR](../../kubernetes/auto-deployment/auto-deploy-with-dgdr.md). For ready-to-copy manifests, see [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx).
