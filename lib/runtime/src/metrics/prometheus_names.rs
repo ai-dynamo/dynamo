@@ -220,6 +220,35 @@ pub mod frontend_service {
     /// Effective KV overlap blocks lost by non-max-overlap selections
     pub const OVERLAP_BLOCKS_LOST: &str = "overlap_blocks_lost";
 
+    /// Input tokens for cache-reuse observations started by the router
+    pub const CACHE_LOSS_OBSERVATION_INPUT_TOKENS_TOTAL: &str =
+        "cache_loss_observation_input_tokens_total";
+
+    /// Raw token observations at each cache-reuse funnel stage
+    pub const CACHE_LOSS_FUNNEL_TOKENS_TOTAL: &str = "cache_loss_funnel_tokens_total";
+
+    /// Prompt-prefix tokens previously seen in this router's bounded history
+    pub const CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL: &str =
+        "cache_loss_history_prefix_tokens_total";
+
+    /// Cache-reuse observations by completion status
+    pub const CACHE_LOSS_OBSERVATIONS_TOTAL: &str = "cache_loss_observations_total";
+
+    /// Distinct canonical block hashes retained by cache history
+    pub const CACHE_LOSS_HISTORY_UNIQUE_HASHES: &str = "cache_loss_history_unique_hashes";
+
+    /// Tokens represented by distinct cache-history entries
+    pub const CACHE_LOSS_HISTORY_REPRESENTED_TOKENS: &str = "cache_loss_history_represented_tokens";
+
+    /// Estimated bytes used by retained cache-history entries
+    pub const CACHE_LOSS_HISTORY_ESTIMATED_BYTES: &str = "cache_loss_history_estimated_bytes";
+
+    /// Configured distinct-block capacity of cache history
+    pub const CACHE_LOSS_HISTORY_CAPACITY_BLOCKS: &str = "cache_loss_history_capacity_blocks";
+
+    /// Configured byte budget of cache history
+    pub const CACHE_LOSS_HISTORY_CAPACITY_BYTES: &str = "cache_loss_history_capacity_bytes";
+
     /// Number of cached tokens (prefix cache hits) per request
     pub const CACHED_TOKENS: &str = "cached_tokens";
 
@@ -1000,6 +1029,18 @@ pub fn clamp_u64_to_i64(value: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cache_history_prefix_metric_name() {
+        assert_eq!(
+            build_component_metric_name(&format!(
+                "{}{}",
+                router_request::METRIC_PREFIX,
+                frontend_service::CACHE_LOSS_HISTORY_PREFIX_TOKENS_TOTAL
+            )),
+            "dynamo_component_router_cache_loss_history_prefix_tokens_total"
+        );
+    }
 
     #[test]
     fn test_sanitize_frontend_prometheus_prefix() {

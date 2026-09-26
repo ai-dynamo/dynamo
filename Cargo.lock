@@ -2757,6 +2757,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rmp-serde",
  "rstest 0.18.2",
+ "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "serial_test",
