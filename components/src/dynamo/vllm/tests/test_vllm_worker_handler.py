@@ -9,6 +9,7 @@
 
 import asyncio
 import base64
+import itertools
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -80,15 +81,22 @@ def _make_handler(
     if config is None:
         config = _make_config()
     model_config = MagicMock(enable_prompt_embeds=True)
+    runtime = MagicMock()
+    # The real binding hands back an integer lease per window; keep them distinct
+    # so a test can tell which window a release closed.
+    runtime.begin_health_check_maintenance.side_effect = itertools.count(1)
     with patch.object(mod.BaseWorkerHandler, "__init__", return_value=None):
         handler = mod.DecodeWorkerHandler(
-            runtime=MagicMock(),
+            runtime=runtime,
             config=config,
             engine=MagicMock(),
             default_sampling_params={},
             model_config=model_config,
             encode_worker_client=encode_worker_client,
         )
+    handler.runtime = runtime
+    handler.config = config
+    handler._rl_maintenance_lease = None
     handler.model_config = model_config
     handler._multimodal_request_processor = VllmMultimodalRequestProcessor(
         model=config.model,
@@ -2114,11 +2122,26 @@ class TestRLAdminRouteHardening:
         assert await handler.get_weight_version({}) == previous
 
     @pytest.mark.asyncio
-    async def test_init_weights_update_group_succeeds_within_timeout(self):
+    @pytest.mark.parametrize(
+        "configured_timeout, expected_timeout", [(45, 45.0), (100000, 86400.0)]
+    )
+    async def test_init_weights_update_group_succeeds_within_timeout(
+        self, monkeypatch, configured_timeout, expected_timeout
+    ):
+        monkeypatch.setenv("DYN_RL_INIT_WEIGHTS_TIMEOUT_S", str(configured_timeout))
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
         handler.engine_client = MagicMock()
         handler.engine_client.collective_rpc = AsyncMock()
+
+        def begin_maintenance(max_seconds, _endpoint):
+            # Match the binding's limit so an oversized setting cannot prevent
+            # the rendezvous RPC from running unnoticed by this handler test.
+            if not 0 < max_seconds <= 86400:
+                raise ValueError("max_seconds is outside the supported range")
+            return 1
+
+        handler.runtime.begin_health_check_maintenance.side_effect = begin_maintenance
 
         resp = await handler.init_weights_update_group(
             {
@@ -2140,6 +2163,11 @@ class TestRLAdminRouteHardening:
                 }
             },
         )
+        handler.runtime.begin_health_check_maintenance.assert_called_once_with(
+            expected_timeout, handler.config.endpoint
+        )
+        handler.runtime.end_health_check_maintenance.assert_not_called()
+        assert handler._rl_maintenance_lease == 1
         assert not handler._pause_lock.locked()
 
     def test_init_weights_update_group_timeout_defaults_to_30_seconds(
@@ -2154,7 +2182,6 @@ class TestRLAdminRouteHardening:
     async def test_init_weights_update_group_timeout_exits_worker(self, monkeypatch):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
-        handler.runtime = MagicMock()
         handler.engine_client = MagicMock()
 
         rpc_cancelled = asyncio.Event()
@@ -2180,6 +2207,7 @@ class TestRLAdminRouteHardening:
         assert rpc_cancelled.is_set()
         handler.runtime.shutdown.assert_called_once_with()
         exit_mock.assert_called_once_with(1)
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_returns_inner_timeout_error(
@@ -2233,7 +2261,6 @@ class TestRLAdminRouteHardening:
     async def test_init_weights_update_group_returns_ordinary_errors(self):
         handler = _make_handler()
         handler._pause_lock = asyncio.Lock()
-        handler.runtime = MagicMock()
         handler.engine_client = MagicMock()
         handler.engine_client.collective_rpc = AsyncMock(
             side_effect=RuntimeError("init failed")
@@ -2245,7 +2272,211 @@ class TestRLAdminRouteHardening:
 
         assert resp == {"status": "error", "message": "init failed"}
         handler.runtime.shutdown.assert_not_called()
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
         assert not handler._pause_lock.locked()
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_cancelled_init_releases_its_maintenance_lease(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        rpc_running = asyncio.Event()
+
+        async def blocked_rpc(*_args, **_kwargs):
+            rpc_running.set()
+            await asyncio.Event().wait()
+
+        handler.engine_client.collective_rpc = AsyncMock(side_effect=blocked_rpc)
+
+        task = asyncio.create_task(
+            handler.init_weights_update_group(
+                {"engine_rpc": "init_weight_transfer_engine"}
+            )
+        )
+        await rpc_running.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
+    async def test_rejected_non_finish_update_keeps_maintenance_lease(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc.reset_mock()
+
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "update_weights_from_path", "allow_unpaused": "true"}
+        )
+
+        assert resp["status"] == "error"
+        assert "'allow_unpaused' must be a boolean" in resp["message"]
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.runtime.end_health_check_maintenance.assert_not_called()
+        assert handler._rl_maintenance_lease == 1
+
+    @pytest.mark.asyncio
+    async def test_worker_cleanup_releases_maintenance_lease_once(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._ep_capacity_executor = None
+        handler._custom_encoder = None
+        handler.temp_dirs = []
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        handler.cleanup()
+        handler.cleanup()
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "paused, options, error",
+        [
+            (True, {}, None),
+            (False, {}, "must be paused"),
+            (True, {"allow_unpaused": "true"}, "'allow_unpaused' must be a boolean"),
+            (
+                True,
+                {"reset_prefix_cache": "false"},
+                "'reset_prefix_cache' must be a boolean",
+            ),
+            (True, {"allow_unpaused": True}, "cannot reset the prefix cache"),
+        ],
+    )
+    async def test_finish_weight_update_closes_maintenance_window(
+        self, paused, options, error
+    ):
+        """A rejected finish must release the lease without an engine RPC."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = paused
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc.reset_mock()
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update", **options}
+        )
+
+        if error is None:
+            assert resp["status"] == "ok"
+            handler.engine_client.collective_rpc.assert_awaited_once_with(
+                "finish_weight_update", kwargs={}
+            )
+        else:
+            assert resp["status"] == "error"
+            assert error in resp["message"]
+            handler.engine_client.collective_rpc.assert_not_awaited()
+            handler.engine_client.reset_prefix_cache.assert_not_awaited()
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
+    async def test_destroy_closes_maintenance_window_even_on_failure(self):
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("teardown failed")
+        )
+
+        resp = await handler.destroy_weights_update_group(
+            {"engine_rpc": "destroy_weight_transfer_engine"}
+        )
+
+        assert resp["status"] == "error"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_failed_finish_weight_update_releases_the_lease(self):
+        """A failed finish must restore the normal canary timeout."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        handler.engine_client.collective_rpc = AsyncMock(
+            side_effect=RuntimeError("broadcast never completed")
+        )
+        resp = await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+
+        assert resp["status"] == "error"
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
+    async def test_reaching_both_terminators_releases_the_lease_once(self):
+        """A transfer can reach finish_weight_update and then destroy. The second
+        terminator must not release a lease the transfer no longer owns."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = True
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        await handler.update_weights_from_distributed(
+            {"engine_rpc": "finish_weight_update"}
+        )
+        await handler.destroy_weights_update_group(
+            {"engine_rpc": "destroy_weight_transfer_engine"}
+        )
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease is None
+
+    @pytest.mark.asyncio
+    async def test_a_new_transfer_supersedes_an_unterminated_lease(self):
+        """A worker has one weight-update group, so an init means the previous
+        transfer is over. Its lease is released rather than left to expire."""
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+        await handler.init_weights_update_group(
+            {"engine_rpc": "init_weight_transfer_engine"}
+        )
+
+        handler.runtime.end_health_check_maintenance.assert_called_once_with(1)
+        assert handler._rl_maintenance_lease == 2
 
     @pytest.mark.asyncio
     async def test_abort_request_surfaces_deferred_abort_failure(self):

@@ -116,6 +116,36 @@ class DistributedRuntime:
         """
         ...
 
+    def begin_health_check_maintenance(self, max_seconds: float, endpoint: str) -> int:
+        """
+        Extend canary timeouts for the named local endpoint and return a lease.
+
+        Use the known bound of an operation that blocks the engine, such as an
+        RL weight transfer. Probes continue and publish both Ready and NotReady.
+        The extension expires max_seconds from this call, so later probes do
+        not receive a fresh operation timeout. The normal request timeout is
+        never shortened. Overlapping leases use the latest expiry for the same
+        endpoint; unrelated endpoints retain their normal timeout.
+
+        Args:
+            max_seconds: Operation timeout and lease lifetime, in seconds.
+            endpoint: Local endpoint name, e.g. "generate".
+
+        Raises:
+            ValueError: If max_seconds is not finite and positive, or exceeds
+                86400 (one day).
+        """
+        ...
+
+    def end_health_check_maintenance(self, lease: int) -> None:
+        """
+        Release a timeout extension without affecting other leases.
+        New probes use the remaining extensions or the normal timeout.
+        An in-flight probe may retain its previously granted deadline.
+        Releasing an expired or already released lease is a no-op.
+        """
+        ...
+
     def register_engine_route(
         self,
         route_name: str,

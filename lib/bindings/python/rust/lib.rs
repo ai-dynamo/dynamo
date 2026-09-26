@@ -1569,6 +1569,41 @@ impl DistributedRuntime {
         Ok(())
     }
 
+    /// Extend canary timeouts for `endpoint` until at most `max_seconds` from now.
+    /// Probes and their status updates remain active. Returns an ownership lease.
+    fn begin_health_check_maintenance(&self, max_seconds: f64, endpoint: &str) -> PyResult<u64> {
+        // A window is a backstop, not a schedule, so a day is already generous.
+        // Bounding it here keeps `Duration::from_secs_f64` and the `Instant`
+        // addition behind it away from the values that make them panic — a PyO3
+        // panic surfaces as PanicException, which `except Exception` misses.
+        // Keep this limit in sync with _RL_INIT_WEIGHTS_TIMEOUT_MAX_S in
+        // components/src/dynamo/vllm/handlers.py, its timeout regression test in
+        // components/src/dynamo/vllm/tests/test_vllm_worker_handler.py, and the API
+        // documentation in lib/bindings/python/src/dynamo/_core.pyi.
+        const MAX_MAINTENANCE_SECONDS: f64 = 86_400.0;
+        if !max_seconds.is_finite() || max_seconds <= 0.0 || max_seconds > MAX_MAINTENANCE_SECONDS {
+            return Err(PyValueError::new_err(format!(
+                "max_seconds must be a finite positive number no greater than \
+                 {MAX_MAINTENANCE_SECONDS}, got {max_seconds}"
+            )));
+        }
+        self.inner
+            .system_health()
+            .lock()
+            .begin_canary_maintenance(endpoint, std::time::Duration::from_secs_f64(max_seconds))
+            .map_err(|err| PyValueError::new_err(err.to_string()))
+    }
+
+    /// Release a timeout extension without affecting other leases.
+    /// Releasing an already released lease is a no-op.
+    fn end_health_check_maintenance(&self, lease: u64) -> PyResult<()> {
+        self.inner
+            .system_health()
+            .lock()
+            .end_canary_maintenance(lease);
+        Ok(())
+    }
+
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
     // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
     // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
