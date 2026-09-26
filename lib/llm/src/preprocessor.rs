@@ -5888,6 +5888,14 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
+            // BEFORE the glm47 recovery pass below: that pass keys per-choice state on
+            // `choice.index` and accumulates `emitted_text`, so a chunk carrying two entries
+            // for one index would run it twice against the same state and corrupt the
+            // truncation bookkeeping. Normalize the shape first, then recover.
+            if let Some(data) = &mut nv_chunk.data {
+                Self::coalesce_duplicate_stream_indices(&mut data.inner);
+            }
+
             if is_glm47 && let Some(data) = &mut nv_chunk.data {
                 let mut recovery = choice_recovery
                     .lock()
@@ -6005,6 +6013,187 @@ impl OpenAIPreprocessor {
         };
 
         Self::hold_usage_until_stream_end(with_eof_metadata)
+    }
+
+    /// Merge duplicate-index entries inside one streaming chunk.
+    ///
+    /// The jail's guided-streaming release path — taken when a forced `tool_choice`
+    /// installs a JSON grammar — can emit a chunk whose `choices`, or a choice's
+    /// `delta.tool_calls`, carries more than one entry for the same index: a
+    /// tool-call opener beside its own first argument fragment, or a finish flush
+    /// beside the fragment it should have joined.
+    ///
+    /// With `n = 1` that is not valid OpenAI streaming. A client is entitled to key
+    /// on `index` and keep one entry per index per chunk, and one that keeps the
+    /// last silently drops the other's `arguments` — truncating the call mid-value
+    /// while `finish_reason` still reports `tool_calls`, so nothing downstream can
+    /// tell the call was corrupted.
+    ///
+    /// The jail ships in the published `dynamo-parsers` crate, so normalizing at
+    /// this boundary is what keeps the malformed shape off the wire whichever
+    /// release is pinned. A no-op, and allocation-free, for the overwhelmingly
+    /// common chunk that already holds one entry per index.
+    fn coalesce_duplicate_stream_indices(
+        inner: &mut dynamo_protocols::types::CreateChatCompletionStreamResponse,
+    ) {
+        for choice in &mut inner.choices {
+            Self::coalesce_duplicate_tool_call_indices(&mut choice.delta.tool_calls);
+        }
+
+        let has_duplicate_choice = inner
+            .choices
+            .iter()
+            .enumerate()
+            .any(|(i, choice)| inner.choices[..i].iter().any(|seen| seen.index == choice.index));
+        if !has_duplicate_choice {
+            return;
+        }
+
+        let mut merged: Vec<dynamo_protocols::types::ChatChoiceStream> =
+            Vec::with_capacity(inner.choices.len());
+        for choice in std::mem::take(&mut inner.choices) {
+            match merged
+                .iter_mut()
+                .find(|seen| seen.index == choice.index && Self::choices_are_mergeable(seen, &choice))
+            {
+                Some(target) => Self::merge_duplicate_choice(target, choice),
+                // No mergeable peer: keep it as its own entry. A chunk we cannot fold
+                // without losing content goes out unchanged rather than half-dropped.
+                None => merged.push(choice),
+            }
+        }
+        inner.choices = merged;
+    }
+
+    /// Whether two same-index entries can be folded without losing information.
+    ///
+    /// Only `Text` content concatenates meaningfully. `Parts` (multimodal) has no
+    /// defined concatenation, and dropping one side would lose data that the
+    /// malformed-but-intact chunk still carries — so such a chunk is left exactly as
+    /// it arrived rather than silently halved.
+    fn choices_are_mergeable(
+        a: &dynamo_protocols::types::ChatChoiceStream,
+        b: &dynamo_protocols::types::ChatChoiceStream,
+    ) -> bool {
+        !matches!(
+            (&a.delta.content, &b.delta.content),
+            (
+                Some(ChatCompletionMessageContent::Parts(_)),
+                Some(ChatCompletionMessageContent::Parts(_))
+            ) | (Some(ChatCompletionMessageContent::Parts(_)), Some(_))
+                | (Some(_), Some(ChatCompletionMessageContent::Parts(_)))
+        )
+    }
+
+    /// Fold `extra` into `target`, which carries the same choice index.
+    ///
+    /// The delta is destructured exhaustively on purpose: `dynamo-protocols` is a
+    /// separately versioned crate, and a field added there must break this build
+    /// rather than be silently dropped on the merge path.
+    fn merge_duplicate_choice(
+        target: &mut dynamo_protocols::types::ChatChoiceStream,
+        extra: dynamo_protocols::types::ChatChoiceStream,
+    ) {
+        let dynamo_protocols::types::ChatChoiceStream {
+            index: _,
+            delta: extra_delta,
+            finish_reason: extra_finish_reason,
+            logprobs: extra_logprobs,
+        } = extra;
+        let dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: extra_content,
+            function_call: extra_function_call,
+            tool_calls: extra_tool_calls,
+            role: extra_role,
+            refusal: extra_refusal,
+            reasoning_content: extra_reasoning_content,
+        } = extra_delta;
+
+        let delta = &mut target.delta;
+
+        match (delta.content.take(), extra_content) {
+            (
+                Some(ChatCompletionMessageContent::Text(mut existing)),
+                Some(ChatCompletionMessageContent::Text(added)),
+            ) => {
+                existing.push_str(&added);
+                delta.content = Some(ChatCompletionMessageContent::Text(existing));
+            }
+            // `choices_are_mergeable` rejects the ambiguous pairs before we get here,
+            // so at most one side is populated.
+            (existing, added) => delta.content = existing.or(added),
+        }
+
+        match (delta.reasoning_content.take(), extra_reasoning_content) {
+            (Some(mut existing), Some(added)) => {
+                existing.push_str(&added);
+                delta.reasoning_content = Some(existing);
+            }
+            (existing, added) => delta.reasoning_content = existing.or(added),
+        }
+
+        match (delta.tool_calls.take(), extra_tool_calls) {
+            (Some(mut existing), Some(added)) => {
+                existing.extend(added);
+                delta.tool_calls = Some(existing);
+            }
+            (existing, added) => delta.tool_calls = existing.or(added),
+        }
+        Self::coalesce_duplicate_tool_call_indices(&mut delta.tool_calls);
+
+        delta.role = delta.role.take().or(extra_role);
+        delta.refusal = delta.refusal.take().or(extra_refusal);
+        delta.function_call = delta.function_call.take().or(extra_function_call);
+
+        // A finish reason arrives once for a choice; take it from whichever entry
+        // carried it rather than letting the position of the flush decide.
+        target.finish_reason = target.finish_reason.take().or(extra_finish_reason);
+        target.logprobs = target.logprobs.take().or(extra_logprobs);
+    }
+
+    /// Merge `tool_calls` entries that share a call index, concatenating their
+    /// `arguments` fragments in arrival order.
+    fn coalesce_duplicate_tool_call_indices(
+        tool_calls: &mut Option<Vec<dynamo_protocols::types::ChatCompletionMessageToolCallChunk>>,
+    ) {
+        let Some(chunks) = tool_calls.as_mut() else {
+            return;
+        };
+        let has_duplicate = chunks
+            .iter()
+            .enumerate()
+            .any(|(i, chunk)| chunks[..i].iter().any(|seen| seen.index == chunk.index));
+        if !has_duplicate {
+            return;
+        }
+
+        let mut merged: Vec<dynamo_protocols::types::ChatCompletionMessageToolCallChunk> =
+            Vec::with_capacity(chunks.len());
+        for chunk in std::mem::take(chunks) {
+            let Some(target) = merged.iter_mut().find(|seen| seen.index == chunk.index) else {
+                merged.push(chunk);
+                continue;
+            };
+            target.id = target.id.take().or(chunk.id);
+            target.r#type = target.r#type.take().or(chunk.r#type);
+            match (target.function.take(), chunk.function) {
+                (Some(mut existing), Some(added)) => {
+                    existing.name = existing.name.take().or(added.name);
+                    match (existing.arguments.take(), added.arguments) {
+                        (Some(mut fragment), Some(rest)) => {
+                            fragment.push_str(&rest);
+                            existing.arguments = Some(fragment);
+                        }
+                        (existing_args, added_args) => {
+                            existing.arguments = existing_args.or(added_args)
+                        }
+                    }
+                    target.function = Some(existing);
+                }
+                (existing, added) => target.function = existing.or(added),
+            }
+        }
+        *chunks = merged;
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -7751,6 +7940,191 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
         FinishReason, Role,
     };
+
+    /// Build one streaming chunk from `(choice_index, tool_call_index, id, name, args)`
+    /// tuples, one `choices` entry per tuple — the shape the guided-streaming jail
+    /// can emit with repeated indices.
+    fn chunk_from(
+        entries: Vec<(u32, Vec<(u32, Option<&str>, Option<&str>, Option<&str>)>)>,
+        finish_reason: Option<FinishReason>,
+    ) -> CreateChatCompletionStreamResponse {
+        use dynamo_protocols::types::{ChatCompletionMessageToolCallChunk, FunctionCallStream};
+        let choices = entries
+            .into_iter()
+            .map(|(choice_index, calls)| ChatChoiceStream {
+                index: choice_index,
+                delta: ChatCompletionStreamResponseDelta {
+                    content: None,
+                    function_call: None,
+                    tool_calls: Some(
+                        calls
+                            .into_iter()
+                            .map(|(index, id, name, arguments)| ChatCompletionMessageToolCallChunk {
+                                index,
+                                id: id.map(str::to_string),
+                                r#type: None,
+                                function: Some(FunctionCallStream {
+                                    name: name.map(str::to_string),
+                                    arguments: arguments.map(str::to_string),
+                                }),
+                            })
+                            .collect(),
+                    ),
+                    role: None,
+                    refusal: None,
+                    reasoning_content: None,
+                },
+                finish_reason: None,
+                logprobs: None,
+            })
+            .collect::<Vec<_>>();
+        let mut inner = CreateChatCompletionStreamResponse {
+            id: "chatcmpl-test".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            created: 0,
+            model: "test".to_string(),
+            system_fingerprint: None,
+            choices,
+            usage: None,
+            service_tier: None,
+        };
+        if let (Some(reason), Some(first)) = (finish_reason, inner.choices.first_mut()) {
+            first.finish_reason = Some(reason);
+        }
+        inner
+    }
+
+    fn arguments_of(inner: &CreateChatCompletionStreamResponse, choice_index: u32) -> String {
+        inner
+            .choices
+            .iter()
+            .filter(|c| c.index == choice_index)
+            .flat_map(|c| c.delta.tool_calls.iter().flatten())
+            .filter_map(|tc| tc.function.as_ref().and_then(|f| f.arguments.clone()))
+            .collect()
+    }
+
+    /// An opener and its first argument fragment arriving as two `tool_calls`
+    /// entries under the same call index must merge, not stay split.
+    #[test]
+    fn coalesces_duplicate_tool_call_indices_within_one_choice() {
+        let mut inner = chunk_from(
+            vec![(
+                0,
+                vec![
+                    (0, Some("call-1"), Some("calculate"), Some("")),
+                    (0, None, None, Some("{\"expression\": \"")),
+                ],
+            )],
+            None,
+        );
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        let calls = inner.choices[0].delta.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1, "one entry per call index");
+        assert_eq!(calls[0].id.as_deref(), Some("call-1"), "opener id survives");
+        let function = calls[0].function.as_ref().unwrap();
+        assert_eq!(function.name.as_deref(), Some("calculate"));
+        assert_eq!(
+            function.arguments.as_deref(),
+            Some("{\"expression\": \""),
+            "the fragment must ride on the merged entry, not a second one"
+        );
+    }
+
+    /// The regression this exists for: a final argument fragment and a finish flush
+    /// arriving as two `choices` entries with the same index. A client keeping the
+    /// last entry used to lose the fragment, truncating the call mid-value.
+    #[test]
+    fn coalesces_duplicate_choice_indices_without_losing_the_final_fragment() {
+        let mut inner = chunk_from(
+            vec![
+                (0, vec![(0, None, None, Some("6\"}"))]),
+                (0, vec![]),
+            ],
+            None,
+        );
+        // second entry is the bare finish flush: no tool_calls at all
+        inner.choices[1].delta.tool_calls = None;
+        inner.choices[1].finish_reason = Some(FinishReason::ToolCalls);
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        assert_eq!(inner.choices.len(), 1, "one entry per choice index");
+        assert_eq!(
+            arguments_of(&inner, 0),
+            "6\"}",
+            "the final fragment must not be displaced by the flush"
+        );
+        assert_eq!(
+            inner.choices[0].finish_reason,
+            Some(FinishReason::ToolCalls),
+            "the flush's finish reason is carried onto the merged choice"
+        );
+    }
+
+    /// Two genuinely distinct calls keep their own slots and their own arguments.
+    #[test]
+    fn distinct_tool_call_indices_are_left_alone() {
+        let mut inner = chunk_from(
+            vec![(
+                0,
+                vec![
+                    (0, Some("call-a"), Some("calculate"), Some("{\"a\": 1}")),
+                    (1, Some("call-b"), Some("calculate"), Some("{\"b\": 2}")),
+                ],
+            )],
+            None,
+        );
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        let calls = inner.choices[0].delta.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 2, "distinct call indices must not be merged");
+        assert_eq!(calls[0].id.as_deref(), Some("call-a"));
+        assert_eq!(calls[1].id.as_deref(), Some("call-b"));
+    }
+
+    /// The common, already-well-formed chunk must pass through byte-identical.
+    #[test]
+    fn well_formed_chunk_is_unchanged() {
+        let mut inner = chunk_from(
+            vec![(0, vec![(0, Some("call-1"), Some("calculate"), Some("{}"))])],
+            Some(FinishReason::ToolCalls),
+        );
+        let before = serde_json::to_string(&inner).unwrap();
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        assert_eq!(
+            serde_json::to_string(&inner).unwrap(),
+            before,
+            "a chunk with one entry per index must be untouched"
+        );
+    }
+
+    /// Two same-index entries whose content cannot be concatenated must both survive:
+    /// folding them would drop data the malformed-but-intact chunk still carries.
+    #[test]
+    fn unmergeable_multimodal_content_passes_through_untouched() {
+        use dynamo_protocols::types::{ChatCompletionMessageContent, ChatCompletionResponseContentPart};
+        let mut inner = chunk_from(vec![(0, vec![]), (0, vec![])], None);
+        for choice in &mut inner.choices {
+            choice.delta.tool_calls = None;
+            choice.delta.content = Some(ChatCompletionMessageContent::Parts(
+                Vec::<ChatCompletionResponseContentPart>::new(),
+            ));
+        }
+        let before = inner.clone();
+
+        OpenAIPreprocessor::coalesce_duplicate_stream_indices(&mut inner);
+
+        assert_eq!(
+            inner, before,
+            "a chunk that cannot be folded without losing content must go out unchanged"
+        );
+    }
 
     #[test]
     fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
