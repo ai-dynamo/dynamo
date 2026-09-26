@@ -32,6 +32,15 @@ const SITE_CSS = `
  * its affiliates is strictly prohibited.
  */
 
+/*
+ * Local and unthemed fallback only.
+ *
+ * The publishing workflow injects Fern's NVIDIA organization theme into hosted
+ * builds. That theme replaces this project CSS entry and the custom footer.
+ * Local Fern development uses this checked-in approximation instead, so it can
+ * drift from the organization theme.
+ */
+
 /* Color themes for light and dark modes */
 :root {
     /* Brand Colors */
@@ -1287,19 +1296,6 @@ a.fern-card:hover{
 .dark .mermaid-container-expanded svg :is(.marker, marker path, marker polygon) {
   fill: #76b900 !important;
   stroke: #76b900 !important;
-}
-
-
-/* ===================== Community page ===================== */
-
-:root {
-  --dynamo-community-green: #76b900;
-  --dynamo-community-green-bright: #8ed600;
-  --dynamo-community-ink: var(--grayscale-a12);
-  --dynamo-community-muted: var(--grayscale-a10);
-  --dynamo-community-rule: color-mix(in srgb, var(--grayscale-a12) 14%, transparent);
-  --dynamo-community-soft: #f3f4f3;
-  --dynamo-community-titlebar-text: #555755;
 }
 `;
 // sync-site-css:end
