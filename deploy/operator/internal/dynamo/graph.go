@@ -1987,6 +1987,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			ParentGraphDeploymentNamespace: parentContext.ParentGraphDeploymentNamespace,
 			Discovery:                      parentContext.Discovery,
 			DynamoNamespace:                parentContext.DynamoNamespace,
+			RuntimeVersion:                 parentContext.RuntimeVersion,
 		}
 		frontendDefaults := NewFrontendDefaults()
 		base, err := frontendDefaults.GetBaseContainer(frontendContext)
@@ -2000,6 +2001,28 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
 		base.Env = MergeEnvs(baseEnv, user.Env)
+
+		// Validate and replace the complete startup probe so handlers cannot merge with the default.
+		if user.StartupProbe != nil {
+			handlerCount := 0
+			if user.StartupProbe.Exec != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.HTTPGet != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.TCPSocket != nil {
+				handlerCount++
+			}
+			if user.StartupProbe.GRPC != nil {
+				handlerCount++
+			}
+			if handlerCount != 1 {
+				return fmt.Errorf("frontend sidecar %q startupProbe must define exactly one handler", sidecarName)
+			}
+			base.StartupProbe = user.StartupProbe.DeepCopy()
+		}
+
 		AddStandardEnvVars(&base, operatorConfig)
 		AddTransportTLSEnvVars(&base, operatorConfig)
 		base.VolumeMounts = appendMissingVolumeMounts(base.VolumeMounts, parentMounts)

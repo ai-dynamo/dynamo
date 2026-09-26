@@ -449,6 +449,7 @@ func TestRuntimeFeatureGatesDoNotPrecedeVersionHashing(t *testing.T) {
 		gate runtimefeatures.Gate
 	}{
 		{name: "canary health checks", gate: runtimefeatures.CanaryHealthChecks},
+		{name: "frontend startup probe", gate: runtimefeatures.FrontendStartupProbe},
 		{name: "increased worker failure threshold", gate: runtimefeatures.IncreasedWorkerFailureThreshold},
 	}
 

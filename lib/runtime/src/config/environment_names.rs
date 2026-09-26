@@ -196,6 +196,9 @@ pub mod nats {
     /// NATS request/reply timeout in seconds. Unset = async-nats default (10 s).
     pub const DYN_NATS_REQUEST_TIMEOUT_SECS: &str = "DYN_NATS_REQUEST_TIMEOUT_SECS";
 
+    /// Maximum time in seconds to establish the initial NATS connection.
+    pub const NATS_STARTUP_CONNECT_TIMEOUT_SECONDS: &str = "NATS_STARTUP_CONNECT_TIMEOUT_SECONDS";
+
     /// NATS authentication environment variables (checked in priority order)
     pub mod auth {
         /// Username for NATS authentication (use with NATS_AUTH_PASSWORD)
@@ -1051,6 +1054,7 @@ mod tests {
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
+            nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
             nats::auth::NATS_AUTH_USERNAME,
             nats::auth::NATS_AUTH_PASSWORD,
             nats::auth::NATS_AUTH_TOKEN,

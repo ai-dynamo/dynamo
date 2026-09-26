@@ -76,6 +76,8 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
   Pod template for the component's pods. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
+  For runtime 1.6.0 and later, frontend containers receive a startup probe that allows five minutes for NATS and etcd connections and initialization. The same default applies to a designated frontend sidecar, using the parent component's resolved runtime version. Older or unknown runtime versions do not receive this default. A user-specified startup probe replaces the default. A frontend sidecar startup probe must include exactly one handler (`exec`, `httpGet`, `tcpSocket`, or `grpc`). The operator rejects overrides that only change timing or define multiple handlers. See [Health Probes](../../kubernetes/operations/observability.mdx#check-and-customize-health-probes) for probe settings and timeout adjustments.
+
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
 

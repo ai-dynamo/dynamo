@@ -8,6 +8,12 @@ package runtime
 import "github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 
 var (
+	// FrontendStartupProbe allows the sequential NATS and etcd startup connection windows.
+	FrontendStartupProbe = Gate{
+		Name:              "FrontendStartupProbe",
+		MinRuntimeVersion: runtimeversion.Version{Major: 1, Minor: 6, Patch: 0},
+	}
+
 	// CanaryHealthChecks gates the canary health-check rendering defaults.
 	// Runtime 1.5.0 is the first version whose resolved runtime version is
 	// included in the worker hash, so enabling the feature cannot silently

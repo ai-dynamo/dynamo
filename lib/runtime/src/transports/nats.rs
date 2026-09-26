@@ -31,9 +31,9 @@
 use crate::metrics::MetricsHierarchy;
 use crate::protocols::EndpointId;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_nats::connection::State;
-use async_nats::{Subscriber, client, jetstream};
+use async_nats::{ConnectError, ConnectErrorKind, ConnectOptions, Subscriber, client, jetstream};
 use async_trait::async_trait;
 use bytes::Bytes;
 use derive_builder::Builder;
@@ -43,9 +43,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use validator::{Validate, ValidationError};
 
@@ -293,6 +295,9 @@ pub struct ClientOptions {
     #[builder(default)]
     auth: NatsAuth,
 
+    #[builder(default = "default_startup_connect_timeout()")]
+    startup_connect_timeout: Duration,
+
     /// Path to PEM CA certificate for TLS. When set, TLS is required and
     /// `NATS_SERVER` must use the `tls://` scheme.
     #[builder(default = "default_nats_tls_ca_cert_path()")]
@@ -355,14 +360,147 @@ fn default_nats_tls_insecure() -> bool {
 // TODO(jthomson04): We really shouldn't be hardcoding this.
 const NATS_WORKER_THREADS: usize = 4;
 
+const DEFAULT_STARTUP_CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+const STARTUP_CONNECT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const STARTUP_CONNECT_MAX_BACKOFF: Duration = Duration::from_secs(5);
+const STARTUP_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn startup_connect_timeout_from_value(value: Option<&str>) -> Duration {
+    match value {
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(seconds) if seconds > 0 => Duration::from_secs(seconds),
+            Ok(_) => {
+                tracing::warn!(
+                    "{} must be >= 1; got 0. Falling back to {}.",
+                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Invalid {}='{}' ({error}). Falling back to {}.",
+                    env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS,
+                    raw,
+                    DEFAULT_STARTUP_CONNECT_TIMEOUT.as_secs()
+                );
+                DEFAULT_STARTUP_CONNECT_TIMEOUT
+            }
+        },
+        None => DEFAULT_STARTUP_CONNECT_TIMEOUT,
+    }
+}
+
+fn default_startup_connect_timeout() -> Duration {
+    startup_connect_timeout_from_value(
+        std::env::var(env_nats::NATS_STARTUP_CONNECT_TIMEOUT_SECONDS)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn is_retryable_connect_error(kind: ConnectErrorKind) -> bool {
+    matches!(
+        kind,
+        ConnectErrorKind::Dns | ConnectErrorKind::Io | ConnectErrorKind::TimedOut
+    )
+}
+
+async fn connect_with_startup_retry(
+    options: ConnectOptions,
+    server: String,
+    timeout: Duration,
+    token: CancellationToken,
+) -> Result<async_nats::Client> {
+    let deadline = time::Instant::now()
+        .checked_add(timeout)
+        .context("NATS startup connection timeout exceeds the supported duration")?;
+    let mut backoff = STARTUP_CONNECT_INITIAL_BACKOFF;
+    let mut attempts = 0;
+    let mut last_error: Option<anyhow::Error> = None;
+
+    loop {
+        if token.is_cancelled() {
+            anyhow::bail!("NATS startup connection cancelled");
+        }
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        if remaining.is_zero() {
+            let message = format!(
+                "NATS startup connection timed out after {} seconds ({attempts} attempts)",
+                timeout.as_secs_f64()
+            );
+            return Err(match last_error {
+                Some(error) => error.context(message),
+                None => anyhow::anyhow!(message),
+            });
+        }
+
+        attempts += 1;
+        let attempt = tokio::select! {
+            biased;
+
+            _ = token.cancelled() => {
+                anyhow::bail!("NATS startup connection cancelled");
+            }
+            result = time::timeout(
+                remaining.min(STARTUP_CONNECT_ATTEMPT_TIMEOUT),
+                options.clone().connect(server.as_str()),
+            ) => match result {
+                Ok(result) => result,
+                Err(error) => Err(ConnectError::with_source(ConnectErrorKind::TimedOut, error)),
+            },
+        };
+
+        let error = match attempt {
+            Ok(client) => {
+                if attempts > 1 {
+                    tracing::info!(attempts, "NATS startup connection established after retry");
+                }
+                return Ok(client);
+            }
+            Err(error) => error,
+        };
+        let kind = error.kind();
+        if !is_retryable_connect_error(kind) {
+            return Err(anyhow::Error::new(error).context("Failed to connect to NATS"));
+        }
+        last_error = Some(anyhow::Error::new(error));
+        let remaining = deadline.saturating_duration_since(time::Instant::now());
+        let delay = backoff.min(remaining);
+        tracing::warn!(
+            attempt = attempts,
+            error_kind = ?kind,
+            remaining = ?remaining,
+            retry_in = ?delay,
+            "NATS not reachable yet; retrying startup connection"
+        );
+
+        tokio::select! {
+            biased;
+
+            _ = token.cancelled() => {
+                anyhow::bail!("NATS startup connection cancelled");
+            }
+            _ = time::sleep(delay) => {}
+        }
+        backoff = backoff.saturating_mul(2).min(STARTUP_CONNECT_MAX_BACKOFF);
+    }
+}
+
 impl ClientOptions {
     /// Create a new [`ClientOptionsBuilder`]
     pub fn builder() -> ClientOptionsBuilder {
         ClientOptionsBuilder::default()
     }
 
-    /// Validate the config and attempt to connection to the NATS server
+    /// Validate the config and connect to NATS within the startup timeout.
     pub async fn connect(self) -> Result<Client> {
+        self.connect_with_cancellation(CancellationToken::new())
+            .await
+    }
+
+    /// Connect to NATS within the startup timeout, stopping when the token is cancelled.
+    pub async fn connect_with_cancellation(self, token: CancellationToken) -> Result<Client> {
         self.validate()?;
 
         // Client cert and key must be set together to present a client identity.
@@ -457,13 +595,9 @@ impl ClientOptions {
             None => options,
         };
 
+        let options = options.connection_timeout(STARTUP_CONNECT_ATTEMPT_TIMEOUT);
         let (client, _) = build_in_runtime(
-            async move {
-                options
-                    .connect(self.server)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to connect to NATS: {e}. Verify NATS server is running and accessible."))
-            },
+            connect_with_startup_retry(options, self.server, self.startup_connect_timeout, token),
             NATS_WORKER_THREADS,
         )
         .await?;
@@ -479,6 +613,7 @@ impl Default for ClientOptions {
         ClientOptions {
             server: default_server(),
             auth: NatsAuth::default(),
+            startup_connect_timeout: default_startup_connect_timeout(),
             tls_ca_cert_path: default_nats_tls_ca_cert_path(),
             tls_client_cert_path: default_nats_tls_client_cert_path(),
             tls_client_key_path: default_nats_tls_client_key_path(),
@@ -1019,6 +1154,257 @@ mod tests {
     use super::*;
     use figment::Jail;
     use serde::{Deserialize, Serialize};
+
+    #[test]
+    fn parses_startup_connect_timeout() {
+        for (value, expected) in [
+            (None, DEFAULT_STARTUP_CONNECT_TIMEOUT),
+            (Some("45"), Duration::from_secs(45)),
+            (Some("0"), DEFAULT_STARTUP_CONNECT_TIMEOUT),
+            (Some("invalid"), DEFAULT_STARTUP_CONNECT_TIMEOUT),
+        ] {
+            assert_eq!(startup_connect_timeout_from_value(value), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_unrepresentable_startup_connect_timeout() {
+        let error = connect_with_startup_retry(
+            ConnectOptions::new(),
+            "nats://127.0.0.1:1".to_string(),
+            Duration::from_secs(u64::MAX),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("exceeds the supported duration"));
+    }
+
+    #[tokio::test]
+    async fn startup_connection_waits_for_deadline() {
+        let options = ClientOptions::builder()
+            .server("nats://127.0.0.1:1")
+            .startup_connect_timeout(Duration::from_millis(1200))
+            .build()
+            .unwrap();
+        let started = time::Instant::now();
+        let error = match time::timeout(Duration::from_secs(3), options.connect())
+            .await
+            .expect("startup exceeded its deadline")
+        {
+            Ok(_) => panic!("closed port unexpectedly connected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("timed out after 1.2 seconds (2 attempts)"),
+            "{error:#}"
+        );
+        assert!(started.elapsed() >= Duration::from_millis(1200));
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            ConnectErrorKind::Io
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_handshake_retries_until_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("nats://{}", listener.local_addr().unwrap());
+        let (accepted, mut connections) = tokio::sync::mpsc::unbounded_channel();
+        let accept_task = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if accepted.send(stream).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let error = time::timeout(
+            Duration::from_secs(9),
+            connect_with_startup_retry(
+                ConnectOptions::new().connection_timeout(Duration::from_secs(60)),
+                server,
+                Duration::from_millis(6500),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("stalled handshake exceeded the startup deadline")
+        .unwrap_err();
+        accept_task.abort();
+        assert!(
+            error
+                .to_string()
+                .contains("timed out after 6.5 seconds (2 attempts)"),
+            "{error:#}"
+        );
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            ConnectErrorKind::TimedOut
+        );
+        assert!(connections.try_recv().is_ok());
+        assert!(connections.try_recv().is_ok());
+        assert!(connections.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_startup_attempt() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ClientOptions::builder()
+            .server(format!("nats://{}", listener.local_addr().unwrap()))
+            .build()
+            .unwrap();
+        let token = CancellationToken::new();
+        let connection = tokio::spawn(options.connect_with_cancellation(token.clone()));
+        let (_stream, _) = time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        token.cancel();
+        let result = time::timeout(Duration::from_millis(500), connection)
+            .await
+            .unwrap()
+            .unwrap();
+        match result {
+            Err(error) => assert_eq!(error.to_string(), "NATS startup connection cancelled"),
+            Ok(_) => panic!("cancelled connection unexpectedly succeeded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_startup_backoff() {
+        let token = CancellationToken::new();
+        let connection = connect_with_startup_retry(
+            ConnectOptions::new(),
+            "nats://127.0.0.1:1".to_string(),
+            DEFAULT_STARTUP_CONNECT_TIMEOUT,
+            token.clone(),
+        );
+        tokio::pin!(connection);
+        assert!(
+            time::timeout(Duration::from_millis(100), &mut connection)
+                .await
+                .is_err()
+        );
+        token.cancel();
+        let error = time::timeout(Duration::from_millis(500), connection)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "NATS startup connection cancelled");
+    }
+
+    #[test]
+    fn classifies_startup_connect_errors() {
+        for (kind, retryable) in [
+            (ConnectErrorKind::Dns, true),
+            (ConnectErrorKind::Io, true),
+            (ConnectErrorKind::TimedOut, true),
+            (ConnectErrorKind::ServerParse, false),
+            (ConnectErrorKind::Authentication, false),
+            (ConnectErrorKind::AuthorizationViolation, false),
+            (ConnectErrorKind::Tls, false),
+            (ConnectErrorKind::MaxReconnects, false),
+        ] {
+            assert_eq!(is_retryable_connect_error(kind), retryable, "{kind:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_server_fails_without_retry() {
+        let error = time::timeout(
+            Duration::from_millis(500),
+            connect_with_startup_retry(
+                ConnectOptions::new(),
+                "nats://[".to_string(),
+                DEFAULT_STARTUP_CONNECT_TIMEOUT,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            ConnectErrorKind::ServerParse
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_failure_does_not_retry() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server = format!("nats://{}", listener.local_addr().unwrap());
+        let accept_task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"INFO {}\r\n").await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("CONNECT "));
+            stream
+                .get_mut()
+                .write_all(b"-ERR 'Authorization Violation'\r\n")
+                .await
+                .unwrap();
+        });
+        let error = time::timeout(
+            Duration::from_millis(500),
+            connect_with_startup_retry(
+                ConnectOptions::new(),
+                server,
+                DEFAULT_STARTUP_CONNECT_TIMEOUT,
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        accept_task.await.unwrap();
+        assert_eq!(
+            error.downcast_ref::<ConnectError>().unwrap().kind(),
+            ConnectErrorKind::AuthorizationViolation
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_connection_recovers_after_failed_handshake() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let options = ClientOptions::builder()
+            .server(format!("nats://{}", listener.local_addr().unwrap()))
+            .startup_connect_timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            drop(first);
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"INFO {}\r\n").await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("CONNECT "));
+            line.clear();
+            stream.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PING\r\n");
+            stream.get_mut().write_all(b"PONG\r\n").await.unwrap();
+            stream
+        });
+
+        let client = time::timeout(Duration::from_secs(4), options.connect())
+            .await
+            .expect("startup did not recover")
+            .expect("startup connection failed");
+        let _stream = server.await.unwrap();
+        assert_eq!(client.client.connection_state(), State::Connected);
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct TestData {
