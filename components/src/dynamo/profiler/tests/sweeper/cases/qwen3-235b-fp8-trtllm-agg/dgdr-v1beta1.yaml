@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+model: Qwen/Qwen3-235B-A22B-FP8
+backend: trtllm
+image: nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.3.0
+searchStrategy: rapid
+workload:
+  isl: 4000
+  osl: 200
+  requestRate: 32
+sla:
+  ttft: 2000
+  itl: 25
+  optimizationType: throughput
+autoApply: false
