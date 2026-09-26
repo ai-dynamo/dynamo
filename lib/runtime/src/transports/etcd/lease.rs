@@ -42,7 +42,8 @@ pub async fn create_lease(
     let ttl = lease.ttl() as u64;
     let child = token.child_token();
 
-    tokio::spawn(async move {
+    let teardown_runtime = runtime.clone();
+    let handle = tokio::spawn(async move {
         match keep_alive(connector, id, ttl, child).await {
             Ok(_) => tracing::trace!("keep alive task exited successfully"),
             Err(e) => {
@@ -56,6 +57,10 @@ pub async fn create_lease(
             }
         }
     });
+
+    // Joined by Phase 3 so `lease.revoke()` — which this task performs on
+    // cancellation — completes before the process exits.
+    teardown_runtime.register_teardown_task(handle);
 
     Ok(id)
 }

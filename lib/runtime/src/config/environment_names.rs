@@ -186,6 +186,10 @@ pub mod runtime {
 pub mod worker {
     /// Graceful shutdown timeout in seconds
     pub const DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT: &str = "DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT";
+
+    /// Total SIGTERM-to-exit budget, including router grace and cleanup.
+    pub const DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS: &str =
+        "DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS";
 }
 
 /// NATS transport environment variables
@@ -1048,6 +1052,7 @@ mod tests {
             runtime::canary::DYN_CANARY_WAIT_TIME,
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            worker::DYN_WORKER_SHUTDOWN_TOTAL_TIMEOUT_SECS,
             // NATS
             nats::NATS_SERVER,
             nats::DYN_NATS_REQUEST_TIMEOUT_SECS,
