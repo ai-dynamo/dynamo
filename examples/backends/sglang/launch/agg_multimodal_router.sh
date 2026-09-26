@@ -32,6 +32,10 @@ SGLANG_SYSTEM_PORT_BASE="${SGLANG_SYSTEM_PORT_BASE:-18091}"
 # Differs from agg_router.sh's 5557 so the two variants can co-run.
 KV_EVENTS_PORT_BASE="${KV_EVENTS_PORT_BASE:-29090}"
 
+# One shared budget for workers plus frontend, so NUM_WORKERS cannot multiply
+# it; stays under the serve tests' 400s so a stall is reported here.
+STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-330}"
+
 DYN_LOG_VAL="${DYN_LOG:-info,mm_routing=debug,dynamo_kv_router::scheduling=debug,dynamo_llm::kv_router=debug}"
 
 # Pass-through extra args for `python -m dynamo.sglang`.
@@ -54,6 +58,7 @@ Env vars:
   BLOCK_SIZE                  (default 16 — SGLang \`--page-size\`)
   MAX_MODEL_LEN               (default 4096)
   KV_EVENTS_PORT_BASE         (default 29090 — worker i uses port BASE + (i-1))
+  STARTUP_TIMEOUT             (default 330 — whole-startup budget in seconds)
   DYN_LOG                     (default info + mm_routing + scheduling debug)
 EOF
             exit 0
@@ -78,17 +83,46 @@ print_launch_banner --multimodal --no-curl \
 
 trap 'trap - EXIT INT TERM; echo; kill 0' EXIT INT TERM
 
+# The readiness waits are sequential, so every worker has to be checked on each
+# poll: one that dies while a different worker is still loading is otherwise
+# only noticed at the shared deadline.
+check_workers_alive() {
+    local i pid status
+    for i in "${!WORKER_PIDS[@]}"; do
+        pid="${WORKER_PIDS[i]}"
+        if ! kill -0 "${pid}" 2>/dev/null; then
+            status=0
+            wait "${pid}" 2>/dev/null || status=$?
+            echo "SGLang backend $((i + 1)) (pid ${pid}) exited with status ${status} before startup completed" >&2
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Remaining budget for one probe, capped: the poll loops test the deadline only
+# between probes, so a peer that accepts the connection and never answers would
+# otherwise block past the budget, and stall the liveness scan with it.
+probe_timeout() {
+    local remaining=$(( $1 - SECONDS ))
+    if (( remaining > 10 )); then remaining=10; fi
+    if (( remaining < 1 )); then remaining=1; fi
+    echo "${remaining}"
+}
+
+# ${deadline} is an absolute SECONDS value, not a duration.
 wait_ready() {
-    local url="$1" name="$2" timeout_s="${3:-900}"
-    local deadline=$((SECONDS + timeout_s))
+    local url="$1" name="$2" deadline="$3"
     echo "Waiting for ${name} ..."
     while (( SECONDS < deadline )); do
-        if curl -fsS "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
+        if curl -fsS --max-time "$(probe_timeout "${deadline}")" "${url}" 2>/dev/null | grep -q '"status"[[:space:]]*:[[:space:]]*"ready"'; then
             echo "${name} is ready"
             return 0
         fi
+        check_workers_alive || return 1
         sleep 1
     done
+    echo "${name} did not become ready within the ${STARTUP_TIMEOUT}s startup budget" >&2
     return 1
 }
 
@@ -109,6 +143,8 @@ GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 # with adjacent test slots.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
+WORKER_PIDS=()
+STARTUP_DEADLINE=$((SECONDS + STARTUP_TIMEOUT))
 for i in $(seq 1 "${NUM_WORKERS}"); do
     DEFAULT_WORKER_PORT=$((SGLANG_SYSTEM_PORT_BASE + (i - 1) * 2))
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
@@ -136,10 +172,12 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
         --disable-piecewise-cuda-graph \
         "${MAMBA_ARGS[@]}" \
         ${GPU_MEM_ARGS} ${SGLANG_EXTRA_ARGS} "${PASSTHRU_ARGS[@]}" &
+    WORKER_PIDS+=("$!")
 done
 
 for i in $(seq 1 "${NUM_WORKERS}"); do
-    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i"
+    wait_ready "http://127.0.0.1:${WORKER_PORTS[i-1]}/health" "SGLang backend $i" \
+        "${STARTUP_DEADLINE}"
 done
 
 echo "=== Starting frontend (KV router, MM-aware routing) ==="
@@ -152,18 +190,21 @@ python -m dynamo.frontend \
 
 echo "Waiting for frontend to accept requests ..."
 FRONTEND_READY=false
-DEADLINE=$((SECONDS + 300))
-while (( SECONDS < DEADLINE )); do
+while (( SECONDS < STARTUP_DEADLINE )); do
     HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" \
+        --max-time "$(probe_timeout "${STARTUP_DEADLINE}")" \
         -X POST "http://127.0.0.1:${HTTP_PORT}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
         2>/dev/null || echo "000")
     [[ "$HTTP_CODE" == "200" ]] && { FRONTEND_READY=true; echo "Frontend ready"; break; }
+    # A worker that dies after reporting ready would otherwise only surface as
+    # the frontend never answering, at the far end of the shared deadline.
+    check_workers_alive || exit 1
     sleep 2
 done
 if [[ "$FRONTEND_READY" != true ]]; then
-    echo "Frontend did not become ready within 300s" >&2
+    echo "Frontend did not become ready within the ${STARTUP_TIMEOUT}s startup budget" >&2
     exit 1
 fi
 

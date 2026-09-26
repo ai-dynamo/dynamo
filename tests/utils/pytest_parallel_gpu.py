@@ -260,6 +260,7 @@ def _get_gpu_used_gib(gpu_index: int = 0) -> float:
 _RETRYABLE_INIT_MARKERS = [
     "Error in memory profiling",  # vLLM profiling race assertion
     "Free memory on device",  # not enough free VRAM at startup
+    "Capture cuda graph failed",  # SGLang startup graph capture ran out of VRAM
     "Engine core initialization failed",  # engine init crash
     "exited with code 0 while waiting for health check",  # engine started but died during init
     "exited with code -15 while waiting for health check",  # SIGTERM during init
