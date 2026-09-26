@@ -227,41 +227,43 @@ func (r *graphReconciler) reconcileWorkloads(
 		deadlineAt       time.Time
 	)
 
-	// Resolve each workload in the same order used for request publication.
-	for _, groupName := range groupNames {
-		plan := plans[groupName]
-		workload := workloads[groupName]
-		pcsg := pcsgs[plan.LPXScalingGroup]
-		explicitReplicas[plan.LPXScalingGroup] = dgd.GetComponentByName(groupName).Replicas
+	// Prepare requests only after observing the PCS, in publication order.
+	if pcs != nil {
+		for _, groupName := range groupNames {
+			plan := plans[groupName]
+			workload := workloads[groupName]
+			pcsg := pcsgs[plan.LPXScalingGroup]
+			explicitReplicas[plan.LPXScalingGroup] = dgd.GetComponentByName(groupName).Replicas
 
-		// External scalers own live capacity once Grove has created the groups.
-		if pcs != nil && explicitReplicas[plan.LPXScalingGroup] == nil {
-			plan.Replicas = pcsg.Spec.Replicas
-			if err := plan.ValidateReplicaCount(); err != nil {
-				return ctrl.Result{}, err
+			// External scalers own live capacity once Grove has created the groups.
+			if explicitReplicas[plan.LPXScalingGroup] == nil {
+				plan.Replicas = pcsg.Spec.Replicas
+				if err := plan.ValidateReplicaCount(); err != nil {
+					return ctrl.Result{}, err
+				}
 			}
-		}
 
-		desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
+			desired, missing, intentChanged := resolvePipelineRequests(deployment, requests, workload, plan)
 
-		if intentChanged {
-			setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
-			return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
-		}
-
-		maps.Copy(desiredRequests, desired)
-		missingRequests = append(missingRequests, missing...)
-
-		// Expanded models use their source component's policy, not the conductor's.
-		secondsByModel := make(map[string]*int64)
-		for _, projection := range workload.ModelProjections() {
-			if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
-				secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+			if intentChanged {
+				setReadyCondition(deployment, v1beta1.DGDStatePending, "Waiting for the previous PodCliqueSet and its requests to be deleted")
+				return ctrl.Result{}, deletePodCliqueSet(ctx, r, pcs)
 			}
+
+			maps.Copy(desiredRequests, desired)
+			missingRequests = append(missingRequests, missing...)
+
+			// Expanded models use their source component's policy, not the conductor's.
+			secondsByModel := make(map[string]*int64)
+			for _, projection := range workload.ModelProjections() {
+				if scheduling := dgd.GetComponentByName(projection.ComponentName()).LPX.Scheduling; scheduling != nil {
+					secondsByModel[projection.Model()] = scheduling.AttemptDeadlineSeconds
+				}
+			}
+			expired, next := pipelineRequestDeadlines(desired, secondsByModel, deadlineAt)
+			expiredRequests = append(expiredRequests, expired...)
+			deadlineAt = next
 		}
-		expired, next := pipelineRequestDeadlines(desired, secondsByModel, deadlineAt)
-		expiredRequests = append(expiredRequests, expired...)
-		deadlineAt = next
 	}
 
 	// Preserve the earliest deadline across workloads on every subsequent return.
