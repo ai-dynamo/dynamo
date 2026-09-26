@@ -2652,7 +2652,7 @@ func resolveLPXTestWorkload(t *testing.T, registry lpx.ModelRegistry, ctx contex
 	require.NoError(t, err)
 	_, missing, changed := resolvePipelineRequests(deployment, nil, workload, plan)
 	require.False(t, changed)
-	fixture := &lpxTestWorkload{workload: workload, plan: plan}
+	fixture := &lpxTestWorkload{workload: workload, plan: plan.ForReplica(0)}
 	for _, request := range missing {
 		fixture.requests = append(fixture.requests, *request)
 	}

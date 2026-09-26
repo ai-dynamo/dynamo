@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 
@@ -110,7 +111,8 @@ func TestWorkloadNames(t *testing.T) {
 			t.Log("Keep shared-runtime resource names and the PCS identity")
 			plan, err := workload.PlanNodeLocalMaterialization(pcsName)
 			require.NoError(t, err)
-			before := plan.ForReplica(0)
+			before := *plan
+			before.Agents = slices.Clone(plan.Agents)
 
 			t.Log("Use readable component names while bounding and distinguishing shortened names")
 			names := make(map[string]bool)
@@ -148,7 +150,7 @@ func TestWorkloadNames(t *testing.T) {
 					require.Empty(t, validation.IsDNS1123Label(materializedPodHostname(agent.CliqueName, agent.Replicas-1)))
 				}
 			}
-			require.Equal(t, before, plan)
+			require.Equal(t, before, *plan)
 		})
 	}
 

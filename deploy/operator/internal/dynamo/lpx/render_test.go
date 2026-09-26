@@ -330,7 +330,7 @@ func TestRenderSpecDecodeRoleOwnershipAndTemplateSettings(t *testing.T) {
 	require.Equal(t, []string{"agt0", "agt1", "agt2"}, conductor.Spec.StartsAfter)
 	require.NotContains(t, configMap.Data, "datacenter.toml")
 	nodeNameTemplate := testContainerEnvValue(conductor.Spec.PodSpec.Containers[0].Env, "NOVA_NODE_NAME_TEMPLATE")
-	for _, agent := range plan.Agents {
+	for _, agent := range plan.ForReplica(0).Agents {
 		hostname := strings.NewReplacer(
 			"${GROVE_PCSG_NAME}", plan.LPXScalingGroup,
 			"${GROVE_PCSG_INDEX}", "0",

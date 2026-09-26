@@ -131,7 +131,7 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	require.Equal(t, "cond", plan.CyborgTemplate)
 	require.EqualValues(t, 2, plan.Replicas)
 	replica := plan.ForReplica(1)
-	require.NotEqual(t, plan.Agents[0].CliqueName, replica.Agents[0].CliqueName)
+	require.NotEqual(t, plan.ForReplica(0).Agents[0].CliqueName, replica.Agents[0].CliqueName)
 
 	t.Log("A scheduling deadline does not change hybrid launch")
 	dgd.Spec.Components[0].LPX.Scheduling = &v1beta1.SchedulingSpec{AttemptDeadlineSeconds: ptr.To(int64(30))}

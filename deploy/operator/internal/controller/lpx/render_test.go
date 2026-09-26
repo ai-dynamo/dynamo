@@ -369,7 +369,8 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 			require.NoError(t, err)
 			plan := plans["lpu"]
-			planBefore := plan.ForReplica(plan.ReplicaIndex)
+			planBefore := *plan
+			planBefore.Agents = slices.Clone(plan.Agents)
 
 			t.Log("Render twice and require identical independently owned output")
 			first, firstResources, err := r.renderPodCliqueSet(t.Context(), child, dgd, workloads, plans)
@@ -408,7 +409,7 @@ func TestLPXRenderingPreservesInputs(t *testing.T) {
 			require.Equal(t, resourcesBefore, secondResources)
 			require.Equal(t, before, dgd)
 			require.Equal(t, childBefore, child)
-			require.Equal(t, planBefore, plan)
+			require.Equal(t, planBefore, *plan)
 		})
 	}
 }

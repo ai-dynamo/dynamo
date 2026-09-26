@@ -183,7 +183,8 @@ func (r *graphReconciler) reconcileExpiredPipelineRequests(
 // evidence for the next reconciliation. An interior failure blocks all
 // scale-down so a healthy higher ordinal is never removed.
 // For four replicas, expiry at {2,3} removes that suffix; {0,3} removes nothing.
-// All requests must already be validated and target the same scaling group.
+// All requests must already be validated and target the same scaling group;
+// expired is a subset of requests.
 func expiredPipelineRequestSuffix(
 	requests []*lpxv1alpha1.LPUPipelineRequest,
 	expired []*lpxv1alpha1.LPUPipelineRequest,
@@ -219,7 +220,6 @@ func expiredPipelineRequestSuffix(
 		expiredNames[request.Name] = struct{}{}
 	}
 	siblings := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(requests))
-	failed := make([]*lpxv1alpha1.LPUPipelineRequest, 0, len(expired))
 	for _, request := range requests {
 		replica := request.Spec.MaterializationTarget.PodCliqueScalingGroupRef.ReplicaIndex
 
@@ -227,11 +227,9 @@ func expiredPipelineRequestSuffix(
 		if replica < targetReplicas {
 			continue
 		}
-		if _, expired := expiredNames[request.Name]; expired {
-			failed = append(failed, request)
-		} else {
+		if _, expired := expiredNames[request.Name]; !expired {
 			siblings = append(siblings, request)
 		}
 	}
-	return int32(targetReplicas), append(siblings, failed...)
+	return int32(targetReplicas), append(siblings, expired...)
 }

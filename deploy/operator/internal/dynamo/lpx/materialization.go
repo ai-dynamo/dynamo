@@ -65,8 +65,8 @@ type MaterializationPlan struct {
 	Replicas int32
 }
 
-// PlanNodeLocalMaterialization derives the exact identities shared by graph
-// rendering and lifecycle observation without mutating the workload.
+// PlanNodeLocalMaterialization derives template and scaling-group identities.
+// Concrete child names are supplied by ForReplica; the workload is not mutated.
 func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*MaterializationPlan, error) {
 	// Leave room for the fixed scaling group and every LPX role in Grove's name budget.
 	if strings.TrimSpace(pcsName) == "" {
@@ -103,7 +103,6 @@ func (w *Workload) PlanNodeLocalMaterialization(pcsName string) (*Materializatio
 		),
 		Replicas: w.scalingGroupReplicas,
 	}
-	plan = plan.ForReplica(0)
 
 	return plan, plan.ValidateReplicaCount()
 }
@@ -176,7 +175,7 @@ func materializedPodHostname(cliqueName string, podIndex int) string {
 
 // WithGroup scopes a workload's resource names within a multi-workload PCS.
 // Sole workloads retain the unscoped plan's established names.
-// The receiver is a validated non-nil plan and groupName is an admitted,
+// The receiver is a validated non-nil base plan and groupName is an admitted,
 // non-empty conductor component name from ComponentGroups.
 // The receiver is not mutated; names that cannot fit Grove's budget are rejected.
 func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan, error) {
@@ -197,7 +196,8 @@ func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan,
 	if err != nil {
 		return nil, err
 	}
-	out := p.ForReplica(0)
+	out := *p
+	out.Agents = slices.Clone(p.Agents)
 	out.ResourcePrefix = p.PodCliqueSetName + "-" + resourceName
 	out.ScalingGroupTemplate = name
 	out.LPXScalingGroup = grovecommon.GeneratePodCliqueScalingGroupName(grovecommon.ResourceNameReplica{Name: p.PodCliqueSetName, Replica: 0}, name)
@@ -212,8 +212,7 @@ func (p *MaterializationPlan) WithGroup(groupName string) (*MaterializationPlan,
 	for i := range out.Agents {
 		out.Agents[i].TemplateName = name + "-" + out.Agents[i].TemplateName
 	}
-	out = out.ForReplica(0)
-	return out, out.ValidateReplicaCount()
+	return &out, out.ValidateReplicaCount()
 }
 
 // boundedGroupName preserves admitted component names when they fit. Hashes retain

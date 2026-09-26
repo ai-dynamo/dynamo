@@ -267,6 +267,7 @@ func TestExpiredPipelineRequestSuffix(t *testing.T) {
 	}{
 		{name: "no expiry", replicas: 2, ordinals: []int64{0, 1}, wantReplicas: 2},
 		{name: "siblings before expired model", replicas: 1, ordinals: []int64{0, 0}, expired: []int{0}, wantRemoved: []string{"request-1", "request-0"}},
+		{name: "independently ordered expired models", replicas: 2, ordinals: []int64{0, 0, 1, 1}, expired: []int{2, 0}, wantRemoved: []string{"request-1", "request-3", "request-0", "request-2"}},
 		{name: "scale already lowered", replicas: 0, ordinals: []int64{0, 0}, expired: []int{0}, wantRemoved: []string{"request-1", "request-0"}},
 		{name: "finish requests beyond live count", replicas: 1, ordinals: []int64{0, 1, 2}, expired: []int{1}, wantReplicas: 1, wantRemoved: []string{"request-2", "request-1"}},
 		{name: "hole still blocks cleanup beyond live count", replicas: 2, ordinals: []int64{0, 1, 2}, expired: []int{0, 2}, wantReplicas: 2},
@@ -278,9 +279,9 @@ func TestExpiredPipelineRequestSuffix(t *testing.T) {
 			for i, ordinal := range tc.ordinals {
 				requests[i] = &lpxv1alpha1.LPUPipelineRequest{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("request-%d", i)}}
 				requests[i].Spec.MaterializationTarget.PodCliqueScalingGroupRef = &lpxv1alpha1.PodCliqueScalingGroupReference{Name: "engines", ReplicaIndex: ordinal}
-				if slices.Contains(tc.expired, i) {
-					expired = append(expired, requests[i])
-				}
+			}
+			for _, index := range tc.expired {
+				expired = append(expired, requests[index])
 			}
 			replicas, removed := expiredPipelineRequestSuffix(requests, expired, tc.replicas)
 			require.Equal(t, tc.wantReplicas, replicas)
@@ -288,7 +289,10 @@ func TestExpiredPipelineRequestSuffix(t *testing.T) {
 			for _, request := range removed {
 				names = append(names, request.Name)
 			}
-			require.Equal(t, tc.wantRemoved, names)
+			require.ElementsMatch(t, tc.wantRemoved, names)
+			if len(removed) > 0 {
+				require.ElementsMatch(t, expired, removed[len(removed)-len(expired):])
+			}
 		})
 	}
 }
