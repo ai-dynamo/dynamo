@@ -33,6 +33,8 @@ pub struct SelectRequest {
     /// already knows so the booking is releasable even if this response is lost.
     pub reservation_id: String,
     pub token_ids: Vec<u32>,
+    /// Prefill estimate used only when tokenization is unavailable.
+    pub estimated_input_tokens: usize,
     pub allowed_worker_ids: Option<HashSet<u64>>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
@@ -178,6 +180,23 @@ impl Selector {
         req: SelectRequest,
     ) -> std::result::Result<SelectResponse, SelectionError> {
         let reservation_id = req.reservation_id;
+        // Empty hashes disable prefix matching, but degraded requests still
+        // reserve their estimated prefill load until the first generated token.
+        let prompt = if req.token_ids.is_empty() {
+            PromptRequest {
+                block_hashes: Some(Vec::new()),
+                sequence_hashes: Some(Vec::new()),
+                isl_tokens: Some(req.estimated_input_tokens.max(1)),
+                cache_namespace: req.cache_namespace,
+                ..Default::default()
+            }
+        } else {
+            PromptRequest {
+                token_ids: Some(req.token_ids),
+                cache_namespace: req.cache_namespace,
+                ..Default::default()
+            }
+        };
         let core_req = CoreSelectAndReserveRequest {
             model_name: req.model_name,
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
@@ -185,11 +204,7 @@ impl Selector {
             // this id; feed it the EPP-minted reservation id so the booking stays
             // EPP-known (releasable even if this response is lost).
             selection_id: Some(reservation_id.clone()),
-            prompt: PromptRequest {
-                token_ids: Some(req.token_ids),
-                cache_namespace: req.cache_namespace,
-                ..Default::default()
-            },
+            prompt,
             router_config_override: None,
             expected_output_tokens: req.expected_output_tokens,
             session_id: req.session_id,
@@ -413,6 +428,7 @@ models:
             model_name: "test-model".to_string(),
             reservation_id: reservation_id.to_string(),
             token_ids: (1..=16).collect(),
+            estimated_input_tokens: 4096,
             allowed_worker_ids: None,
             priority_jump: None,
             strict_priority: None,
@@ -421,6 +437,12 @@ models:
             session_id: None,
             cache_namespace: None,
         }
+    }
+
+    fn load_only_select_request(reservation_id: &str) -> SelectRequest {
+        let mut request = select_request(reservation_id);
+        request.token_ids.clear();
+        request
     }
 
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
@@ -561,6 +583,28 @@ worker_selection:
             .free_reservation("res-1")
             .await
             .expect("freeing an already-freed booking is an idempotent no-op");
+    }
+
+    #[tokio::test]
+    async fn load_only_reserves_estimated_prefill_without_prefix_matches() {
+        let selector = selector_with_schedulable_worker().await;
+
+        for estimate in [0, 64] {
+            let mut request = load_only_select_request("load-only");
+            request.estimated_input_tokens = estimate;
+            let response = selector
+                .select_and_reserve(request)
+                .await
+                .expect("load-only fallback should still reserve a worker");
+            assert_eq!(response.worker_id, 1);
+            assert_eq!(response.overlap.longest_matched, 0);
+            assert_eq!(response.effective_prefill_tokens, estimate.max(1));
+
+            selector
+                .free_reservation("load-only")
+                .await
+                .expect("load-only reservation should be releasable");
+        }
     }
 
     /// Item 5: prefill completion releases prompt load exactly once and is
