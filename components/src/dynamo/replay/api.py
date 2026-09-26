@@ -5,6 +5,8 @@
 
 import json
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal, TypedDict, overload
 
 from typing_extensions import Unpack
@@ -13,7 +15,11 @@ from dynamo._core import (
     run_mocker_synthetic_trace_replay as _run_mocker_synthetic_trace_replay,
 )
 from dynamo._core import run_mocker_trace_replay as _run_mocker_trace_replay
-from dynamo.replay.report import PlannerReplayDetails, ReplayReport
+from dynamo.replay.report import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+)
 
 
 def _planner_replay_adapter():
@@ -28,6 +34,19 @@ def _planner_replay_adapter():
     from dynamo.replay.planner import planner_replay_adapter
 
     return planner_replay_adapter
+
+
+@dataclass(frozen=True)
+class TelemetryOptions:
+    """Optional policy-neutral telemetry for an offline replay.
+
+    In-memory capture is the default only when no callback or JSONL sink is set.
+    """
+
+    sample_interval_ms: float = 1_000.0
+    capture_in_memory: bool | None = None
+    callback: Callable[[dict[str, Any]], None] | None = None
+    jsonl_path: str | os.PathLike[str] | None = None
 
 
 class _CommonReplayOptions(TypedDict, total=False):
@@ -51,6 +70,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     benchmark_granularity: int
     capture_per_request: bool
     capture_planner_details: bool
+    telemetry_options: TelemetryOptions | None
 
 
 class _TraceReplayOptions(_CommonReplayOptions, total=False):
@@ -92,12 +112,42 @@ def _materialize_offline_report(
     *,
     planner: PlannerReplayDetails | None,
 ) -> ReplayReport:
+    native_telemetry = native.telemetry
+    telemetry = (
+        None
+        if native_telemetry is None
+        else ReplayTelemetryDetails(
+            sample_interval_ms=float(native_telemetry["sample_interval_ms"]),
+            samples=list(native_telemetry["samples"]),
+        )
+    )
     return ReplayReport(
         summary=native.summary,
         per_request=native.per_request,
         coverage=native.coverage,
         planner=planner,
+        telemetry=telemetry,
     )
+
+
+def _telemetry_kwargs(options: TelemetryOptions | None) -> dict[str, Any]:
+    if options is None:
+        return {}
+    capture_in_memory = options.capture_in_memory
+    if capture_in_memory is None:
+        capture_in_memory = options.callback is None and options.jsonl_path is None
+    if (
+        not capture_in_memory
+        and options.callback is None
+        and options.jsonl_path is None
+    ):
+        raise ValueError("TelemetryOptions needs at least one sink")
+    return {
+        "capture_telemetry": capture_in_memory,
+        "telemetry_sample_interval_ms": options.sample_interval_ms,
+        "telemetry_callback": options.callback,
+        "telemetry_jsonl_path": options.jsonl_path,
+    }
 
 
 @overload
@@ -161,11 +211,21 @@ def run_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    telemetry_options=None,
 ) -> ReplayReport | dict[str, Any]:
     """Run trace replay.
 
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
+
+    Pass ``TelemetryOptions`` to enable policy-neutral sampling; omitting it
+    leaves telemetry disabled. Callbacks and JSONL writes run synchronously on
+    the replay loop, so their latency contributes to replay wall time. The
+    final buffered-file flush happens after the simulator finalizes
+    ``wall_time_ms``; time the outer API call when measuring end-to-end
+    persistence overhead. JSONL output is opened lazily on the first sample.
+    If a later write fails, replay fails; completed prior lines remain, and the
+    failing final line may be partial.
     """
     if isinstance(agentic_lanes, bool) or (
         agentic_lanes is not None and not isinstance(agentic_lanes, int)
@@ -199,6 +259,7 @@ def run_trace_replay(
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError(
             "capture_per_request only supports replay_mode='offline'; "
@@ -329,8 +390,9 @@ def run_synthetic_trace_replay(
     benchmark_granularity=8,
     capture_per_request=False,
     capture_planner_details=True,
+    telemetry_options=None,
 ) -> ReplayReport | dict[str, Any]:
-    """Run synthetic replay with the same timing boundary as trace replay."""
+    """Run synthetic replay with the same optional ``TelemetryOptions`` contract."""
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,
         "prefill_engine_args": prefill_engine_args,
@@ -358,6 +420,7 @@ def run_synthetic_trace_replay(
         "capture_per_request": capture_per_request,
         "capture_planner_details": capture_planner_details,
     }
+    replay_kwargs.update(_telemetry_kwargs(telemetry_options))
     if capture_per_request and replay_mode == "online":
         raise ValueError("capture_per_request only supports replay_mode='offline'")
     if planner_config is not None:

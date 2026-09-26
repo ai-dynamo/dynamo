@@ -43,16 +43,35 @@ class PlannerReplayDetails:
 
 
 @dataclass
+class ReplayTelemetryDetails:
+    """Periodic observability samples captured independently of Planner ticks."""
+
+    sample_interval_ms: float
+    samples: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sample_interval_ms": self.sample_interval_ms,
+            "samples": _to_primitive(self.samples),
+        }
+
+
+@dataclass
 class ReplayReport:
     summary: dict[str, Any]
     per_request: list[dict[str, Any]] | None
     coverage: dict[str, Any]
     planner: PlannerReplayDetails | None
+    telemetry: ReplayTelemetryDetails | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "summary": self.summary,
             "per_request": self.per_request,
             "coverage": self.coverage,
             "planner": None if self.planner is None else self.planner.to_dict(),
         }
+        # Preserve the exact default-disabled serialized report contract.
+        if self.telemetry is not None:
+            payload["telemetry"] = self.telemetry.to_dict()
+        return payload

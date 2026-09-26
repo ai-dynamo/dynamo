@@ -28,7 +28,11 @@ from aisimulate.sweeper.replay import (
 
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
-from dynamo.replay.api import run_synthetic_trace_replay, run_trace_replay
+from dynamo.replay.api import (
+    TelemetryOptions,
+    run_synthetic_trace_replay,
+    run_trace_replay,
+)
 from dynamo.replay.config import resolve_aic_num_gpu_blocks
 
 _PLANNER_HOOK = HookCapability(
@@ -121,6 +125,13 @@ class DynamoReplayRunner:
             # explicitly request detailed output through the Runner contract.
             "capture_per_request": output_requirements.capture_per_request,
             "capture_planner_details": output_requirements.include_raw_report,
+            "telemetry_options": (
+                TelemetryOptions(
+                    sample_interval_ms=output_requirements.telemetry_sample_interval_ms
+                )
+                if output_requirements.capture_telemetry
+                else None
+            ),
             **self._goodput_sla_kwargs(spec),
         }
 
@@ -440,6 +451,8 @@ class DynamoReplayRunner:
             else:
                 native_report = dict(report)
             metadata["native_report"] = native_report
+        if output_requirements.capture_telemetry:
+            metadata["telemetry"] = report.telemetry.to_dict()
         return metrics, metadata
 
     @staticmethod
