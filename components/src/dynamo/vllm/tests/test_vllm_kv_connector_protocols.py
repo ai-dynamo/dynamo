@@ -6,8 +6,8 @@
 Pins the wire shape of ``kv_transfer_params`` on both sides of the
 prefill/decode boundary for each supported KV connector, plus the
 factory's dispatch and fallback behavior. No real vllm engine is
-required — vllm_config is a SimpleNamespace and Mooncake's bootstrap
-helper is monkey-patched.
+required for the wire-shape tests, which stub the bootstrap helper.
+Additional configuration tests use the installed vLLM helper when available.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import importlib
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Optional
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -31,6 +32,7 @@ from dynamo.vllm.kv_connector_protocols import (
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -38,6 +40,11 @@ pytestmark = [
 _MOONCAKE_MOD = (
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
 )
+
+
+@pytest.fixture(autouse=True)
+def clear_mooncake_advertise_host(monkeypatch):
+    monkeypatch.delenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", raising=False)
 
 
 def _config(connector: Optional[str], **kv_extra) -> SimpleNamespace:
@@ -119,7 +126,11 @@ def test_mooncake_prefill_request_shape(fake_mooncake):
     assert isinstance(params["transfer_id"], str) and params["transfer_id"]
     # Mooncake side never asks vLLM to populate remote_* — those are
     # synthesized on the decode side from this prefill's bootstrap addr.
-    assert set(params) == {"do_remote_decode", "do_remote_prefill", "transfer_id"}
+    assert set(params) == {
+        "do_remote_decode",
+        "do_remote_prefill",
+        "transfer_id",
+    }
 
 
 def test_mooncake_transfer_id_persists_across_prefill_and_decode(fake_mooncake):
@@ -144,7 +155,9 @@ def test_mooncake_distinct_instances_get_distinct_transfer_ids(fake_mooncake):
     assert a != b
 
 
-def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatch):
+def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(
+    monkeypatch,
+):
     """Decode bootstrap addr comes from vLLM's helper; ``http://`` is
     non-optional because the decode side does ``addr + "/query"``."""
     _install_fake_mooncake(monkeypatch, "192.168.0.110", 8998)
@@ -162,6 +175,28 @@ def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(monkeypatc
     }
 
 
+@pytest.mark.parametrize("advertised_host", ["10.42.1.17", None, ""])
+@pytest.mark.parametrize("port", [8998, 9123])
+def test_mooncake_decode_advertised_host_preserves_helper_port(
+    monkeypatch, advertised_host, port
+):
+    # These ports are only serialized into URLs; no sockets are opened.
+    _install_fake_mooncake(monkeypatch, "127.0.0.1", port)
+    if advertised_host is not None:
+        monkeypatch.setenv(
+            "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", advertised_host
+        )
+    cfg = _config("MooncakeConnector", engine_id="eng-prefill-0")
+    proto = MooncakeConnectorProtocol(cfg)
+    params = proto.decode_request_kv_transfer_params(
+        SimpleNamespace(kv_transfer_params=None)
+    )
+    expected_host = advertised_host or "127.0.0.1"
+    assert params["remote_bootstrap_addr"] == f"http://{expected_host}:{port}"
+    assert params["remote_engine_id"] == "eng-prefill-0"
+    assert proto._get_bootstrap_addr(cfg) == ("127.0.0.1", port)
+
+
 def test_mooncake_decode_ignores_engine_kv_transfer_params(fake_mooncake):
     """Mooncake is push-based; whatever vLLM returns on
     ``res.kv_transfer_params`` must not leak into the decode-side payload."""
@@ -175,7 +210,9 @@ def test_mooncake_decode_ignores_engine_kv_transfer_params(fake_mooncake):
     assert "remote_host" not in params
 
 
-def test_mooncake_init_raises_clear_error_when_vllm_mooncake_unavailable(monkeypatch):
+def test_mooncake_init_raises_clear_error_when_vllm_mooncake_unavailable(
+    monkeypatch,
+):
     """Missing vLLM Mooncake support must surface at protocol construction
     (request setup), not after the prefill has been submitted to vLLM."""
     parts = _MOONCAKE_MOD.split(".")
@@ -438,7 +475,10 @@ def test_multiconnector_decode_uses_child_engine_id_not_wrapper(fake_mooncake):
                         "kv_connector": "MooncakeStoreConnector",
                         "kv_connector_extra_config": {"load_async": True},
                     },
-                    {"kv_connector": "MooncakeConnector", "engine_id": "mooncake-eng"},
+                    {
+                        "kv_connector": "MooncakeConnector",
+                        "engine_id": "mooncake-eng",
+                    },
                 ]
             },
         )
@@ -578,3 +618,109 @@ def test_real_vllm_mooncake_helper_signature_is_compatible():
         f"get_mooncake_bootstrap_addr signature changed: expected at least 1 "
         f"positional arg, got {sig}"
     )
+
+
+@pytest.mark.parametrize("source", ["helper", "override"])
+@pytest.mark.parametrize(
+    "host, expected",
+    [
+        ("fd00::17", "[fd00::17]"),
+        ("[fd00::17]", "[fd00::17]"),
+        ("prefill.example", "prefill.example"),
+        ("10.42.1.17", "10.42.1.17"),
+    ],
+)
+def test_mooncake_bootstrap_url_host(monkeypatch, source, host, expected):
+    _install_fake_mooncake(
+        monkeypatch, host if source == "helper" else "127.0.0.1", 9123
+    )
+    if source == "override":
+        monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", host)
+    proto = MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="prefill"))
+    params = proto.decode_request_kv_transfer_params(None)
+    parsed = urlsplit(params["remote_bootstrap_addr"])
+    assert params["remote_bootstrap_addr"] == f"http://{expected}:9123"
+    assert parsed.hostname == host.strip("[]")
+    assert parsed.port == 9123
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "http://prefill",
+        "prefill:8998",
+        "fd00::zz",
+        "fe80::1%eth0",
+        "[fd00::17",
+        "a/b",
+        "a@b",
+        "a?b",
+        "a#b",
+        " bad",
+    ],
+)
+def test_mooncake_rejects_invalid_advertised_host(monkeypatch, fake_mooncake, host):
+    monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", host)
+    proto = MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="prefill"))
+    with pytest.raises(ValueError, match="Invalid Mooncake bootstrap host"):
+        proto.decode_request_kv_transfer_params(None)
+
+
+@pytest.mark.parametrize(
+    "parallel_kwargs, expected_host",
+    [
+        ({}, "127.0.0.1"),
+        (
+            {"data_parallel_size": 2, "data_parallel_external_lb": True},
+            "127.0.0.1",
+        ),
+        (
+            {"data_parallel_size": 2, "data_parallel_hybrid_lb": True},
+            "127.0.0.1",
+        ),
+        (
+            {"data_parallel_size": 2, "data_parallel_master_ip": "10.42.1.20"},
+            "10.42.1.20",
+        ),
+        (
+            {
+                "nnodes": 2,
+                "tensor_parallel_size": 2,
+                "master_addr": "10.42.1.30",
+            },
+            "10.42.1.30",
+        ),
+    ],
+    ids=[
+        "ordinary-dp1",
+        "external-lb",
+        "hybrid-lb",
+        "centralized-dp",
+        "model-parallel",
+    ],
+)
+@pytest.mark.parametrize("override", [None, "10.42.1.17"])
+@pytest.mark.timeout(30)
+def test_mooncake_real_bootstrap_helper(
+    monkeypatch, parallel_kwargs, expected_host, override
+):
+    # Use the installed engine's configuration and helper, never the fake fixture.
+    monkeypatch.setenv("VLLM_DP_MASTER_IP", "127.0.0.1")
+    config_module = pytest.importorskip("vllm.config")
+    mooncake = pytest.importorskip(_MOONCAKE_MOD)
+    monkeypatch.setenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "9123")
+    if override:
+        monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", override)
+    cfg = _config("MooncakeConnector", engine_id="prefill")
+    cfg.parallel_config = config_module.ParallelConfig(
+        distributed_executor_backend="mp", **parallel_kwargs
+    )
+    local_addr = mooncake.get_mooncake_bootstrap_addr(cfg)
+    assert local_addr == (expected_host, 9123)
+    proto = MooncakeConnectorProtocol(cfg)
+    transfer_id = proto.prefill_request_kv_transfer_params()["transfer_id"]
+    params = proto.decode_request_kv_transfer_params(None)
+    assert params["remote_bootstrap_addr"] == f"http://{override or expected_host}:9123"
+    assert params["remote_engine_id"] == "prefill"
+    assert params["transfer_id"] == transfer_id
+    assert mooncake.get_mooncake_bootstrap_addr(cfg) == local_addr

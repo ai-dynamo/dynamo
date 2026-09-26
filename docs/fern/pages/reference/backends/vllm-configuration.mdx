@@ -324,3 +324,33 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
     The equivalent Dynamo flag reference for the TensorRT-LLM backend.
   </Card>
 </CardGroup>
+
+
+## Mooncake Bootstrap Advertised Host
+
+`DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST` is an optional, environment-only override
+for the host in the Mooncake bootstrap URL sent from prefill to decode. It applies
+only to the `MooncakeConnector` protocol, including when selected through a wrapper
+connector. An unset or empty value preserves vLLM's helper-selected host.
+
+Set a bare hostname, IPv4 address, or IPv6 address reachable from the decode workers.
+IPv6 literals are bracketed when serialized into the URL; scoped IPv6 addresses are rejected. Do not include a scheme,
+path, or port; vLLM's helper still supplies the bootstrap port. URL serialization
+does not establish end-to-end IPv6 support for Mooncake transport.
+
+vLLM can select loopback for ordinary data-parallel size 1 and for external or hybrid
+load balancing. For a bootstrap server owned by the local prefill pod, explicitly
+set this variable from `status.podIP` using the container environment's Downward API
+`valueFrom.fieldRef`. For centralized data-parallel or model-parallel deployments,
+use the actual bootstrap owner's reachable address, not each rank's pod IP.
+Local bootstrap registration, server ownership, and transfer metadata remain unchanged.
+
+The operator does not inject this variable. To migrate an existing Mooncake workload,
+update its worker image to a build containing this override and explicitly configure
+the variable in the prefill container. Both changes require a planned workload rollout.
+An unpatched Dynamo 1.4.0 worker ignores this variable; upgrading only the operator is
+insufficient. Unchanged workloads retain their pod templates on operator-only upgrades.
+
+Validate the migration with a cross-node request that discovers the remote engine
+and transfers KV data through the registered worker endpoints. An open bootstrap
+port alone does not verify the data path.
