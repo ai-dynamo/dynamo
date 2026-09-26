@@ -344,8 +344,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--aic-backend-version",
         type=str,
         default=None,
-        help="AIC backend engine version (e.g., '0.19.0' for vLLM, '0.5.10' for SGLang, "
-        "'1.3.0rc10' for TRT-LLM). If not set, uses the default version for the backend.",
+        help="AIC performance-database version: 'current', 'previous', or 'next' "
+        "when available, or a version assigned to one of those slots. "
+        "Defaults to the release database's 'current' slot.",
     )
     parser.add_argument(
         "--aic-tp-size",
@@ -587,12 +588,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--stagger-delay",
         type=float,
-        default=-1.0,
+        default=0.0,
         help=(
-            "Delay in seconds between launching each worker to avoid overwhelming "
-            "etcd/NATS/frontend with many workers. Set to 0 to disable staggering. "
-            "Use -1 for auto mode (0.1s for 32-128 workers, 0.2s for >128 workers, 0 otherwise). "
-            "Default: -1 (auto)"
+            "Delay in seconds between launching each worker. "
+            "Set to 0 to disable staggering (default). "
+            "Use -1 for auto mode (0.1s for 33-128 workers, 0.2s for >128 workers, 0 otherwise)."
         ),
     )
     parser.add_argument(

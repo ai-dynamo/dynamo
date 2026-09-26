@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dynamo_backend_common::{
@@ -28,6 +29,8 @@ use crate::protocol::{
     build_generate_request, disaggregated_params_to_json, engine_data_from_meta, extract_logprobs,
     meta_u32, output_ids_to_u32, terminal_from_meta,
 };
+
+const RETRY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct SglangSidecarEngine {
     endpoint: GrpcEndpoint,
@@ -143,7 +146,11 @@ impl SglangSidecarEngine {
     }
 
     async fn await_ready(&self, client: &mut Client, deadline: Instant) -> Result<(), DynamoError> {
+        let started = Instant::now();
+        let mut attempt = 0_u64;
+        let mut last_logged_at: Option<Instant> = None;
         loop {
+            attempt += 1;
             let retry_message = match client::health_check(client, deadline).await {
                 Ok(healthy) => {
                     if healthy {
@@ -159,10 +166,26 @@ impl SglangSidecarEngine {
                     self.transport.startup_deadline
                 )));
             }
-            tokio::time::sleep_until(
-                (Instant::now() + self.transport.retry_interval).min(deadline),
-            )
-            .await;
+            let now = Instant::now();
+            if last_logged_at.is_none_or(|last| now.duration_since(last) >= RETRY_LOG_INTERVAL) {
+                // WARN, not silent: this loop previously logged nothing at all on a
+                // failed attempt, so a SGLang engine that's slow (or never becomes)
+                // healthy produced zero visible output anywhere for up to
+                // startup_deadline (default 300s) -- indistinguishable from a hang.
+                // Rate-limited like GrpcChannelPool::connect_until_ready: a normal
+                // slow startup retries every retry_interval (default 1s) and would
+                // otherwise spam hundreds of lines.
+                tracing::warn!(
+                    attempt,
+                    elapsed = ?started.elapsed(),
+                    remaining = ?deadline.saturating_duration_since(now),
+                    retry_interval = ?self.transport.retry_interval,
+                    reason = %retry_message,
+                    "SGLang not healthy yet; retrying"
+                );
+                last_logged_at = Some(now);
+            }
+            tokio::time::sleep_until((now + self.transport.retry_interval).min(deadline)).await;
         }
     }
 }
@@ -277,7 +300,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -285,7 +308,7 @@ impl LLMEngine for SglangSidecarEngine {
         } else {
             None
         };
-        let cancel = self.cancel.clone();
+        let cancel = self.cancel.child_token();
         let is_prefill = self.disaggregation_mode.is_prefill();
 
         Ok(Box::pin(async_stream::stream! {
@@ -312,6 +335,20 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after the gRPC transport opens the
+                // response stream so decode can rendezvous while prefill runs.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
@@ -364,7 +401,7 @@ impl LLMEngine for SglangSidecarEngine {
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
@@ -375,7 +412,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
@@ -474,6 +510,7 @@ impl LLMEngine for SglangSidecarEngine {
                 endpoint: source.endpoint.clone(),
                 topic: source.topic.clone(),
                 dp_rank: source.dp_rank,
+                image_token_id: None,
             })
             .collect())
     }
@@ -489,7 +526,7 @@ fn bootstrap_discover(
         .map_err(|err| client::engine_shutdown(format!("bootstrap runtime: {err}")))?;
     runtime.block_on(async {
         let deadline = Instant::now() + transport.startup_deadline;
-        let mut grpc_client = client::connect(endpoint, transport, deadline).await?;
+        let mut grpc_client = client::connect(endpoint, transport, deadline, true).await?;
         client::discover(&mut grpc_client, deadline).await
     })
 }
@@ -945,6 +982,7 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            max_gpu_lora_count: None,
             data_parallel_size,
             data_parallel_start_rank,
             enable_eagle,

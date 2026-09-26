@@ -304,6 +304,9 @@ overrides:
   - { ecosystem: dpkg, name: libnvptxcompiler-13-0,            license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: libnvvm-13-0,                     license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA CUDA Toolkit EULA" }
   - { ecosystem: dpkg, name: mlnx-dpdk,                        license: "BSD-3-Clause", source: "Mellanox build of upstream DPDK — https://www.dpdk.org/about/legal/" }
+  # TRT-LLM 1.3.0rc27's base removes this package and keeps its ld.so.conf.d conffile.
+  # The .deb (DOCA 3.5.0 repo) ships no copyright file; its only SPDX tags are BSD-3-Clause.
+  - { ecosystem: dpkg, name: dpdk-community,                   license: "BSD-3-Clause", source: "NVIDIA DOCA build of upstream DPDK — https://www.dpdk.org/about/legal/" }
 
   # --- NVIDIA DOCA SDK (cuda-dl-base 25.11 ships these) ---
   - { ecosystem: dpkg, name: doca-sdk-common,                  license: LicenseRef-NVIDIA-Proprietary, source: "NVIDIA DOCA SDK License — https://developer.nvidia.com/doca" }
@@ -1036,3 +1039,7 @@ overrides:
   - { ecosystem: python, name: kaleido,       license: "MIT", source: "Plotly Kaleido — https://github.com/plotly/kaleido/blob/main/LICENSE.txt (MIT)" }
   - { ecosystem: python, name: choreographer, license: "MIT", source: "Plotly Choreographer — https://github.com/plotly/choreographer/blob/main/LICENSE.md (MIT)" }
   - { ecosystem: python, name: logistro,      license: "MIT", source: "GeoPozo logistro — https://github.com/geopozo/logistro/blob/main/LICENSE (MIT)" }
+
+  - { ecosystem: python, name: instanttensor, license: "Apache-2.0", source: "https://github.com/scitix/InstantTensor/blob/v0.1.9/LICENSE" }
+  - { ecosystem: python, name: sigstore-models, license: "MIT", source: "https://github.com/astral-sh/sigstore-models/blob/v0.0.6/LICENSE" }
+  - { ecosystem: rust, name: tsp-asn1, license: "Apache-2.0", source: "https://github.com/trailofbits/rfc3161-client/blob/v1.0.8/LICENSE" }

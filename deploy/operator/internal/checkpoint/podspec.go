@@ -41,6 +41,11 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 	if startupPolicy == "" {
 		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 	}
+	if checkpointInfo.SnapshotCompatibilityHash != "" {
+		// Keep the expected identity on pending explicit references so the DCD
+		// renderer can repeat resolution without relying on the rollout hash.
+		annotations[commonconsts.SnapshotCandidateCompatibilityHashAnnotation] = checkpointInfo.SnapshotCompatibilityHash
+	}
 
 	if checkpointInfo.AutomaticSnapshotJob != nil {
 		if !checkpointInfo.AutomaticCapture {
@@ -48,6 +53,9 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 		}
 		if strings.TrimSpace(checkpointInfo.AutomaticSnapshotJob.Name) == "" || checkpointInfo.AutomaticSnapshotJob.UID == "" {
 			return fmt.Errorf("SnapshotJob restore candidate requires a name and UID")
+		}
+		if checkpointInfo.SnapshotCompatibilityHash == "" {
+			return fmt.Errorf("SnapshotJob restore candidate requires a compatibility hash")
 		}
 		annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 		annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.AutomaticSnapshotJob.Name
@@ -65,6 +73,9 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 	}
 	if checkpointInfo.NativeSnapshot == nil {
 		return fmt.Errorf("restore candidate requires a resolved PodSnapshot")
+	}
+	if checkpointInfo.SnapshotCompatibilityHash == "" {
+		return fmt.Errorf("PodSnapshot restore candidate requires a compatibility hash")
 	}
 
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
@@ -89,6 +100,7 @@ func removeRestoreCandidateMetadata(annotations map[string]string) {
 	delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
+	delete(annotations, commonconsts.SnapshotCandidateCompatibilityHashAnnotation)
 	delete(annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
 }
 

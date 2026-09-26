@@ -20,6 +20,7 @@ import math
 import re
 import struct
 import time
+import wave
 from copy import deepcopy
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -2247,6 +2248,9 @@ class TRTLLMMetricsPayload(MetricsPayload):
 
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """TRT-LLM-specific metric checks"""
+        component_prefix = prometheus_names.name_prefix.COMPONENT
+        total_blocks = f"{component_prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}"
+
         checks = [
             MetricCheck(
                 # Check: Minimum count of unique trtllm_* metrics
@@ -2262,7 +2266,54 @@ class TRTLLMMetricsPayload(MetricsPayload):
                     f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)"
                 ),
                 multiline=True,
-            )
+            ),
+            # The checks above and in the base class count metric *names* and
+            # accept a zero block count. Prometheus registers names when the
+            # collector is constructed, so both pass on a worker whose stats
+            # thread never published a sample and whose engine never recorded
+            # a request. The two checks below require an observation on each
+            # path, so one going dead cannot pass as the other still working.
+            MetricCheck(
+                # Stats path: the per-rank gauges are seeded at 0 by
+                # _init_publish_metrics_thread and only move when iteration
+                # stats arrive from the engine. Any rank reporting a positive
+                # block count proves the polling thread published.
+                name=f"{total_blocks} (positive on some rank)",
+                pattern=lambda name: (
+                    rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: every rank reported a non-positive block count "
+                    f"(values: {value}). The stats polling thread never "
+                    f"published iteration stats."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
+            MetricCheck(
+                # Request path: TRT-LLM's own per-request series, recorded by
+                # MetricsCollector as requests finish. Several names are
+                # matched because they come from tensorrt_llm.metrics and one
+                # upstream rename should not silently void the check.
+                name="trtllm_* per-request observations",
+                pattern=lambda name: (
+                    r"trtllm_(?:request_success_total"
+                    r"|e2e_request_latency_seconds_count"
+                    r"|time_to_first_token_seconds_count"
+                    r"|time_per_output_token_seconds_count"
+                    r"|request_queue_time_seconds_count)"
+                    r"(?:\{[^}]*\})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: TRT-LLM recorded no per-request observations "
+                    f"(values: {value}). The engine's request metrics are not "
+                    f"reaching the collector."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
         ]
 
         # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
@@ -2384,10 +2435,24 @@ class I2VPayload(VideoGenerationPayload):
 
 @dataclass
 class AudioSpeechPayload(BasePayload):
-    """Payload for /v1/audio/speech endpoint."""
+    """Payload for /v1/audio/speech endpoint.
+
+    The byte-count check alone passes on a WAV that carries a header and a
+    fraction of a second of silence, which is what a broken decoder or a
+    mis-assembled chunk stream produces. Set the waveform expectations below to
+    assert the audio is actually as long and as loud as the request implies;
+    they apply to WAV responses (binary or base64) and are skipped for URL
+    responses.
+    """
 
     endpoint: str = "/v1/audio/speech"
     timeout: int = 300
+    # Minimum decoded duration in seconds; 0 disables the check.
+    min_duration_s: float = 0.0
+    # Minimum RMS amplitude, normalized to [0, 1]; 0 disables the check.
+    min_rms: float = 0.0
+    # Expected sample rate in Hz; None disables the check.
+    expected_sample_rate: Optional[int] = None
 
     def response_handler(self, response: Any) -> str:
         response.raise_for_status()
@@ -2398,6 +2463,7 @@ class AudioSpeechPayload(BasePayload):
                 f"Audio response too small ({len(audio_bytes)} bytes), "
                 f"likely not valid audio"
             )
+            self._validate_waveform(audio_bytes)
             return f"binary_audio_{len(audio_bytes)}_bytes"
         result = response.json()
         assert (
@@ -2411,4 +2477,50 @@ class AudioSpeechPayload(BasePayload):
         if "url" in entry and entry["url"]:
             return entry["url"]
         assert entry.get("b64_json"), "Audio response b64_json is empty"
+        self._validate_waveform(base64.b64decode(entry["b64_json"]))
         return "b64_audio_returned"
+
+    def _validate_waveform(self, audio_bytes: bytes) -> None:
+        """Assert the decoded WAV meets the configured expectations."""
+        if (
+            self.min_duration_s <= 0
+            and self.min_rms <= 0
+            and self.expected_sample_rate is None
+        ):
+            return
+
+        with wave.open(BytesIO(audio_bytes), "rb") as wav:
+            sample_rate = wav.getframerate()
+            frame_count = wav.getnframes()
+            sample_width = wav.getsampwidth()
+            channels = wav.getnchannels()
+            frames = wav.readframes(frame_count)
+
+        if self.expected_sample_rate is not None:
+            assert sample_rate == self.expected_sample_rate, (
+                f"Expected {self.expected_sample_rate} Hz audio, "
+                f"got {sample_rate} Hz"
+            )
+
+        duration_s = frame_count / sample_rate if sample_rate else 0.0
+        assert duration_s >= self.min_duration_s, (
+            f"Audio is {duration_s:.3f}s, shorter than the expected minimum "
+            f"{self.min_duration_s:.3f}s ({frame_count} frames at {sample_rate} Hz)"
+        )
+
+        if self.min_rms <= 0:
+            return
+
+        assert sample_width == 2, (
+            f"RMS check supports 16-bit PCM only, got {sample_width * 8}-bit "
+            f"audio; drop min_rms for this payload"
+        )
+        sample_count = len(frames) // 2
+        assert sample_count > 0, "Decoded WAV carries no samples"
+        samples = struct.unpack(f"<{sample_count}h", frames[: sample_count * 2])
+        rms = math.sqrt(sum(s * s for s in samples) / sample_count) / 32768.0
+        assert rms >= self.min_rms, (
+            f"Audio RMS {rms:.5f} is below the expected minimum {self.min_rms:.5f}; "
+            f"the waveform is silent or near-silent "
+            f"({duration_s:.3f}s, {channels}ch at {sample_rate} Hz)"
+        )
