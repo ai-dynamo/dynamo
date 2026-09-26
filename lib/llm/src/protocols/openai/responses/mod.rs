@@ -2981,6 +2981,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3041,6 +3042,7 @@ mod tests {
                 object: "chat.completion".to_string(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3114,6 +3116,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
         let params = ResponseParams {
@@ -3317,6 +3320,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3353,6 +3357,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3381,6 +3386,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3406,6 +3412,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         };
 
@@ -3572,6 +3579,7 @@ mod tests {
                 object: "chat.completion".into(),
                 usage: None,
             },
+            prompt_logprobs: None,
             nvext: None,
         }
     }

@@ -1004,6 +1004,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
@@ -1047,6 +1048,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
@@ -1473,6 +1475,7 @@ mod tests {
                 }),
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
@@ -2169,6 +2172,7 @@ mod tests {
                 usage: None,
             },
             nvext: None,
+            prompt_logprobs: None,
             llm_metrics: None,
         }
     }
