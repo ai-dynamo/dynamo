@@ -17,6 +17,7 @@ from typing import Any, Optional
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY
+from tensorrt_llm._torch.pyexecutor.config_utils import resolve_vocab_size
 from tensorrt_llm.llmapi import (
     CapacitySchedulerPolicy,
     DynamicBatchConfig,
@@ -637,6 +638,7 @@ async def init_llm_worker(
 
     multimodal_processor = None
     image_token_id: Optional[int] = None
+    mm_token_id_offset: Optional[int] = None
 
     if os.getenv("DYN_ENABLE_TEST_LOGITS_PROCESSOR") == "1":
         # We need to initialize the tokenizer for the test logits processor
@@ -651,6 +653,7 @@ async def init_llm_worker(
             config.model,
             trust_remote_code=engine_args.get("trust_remote_code", False),
         )
+        mm_token_id_offset = resolve_vocab_size(model_config)
         # MM-aware KV routing is aggregated-only, so the image marker is resolved
         # only in aggregated mode; disaggregated MM requests are not routed on it.
         if config.disaggregation_mode == DisaggregationMode.AGGREGATED:
@@ -1046,6 +1049,7 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
+                mm_token_id_offset=mm_token_id_offset,
                 publish_metrics=config.publish_metrics,
                 publish_forward_pass_metrics=config.publish_forward_pass_metrics,
                 kv_event_publication_mode=kv_event_publication_mode,
