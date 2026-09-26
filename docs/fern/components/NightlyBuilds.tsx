@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Recent pinned nightly wheel builds plus the rolling nightly runtime
- * container tags. Version data lives in releases.data.ts so the human page,
- * install selector, JSON, and llms-only tables stay aligned.
+ * container tags. Version data is generated from the dated NGC nightly tags
+ * so the human page, install selector, JSON, and llms-only tables stay aligned.
  */
 
-import { NIGHTLY_BUILDS, type NightlyBuild } from "./releases.data";
+import { NIGHTLY_BUILDS, type NightlyBuild } from "./nightly-selector-data.generated";
 
 const NIGHTLY_CSS = `
 .dynref-nightly-row {

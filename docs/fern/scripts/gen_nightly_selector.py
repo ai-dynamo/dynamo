@@ -5,9 +5,10 @@
 
 Emits ``docs/fern/components/nightly-selector-data.generated.ts``: for each
 backend, the ``NIGHTLY_VERSIONS_BACK`` most recent backend versions a nightly
-shipped, each paired with the newest nightly that shipped it. The module is
-gitignored and rebuilt by the docs workflow on every publish, so the site never
-serves a pin that a human forgot to refresh.
+shipped, each paired with the newest nightly that shipped it, plus the recent
+nightly-wheel ledger used by Release Artifacts. The module is gitignored and
+rebuilt by the docs workflow on every publish, so the site never serves a pin
+that a human forgot to refresh.
 
 Data sources (all authoritative and anonymous):
   * which nightlies exist, and the commit each was built from -- the dated
@@ -60,8 +61,11 @@ NGC_NAMESPACE = "nvidia/ai-dynamo"
 
 # How many distinct backend versions each selector row offers.
 NIGHTLY_VERSIONS_BACK = 3
+# How many dated nightly wheels the Release Artifacts ledger shows.
+NIGHTLY_LEDGER_BUILDS = 3
 # Dated tags to walk back through when hunting for those versions.
 MAX_TAGS = 120
+NIGHTLY_PACKAGES = ["ai-dynamo", "ai-dynamo-runtime", "kvbm"]
 
 TIMEOUT = 30
 # Endpoint-unreachable failures degrade gracefully (skip the backend); anything
@@ -196,18 +200,34 @@ def dated_tags(image: str) -> list[tuple[str, str]]:
 # --------------------------------------------------------------------------- #
 # PyPI
 # --------------------------------------------------------------------------- #
-def published_wheels() -> set[str] | None:
-    """Published ``ai-dynamo`` dev versions; ``None`` when the index is unreachable."""
+def published_wheels(package: str) -> set[str] | None:
+    """Published dev versions for ``package``; ``None`` when its index is unreachable."""
     try:
-        with urllib.request.urlopen(f"{PYPI}/ai-dynamo/", timeout=TIMEOUT) as resp:
+        with urllib.request.urlopen(f"{PYPI}/{package}/", timeout=TIMEOUT) as resp:
             html = resp.read().decode()
     except TRANSPORT_ERRORS as exc:
-        warn(f"pypi.nvidia.com index fetch failed: {exc}")
+        warn(f"pypi.nvidia.com index fetch for {package} failed: {exc}")
         return None
     except Exception as exc:
-        warn(f"pypi.nvidia.com index returned an unexpected response: {exc}")
+        warn(
+            f"pypi.nvidia.com index for {package} returned an unexpected response: {exc}"
+        )
         raise
-    return set(re.findall(r"ai_dynamo-(\d+\.\d+\.\d+\.dev\d{8})", html))
+    normalized = package.replace("-", "_")
+    return set(
+        re.findall(rf"{re.escape(normalized)}-(\d+\.\d+\.\d+\.dev\d{{8}})", html)
+    )
+
+
+def published_nightly_packages() -> dict[str, set[str]] | None:
+    """Published dev versions for every package that a ledger row advertises."""
+    published: dict[str, set[str]] = {}
+    for package in NIGHTLY_PACKAGES:
+        versions = published_wheels(package)
+        if versions is None:
+            return None
+        published[package] = versions
+    return published
 
 
 def wheel_for(yyyymmdd: str, sha: str, published: set[str]) -> str | None:
@@ -244,6 +264,11 @@ def newest_published(published: set[str]) -> str | None:
     return max(published, key=key)
 
 
+def ledger_version_published(version: str, published: dict[str, set[str]]) -> bool:
+    """Whether every package advertised by a ledger row published ``version``."""
+    return all(version in published[package] for package in NIGHTLY_PACKAGES)
+
+
 # --------------------------------------------------------------------------- #
 # assembly
 # --------------------------------------------------------------------------- #
@@ -264,14 +289,28 @@ class NightlyBackendBuild:
     latest: bool
 
 
-def build(published: set[str]) -> list[NightlyBackendBuild]:
+@dataclass(frozen=True)
+class NightlyBuild:
+    """One Release Artifacts ledger row, sourced from a dated nightly tag."""
+
+    version: str
+    date: str
+    packages: list[str]
+
+
+def build(
+    published: dict[str, set[str]],
+) -> tuple[list[NightlyBackendBuild], list[NightlyBuild]]:
+    dynamo_wheels = published["ai-dynamo"]
     rows: list[NightlyBackendBuild] = []
+    tags_by_backend: dict[str, dict[str, str]] = {}
 
     for fw in FRAMEWORKS:
         tags = dated_tags(fw.image)
         if not tags:
             warn(f"{fw.backend}: no dated nightly tags found; skipping")
             continue
+        tags_by_backend[fw.backend] = dict(tags)
 
         # Group nightly tags by the backend version each shipped, newest first,
         # so a version's whole run is available when picking a representative.
@@ -316,9 +355,9 @@ def build(published: set[str]) -> list[NightlyBackendBuild]:
                 # than the container commit, and no pin moved since. Otherwise use
                 # this version's own run, whose commits were read.
                 yyyymmdd, sha = nights[0]
-                wheel = newest_published(published)
+                wheel = newest_published(dynamo_wheels)
                 if not wheel or wheel_date(wheel) < yyyymmdd or pins_moved_since(sha):
-                    wheel = run_wheel(nights, published)
+                    wheel = run_wheel(nights, dynamo_wheels)
             else:
                 # Pinned rows describe one immutable build, so the wheel has to
                 # come from the exact commit the container tag names. Fall back to
@@ -326,7 +365,7 @@ def build(published: set[str]) -> list[NightlyBackendBuild]:
                 # container tag, when none of its nights published a wheel.
                 chosen = None
                 for yyyymmdd, sha in nights:
-                    wheel = wheel_for(yyyymmdd, sha, published)
+                    wheel = wheel_for(yyyymmdd, sha, dynamo_wheels)
                     if wheel:
                         chosen = (yyyymmdd, sha, wheel)
                         break
@@ -344,10 +383,38 @@ def build(published: set[str]) -> list[NightlyBackendBuild]:
                 )
             )
 
-    return rows
+    # A ledger row describes the package train, not one backend selector row.
+    # Require every runtime repository to publish the same dated tag before
+    # showing it; otherwise the existing package list would overstate what
+    # shipped. A ledger row names every package in NIGHTLY_PACKAGES, so require
+    # every one at the exact resolved version before writing it.
+    common_dates = (
+        set.intersection(*(set(tags) for tags in tags_by_backend.values()))
+        if len(tags_by_backend) == len(FRAMEWORKS)
+        else set()
+    )
+    ledger: list[NightlyBuild] = []
+    for yyyymmdd in sorted(common_dates, reverse=True):
+        shas = {tags_by_backend[fw.backend][yyyymmdd] for fw in FRAMEWORKS}
+        if len(shas) != 1:
+            continue
+        sha = shas.pop()
+        version = wheel_for(yyyymmdd, sha, dynamo_wheels)
+        if version and ledger_version_published(version, published):
+            ledger.append(
+                NightlyBuild(
+                    version=version,
+                    date=pretty_date(yyyymmdd),
+                    packages=list(NIGHTLY_PACKAGES),
+                )
+            )
+        if len(ledger) == NIGHTLY_LEDGER_BUILDS:
+            break
+
+    return rows, ledger
 
 
-def as_ts(rows: list[NightlyBackendBuild]) -> str:
+def as_ts(rows: list[NightlyBackendBuild], ledger: list[NightlyBuild]) -> str:
     def ts(value) -> str:
         if value is None:
             return "null"
@@ -377,6 +444,13 @@ def as_ts(rows: list[NightlyBackendBuild]) -> str:
         "  latest?: boolean;",
         "}",
         "",
+        "export interface NightlyBuild {",
+        "  version: string;",
+        "  date: string;",
+        "  packages: string[];",
+        "  note?: string;",
+        "}",
+        "",
         "export const NIGHTLY_BACKEND_BUILDS: NightlyBackendBuild[] = [",
     ]
     for row in rows:
@@ -384,6 +458,12 @@ def as_ts(rows: list[NightlyBackendBuild]) -> str:
             f"{key}: {ts(value)}"
             for key, value in asdict(row).items()
             if not (key == "latest" and not value)
+        )
+        lines.append(f"  {{ {fields} }},")
+    lines += ["];", "", "export const NIGHTLY_BUILDS: NightlyBuild[] = ["]
+    for build in ledger:
+        fields = ", ".join(
+            f"{key}: {ts(value)}" for key, value in asdict(build).items()
         )
         lines.append(f"  {{ {fields} }},")
     lines += ["];", "", "export default NIGHTLY_BACKEND_BUILDS;", ""]
@@ -407,6 +487,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rows: list[NightlyBackendBuild] = []
+    ledger: list[NightlyBuild] = []
     if args.offline:
         # Local previews and the composition replay only need the module to
         # exist so the component import resolves; the selector renders its
@@ -416,23 +497,30 @@ def main() -> int:
         # Both guards protect the same invariant: the publish job syncs whatever
         # this writes, so a module that resolved nothing would replace the live
         # selector's rows with nothing. Fail and leave the published copy alone.
-        published = published_wheels()
+        published = published_nightly_packages()
         if published is None:
             print(
-                "error: pypi.nvidia.com unreachable; refusing to write a module "
-                "with no wheel commands",
+                "error: a required pypi.nvidia.com package index is unreachable; "
+                "refusing to write a module with incomplete package claims",
                 file=sys.stderr,
             )
             return 1
-        rows = build(published)
+        rows, ledger = build(published)
         if not rows:
             print(
                 "error: no nightly data resolved; refusing to write an empty module",
                 file=sys.stderr,
             )
             return 1
+        if len(ledger) < NIGHTLY_LEDGER_BUILDS:
+            print(
+                "error: fewer than three complete nightly ledger rows resolved; "
+                "refusing to replace the published ledger",
+                file=sys.stderr,
+            )
+            return 1
 
-    module = as_ts(rows)
+    module = as_ts(rows, ledger)
     if args.stdout:
         print(module)
         return 0
