@@ -524,16 +524,13 @@ export const FEATURES: Feature[] = [
     name: "Multimodal (Image)",
     sglang: {
       status: "yes",
-      note: "KV-aware routing supported on Dynamo's SGLang image for aggregated workers; a custom build without the hash-forwarding patch falls back to text-prefix routing. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)",
+      note: "Image input",
     },
     trtllm: {
       status: "yes",
-      note: "Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)",
+      note: "Image URLs and pre-computed embeddings",
     },
-    vllm: {
-      status: "yes",
-      note: "With KV-aware routing, image-aware routing on documented paths",
-    },
+    vllm: { status: "yes" },
   },
   {
     name: "Multimodal (Video)",
@@ -550,15 +547,12 @@ export const FEATURES: Feature[] = [
   {
     name: "Request Migration",
     sglang: { status: "yes" },
-    trtllm: { status: "yes", note: "Work in progress with multimodal" },
+    trtllm: { status: "yes" },
     vllm: { status: "yes" },
   },
   {
     name: "Request Cancellation",
-    sglang: {
-      status: "wip",
-      note: "Remote-prefill-phase cancellation not supported in disaggregated mode",
-    },
+    sglang: { status: "yes" },
     trtllm: {
       status: "caveat",
       note: "Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)",
@@ -569,10 +563,10 @@ export const FEATURES: Feature[] = [
     name: "LoRA",
     sglang: {
       status: "wip",
-      note: "Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated",
+      note: "Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested",
     },
     trtllm: { status: "no" },
-    vllm: { status: "yes", note: "Dynamic load/unload; KV-aware routing supports adapter affinity" },
+    vllm: { status: "yes", note: "Dynamic load and unload" },
   },
   {
     name: "Tool Calling",
@@ -1129,119 +1123,114 @@ export const MODEL_EA_BUILDS: ModelEaBuild[] = [
   },
 ];
 
-/* Pairwise feature-by-feature compatibility, one matrix per backend. Only the
- * lower triangle is stored: rows[i] carries i+1 cells, ending on the diagonal.
- * The upper triangle is the mirror and is never authored twice.
- *
- * FeatureInteractions renders this for readers and gen_llms_tables.py emits the
- * same cells as markdown into the <llms-only> twin, so a pairwise status can
- * never be visible on the page but missing from an agent export -- the failure
- * the tables hit while they were hand-authored JSX. */
-export const INTERACTION_FEATURES = [
-  "Disaggregated Serving",
-  "KV-Aware Routing",
-  "SLA-Based Planner",
-  "KV Block Manager",
-  "Multimodal",
-  "Request Migration",
-  "Request Cancellation",
-  "LoRA",
-  "Tool Calling",
-  "Speculative Decoding",
-];
+/* Non-obvious constraints between otherwise available features. Base support
+ * belongs to FEATURES above; derived combinations such as every TensorRT-LLM
+ * pairing with unsupported LoRA are intentionally omitted. */
+export type InteractionState = "yes" | "wip" | "no";
 
-export type InteractionState = "yes" | "wip" | "no" | "na";
-
-export interface InteractionCell {
+export interface FeatureConstraint {
+  features: [string, string];
   status: InteractionState;
-  label?: string; // short screen-reader / summary phrase for a noted cell
-  note?: string;
+  label: string;
+  note: string;
   source?: string; // site-absolute docs path
 }
 
 export interface BackendInteractions {
   backend: "SGLang" | "TensorRT-LLM" | "vLLM";
-  features: string[];
-  rows: InteractionCell[][];
+  constraints: FeatureConstraint[];
 }
 
 export const FEATURE_INTERACTIONS: BackendInteractions[] = [
   {
     backend: "vLLM",
-    features: INTERACTION_FEATURES,
-    rows: [
-      // Disaggregated Serving
-      [{ status: "na" }],
-      // KV-Aware Routing
-      [{ status: "yes" }, { status: "na" }],
-      // SLA-Based Planner
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
-      // KV Block Manager
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // Multimodal
-      [{ status: "yes", label: "Audio and video support", note: "Supports Qwen2-Audio experimentally and video input with frame sampling.", source: "/dynamo/dev/knowledge-base/modular-components/backends/v-llm/vllm-multimodal" }, { status: "yes", label: "Image-aware KV routing", note: "The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "yes" }, { status: "na" }],
-      // Request Migration
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // Request Cancellation
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // LoRA
-      [{ status: "yes" }, { status: "yes", label: "Adapter-aware routing", note: "vLLM routes requests based on LoRA adapter affinity." }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // Tool Calling
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // Speculative Decoding
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes", label: "Eagle3 support", note: "Eagle3 support is documented.", source: "/dynamo/dev/additional-resources/speculative-decoding/speculative-decoding-with-v-llm" }, { status: "na" }],
+    constraints: [
+      {
+        features: ["Multimodal (Image)", "KV-Aware Routing"],
+        status: "yes",
+        label: "Supported with requirement",
+        note: "The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor.",
+        source: "/dynamo/dev/multimodal/multimodal-kv-routing",
+      },
+      {
+        features: ["LoRA", "KV-Aware Routing"],
+        status: "yes",
+        label: "Supported with requirement",
+        note: "Dynamo routes requests by LoRA adapter affinity.",
+      },
     ],
   },
   {
     backend: "SGLang",
-    features: INTERACTION_FEATURES,
-    rows: [
-      // Disaggregated Serving
-      [{ status: "na" }],
-      // KV-Aware Routing
-      [{ status: "yes" }, { status: "na" }],
-      // SLA-Based Planner
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
-      // KV Block Manager
-      [{ status: "wip" }, { status: "wip" }, { status: "wip" }, { status: "na" }],
-      // Multimodal
-      [{ status: "yes", label: "Supported serving patterns", note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal" }, { status: "yes", label: "Image-aware routing on Dynamo's SGLang image", note: "Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.19, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "wip" }, { status: "na" }],
-      // Request Migration
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
-      // Request Cancellation
-      [{ status: "wip", label: "Remote-prefill limitation", note: "Cancellation during remote prefill is not supported in disaggregated mode.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "wip" }, { status: "yes" }, { status: "na" }],
-      // LoRA
-      [{ status: "wip", label: "Disaggregated LoRA not end-to-end validated", note: "Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Adapter-aware routing not end-to-end validated", note: "Aggregated LoRA inference is validated without the KV router; the combined path remains experimental.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip", label: "Experimental combination", note: "This LoRA feature pairing is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
-      // Tool Calling
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip", label: "Experimental combination", note: "Tool calling with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "na" }],
-      // Speculative Decoding
-      [{ status: "wip", label: "Limited integration", note: "Code hooks exist, but examples and documentation are not yet available." }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip" }, { status: "na" }, { status: "wip", label: "Experimental combination", note: "Speculative decoding with SGLang LoRA is not end-to-end validated.", source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview" }, { status: "wip" }, { status: "na" }],
+    constraints: [
+      {
+        features: ["Multimodal (Image)", "Disaggregated Serving"],
+        status: "yes",
+        label: "Supported with topology limits",
+        note: "Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal",
+      },
+      {
+        features: ["Multimodal (Image)", "KV-Aware Routing"],
+        status: "yes",
+        label: "Supported with requirement",
+        note: "Dynamo's SGLang image includes hash forwarding. A custom build without that patch falls back to text-prefix routing.",
+        source: "/dynamo/dev/multimodal/multimodal-kv-routing",
+      },
+      {
+        features: ["Request Cancellation", "Disaggregated Serving"],
+        status: "wip",
+        label: "Limited",
+        note: "Cancellation during remote prefill is not supported.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview",
+      },
+      {
+        features: ["LoRA", "Disaggregated Serving"],
+        status: "wip",
+        label: "Experimental",
+        note: "Prefill/decode lifecycle registration has unit coverage, but this combination has no end-to-end test.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview",
+      },
+      {
+        features: ["LoRA", "KV-Aware Routing"],
+        status: "wip",
+        label: "Experimental",
+        note: "Aggregated LoRA inference is validated without the KV router; the combined path is not end-to-end validated.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview",
+      },
+      {
+        features: ["LoRA", "Tool Calling"],
+        status: "wip",
+        label: "Experimental",
+        note: "This combination is not end-to-end validated.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview",
+      },
     ],
   },
   {
     backend: "TensorRT-LLM",
-    features: INTERACTION_FEATURES,
-    rows: [
-      // Disaggregated Serving
-      [{ status: "na" }],
-      // KV-Aware Routing
-      [{ status: "yes" }, { status: "na" }],
-      // SLA-Based Planner
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }],
-      // KV Block Manager
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "na" }],
-      // Multimodal
-      [{ status: "yes", label: "Disaggregated image flows", note: "Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal" }, { status: "yes", label: "Image-aware KV routing", note: "Workers must publish KV events with block reuse enabled.", source: "/dynamo/dev/multimodal/multimodal-kv-routing" }, { status: "na" }, { status: "yes" }, { status: "na" }],
-      // Request Migration
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "wip" }, { status: "na" }],
-      // Request Cancellation
-      [{ status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "yes", label: "Known engine limitation", note: "The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed." }, { status: "na" }],
-      // LoRA
-      [{ status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "na" }],
-      // Tool Calling
-      [{ status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "na" }],
-      // Speculative Decoding
-      [{ status: "yes" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "na" }, { status: "yes" }, { status: "yes" }, { status: "no", label: "LoRA not supported", note: "TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported.", source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview" }, { status: "yes" }, { status: "na" }],
+    constraints: [
+      {
+        features: ["Multimodal (Image)", "Disaggregated Serving"],
+        status: "yes",
+        label: "Supported with topology limits",
+        note: "Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal",
+      },
+      {
+        features: ["Multimodal (Image)", "KV-Aware Routing"],
+        status: "yes",
+        label: "Supported with requirement",
+        note: "Workers must publish KV events with block reuse enabled.",
+        source: "/dynamo/dev/multimodal/multimodal-kv-routing",
+      },
+      {
+        features: ["Request Migration", "Multimodal (Image)"],
+        status: "wip",
+        label: "Work in progress",
+        note: "Request migration is not yet fully supported for multimodal requests.",
+        source: "/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal",
+      },
     ],
   },
 ];

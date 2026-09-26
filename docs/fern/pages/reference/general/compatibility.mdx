@@ -41,83 +41,13 @@ Worker count is a capacity approximation, not a measurement of end-to-end servin
 
 <FeatureHeatmap />
 
-### Per-Backend Detail
+For backend setup, configuration, and implementation details, see the [vLLM][vllm-readme],
+[SGLang][sglang-readme], and [TensorRT-LLM][trtllm-readme] backend documentation.
 
-<Tabs>
-  <Tab title="vLLM">
+### Known Feature Interaction Constraints
 
-vLLM offers the broadest feature coverage in Dynamo, with full support for disaggregated serving, KV-aware routing, KV block management, LoRA adapters, and multimodal inference including video and audio.
-
-*Source: [docs/backends/vllm/README.md][vllm-readme]*
-
-| Feature                   | Supported? | Notes                                                                                                                                        |
-| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> | Prefill/decode separation with NIXL KV transfer                                                                                              |
-| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image + video; audio experimental (Qwen2-Audio). With KV-aware routing, exact image routing and model-specific video routing on documented paths ([Source][mm-kv-routing]) |
-| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **Request Cancellation**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **LoRA**                  | <span className="dynref-badge dynref-badge--green">✓</span> | Dynamic load/unload; KV-aware routing supports adapter affinity                                                                              |
-| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                              |
-| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> | Eagle3 ([Source][vllm-spec])                                                                                                                 |
-| **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
-| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--amber">!</span> | Software-process failover only; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress |
-
-  </Tab>
-  <Tab title="SGLang">
-
-SGLang is optimized for high-throughput serving with fast primitives, providing robust support for disaggregated serving, KV-aware routing, and request migration.
-
-*Source: [docs/backends/sglang/README.md][sglang-readme]*
-
-| Feature                   | Supported? | Notes                                                                                                                                 |
-| :------------------------ | :--------: | :------------------------------------------------------------------------------------------------------------------------------------ |
-| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
-| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
-| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
-| **KV Block Manager**      | <span className="dynref-badge dynref-badge--wip">WIP</span> | Work in progress across all combinations                                                                                              |
-| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image + video. KV-aware routing supported on Dynamo's SGLang image; a custom build without the hash-forwarding patch falls back to text-prefix routing. Disagg patterns: EPD, E/PD, E/P/D (not traditional EP/D) ([Source][mm-sglang]) |
-| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
-| **Request Cancellation**  | <span className="dynref-badge dynref-badge--wip">WIP</span> | Remote-prefill-phase cancellation not supported in disaggregated mode ([Source][sglang-readme])                                       |
-| **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                         |
-| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                       |
-| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--wip">WIP</span> | Code hooks exist; no examples or docs yet                                                                                             |
-| **GPU Memory Service** | <span className="dynref-badge dynref-badge--green">✓</span> | Weights and KV; upstream integration remains in progress |
-| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--amber">!</span> | Single-GPU supported; multi-GPU and multinode remain in progress |
-
-  </Tab>
-  <Tab title="TensorRT-LLM">
-
-TensorRT-LLM delivers maximum inference performance and optimization, with full KVBM integration and robust disaggregated serving support.
-
-*Source: [docs/backends/trtllm/README.md][trtllm-readme]*
-
-| Feature                   | Supported? | Notes                                                                                                                                                                         |
-| :------------------------ | :--------: | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Disaggregated Serving** | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **KV-Aware Routing**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **SLA-Based Planner**     | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **KV Block Manager**      | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **Multimodal**            | <span className="dynref-badge dynref-badge--green">✓</span> | Image only (URLs + pre-computed embeddings). Disagg: EP/D + E/P/D. With KV-aware routing, via dedicated MM Router Worker (requires KV event publishing) ([Source][mm-trtllm]) |
-| **Request Migration**     | <span className="dynref-badge dynref-badge--green">✓</span> | Work in progress with multimodal                                                                                                                                                             |
-| **Request Cancellation**  | <span className="dynref-badge dynref-badge--amber">!</span> | Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)                                                               |
-| **LoRA**                  | <span className="dynref-badge dynref-badge--gray">—</span> | Not supported                                                                                                                                                                 |
-| **Tool Calling**          | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **Speculative Decoding**  | <span className="dynref-badge dynref-badge--green">✓</span> |                                                                                                                                                                               |
-| **GPU Memory Service** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Weights only; multinode and upstream integration remain in progress |
-| **Shadow Engine Failover** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental; no KV-cache reuse or hardware fault tolerance |
-| **[Dynamo Snapshot API](../kubernetes-api/full-api-reference.mdx#componentcheckpointconfig)** | <span className="dynref-badge dynref-badge--wip">WIP</span> | Experimental single-GPU aggregated text-worker path only |
-
-  </Tab>
-</Tabs>
-
-### Feature Interactions
-
-Pairwise feature-by-feature compatibility within each backend. Each cell reports whether the row feature works together with the column feature.
+These tables list requirements and limitations that apply only when you combine two otherwise
+available features. The feature-support table above remains the source of truth for base support.
 
 <Tabs>
   <Tab title="vLLM">
@@ -140,10 +70,6 @@ Pairwise feature-by-feature compatibility within each backend. Each cell reports
 [vllm-readme]: ../../developer-guide/knowledge-base/modular-components/backends/vllm/overview.md
 [sglang-readme]: ../../developer-guide/knowledge-base/modular-components/backends/sglang/overview.md
 [trtllm-readme]: ../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/overview.md
-[mm-kv-routing]: ../../use-cases/multimodal-serving/multimodal-kv-routing.md
-[mm-sglang]: ../../developer-guide/knowledge-base/modular-components/backends/sglang/multimodal.md
-[mm-trtllm]: ../../developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
-[vllm-spec]: ../../developer-guide/additional-resources/speculative-decoding/speculative-decoding-with-vllm.md
 
 ## Release Support Matrix
 
@@ -298,66 +224,47 @@ Current stable release: v1.5.0 (container tag `1.5.0`, wheel version `1.5.0`).
 | KV-Aware Routing | Supported | Supported | Supported |
 | SLA-Based Planner | Supported | Supported | Supported |
 | KV Block Manager | Experimental (Work in progress across all combinations) | Supported | Supported |
-| Multimodal (Image) | Supported (KV-aware routing supported on Dynamo's SGLang image for aggregated workers; a custom build without the hash-forwarding patch falls back to text-prefix routing. Separately, multimodal serving supports EPD, E/PD and E/P/D disaggregation (not traditional EP/D)) | Supported (Image URLs + pre-computed embeddings. Disagg: EP/D + E/P/D. KV-aware routing via dedicated MM Router Worker (requires KV event publishing)) | Supported (With KV-aware routing, image-aware routing on documented paths) |
+| Multimodal (Image) | Supported (Image input) | Supported (Image URLs and pre-computed embeddings) | Supported |
 | Multimodal (Video) | Supported | Not supported | Supported (Video input with frame sampling) |
 | Multimodal (Audio) | Not supported | Not supported | Experimental (Qwen2-Audio, experimental) |
-| Request Migration | Supported | Supported (Work in progress with multimodal) | Supported |
-| Request Cancellation | Experimental (Remote-prefill-phase cancellation not supported in disaggregated mode) | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
-| LoRA | Experimental (Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested; disaggregated serving not end-to-end validated) | Not supported | Supported (Dynamic load/unload; KV-aware routing supports adapter affinity) |
+| Request Migration | Supported | Supported | Supported |
+| Request Cancellation | Supported | Supported with caveat (Engine temporarily not notified of cancellations — resources for cancelled requests are not freed (known issue)) | Supported |
+| LoRA | Experimental (Dynamic loading, discovery, and aggregated inference validated; unloading is implemented but not end-to-end tested) | Not supported | Supported (Dynamic load and unload) |
 | Tool Calling | Supported | Supported | Supported |
 | Speculative Decoding | Experimental (Code hooks exist; no examples or docs yet) | Supported | Supported (Eagle3) |
 | GPU Memory Service | Supported (Weights and KV; upstream integration remains in progress) | Experimental (Weights only; multinode and upstream integration remain in progress) | Supported (Weights and KV; upstream integration remains in progress) |
 | Shadow Engine Failover | Experimental (No KV-cache reuse or hardware fault tolerance) | Experimental (No KV-cache reuse or hardware fault tolerance) | Supported with caveat (Software-process failover only; no KV-cache reuse or hardware fault tolerance) |
 | Dynamo Snapshot | Supported with caveat (Single-GPU supported; multi-GPU and multinode remain in progress) | Experimental (Single-GPU aggregated text-worker path only) | Supported with caveat (Single-GPU supported; multi-GPU is highly experimental and multinode remains in progress) |
 
-**Feature interactions by backend**
+**Known feature interaction constraints by backend**
 
-Each cell states whether the row feature works together with the column feature. The matrix is symmetric: a cell reads the same in either direction.
+These tables list requirements and limitations that apply only when two otherwise available features are combined.
 
 *vLLM*
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Disaggregated Serving | n/a | Yes | Yes | Yes | Yes — Supports Qwen2-Audio experimentally and video input with frame sampling. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/v-llm/vllm-multimodal) | Yes | Yes | Yes | Yes | Yes |
-| KV-Aware Routing | Yes | n/a | Yes | Yes | Yes — The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | Yes | Yes | Yes — vLLM routes requests based on LoRA adapter affinity. | Yes | Yes |
-| SLA-Based Planner | Yes | Yes | n/a | Yes | n/a | Yes | Yes | n/a | Yes | n/a |
-| KV Block Manager | Yes | Yes | Yes | n/a | Yes | Yes | Yes | Yes | Yes | Yes |
-| Multimodal | Yes — Supports Qwen2-Audio experimentally and video input with frame sampling. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/v-llm/vllm-multimodal) | Yes — The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | n/a | Yes | n/a | Yes | Yes | n/a | Yes | n/a |
-| Request Migration | Yes | Yes | Yes | Yes | Yes | n/a | Yes | Yes | Yes | Yes |
-| Request Cancellation | Yes | Yes | Yes | Yes | Yes | Yes | n/a | Yes | Yes | Yes |
-| LoRA | Yes | Yes — vLLM routes requests based on LoRA adapter affinity. | n/a | Yes | n/a | Yes | Yes | n/a | Yes | n/a |
-| Tool Calling | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | n/a | Yes — Eagle3 support is documented. (https://docs.nvidia.com/dynamo/dev/additional-resources/speculative-decoding/speculative-decoding-with-v-llm) |
-| Speculative Decoding | Yes | Yes | n/a | Yes | n/a | Yes | Yes | n/a | Yes — Eagle3 support is documented. (https://docs.nvidia.com/dynamo/dev/additional-resources/speculative-decoding/speculative-decoding-with-v-llm) | n/a |
+| Feature combination | Status | Constraint |
+| --- | --- | --- |
+| Multimodal (Image) + KV-Aware Routing | Supported with requirement | The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) |
+| LoRA + KV-Aware Routing | Supported with requirement | Dynamo routes requests by LoRA adapter affinity. |
 
 *SGLang*
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Disaggregated Serving | n/a | Yes | Yes | Experimental | Yes — Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal) | Yes | Experimental — Cancellation during remote prefill is not supported in disaggregated mode. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental — Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Yes | Experimental — Code hooks exist, but examples and documentation are not yet available. |
-| KV-Aware Routing | Yes | n/a | Yes | Experimental | Yes — Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.19, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | Yes | Yes | Experimental — Aggregated LoRA inference is validated without the KV router; the combined path remains experimental. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Yes | Experimental |
-| SLA-Based Planner | Yes | Yes | n/a | Experimental | n/a | Yes | Yes | n/a | Yes | n/a |
-| KV Block Manager | Experimental | Experimental | Experimental | n/a | Experimental | Experimental | Experimental | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental | Experimental |
-| Multimodal | Yes — Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal) | Yes — Hash forwarding is upstream in SGLang 0.5.13+ and Dynamo pins 0.5.19, so the shipped image routes on image overlap. A custom build without that patch still serves the request but degrades to text-prefix routing. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | n/a | Experimental | n/a | Yes | Experimental | n/a | Yes | n/a |
-| Request Migration | Yes | Yes | Yes | Experimental | Yes | n/a | Yes | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Yes | Experimental |
-| Request Cancellation | Experimental — Cancellation during remote prefill is not supported in disaggregated mode. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Yes | Yes | Experimental | Experimental | Yes | n/a | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Yes | n/a |
-| LoRA | Experimental — Prefill/decode lifecycle registration has unit coverage, but no SGLang disaggregated LoRA end-to-end test. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental — Aggregated LoRA inference is validated without the KV router; the combined path remains experimental. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | n/a | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | n/a | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental — This LoRA feature pairing is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | n/a | Experimental — Tool calling with SGLang LoRA is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental — Speculative decoding with SGLang LoRA is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
-| Tool Calling | Yes | Yes | Yes | Experimental | Yes | Yes | Yes | Experimental — Tool calling with SGLang LoRA is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | n/a | Experimental |
-| Speculative Decoding | Experimental — Code hooks exist, but examples and documentation are not yet available. | Experimental | n/a | Experimental | n/a | Experimental | n/a | Experimental — Speculative decoding with SGLang LoRA is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) | Experimental | n/a |
+| Feature combination | Status | Constraint |
+| --- | --- | --- |
+| Multimodal (Image) + Disaggregated Serving | Supported with topology limits | Supports aggregated EPD, E/PD, and E/P/D patterns. Traditional disaggregated EP/D is not supported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/sglang-multimodal) |
+| Multimodal (Image) + KV-Aware Routing | Supported with requirement | Dynamo's SGLang image includes hash forwarding. A custom build without that patch falls back to text-prefix routing. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) |
+| Request Cancellation + Disaggregated Serving | Limited | Cancellation during remote prefill is not supported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
+| LoRA + Disaggregated Serving | Experimental | Prefill/decode lifecycle registration has unit coverage, but this combination has no end-to-end test. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
+| LoRA + KV-Aware Routing | Experimental | Aggregated LoRA inference is validated without the KV router; the combined path is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
+| LoRA + Tool Calling | Experimental | This combination is not end-to-end validated. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/sg-lang/overview) |
 
 *TensorRT-LLM*
 
-| Feature | Disaggregated Serving | KV-Aware Routing | SLA-Based Planner | KV Block Manager | Multimodal | Request Migration | Request Cancellation | LoRA | Tool Calling | Speculative Decoding |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Disaggregated Serving | n/a | Yes | Yes | Yes | Yes — Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal) | Yes | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | Yes |
-| KV-Aware Routing | Yes | n/a | Yes | Yes | Yes — Workers must publish KV events with block reuse enabled. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | Yes | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | Yes |
-| SLA-Based Planner | Yes | Yes | n/a | Yes | n/a | Yes | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | n/a |
-| KV Block Manager | Yes | Yes | Yes | n/a | Yes | Yes | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | Yes |
-| Multimodal | Yes — Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal) | Yes — Workers must publish KV events with block reuse enabled. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) | n/a | Yes | n/a | Experimental | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | n/a |
-| Request Migration | Yes | Yes | Yes | Yes | Experimental | n/a | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | Yes |
-| Request Cancellation | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | Yes — The engine is temporarily not notified of cancellations, so resources for cancelled requests are not freed. | n/a | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | Yes |
-| LoRA | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | n/a | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) |
-| Tool Calling | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | n/a | Yes |
-| Speculative Decoding | Yes | Yes | n/a | Yes | n/a | Yes | Yes | No — TensorRT-LLM does not support LoRA in Dynamo, so every LoRA pairing is unsupported. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/overview) | Yes | n/a |
+| Feature combination | Status | Constraint |
+| --- | --- | --- |
+| Multimodal (Image) + Disaggregated Serving | Supported with topology limits | Supports EP/D and E/P/D image flows with image URLs and pre-computed embeddings. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal) |
+| Multimodal (Image) + KV-Aware Routing | Supported with requirement | Workers must publish KV events with block reuse enabled. (https://docs.nvidia.com/dynamo/dev/multimodal/multimodal-kv-routing) |
+| Request Migration + Multimodal (Image) | Work in progress | Request migration is not yet fully supported for multimodal requests. (https://docs.nvidia.com/dynamo/dev/knowledge-base/modular-components/backends/tensor-rt-llm/tensorrt-llm-multimodal) |
 
 **Platform support**
 
