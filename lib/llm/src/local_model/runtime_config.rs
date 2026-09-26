@@ -102,6 +102,13 @@ pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_gener
 pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
     "vllm_qwen_video_processor_contract";
 
+/// Worker-reported Qwen3 video prompt-expansion contract used by SGLang.
+///
+/// SGLang performs an additional frame-selection and spatial-resize stage
+/// before the Transformers processor, so this cannot share vLLM's contract.
+pub const SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "sglang_qwen_video_processor_contract";
+
 /// Worker-reported Nemotron Nano Omni video prompt-expansion contract used by
 /// vLLM. Absence disables exact video routing for mixed-version safety.
 pub const VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =

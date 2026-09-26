@@ -54,12 +54,13 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use tracing::{self, Instrument};
 
-use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::{
+    ModelRuntimeConfig, SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_NEMOTRON_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
     VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
 };
+use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
 use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
@@ -753,10 +754,9 @@ pub struct MmImageEntry {
 }
 
 /// One replacement tracked in both the worker-visible and canonical routing
-/// token spaces. vLLM includes MM metadata on every block intersecting a
-/// feature span, including timestamp/delimiter-only boundary blocks. Those
-/// blocks need the worker token form plus `block_mm_infos`; blocks with an
-/// exact placeholder/object mapping use the canonical pad-value form.
+/// token spaces. Blocks with an exact placeholder/object mapping use the
+/// canonical pad-value form. For a timestamp/delimiter-only boundary block,
+/// the worker contract determines whether the hash also includes MM metadata.
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TrackedMmRoutingReplacement {
@@ -1020,10 +1020,9 @@ fn append_mm_routing_replacement_with_fill(
 /// normalizer block by block.
 ///
 /// Most blocks use canonical pad-value tokens. If a feature-span boundary
-/// does not contain an exact ordered placeholder/object mapping, vLLM keeps
-/// the worker tokens and hashes the block's MM metadata instead. Reproducing
-/// that fallback here keeps both sides identical without discarding the media
-/// identity carried by an ambiguous boundary block.
+/// does not contain an exact ordered placeholder/object mapping, the worker's
+/// KV-event identity contract determines whether to keep those canonical
+/// tokens or fall back to worker tokens plus MM metadata.
 #[cfg(feature = "mm-routing")]
 fn apply_tracked_mm_replacements(
     routing_prepend_bos: Option<TokenIdType>,
@@ -1032,6 +1031,7 @@ fn apply_tracked_mm_replacements(
     block_size: usize,
     image_token_id: Option<TokenIdType>,
     video_token_id: Option<TokenIdType>,
+    kv_event_mm_identity: mm_routing::KvEventMmIdentity,
 ) -> Result<(
     Vec<TokenIdType>,
     usize,
@@ -1149,6 +1149,11 @@ fn apply_tracked_mm_replacements(
                     normalized == routing_block,
                     "frontend MM replacement differs from KV-event normalization"
                 );
+            }
+            None if kv_event_mm_identity == mm_routing::KvEventMmIdentity::PadValueTokens => {
+                // SGLang has already replaced every placeholder with the
+                // canonical media pad before publishing this KV-event block.
+                // The request-side routing block is therefore complete as-is.
             }
             None => {
                 routing_block.copy_from_slice(worker_block);
@@ -1707,6 +1712,40 @@ pub struct OpenAIPreprocessor {
 }
 
 pub(crate) const LORA_NAME_CONTEXT_KEY: &str = "discovery.lora_name";
+
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+fn resolve_qwen_video_processor_contract(
+    runtime_config: &ModelRuntimeConfig,
+) -> Result<Option<mm_routing::QwenVideoProcessorContract>> {
+    let vllm_contract = runtime_config
+        .get_engine_specific::<mm_routing::VllmQwenVideoProcessorContract>(
+            VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+    let sglang_contract = runtime_config
+        .get_engine_specific::<mm_routing::SglangQwenVideoProcessorContract>(
+            SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+        )
+        .with_context(|| {
+            format!(
+                "invalid Qwen video processor runtime metadata under {SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY}"
+            )
+        })?
+        .map(mm_routing::QwenVideoProcessorContract::try_from)
+        .transpose()?;
+
+    anyhow::ensure!(
+        vllm_contract.is_none() || sglang_contract.is_none(),
+        "multiple Qwen video processor contracts were published"
+    );
+    Ok(vllm_contract.or(sglang_contract))
+}
 
 impl OpenAIPreprocessor {
     fn omitted_max_tokens_default(
@@ -2559,16 +2598,12 @@ impl OpenAIPreprocessor {
 
         #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
         let video_routing_processor = {
-            let qwen_contract = match runtime_config
-                .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
-                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
-                ) {
-                Ok(target) => target,
+            let qwen_contract = match resolve_qwen_video_processor_contract(&runtime_config) {
+                Ok(contract) => contract,
                 Err(error) => {
                     tracing::warn!(
                         target: "mm_routing",
                         %error,
-                        key = VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
                         "invalid Qwen video processor runtime metadata; exact video routing disabled"
                     );
                     None
@@ -4151,6 +4186,15 @@ impl OpenAIPreprocessor {
             // the frontend-tokenized prompt.
             let routing_bos =
                 routing_bos_to_prepend(self.routing_prepend_bos, image_counter_required);
+            #[cfg(feature = "media-ffmpeg")]
+            let kv_event_mm_identity = self
+                .video_routing_processor
+                .as_ref()
+                .map_or(mm_routing::KvEventMmIdentity::MmMetadata, |processor| {
+                    processor.kv_event_mm_identity()
+                });
+            #[cfg(not(feature = "media-ffmpeg"))]
+            let kv_event_mm_identity = mm_routing::KvEventMmIdentity::MmMetadata;
             match apply_tracked_mm_replacements(
                 routing_bos,
                 &replacements,
@@ -4158,6 +4202,7 @@ impl OpenAIPreprocessor {
                 block_size,
                 image_token_id,
                 video_token_id,
+                kv_event_mm_identity,
             ) {
                 Ok(expanded) => expanded,
                 Err(error) => {
@@ -12451,6 +12496,48 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn dual_qwen_video_contracts_disable_exact_routing() {
+        let mut runtime_config = ModelRuntimeConfig::default();
+        runtime_config
+            .set_engine_specific(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil"
+                }),
+            )
+            .unwrap();
+        runtime_config
+            .set_engine_specific(
+                SGLANG_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                serde_json::json!({
+                    "placeholder_target": "bare_video_token",
+                    "resize_mode": "legacy_ceil",
+                    "runless_boundary_hash": "tokens_only",
+                    "sglang_preprocess": {
+                        "image_factor": 28,
+                        "video_min_pixels": 100352,
+                        "video_max_pixels": 602112,
+                        "video_total_pixels": 90316800,
+                        "frame_factor": 2,
+                        "fps": 2.0,
+                        "min_frames": 4,
+                        "max_frames": 768
+                    }
+                }),
+            )
+            .unwrap();
+
+        let error = resolve_qwen_video_processor_contract(&runtime_config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("multiple Qwen video processor contracts")
+        );
+    }
+
     #[cfg(feature = "mm-routing")]
     #[test]
     fn exif_transposed_dimensions_match_vllm_image_loading() {
@@ -12571,6 +12658,7 @@ mod tests {
             4,
             Some(99),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12579,6 +12667,67 @@ mod tests {
         assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
         assert_eq!(infos[0].as_ref().unwrap().mm_objects[0].mm_hash, mm_hash);
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_video_boundary_matches_token_only_worker_contract() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let video_token_id = 100;
+        let mm_hash = 41;
+        let video_pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![9],
+            worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
+            routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+        };
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[1, 9, 2],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 8);
+        assert_eq!(&tokens[..4], &[1, 3, 4, 5]);
+        assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
+        assert!(infos.iter().all(Option::is_none));
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_token_only_worker_still_validates_normalizable_blocks() {
+        let video_token_id = 100;
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash: 41,
+            target_tokens: vec![9],
+            worker_tokens: vec![video_token_id, video_token_id],
+            routing_tokens: vec![1, 2],
+        };
+
+        let error = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[9],
+            4,
+            Some(99),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("frontend MM replacement differs from KV-event normalization")
+        );
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12621,6 +12770,7 @@ mod tests {
             4,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12646,6 +12796,50 @@ mod tests {
             [image_hash, video_hash]
         );
         assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_mixed_token_only_boundary_preserves_canonical_pads() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let image_hash = 41;
+        let video_hash = 42;
+        let image_pad = pad_value_for_mm_hash(image_hash);
+        let video_pad = pad_value_for_mm_hash(video_hash);
+        let replacements = [
+            TrackedMmRoutingReplacement {
+                mm_hash: image_hash,
+                target_tokens: vec![image_token_id],
+                worker_tokens: vec![image_token_id; 14],
+                routing_tokens: vec![image_pad; 14],
+            },
+            TrackedMmRoutingReplacement {
+                mm_hash: video_hash,
+                target_tokens: vec![video_token_id],
+                worker_tokens: vec![7, 8, video_token_id, video_token_id],
+                routing_tokens: vec![7, 8, video_pad, video_pad],
+            },
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[image_token_id, video_token_id],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+            mm_routing::KvEventMmIdentity::PadValueTokens,
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 18);
+        assert_eq!(&tokens[..14], &[image_pad; 14]);
+        assert_eq!(&tokens[14..18], &[7, 8, video_pad, video_pad]);
+        assert!(tokens[18..].iter().all(|token| *token == 0));
+        assert!(infos.iter().all(Option::is_none));
     }
 
     #[cfg(feature = "mm-routing")]
@@ -12677,6 +12871,7 @@ mod tests {
             16,
             Some(image_token_id),
             Some(video_token_id),
+            mm_routing::KvEventMmIdentity::MmMetadata,
         )
         .unwrap();
 
@@ -12719,6 +12914,7 @@ mod tests {
                     4,
                     Some(10),
                     Some(20),
+                    mm_routing::KvEventMmIdentity::MmMetadata,
                 )
                 .is_err(),
                 "invalid target sequence {token_ids:?} must fail closed"
@@ -12740,8 +12936,16 @@ mod tests {
             routing_tokens: vec![100, 19, pad, pad, 20, 101, 19, pad, 20],
         };
 
-        let (tokens, prompt_len, block_infos) =
-            apply_tracked_mm_replacements(None, &[replacement], &[7], 4, Some(18), None).unwrap();
+        let (tokens, prompt_len, block_infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[7],
+            4,
+            Some(18),
+            None,
+            mm_routing::KvEventMmIdentity::MmMetadata,
+        )
+        .unwrap();
 
         assert_eq!(prompt_len, 9);
         assert_eq!(tokens, [100, 19, pad, pad, 20, 101, 19, pad, 20, 0, 0, 0]);
