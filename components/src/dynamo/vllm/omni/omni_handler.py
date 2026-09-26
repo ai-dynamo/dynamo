@@ -494,8 +494,8 @@ class OmniHandler(BaseOmniHandler):
 
         **Single-stage pipelines (pure LLM or pure diffusion)**:
         - Hold lock through first output only
+        - Track the active request until generation completes
         - Release lock, then stream remaining results (tokens) outside lock
-        - This optimization reduces lock contention for high-throughput text generation
 
         **Multi-stage pipelines (e.g., image-via-chat with LLM + diffusion stages)**:
         - Hold lock through entire generation
@@ -541,45 +541,52 @@ class OmniHandler(BaseOmniHandler):
         # calling remove_lora while this request is in-flight. This applies to
         # all adapter modes: lazy-activated (PREFILL) and preloaded (AGGREGATED).
         lock = self._get_lora_lock(lora_request.lora_name)
-        async with lock:
-            # Re-resolve adapter while holding lock; may have been unloaded/reloaded
-            admitted_lora_request = self._resolve_lora_request(lora_request.lora_name)
-            if admitted_lora_request is None:
-                logger.warning(
-                    "LoRA adapter %s was unloaded before generation; "
-                    "rejecting the request",
-                    lora_request.lora_name,
+        request_started = False
+        try:
+            async with lock:
+                # Re-resolve adapter while holding lock; may have been unloaded/reloaded
+                admitted_lora_request = self._resolve_lora_request(
+                    lora_request.lora_name
                 )
-                raise ValueError(
-                    f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                if admitted_lora_request is None:
+                    logger.warning(
+                        "LoRA adapter %s was unloaded before generation; "
+                        "rejecting the request",
+                        lora_request.lora_name,
+                    )
+                    raise ValueError(
+                        f"unknown model or LoRA adapter: '{lora_request.lora_name}'"
+                    )
+
+                self._track_lora_request_activation(admitted_lora_request)
+                self._lora_state.begin_request(admitted_lora_request.lora_name)
+                request_started = True
+                generator = create_generator(admitted_lora_request)
+                try:
+                    first_output = await anext(generator)
+                except StopAsyncIteration:
+                    return
+
+                yield first_output
+
+                # For multi-stage pipelines (e.g., LLM + diffusion), keep lock held
+                # for the entire generation. For single-stage, release lock for throughput.
+                is_multi_stage = (
+                    sampling_params_list is not None and len(sampling_params_list) > 1
                 )
+                if is_multi_stage:
+                    # Multi-stage: continue streaming inside the lock
+                    async for result in generator:
+                        yield result
+                    # Lock is released here when exiting the async with block
 
-            generator = create_generator(admitted_lora_request)
-            try:
-                first_output = await anext(generator)
-            except StopAsyncIteration:
-                return
-
-            yield first_output
-
-            # For multi-stage pipelines (e.g., LLM + diffusion), keep lock held
-            # for the entire generation. For single-stage, release lock for throughput.
-            is_multi_stage = (
-                sampling_params_list is not None and len(sampling_params_list) > 1
-            )
-            if is_multi_stage:
-                # Multi-stage: continue streaming inside the lock
+            # For single-stage pipelines, stream remaining results outside lock
+            if not is_multi_stage:
                 async for result in generator:
                     yield result
-                # Lock is released here when exiting the async with block
-            else:
-                # Single-stage: release lock early and stream remaining results outside
-                pass
-
-        # For single-stage pipelines, stream remaining results outside lock
-        if sampling_params_list is None or len(sampling_params_list) <= 1:
-            async for result in generator:
-                yield result
+        finally:
+            if request_started:
+                self._lora_state.end_request(lora_request.lora_name)
 
     async def build_engine_inputs(
         self,

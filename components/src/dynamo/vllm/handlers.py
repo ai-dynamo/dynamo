@@ -2718,6 +2718,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
+                            await self._lora_state.wait_until_idle(lora_name)
                             await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
@@ -2981,6 +2982,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # inference request. Remove only adapters known to have
                     # reached vLLM.
                     if lora_name in self._engine_loaded_loras:
+                        await self._lora_state.wait_until_idle(lora_name)
+
                         try:
                             await self.engine_client.remove_lora(lora_id)
                         except Exception as e:
