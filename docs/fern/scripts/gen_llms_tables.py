@@ -442,59 +442,37 @@ def feature_table(data: dict) -> str:
     return md_table(["Feature", "SGLang", "TensorRT-LLM", "vLLM"], rows)
 
 
-INTERACTION_GLYPH = {"yes": "Yes", "wip": "Experimental", "no": "No", "na": "n/a"}
+INTERACTION_STATUS = {"yes", "wip", "no"}
 
 
 def interaction_tables(data: dict) -> str:
-    """Pairwise feature-interaction matrices, one table per backend.
+    """Non-obvious feature-interaction constraints, one table per backend.
 
-    The human view renders through <FeatureInteractions />, whose cell states
-    live in the DOM as tinted divs with no text; Fern's agent-facing export
-    would carry no status at all. This twin restates every cell as words from
-    the same FEATURE_INTERACTIONS data, so the two cannot disagree.
-
-    Only the lower triangle is stored, so the upper triangle is filled in here
-    by mirroring -- an agent reading a row should not have to know the
-    convention to answer "does A work with B".
+    The human view renders through <FeatureInteractions />. Fern's agent-facing
+    export may omit component output, so this twin emits the same constraints
+    as Markdown from the shared FEATURE_INTERACTIONS data.
     """
     parts: list[str] = []
-    for matrix in data["FEATURE_INTERACTIONS"]:
-        features = matrix["features"]
-        rows_in = matrix["rows"]
-        grid: list[list] = [[None] * len(features) for _ in features]
-        for r, cells in enumerate(rows_in):
-            for c, cell in enumerate(cells):
-                grid[r][c] = cell
-                if r != c:
-                    grid[c][r] = cell  # mirror, so both directions read alike
-        body: list[list] = []
-        for r, feature in enumerate(features):
-            row = [feature]
-            for c in range(len(features)):
-                cell = grid[r][c]
-                if cell is None:
-                    row.append(None)
-                    continue
-                # Raised as TSParseError like every other parse failure in
-                # this module: a bare KeyError is caught by main() and shown
-                # as "KeyError('preview')", which names neither the map nor
-                # the fix. Matches feature_cell above.
-                status = cell["status"]
-                if status not in INTERACTION_GLYPH:
-                    raise TSParseError(
-                        f"unknown interaction status {status!r} for "
-                        f"{matrix['backend']}; add it to INTERACTION_GLYPH"
-                    )
-                text = INTERACTION_GLYPH[status]
-                note = cell.get("note")
-                if note:
-                    source = cell.get("source")
-                    suffix = f" ({PROD_HOST}{source})" if source else ""
-                    text = f"{text} — {note}{suffix}"
-                row.append(text)
-            body.append(row)
-        parts.append(f"*{matrix['backend']}*")
-        parts.append(md_table(["Feature", *features], body))
+    for entry in data["FEATURE_INTERACTIONS"]:
+        rows: list[list] = []
+        for constraint in entry["constraints"]:
+            status = constraint["status"]
+            if status not in INTERACTION_STATUS:
+                raise TSParseError(
+                    f"unknown interaction status {status!r} for "
+                    f"{entry['backend']}; add it to INTERACTION_STATUS"
+                )
+            source = constraint.get("source")
+            suffix = f" ({PROD_HOST}{source})" if source else ""
+            rows.append(
+                [
+                    " + ".join(constraint["features"]),
+                    constraint["label"],
+                    f"{constraint['note']}{suffix}",
+                ]
+            )
+        parts.append(f"*{entry['backend']}*")
+        parts.append(md_table(["Feature combination", "Status", "Constraint"], rows))
     return "\n\n".join(parts)
 
 
@@ -660,11 +638,10 @@ def render_compatibility(data: dict) -> str:
     parts.append(f"**Feature support by backend ({data['CURRENT_VERSION']})**")
     parts.append(feature_table(data))
 
-    parts.append("**Feature interactions by backend**")
+    parts.append("**Known feature interaction constraints by backend**")
     parts.append(
-        "Each cell states whether the row feature works together with the "
-        "column feature. The matrix is symmetric: a cell reads the same in "
-        "either direction."
+        "These tables list requirements and limitations that apply only when "
+        "two otherwise available features are combined."
     )
     parts.append(interaction_tables(data))
 
