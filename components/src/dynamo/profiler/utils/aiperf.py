@@ -363,6 +363,7 @@ def benchmark_decode(
         model=model_name,
         tokenizer=tokenizer,
         base_url=base_url,
+        warmup_request_count=warmup_request_count,
     )
     aiperf_process = subprocess.Popen(
         aiperf_cmd,
