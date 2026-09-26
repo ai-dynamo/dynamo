@@ -28,6 +28,7 @@ use futures::stream::{self, StreamExt};
 use crate::{
     discovery::{ModelManager, WorkerSetTarget, WorkerSetTargetId},
     kv_router::{RoutingHost, SelectionPolicySource},
+    local_model::runtime_config::DISAGG_PREFILL_CANCEL_ANYTIME_V1,
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
@@ -39,6 +40,7 @@ use crate::{
 
 mod activation;
 mod admission;
+mod cancellation;
 mod conditional_bypass;
 mod handoff;
 mod query;
@@ -70,6 +72,29 @@ impl PrefillLifecycleState {
     fn from_atomic(value: u8) -> Self {
         Self::try_from(value)
             .unwrap_or_else(|value| panic!("invalid prefill lifecycle state: {value}"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrefillDispatchErrorClass {
+    Cancelled,
+    AtCapacity,
+    Failed,
+}
+
+fn classify_prefill_dispatch_error(
+    error: &(dyn std::error::Error + 'static),
+) -> PrefillDispatchErrorClass {
+    if match_error_chain(error, &[ErrorType::Cancelled], &[]) {
+        PrefillDispatchErrorClass::Cancelled
+    } else if match_error_chain(
+        error,
+        &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
+        &[],
+    ) {
+        PrefillDispatchErrorClass::AtCapacity
+    } else {
+        PrefillDispatchErrorClass::Failed
     }
 }
 
@@ -227,6 +252,8 @@ pub struct PrefillRouter {
     /// lives on [`PrefillBinding::prefill_router_mode`].
     decode_router_mode: RouterMode,
     session_affinity_ttl: Option<std::time::Duration>,
+    decode_supports_prefill_cancellation: bool,
+
     session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
@@ -420,6 +447,7 @@ impl
 
         let tracker = prefill_req.tracker.clone();
         let mut prefill_context = independent_prefill_context(prefill_req, &context)?;
+        let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
@@ -445,7 +473,22 @@ impl
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    let prepared = self.prepare_prefill_dispatch(request, target, endpoint_id)?;
+                    let prefill_supports_cancellation =
+                        self.model_manager.worker_supports_runtime_capability(
+                            endpoint_id,
+                            prepared.worker_id,
+                            DISAGG_PREFILL_CANCEL_ANYTIME_V1,
+                        );
+                    if let Some(guard) = cancellation::arm_for(
+                        prefill_supports_cancellation,
+                        self.decode_supports_prefill_cancellation,
+                        engine_ctx.clone(),
+                        Arc::downgrade(&prefill_ctx),
+                    ) {
+                        prefill_ctx.retain(guard);
+                    }
+                    Ok(prepared)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
@@ -495,18 +538,17 @@ impl
         let (outcome, topology_constraints) = match prefill_result {
             Ok(result) => result,
             Err(error) => {
-                use dynamo_runtime::error::{ErrorType, match_error_chain};
-                if match_error_chain(
-                    error.as_ref(),
-                    &[ErrorType::ResourceExhausted, ErrorType::WorkerOverloaded],
-                    &[],
-                ) {
-                    tracing::warn!(
+                match classify_prefill_dispatch_error(error.as_ref()) {
+                    PrefillDispatchErrorClass::Cancelled => {
+                        tracing::debug!(error = %error, "Remote prefill cancelled");
+                    }
+                    PrefillDispatchErrorClass::AtCapacity => tracing::warn!(
                         error = %error,
                         "request rejected by prefill worker (at capacity)"
-                    );
-                } else {
-                    tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    ),
+                    PrefillDispatchErrorClass::Failed => {
+                        tracing::error!(error = %error, "Remote prefill failed, failing request");
+                    }
                 }
                 return Err(error);
             }
@@ -827,6 +869,36 @@ mod tests {
             prefill.context().kill();
             assert!(prefill.context().is_killed());
         }
+    }
+
+    #[test]
+    fn prefill_dispatch_errors_distinguish_cancellation_from_worker_failure() {
+        use dynamo_runtime::error::DynamoError;
+
+        let cancelled: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::Cancelled)
+            .message("client disconnected")
+            .build()
+            .into();
+        let at_capacity: anyhow::Error = DynamoError::builder()
+            .error_type(ErrorType::ResourceExhausted)
+            .message("worker at capacity")
+            .build()
+            .into();
+        let failed = anyhow::anyhow!("transport failed");
+
+        assert_eq!(
+            classify_prefill_dispatch_error(cancelled.as_ref()),
+            PrefillDispatchErrorClass::Cancelled
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(at_capacity.as_ref()),
+            PrefillDispatchErrorClass::AtCapacity
+        );
+        assert_eq!(
+            classify_prefill_dispatch_error(failed.as_ref()),
+            PrefillDispatchErrorClass::Failed
+        );
     }
 
     #[tokio::test]

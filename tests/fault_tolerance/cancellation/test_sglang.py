@@ -18,8 +18,10 @@ import pytest
 from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
+    read_log_content,
     read_streaming_responses,
     send_cancellable_request,
+    send_completion_request,
     verify_frontend_cancellation_metrics,
     verify_runtime_cancellation_metrics,
 )
@@ -27,6 +29,11 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.payloads import check_health_generate, check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
+
+FOLLOWUP_TIMEOUT_S = 30.0
+PREFILL_CANCELLATION_MAX_TOKENS = 1
+DECODE_HANDOFF_CANCELLATION_MAX_TOKENS = 256
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,7 @@ class DynamoWorkerProcess(ManagedProcess):
         system_port: int,
         frontend_port: int,
         mode: str = "agg",
+        serialize_requests: bool = False,
     ):
         """
         Initialize SGLang worker process.
@@ -57,6 +65,8 @@ class DynamoWorkerProcess(ManagedProcess):
             system_port: Port for system metrics server
             frontend_port: Port where frontend is running
             mode: One of "agg", "prefill", "decode"
+            serialize_requests: Disable CUDA graphs and run one request at a time for
+                cancellation timing tests.
         """
         command = [
             "python3",
@@ -72,6 +82,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "1",
             "--trust-remote-code",
         ]
+        if serialize_requests:
+            command.extend(["--disable-cuda-graph", "--max-running-requests", "1"])
 
         # Add mode-specific arguments
         if mode == "agg":
@@ -414,8 +426,116 @@ def test_request_cancellation_sglang_decode_cancel(
                     worker_system_port=decode_worker.system_port,
                     expected_count=1,
                 )
+                # Prefill may finish draining before or receive this cancellation.
                 verify_runtime_cancellation_metrics(
                     worker_system_port=prefill_worker.system_port,
-                    expected_count=0,
+                    expected_count=(0, 1),
                     component="prefill",
+                )
+
+
+@pytest.mark.timeout(900)
+@pytest.mark.gpu_2
+@pytest.mark.pre_merge
+@pytest.mark.parametrize("cancel_phase", ["prefill_received", "decode_handoff"])
+def test_request_cancellation_sglang_prefill_cancel(
+    request, runtime_services_dynamic_ports, predownload_models, cancel_phase
+):
+    decode_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
+    prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
+    request.addfinalizer(lambda port=prefill_system_port: deallocate_port(port))
+
+    with DynamoFrontendProcess(request) as frontend:
+        with DynamoWorkerProcess(
+            request,
+            system_port=decode_system_port,
+            frontend_port=frontend.frontend_port,
+            mode="decode",
+            serialize_requests=True,
+        ) as decode_worker:
+            with DynamoWorkerProcess(
+                request,
+                system_port=prefill_system_port,
+                frontend_port=frontend.frontend_port,
+                mode="prefill",
+                serialize_requests=True,
+            ) as prefill_worker:
+                time.sleep(2)
+                decode_log_offset = len(read_log_content(decode_worker.log_path))
+                max_tokens = (
+                    PREFILL_CANCELLATION_MAX_TOKENS
+                    if cancel_phase == "prefill_received"
+                    else DECODE_HANDOFF_CANCELLATION_MAX_TOKENS
+                )
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port,
+                    "completion",
+                    use_long_prompt=True,
+                    max_tokens=max_tokens,
+                )
+                request_id, prefill_log_offset = poll_for_pattern(
+                    process=prefill_worker,
+                    pattern="New Request ID: ",
+                    match_type="contains",
+                    max_wait_ms=10000,
+                    poll_interval_ms=50,
+                    cancellable_request=cancellable_req,
+                )
+
+                if cancel_phase == "decode_handoff":
+                    poll_for_pattern(
+                        process=decode_worker,
+                        pattern="Using bootstrap_info:",
+                        log_offset=decode_log_offset,
+                        match_type="contains",
+                        max_wait_ms=15000,
+                        poll_interval_ms=50,
+                        cancellable_request=cancellable_req,
+                    )
+
+                cancellable_req.cancel()
+                poll_for_pattern(
+                    process=prefill_worker,
+                    pattern=f"Aborted Request ID: {request_id}",
+                    log_offset=prefill_log_offset,
+                    max_wait_ms=15000,
+                    poll_interval_ms=50,
+                )
+                poll_for_pattern(
+                    process=decode_worker,
+                    pattern=f"Aborted Request ID: {request_id}",
+                    max_wait_ms=15000,
+                    poll_interval_ms=50,
+                )
+
+                followup = send_completion_request(
+                    prompt="hello",
+                    max_tokens=4,
+                    frontend_port=frontend.frontend_port,
+                    timeout_s=FOLLOWUP_TIMEOUT_S,
+                )
+                followup.wait(FOLLOWUP_TIMEOUT_S)
+                response = followup.get_response()
+                assert response.status_code == 200, (
+                    "Request after prefill cancellation failed "
+                    f"with HTTP {response.status_code}; the prefill/decode "
+                    "pair appears wedged."
+                )
+
+                verify_frontend_cancellation_metrics(
+                    frontend_port=frontend.frontend_port,
+                    request_type="completion",
+                    expected_count=1,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=prefill_worker.system_port,
+                    expected_count=1,
+                    component="prefill",
+                    max_wait_ms=15000,
+                )
+                verify_runtime_cancellation_metrics(
+                    worker_system_port=decode_worker.system_port,
+                    expected_count=1,
+                    max_wait_ms=15000,
                 )
