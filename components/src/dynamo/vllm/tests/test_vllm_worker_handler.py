@@ -1181,7 +1181,7 @@ class TestDeferredAbort:
             return await real_gather(*args, **kwargs)
 
         with patch.object(mod.asyncio, "gather", side_effect=delayed_gather):
-            with pytest.raises(mod.EngineShutdown):
+            with pytest.raises(mod.WorkerShutdown):
                 async with handler._abort_monitor(
                     context, "req-shutdown"
                 ) as monitor_task:
@@ -1482,6 +1482,22 @@ class TestEmbeddingWorkerHandlerCancellation:
 
         assert killed_or_stopped.cancelled()
         assert not handler.shutdown_event._waiters
+
+    @pytest.mark.asyncio
+    @pytest.mark.timeout(5)
+    async def test_embedding_shutdown_is_explicit_and_catchable_as_engine_shutdown(
+        self,
+    ):
+        handler = self._make_embedding_handler()
+        handler.shutdown_event = asyncio.Event()
+        handler.shutdown_event.set()
+        context = self._make_context()
+
+        with pytest.raises(mod.EngineShutdown) as raised:
+            await handler._monitor_abort(context, "test-req")
+
+        assert isinstance(raised.value, mod.WorkerShutdown)
+        handler.engine_client.abort.assert_awaited_once_with("test-req")
 
     @pytest.mark.asyncio
     @pytest.mark.timeout(5)

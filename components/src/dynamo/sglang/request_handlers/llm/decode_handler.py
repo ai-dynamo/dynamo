@@ -23,7 +23,7 @@ from dynamo.common.multimodal.image_loader import (
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils.engine_response import normalize_finish_reason
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
+from dynamo.llm.exceptions import InvalidArgument, WorkerShutdown
 from dynamo.sglang._compat import (
     cache_salt_kwargs,
     filter_supported_async_generate_kwargs,
@@ -967,7 +967,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         and self.shutdown_event
                         and self.shutdown_event.is_set()
                     ):
-                        raise EngineShutdown(
+                        raise WorkerShutdown(
                             "Engine was shut down during token generation"
                         )
                     _raise_if_sglang_error(finish_reason)
@@ -1045,7 +1045,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                             and self.shutdown_event
                             and self.shutdown_event.is_set()
                         ):
-                            raise EngineShutdown(
+                            raise WorkerShutdown(
                                 "Engine was shut down during token generation"
                             )
                 elif metadata_uploader is not None:
@@ -1124,7 +1124,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         and self.shutdown_event
                         and self.shutdown_event.is_set()
                     ):
-                        raise EngineShutdown(
+                        raise WorkerShutdown(
                             "Engine was shut down during token generation"
                         )
                     _raise_if_sglang_error(finish_reason)
@@ -1170,7 +1170,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         and self.shutdown_event
                         and self.shutdown_event.is_set()
                     ):
-                        raise EngineShutdown(
+                        raise WorkerShutdown(
                             "Engine was shut down during token generation"
                         )
                 elif metadata_uploader is not None:

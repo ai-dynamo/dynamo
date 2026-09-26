@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from dynamo._core import Context
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import WorkerShutdown
 from dynamo.sglang._compat import resolved_server_args
 
 _CANCELLATION_POLL_MAX_DELAY_S = 0.05
@@ -249,7 +249,7 @@ class CancellationMixin:
         submitted_request_id: str | None = None,
         request_ids: set[str] | None = None,
     ) -> asyncio.Task[Any] | None:
-        """Wait for cancellation, then order an exact SGLang abort."""
+        """Order an exact SGLang abort; raise WorkerShutdown on worker shutdown."""
         logging.debug("Cancellation monitor started for Context: %s", context.id())
         ordered_abort_task = None
         request_id = submitted_request_id
@@ -308,7 +308,7 @@ class CancellationMixin:
                                 raise
                         except Exception:
                             pass
-                    raise EngineShutdown("Engine was shut down during token generation")
+                    raise WorkerShutdown("Engine was shut down during token generation")
             return ordered_abort_task
         except asyncio.CancelledError:
             logging.debug(
@@ -414,7 +414,7 @@ class CancellationMixin:
         submitted_request_id: str | None = None,
         request_ids: set[str] | None = None,
     ) -> AsyncGenerator[asyncio.Task, None]:
-        """Own the cancellation monitor task for one response stream."""
+        """Own the cancellation monitor and propagate WorkerShutdown on shutdown."""
         logging.debug(
             "Creating cancellation monitor task for Context: %s", context.id()
         )
@@ -455,4 +455,4 @@ class CancellationMixin:
                 self._abort_requests(request_ids, context)
 
             if self.shutdown_event and self.shutdown_event.is_set():
-                raise EngineShutdown("Engine was shut down during token generation")
+                raise WorkerShutdown("Engine was shut down during token generation")
