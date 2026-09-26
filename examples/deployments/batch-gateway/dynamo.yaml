@@ -66,13 +66,7 @@ spec:
                 - --no-enable-log-requests
               env:
                 - name: HF_HOME
-                  value: /opt/models
-              envFrom:
-                - secretRef:
-                    name: hf-token-secret
-              volumeMounts:
-                - name: model-cache
-                  mountPath: /opt/models
+                  value: /tmp/huggingface
               workingDir: /workspace/examples/backends/vllm
               resources:
                 requests:
@@ -83,7 +77,3 @@ spec:
                   cpu: "4"
                   memory: 16Gi
                   nvidia.com/gpu: "1"
-          volumes:
-            - name: model-cache
-              persistentVolumeClaim:
-                claimName: model-cache
