@@ -1,0 +1,458 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+data:
+  nodes_per_partition: |-
+    2
+    2
+  partition_ids: |-
+    0
+    1
+  partition_node_offsets: |-
+    0
+    2
+  partition_paths: |-
+    part-0
+    part-1
+  topologies: |-
+    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+  namespace: test
+---
+data:
+  lpu_servers: target-${GROVE_PCSG_INDEX}-target-agt-0
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpu-cyborg-specdec-5f16-target-decode-32805b2198371ed2
+  namespace: test
+---
+data:
+  nodes_per_partition: "4"
+  partition_ids: "0"
+  partition_indices: "0"
+  partition_models: default
+  partition_node_offsets: "0"
+  partition_paths: part-0
+  topologies: URSA_V2__Q8__32C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
+immutable: true
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+  name: lpu-cyborg-specdec-5f16-target-lpu-355e8ac6768c54e3
+  namespace: test
+---
+metadata:
+  annotations:
+    lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+    scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:31a0ee5e56b73e39b7c7b2c93678df6bf858dedaa77350422c3f557fbdb7d5ad
+  labels:
+    lpx.nvidia.com/deployment-uid: lpx-render-uid
+    nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
+  name: lpu-cyborg-specdec-5f16
+  namespace: test
+spec:
+  replicas: 1
+  template:
+    cliqueStartupType: CliqueStartupTypeExplicit
+    cliques:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:d2aa1fa3f0cba5a30825fed47074c7a78060965d54075abab08622dc1f4e5eff
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v2LpuOnly
+      labels:
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
+        nvidia.com/dynamo-namespace: test-lpu-cyborg-specdec
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-cyborg-specdec-draft
+      name: draft-agt
+      spec:
+        minAvailable: 4
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/dynamo-lpu
+            env:
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/lpu-agent:test
+            name: agent
+            resources:
+              limits:
+                lpu.nvidia.com/lpu: "8"
+              requests:
+                lpu.nvidia.com/lpu: "8"
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+            name: config
+        replicas: 4
+        roleName: draft-agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        nvidia.com/extra-resources-hash: 6bcf1f4cf22aaf552736014dfc177eec81d993bf14b94b3328a39dd1b7d38e5d
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+        scheduling.lpu.nvidia.com/role: conductor
+      labels:
+        lpx.nvidia.com/serving: "true"
+        nvidia.com/dynamo-component: draft
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
+        nvidia.com/dynamo-namespace: test-lpu-cyborg-specdec
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-cyborg-specdec-draft
+      name: draft-cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/dynamo-lpu
+            env:
+            - name: LPX_ALLOCATION
+              value: draft-agt
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/lpu-conductor:test
+            name: conductor
+            resources: {}
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-cyborg-specdec-5f16-draft-lpu-6bcf1f4cf22aaf55
+            name: config
+        replicas: 1
+        roleName: draft-cond
+        startsAfter:
+        - draft-agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        nvidia.com/extra-resources-hash: 355e8ac6768c54e3ee778e2044a7498390f64c82034bbc4cc3dafa0ef4031877
+        scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:a70fcf7def9c874b1634097fef306b97a4af1103842c80b3516dcf6bda30ad59
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
+        scheduling.lpu.nvidia.com/model: default
+        scheduling.lpu.nvidia.com/role: agent
+        scheduling.lpu.nvidia.com/workload-mode: v2StrictHybrid
+      labels:
+        nvidia.com/dynamo-component: target
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
+        nvidia.com/dynamo-namespace: test-lpu-cyborg-specdec
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-cyborg-specdec-target
+      name: target-agt
+      spec:
+        minAvailable: 4
+        podSpec:
+          containers:
+          - args:
+            - serve
+            command:
+            - /opt/dynamo-lpu
+            env:
+            - name: LPX_MODEL_PATH
+              value: /models/node-local-v2-connected-lpx
+            - name: DYN_COMPONENT
+              value: lpx
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_NAMESPACE
+              value: test-lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/lpu-agent:test
+            name: agent
+            resources:
+              limits:
+                lpu.nvidia.com/lpu: "8"
+              requests:
+                lpu.nvidia.com/lpu: "8"
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-cyborg-specdec-5f16-target-lpu-355e8ac6768c54e3
+            name: config
+        replicas: 4
+        roleName: target-agt
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        nvidia.com/extra-resources-hash: 32805b2198371ed2ff837e4776e3e59448937c6274efe6602681e42f78f14d41
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
+        scheduling.lpu.nvidia.com/role: cyborg-worker
+      labels:
+        lpx.nvidia.com/serving: "true"
+        nvidia.com/dynamo-component: target
+        nvidia.com/dynamo-component-type: lpx
+        nvidia.com/dynamo-graph-deployment-name: lpu-cyborg-specdec
+        nvidia.com/dynamo-namespace: test-lpu-cyborg-specdec
+        nvidia.com/metrics-enabled: "true"
+        nvidia.com/selector: lpu-cyborg-specdec-target
+      name: target-cond
+      spec:
+        minAvailable: 1
+        podSpec:
+          containers:
+          - args:
+            - --draft-endpoint
+            - test-lpu-cyborg-specdec/backend/generate
+            command:
+            - python
+            - -m
+            - dynamo.cyborg
+            env:
+            - name: GBUILD_MANIFEST_PATH
+              value: /models/node-local-v2-connected-lpx/manifest.v2.capnp.bin
+            - name: DYN_COMPONENT
+              value: decode
+            - name: DYN_DISCOVERY_BACKEND
+              value: kubernetes
+            - name: DYN_FORWARDPASS_METRIC_PORT
+              value: "20380"
+            - name: DYN_HEALTH_CHECK_ENABLED
+              value: "false"
+            - name: DYN_NAMESPACE
+              value: test-lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAME
+              value: lpu-cyborg-specdec
+            - name: DYN_PARENT_DGD_K8S_NAMESPACE
+              value: test
+            - name: DYN_SYSTEM_ENABLED
+              value: "true"
+            - name: DYN_SYSTEM_PORT
+              value: "9090"
+            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+              value: '["generate"]'
+            - name: ETCD_ENDPOINTS
+              value: etcd-address
+            - name: NATS_SERVER
+              value: nats-address
+            - name: NIXL_TELEMETRY_ENABLE
+              value: "n"
+            - name: NIXL_TELEMETRY_EXPORTER
+              value: prometheus
+            - name: NIXL_TELEMETRY_PROMETHEUS_PORT
+              value: "19090"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            image: example.invalid/cyborg-specdecode:test
+            name: main
+            ports:
+            - containerPort: 9090
+              name: system
+              protocol: TCP
+            - containerPort: 19090
+              name: nixl
+              protocol: TCP
+            resources:
+              claims:
+              - name: gpu
+            volumeMounts:
+            - mountPath: /models
+              name: model-storage
+            - mountPath: /dev/shm
+              name: shared-memory
+          resourceClaims:
+          - name: gpu
+            resourceClaimTemplateName: decode-gpu
+          restartPolicy: Always
+          schedulerName: lpx-scheduler
+          terminationGracePeriodSeconds: 60
+          volumes:
+          - name: model-storage
+            persistentVolumeClaim:
+              claimName: model-storage
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 8Gi
+            name: shared-memory
+          - configMap:
+              name: lpu-cyborg-specdec-5f16-target-decode-32805b2198371ed2
+            name: config
+        replicas: 1
+        roleName: target-cond
+        startsAfter:
+        - target-agt
+    headlessServiceConfig:
+      publishNotReadyAddresses: true
+    podCliqueScalingGroups:
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:a4b9e49a326db14e1ea8ab4afc0d118c3da3a3c028077474c1369264073837cc
+      cliqueNames:
+      - draft-cond
+      - draft-agt
+      minAvailable: 1
+      name: draft
+      replicas: 1
+    - annotations:
+        lpx.nvidia.com/deployment-name: lpu-cyborg-specdec
+        scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c5f810defd8bdedcf98fa5c74975630429eade384354fb677c2f3b6f1d6f4462
+      cliqueNames:
+      - target-agt
+      - target-cond
+      minAvailable: 1
+      name: target
+      replicas: 1
+    terminationDelay: 15m0s
+status:
+  availableReplicas: 0
+  updatedReplicas: 0

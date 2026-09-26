@@ -29,7 +29,7 @@ import (
 // was used as a workaround for disaggregated serving), `prefill` and `decode`
 // are first-class values: users can set them directly and downstream consumers
 // (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
-// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp
+// +kubebuilder:validation:Enum=frontend;worker;prefill;decode;planner;epp;lpx
 type ComponentType string
 
 const (
@@ -39,6 +39,7 @@ const (
 	ComponentTypeDecode   ComponentType = "decode"
 	ComponentTypePlanner  ComponentType = "planner"
 	ComponentTypeEPP      ComponentType = "epp"
+	ComponentTypeLPX      ComponentType = "lpx"
 )
 
 const (
@@ -107,6 +108,10 @@ const (
 	ComponentRoleLeader = "leader"
 	// ComponentRoleWorker identifies the worker Pod-producing role of a multinode component.
 	ComponentRoleWorker = "worker"
+	// ComponentRoleLPXConductor identifies the launcher role of an LPX component.
+	ComponentRoleLPXConductor = "conductor"
+	// ComponentRoleLPXAgent identifies the LPU-serving role of an LPX component.
+	ComponentRoleLPXAgent = "agent"
 )
 
 // ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -136,9 +141,21 @@ type ComponentRoleSpec struct {
 
 	// podTemplate defines the Pod configuration for this role. Admission permits
 	// it only when the enclosing component type explicitly supports role-specific
-	// Pod templates. No component type supports it in this release.
+	// Pod templates.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+}
+
+// ComponentRole returns the authored role, or nil when the component does not declare it.
+// The shared spec must not be nil.
+func (s *DynamoComponentDeploymentSharedSpec) ComponentRole(name string) *ComponentRoleSpec {
+	// Resolve the role by its stable authored name.
+	for i := range s.Roles {
+		if s.Roles[i].Name == name {
+			return &s.Roles[i]
+		}
+	}
+	return nil
 }
 
 // MultinodeSpec configures a multinode component.

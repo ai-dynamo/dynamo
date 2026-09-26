@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: LPX operator configuration and RBAC
+templates:
+  - charts/dynamo-operator/templates/operator-config.yaml
+  - charts/dynamo-operator/templates/manager-rbac.yaml
+  - charts/dynamo-operator/templates/validate-values.yaml
+tests:
+  - it: rejects LPX without Grove integration
+    template: charts/dynamo-operator/templates/validate-values.yaml
+    set:
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "LPX requires Grove integration to be enabled"
+
+  - it: keeps LPX disabled by default
+    template: charts/dynamo-operator/templates/operator-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpx:\n  enabled: false$'
+
+  - it: enables LPX and externally installed Grove together
+    template: charts/dynamo-operator/templates/operator-config.yaml
+    set:
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpx:\n  enabled: true$'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^  grove:\n    enabled: true$'
+
+  - it: renders canonical LPX model registry configuration
+    template: charts/dynamo-operator/templates/operator-config.yaml
+    set:
+      global.grove.enabled: true
+      dynamo-operator.lpx.enabled: true
+      dynamo-operator.lpx.modelRegistryURL: gs://models/canonical
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpx:\n  enabled: true\n  modelRegistryURL: "gs://models/canonical"$'
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^lpu:'
+
+  - it: renders the exact inert LpuPipelineRequest and Grove owner grants
+    template: charts/dynamo-operator/templates/manager-rbac.yaml
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - scheduling.lpu.nvidia.com
+            resources:
+              - lpupipelinerequests
+            verbs:
+              - create
+              - delete
+              - get
+              - list
+              - watch
+        documentIndex: 0
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - grove.io
+            resources:
+              - podcliquesets/finalizers
+            verbs:
+              - update
+        documentIndex: 0

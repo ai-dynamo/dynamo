@@ -152,7 +152,7 @@ _Appears in:_
 | `name` _string_ | Name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the logical cardinality of this role in one complete component<br />instance. The enclosing component type defines the cardinality. For<br />multinode components, admission defaults and persists omitted values from<br />Multinode.NodeCount; leader must be 1 and worker must be<br />Multinode.NodeCount minus 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | ProviderOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. No component type supports it in this release. |  | Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. |  | Optional: \{\} <br /> |
 
 
 #### ConfigMapKeySelector
@@ -338,10 +338,11 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
-| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
+| `lpx` _[LPXConfig](#lpxconfig)_ | LPX holds LPX integration configuration. Only meaningful when<br />ComponentType is "lpx". |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService configures the GPU Memory Service (GMS) sidecar.<br />When enabled, a GMS sidecar is injected and GPU access is managed via DRA. |  | Optional: \{\} <br /> |
@@ -384,7 +385,7 @@ _Appears in:_
 | `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  |  |
-| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
+| `roles` _object array_ | Roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
@@ -956,6 +957,8 @@ _Appears in:_
 | `domain` _[TopologyDomain](#topologydomain)_ | Domain is the logical name for the topology level to enforce<br />(e.g. "zone", "rack"). The router uses this to match workers that<br />share the same value for the label identified by `labelKey`. |  | Pattern: `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$` <br /> |
 | `enforcement` _[KvTransferEnforcement](#kvtransferenforcement)_ | Enforcement controls how the selected prefill worker's topology is<br />applied to decode routing. "required" only allows decode workers in the<br />same topology domain as the selected prefill worker. "preferred" keeps<br />all decode workers eligible, but biases selection toward workers in the<br />same topology domain. Defaults to "required". | required | Enum: [required preferred] <br />Optional: \{\} <br /> |
 | `preferredWeight` _float_ | PreferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
+
+
 
 
 
@@ -1598,7 +1601,7 @@ users do not need to hand-wire them into the pod template.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -1656,7 +1659,7 @@ ComponentCheckpointStatus contains checkpoint information for a single component
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1695,7 +1698,7 @@ ComponentReplicaStatus contains replica information for a single component.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1721,14 +1724,14 @@ The enclosing component type defines the allowed role names and cardinality.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | name identifies the role within the enclosing component independently of<br />generated provider resource names. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Required: \{\} <br /> |
 | `replicas` _integer_ | replicas is the logical cardinality of this role in one complete component<br />instance. The enclosing component type defines the cardinality. For<br />multinode components, admission defaults and persists omitted values from<br />multinode.nodeCount; leader must be 1 and worker must be<br />multinode.nodeCount minus 1. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the provider workload unit generated for this<br />role. It is supported only for components embedded in a DGD. |  | Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. No component type supports it in this release. |  | Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the Pod configuration for this role. Admission permits<br />it only when the enclosing component type explicitly supports role-specific<br />Pod templates. |  | Optional: \{\} <br /> |
 
 
 #### ComponentType
@@ -1742,10 +1745,10 @@ are first-class values: users can set them directly and downstream consumers
 (e.g., the EPP) can filter on the pod label `nvidia.com/dynamo-component-type`.
 
 _Validation:_
-- Enum: [frontend worker prefill decode planner epp]
+- Enum: [frontend worker prefill decode planner epp lpx]
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description |
@@ -1756,6 +1759,7 @@ _Appears in:_
 | `decode` |  |
 | `planner` |  |
 | `epp` |  |
+| `lpx` |  |
 
 
 #### DGDRPhase
@@ -1790,7 +1794,7 @@ _Validation:_
 - Enum: [initializing pending successful failed]
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description |
 | --- | --- |
@@ -1864,7 +1868,7 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `spec` _[DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)_ | spec defines the desired state for this Dynamo component deployment. |  |  |
 
 
-#### DynamoComponentDeploymentSharedSpec
+#### v1beta1 DynamoComponentDeploymentSharedSpec
 
 
 
@@ -1883,24 +1887,25 @@ directly in `podTemplate` without any `extraPodSpec`-style escape hatch.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `providerOverride` _[ProviderOverride](#provideroverride)_ | providerOverride configures the primary Grove unit representing this DGD<br />component. With apiVersion `grove.io/v1alpha1`, target is<br />`PodCliqueTemplateSpec` for a single-node component or<br />`PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set<br />only `topologyConstraint`. Standalone DCD OpenAPI omits this field. |  | Optional: \{\} <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
-| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
+| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
-| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. |  | Optional: \{\} <br /> |
+| `roles` _[ComponentRoleSpec](#componentrolespec) array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
 | `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
+| `lpx` _[LPXConfig](#lpxconfig)_ | lpx holds LPX integration configuration. Only meaningful when<br />`type` is `lpx`. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
@@ -1922,14 +1927,14 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `backendFramework` _string_ | backendFramework specifies the backend framework. |  | Enum: [sglang vllm trtllm] <br /> |
 | `name` _string_ | name is the stable logical identifier for this component within its<br />DynamoGraphDeployment. It must be unique within the parent's<br />`spec.components` list.<br />For standalone DynamoComponentDeployment objects, the defaulting webhook<br />populates `name` from `metadata.name` on admission, so users<br />typically do not need to set it explicitly.<br />`name` is decoupled from the underlying Kubernetes resource name so that<br />the operator can rename child workloads (e.g. suffixing worker DCDs with<br />a hash during rolling updates) without losing the stable identity that<br />downstream consumers (labels, status maps, DGDSA references, planner<br />RBAC, EPP filters) depend on. |  | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$` <br />Required: \{\} <br /> |
-| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp] <br />Optional: \{\} <br /> |
+| `type` _[ComponentType](#componenttype)_ | type indicates the role of this component within a Dynamo graph. Drives<br />port mapping, frontend detection, planner RBAC, and the pod label<br />`nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are<br />first-class values, users can set them directly. |  | Enum: [frontend worker prefill decode planner epp lpx] <br />Optional: \{\} <br /> |
 | `runtimeVersionOverride` _string_ | RuntimeVersionOverride declares the Dynamo runtime version in this component's<br />main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has<br />no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the<br />parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for<br />example "1.4.0". It does not change the image. Setting or changing an override that resolves to<br />version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version. |  | Pattern: `^(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})\.(0\|[1-9][0-9]\{0,3\})$` <br />Optional: \{\} <br /> |
 | `globalDynamoNamespace` _boolean_ | globalDynamoNamespace places the component in the global Dynamo<br />namespace rather than the per-deployment namespace derived from the<br />DGD name. |  | Optional: \{\} <br /> |
 | `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate defines the component's Pod configuration. New components must<br />include a container named "main" with a non-empty image. Existing components<br />created without a podTemplate may remain unchanged. The operator merges<br />defaults into the main container.<br />For DGD components whose main image tag is not a Dynamo semantic version,<br />set runtimeVersionOverride explicitly.<br />All other containers are user-managed sidecars and must specify their<br />required fields, including image. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the desired number of Pods for this component. When<br />`scalingAdapter` is set on this component, this field is managed by<br />the DynamoGraphDeploymentScalingAdapter and should not be modified<br />directly. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `minAvailable` _integer_ | minAvailable maps to Grove PodCliqueScalingGroup minAvailable for<br />components rendered as a scaling group (multi-node, inter-pod GMS, or<br />`experimental.grove.forceScalingGroup`; see `UsesPCSG`) and to Grove<br />PodClique minAvailable for all other single-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | multinode configures worker, prefill, or decode components that span<br />multiple Pods. |  | Optional: \{\} <br /> |
-| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
+| `roles` _object array_ | roles expose the named Pod-producing parts inside a compound component.<br />When set for a multinode component, this list must contain exactly one<br />leader and one worker role. Admission defaults omitted replicas to 1 for<br />leader and multinode.nodeCount minus 1 for worker. Omitting the roles list<br />preserves the implicit multinode role layout.<br />LPX components each require an agent role. A DGD may contain independent<br />LPX components, each with its own conductor role, or a shared draft and<br />target pair with a conductor role only on the target. Every LPX role<br />requires its own podTemplate. Standalone DCD roles accept only `name` and `replicas`; `providerOverride` is a DGD-only provider context. |  | Optional: \{\} <br /> |
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
@@ -1959,8 +1964,8 @@ operator's conversion webhook; see api/v1alpha1/*_conversion.go.
 | `apiVersion` _string_ | `nvidia.com/v1beta1` | | |
 | `kind` _string_ | `DynamoGraphDeployment` | | |
 | `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoGraphDeploymentSpec](#dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
-| `status` _[DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
+| `spec` _[DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)_ | spec defines the desired state for this graph deployment. |  |  |
+| `status` _[DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)_ | status reflects the current observed state of this graph deployment. |  |  |
 
 
 #### DynamoGraphDeploymentComponentRef
@@ -1995,7 +2000,7 @@ v1beta1 releases. Component-level experimental features live under
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2149,7 +2154,7 @@ _Appears in:_
 | `lastScaleTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | lastScaleTime is the last time the adapter scaled the target component. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentSpec
+#### v1beta1 DynamoGraphDeploymentSpec
 
 
 
@@ -2166,7 +2171,7 @@ _Appears in:_
 | `annotations` _object (keys:string, values:string)_ | annotations to propagate to all child resources (PCS, DCD, Deployments,<br />and pod templates). Component-level (`podTemplate`) values take precedence<br />on conflict. |  | Optional: \{\} <br /> |
 | `labels` _object (keys:string, values:string)_ | labels to propagate to all child resources. Same precedence rules as `annotations`. |  | Optional: \{\} <br /> |
 | `priorityClassName` _string_ | priorityClassName is the name of the PriorityClass to use for Grove PodCliqueSets.<br />Requires the Grove pathway. |  | Optional: \{\} <br /> |
-| `components` _[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
+| `components` _[DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec) array_ | components are the components deployed as part of this graph. Each entry<br />carries its own stable logical `name`, and names must be unique within<br />the list. Component types are generally repeatable, except `type: epp`<br />which may appear at most once. |  | MaxItems: 25 <br />Optional: \{\} <br /> |
 | `env` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | env is prepended to every component's environment. Component-specific<br />env entries with the same name take precedence and may reference values<br />from this list. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | backendFramework specifies the backend framework (e.g. "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
@@ -2174,7 +2179,7 @@ _Appears in:_
 | `experimental` _[DynamoGraphDeploymentExperimentalSpec](#dynamographdeploymentexperimentalspec)_ | experimental groups graph-level preview features whose API shape and<br />behavior may change in breaking ways between v1beta1 releases. |  | Optional: \{\} <br /> |
 
 
-#### DynamoGraphDeploymentStatus
+#### v1beta1 DynamoGraphDeploymentStatus
 
 
 
@@ -2212,7 +2217,7 @@ explicitly by clearing `eppConfig` (and updating the image).
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2236,7 +2241,7 @@ spec) once their API is considered stable.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2477,6 +2482,24 @@ _Appears in:_
 | `preferredWeight` _float_ | preferredWeight is required and used only when enforcement is<br />"preferred". Higher values create a stronger same-domain routing<br />preference, but do not guarantee same-domain selection. The value is not<br />a probability; worker selection still depends on load and other routing<br />inputs. A value of 0 disables the topology preference; 1 is the strongest<br />supported preference. |  | Maximum: 1 <br />Minimum: 0 <br />Optional: \{\} <br /> |
 
 
+#### LPXConfig
+
+
+
+LPXConfig identifies the component's compiled model and configures scheduling.
+
+
+
+_Appears in:_
+- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `buildId` _string_ | buildId references the immutable model build. |  | MinLength: 1 <br /> |
+| `scheduling` _[SchedulingSpec](#schedulingspec)_ | scheduling configures this component's LPX scheduling attempts.<br />Omission means no deadline. |  | Optional: \{\} <br /> |
+
+
 #### MockerSpec
 
 
@@ -2521,7 +2544,7 @@ When specified, a headless service is created for endpoint discovery.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2539,7 +2562,7 @@ MultinodeSpec configures a multinode component.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -2646,7 +2669,7 @@ conversion are landed here so downstream consumers can rely on the shape.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2714,8 +2737,8 @@ All other providers, versions, targets, and fields are rejected.
 
 _Appears in:_
 - [ComponentRoleSpec](#componentrolespec)
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2733,7 +2756,7 @@ Restart specifies the restart policy for a graph deployment.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2770,7 +2793,7 @@ RestartStatus contains the status of a graph-level restart.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2843,7 +2866,7 @@ RollingUpdateStatus tracks the progress of an operator-managed rolling update.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+- [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2885,9 +2908,25 @@ Omit the field to opt out.
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
+
+
+#### SchedulingSpec
+
+
+
+SchedulingSpec configures LPX scheduling attempts.
+
+
+
+_Appears in:_
+- [LPXConfig](#lpxconfig)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `attemptDeadlineSeconds` _integer_ | attemptDeadlineSeconds limits how long each LPR may remain pending.<br />Omission means unlimited; the value is not a solver budget. |  | Maximum: 9.223372036e+09 <br />Minimum: 1 <br />Optional: \{\} <br /> |
 
 
 #### SearchStrategy
@@ -2917,7 +2956,7 @@ SpecTopologyConstraint defines deployment-level topology placement requirements.
 
 
 _Appears in:_
-- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+- [DynamoGraphDeploymentSpec](#v1beta1-dynamographdeploymentspec)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -2936,7 +2975,7 @@ The topology profile is inherited from the deployment-level
 
 
 _Appears in:_
-- [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
+- [DynamoComponentDeploymentSharedSpec](#v1beta1-dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 | Field | Description | Default | Validation |
@@ -3226,6 +3265,23 @@ _Appears in:_
 
 
 
+#### LPXConfiguration
+
+
+
+LPXConfiguration holds LPX scheduler integration and model-registry settings.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled opts the operator into LPX request production. When true, startup<br />requires the scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API to<br />be installed separately. | false |  |
+| `modelRegistryURL` _string_ | ModelRegistryURL configures the location of the LPU model registry used by LPX.<br />Supported values are an absolute local path (or file:// URL) and gs:// URLs. |  |  |
+
+
 #### LWSConfiguration
 
 
@@ -3375,6 +3431,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |
 | `security` _[SecurityConfiguration](#securityconfiguration)_ | HTTP/2 and TLS settings |  |  |
+| `lpx` _[LPXConfiguration](#lpxconfiguration)_ | LPX scheduler integration and model-registry configuration. |  |  |
 
 
 #### OrchestratorConfiguration

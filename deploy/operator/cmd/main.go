@@ -66,6 +66,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/crdmigrator"
+	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
@@ -125,6 +126,8 @@ func initCRDSchemes() {
 	// PodSnapshot/PodSnapshotContent are owned by github.com/ai-dynamo/snapshot; the
 	// operator only consumes them (creates/reads), it does not reconcile them.
 	utilruntime.Must(snapshotv1alpha1.AddToScheme(crdScheme))
+
+	utilruntime.Must(lpxv1alpha1.AddToScheme(crdScheme))
 
 	utilruntime.Must(apiextensionsv1.AddToScheme(crdScheme))
 

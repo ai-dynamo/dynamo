@@ -20,19 +20,17 @@ package controller
 import (
 	"context"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
+	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
@@ -79,7 +77,7 @@ func podCliqueEventPredicates() predicate.Funcs {
 			newPodClique, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodClique)
 			return oldOK &&
 				newOK &&
-				podCliqueStatusChangeIsSignificant(oldPodClique, newPodClique)
+				commoncontroller.PodCliqueStatusChangeIsSignificant(oldPodClique, newPodClique)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
@@ -94,7 +92,7 @@ func pcsgEventPredicates() predicate.Funcs {
 			newScalingGroup, newOK := updateEvent.ObjectNew.(*grovev1alpha1.PodCliqueScalingGroup)
 			return oldOK &&
 				newOK &&
-				pcsgStatusChangeIsSignificant(oldScalingGroup, newScalingGroup)
+				commoncontroller.PodCliqueScalingGroupStatusChangeIsSignificant(oldScalingGroup, newScalingGroup)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
@@ -109,22 +107,12 @@ func (s *groveWatchSetup) mapPodCliqueToRequests(
 		return nil
 	}
 
-	dgdName := podClique.GetLabels()[consts.KubeLabelDynamoGraphDeploymentName]
-	if dgdName == "" {
-		log.FromContext(ctx).V(1).Info(
-			"PodClique missing DGD label",
-			"podClique", podClique.Name,
-			"namespace", podClique.Namespace,
-		)
+	pcs, found := s.resolveOwningPodCliqueSet(ctx, podClique)
+	if !found {
 		return nil
 	}
 
-	return []ctrl.Request{{
-		NamespacedName: types.NamespacedName{
-			Name:      dgdName,
-			Namespace: podClique.Namespace,
-		},
-	}}
+	return mapPodCliqueSetToDGDRequest(pcs)
 }
 
 // mapPodCliqueScalingGroupToRequests walks PCSG -> PCS -> DGD because the PCS
@@ -138,105 +126,88 @@ func (s *groveWatchSetup) mapPodCliqueScalingGroupToRequests(
 		return nil
 	}
 
-	controllerRef := metav1.GetControllerOf(pcsg)
-	if controllerRef == nil ||
-		controllerRef.Kind != "PodCliqueSet" ||
-		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
-		log.FromContext(ctx).V(1).Info(
-			"PodCliqueScalingGroup missing PodCliqueSet controller ownerReference",
-			"podCliqueScalingGroup", pcsg.Name,
-			"namespace", pcsg.Namespace,
-		)
+	pcs, found := s.resolvePodCliqueSetOwner(ctx, pcsg)
+	if !found {
 		return nil
 	}
+	return mapPodCliqueSetToDGDRequest(pcs)
+}
 
+func (s *groveWatchSetup) resolveOwningPodCliqueSet(
+	ctx context.Context,
+	podClique *grovev1alpha1.PodClique,
+) (*grovev1alpha1.PodCliqueSet, bool) {
+	controllerRef := metav1.GetControllerOf(podClique)
+	if controllerRef == nil || controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() {
+		return nil, false
+	}
+
+	switch controllerRef.Kind {
+	case "PodCliqueSet":
+		return s.getPodCliqueSet(ctx, podClique.Namespace, controllerRef)
+	case "PodCliqueScalingGroup":
+		pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
+		if err := s.reader.Get(ctx, types.NamespacedName{
+			Name:      controllerRef.Name,
+			Namespace: podClique.Namespace,
+		}, pcsg); err != nil || pcsg.UID != controllerRef.UID {
+			return nil, false
+		}
+		return s.resolvePodCliqueSetOwner(ctx, pcsg)
+	default:
+		return nil, false
+	}
+}
+
+func (s *groveWatchSetup) resolvePodCliqueSetOwner(
+	ctx context.Context,
+	pcsg *grovev1alpha1.PodCliqueScalingGroup,
+) (*grovev1alpha1.PodCliqueSet, bool) {
+	controllerRef := metav1.GetControllerOf(pcsg)
+	if controllerRef == nil ||
+		controllerRef.APIVersion != grovev1alpha1.SchemeGroupVersion.String() ||
+		controllerRef.Kind != "PodCliqueSet" {
+		return nil, false
+	}
+	return s.getPodCliqueSet(ctx, pcsg.Namespace, controllerRef)
+}
+
+func (s *groveWatchSetup) getPodCliqueSet(
+	ctx context.Context,
+	namespace string,
+	controllerRef *metav1.OwnerReference,
+) (*grovev1alpha1.PodCliqueSet, bool) {
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	if err := s.reader.Get(ctx, types.NamespacedName{
 		Name:      controllerRef.Name,
-		Namespace: pcsg.Namespace,
+		Namespace: namespace,
 	}, pcs); err != nil {
-		log.FromContext(ctx).V(1).Info(
-			"failed to look up PodCliqueSet for PCSG",
-			"podCliqueScalingGroup", pcsg.Name,
-			"pcsName", controllerRef.Name,
-			"error", err,
-		)
+		return nil, false
+	}
+	return pcs, pcs.UID == controllerRef.UID
+}
+
+func mapPodCliqueSetToDGDRequest(pcs *grovev1alpha1.PodCliqueSet) []ctrl.Request {
+	pcsOwnerRef := metav1.GetControllerOf(pcs)
+	if pcsOwnerRef == nil ||
+		pcsOwnerRef.Name == "" ||
+		pcsOwnerRef.UID == "" {
 		return nil
 	}
 
-	pcsOwnerRef := metav1.GetControllerOf(pcs)
-	if pcsOwnerRef == nil || pcsOwnerRef.Kind != consts.ResourceTypeDynamoGraphDeployment {
-		log.FromContext(ctx).V(1).Info(
-			"PodCliqueSet missing DynamoGraphDeployment controller ownerReference",
-			"pcsName", pcs.Name,
-			"namespace", pcs.Namespace,
-		)
+	// Accept any served DGD version from Dynamo's API group.
+	groupVersion, err := schema.ParseGroupVersion(pcsOwnerRef.APIVersion)
+	if err != nil ||
+		groupVersion.Group != nvidiacomv1beta1.GroupVersion.Group ||
+		groupVersion.Version == "" ||
+		pcsOwnerRef.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind {
 		return nil
 	}
 
 	return []ctrl.Request{{
 		NamespacedName: types.NamespacedName{
 			Name:      pcsOwnerRef.Name,
-			Namespace: pcsg.Namespace,
+			Namespace: pcs.Namespace,
 		},
 	}}
-}
-
-// groveScheduledConditionChanged reports whether the scheduling conditions
-// consumed by Grove readiness changed.
-func groveScheduledConditionChanged(oldConditions, newConditions []metav1.Condition) bool {
-	for _, conditionType := range []string{
-		groveconstants.ConditionTypePodCliqueScheduled,
-		groveconstants.ConditionTypeMinAvailableBreached,
-	} {
-		oldCondition := meta.FindStatusCondition(oldConditions, conditionType)
-		newCondition := meta.FindStatusCondition(newConditions, conditionType)
-		if (oldCondition == nil) != (newCondition == nil) {
-			return true
-		}
-		if oldCondition != nil &&
-			newCondition != nil &&
-			(oldCondition.Status != newCondition.Status ||
-				oldCondition.Reason != newCondition.Reason) {
-			return true
-		}
-	}
-	return false
-}
-
-// podCliqueStatusChangeIsSignificant mirrors every PodClique field consumed by
-// Grove readiness and capacity classification.
-func podCliqueStatusChangeIsSignificant(
-	oldPodClique *grovev1alpha1.PodClique,
-	newPodClique *grovev1alpha1.PodClique,
-) bool {
-	return oldPodClique.Status.ReadyReplicas != newPodClique.Status.ReadyReplicas ||
-		oldPodClique.Status.UpdatedReplicas != newPodClique.Status.UpdatedReplicas ||
-		oldPodClique.Status.Replicas != newPodClique.Status.Replicas ||
-		oldPodClique.Status.ScheduledReplicas != newPodClique.Status.ScheduledReplicas ||
-		oldPodClique.Status.ScheduleGatedReplicas != newPodClique.Status.ScheduleGatedReplicas ||
-		oldPodClique.Spec.Replicas != newPodClique.Spec.Replicas ||
-		!ptr.Equal(oldPodClique.Status.ObservedGeneration, newPodClique.Status.ObservedGeneration) ||
-		!ptr.Equal(oldPodClique.Status.CurrentPodCliqueSetGenerationHash, newPodClique.Status.CurrentPodCliqueSetGenerationHash) ||
-		(oldPodClique.Status.UpdateProgress != nil && oldPodClique.Status.UpdateProgress.UpdateEndedAt != nil) !=
-			(newPodClique.Status.UpdateProgress != nil && newPodClique.Status.UpdateProgress.UpdateEndedAt != nil) ||
-		groveScheduledConditionChanged(oldPodClique.Status.Conditions, newPodClique.Status.Conditions)
-}
-
-// pcsgStatusChangeIsSignificant mirrors every PodCliqueScalingGroup field
-// consumed by Grove readiness and capacity classification.
-func pcsgStatusChangeIsSignificant(
-	oldScalingGroup *grovev1alpha1.PodCliqueScalingGroup,
-	newScalingGroup *grovev1alpha1.PodCliqueScalingGroup,
-) bool {
-	return oldScalingGroup.Status.AvailableReplicas != newScalingGroup.Status.AvailableReplicas ||
-		oldScalingGroup.Status.UpdatedReplicas != newScalingGroup.Status.UpdatedReplicas ||
-		oldScalingGroup.Status.Replicas != newScalingGroup.Status.Replicas ||
-		oldScalingGroup.Status.ScheduledReplicas != newScalingGroup.Status.ScheduledReplicas ||
-		oldScalingGroup.Spec.Replicas != newScalingGroup.Spec.Replicas ||
-		!ptr.Equal(oldScalingGroup.Status.ObservedGeneration, newScalingGroup.Status.ObservedGeneration) ||
-		!ptr.Equal(oldScalingGroup.Status.CurrentPodCliqueSetGenerationHash, newScalingGroup.Status.CurrentPodCliqueSetGenerationHash) ||
-		(oldScalingGroup.Status.UpdateProgress != nil && oldScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) !=
-			(newScalingGroup.Status.UpdateProgress != nil && newScalingGroup.Status.UpdateProgress.UpdateEndedAt != nil) ||
-		groveScheduledConditionChanged(oldScalingGroup.Status.Conditions, newScalingGroup.Status.Conditions)
 }

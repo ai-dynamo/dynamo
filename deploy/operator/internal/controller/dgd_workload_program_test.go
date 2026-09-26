@@ -89,6 +89,7 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 				assert.NotNil(t, grove.rollout)
 				assert.NotNil(t, grove.restart)
 				assert.NotNil(t, grove.restartProgress)
+				assert.NotNil(t, grove.lpxRestartProgress)
 				assert.NotNil(t, grove.workloads)
 				assert.NotNil(t, grove.scalingAdapters)
 				assert.NotNil(t, grove.topology)
@@ -115,6 +116,30 @@ func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
 	assert.Contains(t, ready.Message, "Grove is disabled")
+}
+
+func TestComponentProgramRejectsExternallyManagedComponents(t *testing.T) {
+	t.Log("Create a component-provider DGD containing an externally managed component")
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 4},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "serving",
+				ComponentType: nvidiacomv1beta1.ComponentTypeLPX,
+			}},
+		},
+	}
+
+	t.Log("Reconcile the component program")
+	result, err := (&componentProgram{}).Reconcile(t.Context(), workloadProgramRequest{DGD: dgd})
+	require.ErrorIs(t, err, reconcile.TerminalError(nil))
+
+	t.Log("Verify the program returns the component rejection without a terminal-error prefix")
+	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, "UnsupportedComponent", ready.Reason)
+	assert.Equal(t, `component "serving" of type "lpx" requires the Grove workload provider`, ready.Message)
 }
 
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
@@ -460,14 +485,14 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	)
 
 	t.Log("Verify the renderer initially publishes the full multinode shape")
-	rendered, err := renderer.Render(t.Context(), dgd, nil, nil, false)
+	rendered, err := renderer.Render(t.Context(), dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerEngine)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerReplica)
 
 	t.Log("Delete the dependency without changing DGD generation and render again")
 	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
-	_, err = renderer.Render(t.Context(), dgd, nil, nil, false)
+	_, err = renderer.Render(t.Context(), dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	require.ErrorContains(t, err, "ResourceClaimTemplate default/gpu-template")
 }
 

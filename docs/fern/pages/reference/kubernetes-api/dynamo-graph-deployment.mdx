@@ -50,7 +50,9 @@ spec:
 </ParamField>
 
 <Note>
-  Each new component must supply a `podTemplate.spec.containers` entry named `main` with a non-empty `image`. For an image without a parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to the image's Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+  Each new non-LPX component must supply a `podTemplate.spec.containers` entry named `main` with a non-empty `image`. For an image without a parseable semantic-version tag, set `spec.components[*].runtimeVersionOverride` to the image's Dynamo runtime version. Also set it when the tag identifies a different version, such as the inference engine's version. See [Runtime Version Compatibility](dynamo-component-deployment.mdx#runtime-version-compatibility). DGD has no graph-level `runtimeVersionOverride`; the DGDR-level field supplies a default when generating components.
+
+  LPX components use `roles[].podTemplate` instead and do not require `runtimeVersionOverride`. See [Shared component spec](dynamo-component-deployment.mdx#shared-component-spec).
 </Note>
 
 <ParamField path="providerOverride" type="ProviderOverride">
@@ -58,7 +60,7 @@ spec:
 </ParamField>
 
 <ParamField path="backendFramework" type="string">
-  Backend framework for the graph. Sets backend-specific defaults the operator injects into each component's `main` container.
+  GPU backend framework for worker components. When omitted, the operator infers the framework from each worker's command and arguments. When set, it must match the detected worker framework. LPX components omit this field.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>sglang</Badge> <Badge intent="note" minimal>vllm</Badge> <Badge intent="note" minimal>trtllm</Badge></span>
 </ParamField>
@@ -75,6 +77,8 @@ spec:
 
 <ParamField path="labels" type="map[string]string">
   Labels propagated to all child resources. Same precedence rules as `annotations`.
+
+  For LPX, metadata synchronization keeps the PCS labels and clique templates consistent after queue edits. Moving an existing KAI PodGroup to another queue depends on the Grove backend; metadata synchronization does not recreate existing PodGroups.
 </ParamField>
 
 <ParamField path="priorityClassName" type="string">
@@ -83,6 +87,7 @@ spec:
 
 <ParamField path="restart" type="Restart">
   Restart policy for the graph. Must be unset on creation; set or change `restart.id` on an existing DGD to trigger a restart.
+  Graphs containing LPX components require explicit `restart.strategy.type: Parallel`; Sequential and omitted strategies are rejected.
 </ParamField>
 
 <Indent>

@@ -87,6 +87,15 @@ dynamo-operator:
 
   # -- URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true).
   modelExpressURL: ""
+
+  # The LPX scheduler and its CRDs must be installed separately.
+  lpx:
+    # -- Enable the Dynamo operator's LPX integration. Startup requires the
+    # externally installed scheduling.lpu.nvidia.com/v1alpha1 LpuPipelineRequest API.
+    enabled: false
+    # -- Configure the LPU model registry used by the LPX integration.
+    modelRegistryURL: ""
+
   # -- DEVELOPMENT AND TESTING ONLY: Namespace-restricted mode is not supported for production. Use cluster-wide mode for production deployments.
   namespaceRestriction:
     # -- DEVELOPMENT AND TESTING ONLY: Enable namespace-restricted reconciliation and admission. Not supported for production.

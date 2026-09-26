@@ -1,0 +1,122 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package v1alpha1
+
+import (
+	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// LPXSchedulerName selects Grove's LPX backend in generated role PodSpecs.
+	// The operator sets schedulerName to this value for every LPX role, including
+	// Cyborg. Non-LPX component Pod templates may not select this scheduler.
+	LPXSchedulerName = "lpx-scheduler"
+
+	// ModelStorageVolumeName identifies the model-storage volume and its mount in
+	// each LPX role's main container. The operator uses the mountPath from the
+	// role's podTemplate as the root for compiled model artifacts.
+	ModelStorageVolumeName = "model-storage"
+
+	// AnnotationExtraResourcesHash records an opaque content hash of the role's
+	// generated immutable runtime ConfigMap on PodClique templates
+	// (PodCliqueSet.spec.template.cliques[].annotations). Grove propagates it to
+	// PodClique and Pod metadata.
+	AnnotationExtraResourcesHash = "nvidia.com/extra-resources-hash"
+
+	// LPXReadyCondition reports if LPXGraphDeployment object is ready.
+	// Note: This condition type is defined to ensure consistent naming of conditions across objects.
+	// Please use object specific variants of this condition which provides more details for each context where
+	// the same condition type exists.
+	LPXReadyCondition = "Ready"
+)
+
+// LPX readiness reasons distinguish progress from failure when Ready is false.
+const (
+	LPXReadyReasonReady   = "Ready"
+	LPXReadyReasonPending = "Pending"
+	LPXReadyReasonFailed  = "Failed"
+)
+
+// LPXGraphDeploymentSpec is the operator's handoff for all LPX components in a DGD.
+// The owning DGD remains the only authored workload spec. The child reads that
+// DGD only after verifying the controller owner and effective LPX input revision.
+type LPXGraphDeploymentSpec struct {
+	// inputRevision hashes only effective LPX inputs, including its selected
+	// restart token. Unrelated component edits do not create an LPX revision.
+	// +kubebuilder:validation:Pattern="^sha256:[a-f0-9]{64}$"
+	InputRevision string `json:"inputRevision"`
+}
+
+// LPXComponentStatus reports logical replicas and readiness for one LPX component.
+type LPXComponentStatus struct {
+	v1beta1.ComponentReplicaStatus `json:",inline"`
+
+	// conditions reports component readiness for the current child generation.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
+// LPXGraphDeploymentStatus is the LPX controller's durable lifecycle state.
+// Dynamo consumes readiness only for the current generation and input revision.
+type LPXGraphDeploymentStatus struct {
+	// observedGeneration is the child generation processed successfully.
+	// Every spec.inputRevision change advances the child generation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// conditions reports readiness and scheduling deadline failures.
+	// Ready uses reason Ready, Pending, or Failed and a diagnostic message.
+	// SchedulingFailed independently retains deadline failure and retry state.
+	// +optional
+	// +listType=map
+	// +listMapKey=type
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// components reports logical replicas by authored component name, never Agent Pods.
+	// +optional
+	Components map[string]LPXComponentStatus `json:"components,omitempty"`
+	// modelDownload retains the existing remote-build download progress.
+	// +optional
+	ModelDownload *ModelDownloadStatus `json:"modelDownload,omitempty"`
+}
+
+// ModelDownloadStatus contains the status of remote LPU model downloads.
+type ModelDownloadStatus struct {
+	// builds is the sorted set of resolved remote LPU build URLs whose artifacts
+	// were successfully downloaded into model-storage.
+	// +optional
+	Builds []string `json:"builds,omitempty"`
+
+	// lastCheckedAt is the last time all remote LPU builds were checked with ModelExpress.
+	// +optional
+	LastCheckedAt *metav1.Time `json:"lastCheckedAt,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:storageversion
+// +kubebuilder:resource:shortName=lpxgd
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+
+// LPXGraphDeployment is generated and owned by the Dynamo operator, not authored
+// by users. It owns one LPX PCS and its build/placement resources.
+// It serves only v1alpha1 and has no conversion contract.
+type LPXGraphDeployment struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              LPXGraphDeploymentSpec `json:"spec"`
+	// +optional
+	Status LPXGraphDeploymentStatus `json:"status,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+
+// LPXGraphDeploymentList contains operator-generated LPX deployments.
+type LPXGraphDeploymentList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []LPXGraphDeployment `json:"items"`
+}

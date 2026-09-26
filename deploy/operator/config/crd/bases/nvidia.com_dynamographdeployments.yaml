@@ -11508,6 +11508,32 @@ spec:
                             format: int32
                             type: integer
                         type: object
+                      lpx:
+                        description: |-
+                          LPX holds LPX integration configuration. Only meaningful when
+                          ComponentType is "lpx".
+                        properties:
+                          buildId:
+                            description: buildId references the immutable model build.
+                            minLength: 1
+                            type: string
+                          scheduling:
+                            description: |-
+                              scheduling configures this component's LPX scheduling attempts.
+                              Omission means no deadline.
+                            properties:
+                              attemptDeadlineSeconds:
+                                description: |-
+                                  attemptDeadlineSeconds limits how long each LPR may remain pending.
+                                  Omission means unlimited; the value is not a solver budget.
+                                format: int64
+                                maximum: 9223372036
+                                minimum: 1
+                                type: integer
+                            type: object
+                        required:
+                          - buildId
+                        type: object
                       minAvailable:
                         description: |-
                           MinAvailable maps to Grove PodClique minAvailable for single-node and
@@ -11828,6 +11854,10 @@ spec:
                           leader and one worker role. Admission defaults omitted replicas to 1 for
                           leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                           preserves the implicit multinode role layout.
+                          LPX components each require an agent role. A DGD may contain independent
+                          LPX components, each with its own conductor role, or a shared draft and
+                          target pair with a conductor role only on the target. Every LPX role
+                          requires its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -11845,7 +11875,7 @@ spec:
                               description: |-
                                 PodTemplate defines the Pod configuration for this role. Admission permits
                                 it only when the enclosing component type explicitly supports role-specific
-                                Pod templates. No component type supports it in this release.
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
@@ -20099,11 +20129,19 @@ spec:
                     type: object
                     x-kubernetes-validations:
                       - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                        rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                        rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                       - message: componentType is immutable after it is set
                         rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
+                      - message: lpx may only be set when componentType is lpx
+                        rule: '!has(self.lpx) || (has(self.componentType) && self.componentType == ''lpx'')'
+                      - message: lpx is required when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'') || has(self.lpx)'
+                      - message: replicas must be positive when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                      - message: scalingAdapter is not supported when componentType is lpx
+                        rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -20134,6 +20172,8 @@ spec:
                 - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
                   optionalOldSelf: true
                   rule: oldSelf.hasValue() || !has(self.restart)
+                - message: spec.restart.strategy.type must be Parallel when the graph contains LPX components
+                  rule: '!has(self.restart) || !has(self.services) || !self.services.exists(name, has(self.services[name].componentType) && self.services[name].componentType == ''lpx'') || (has(self.restart.strategy) && has(self.restart.strategy.type) && self.restart.strategy.type == ''Parallel'')'
             status:
               description: Status reflects the current observed state of this graph deployment.
               properties:
@@ -20974,6 +21014,32 @@ spec:
                           namespace rather than the per-deployment namespace derived from the
                           DGD name.
                         type: boolean
+                      lpx:
+                        description: |-
+                          lpx holds LPX integration configuration. Only meaningful when
+                          `type` is `lpx`.
+                        properties:
+                          buildId:
+                            description: buildId references the immutable model build.
+                            minLength: 1
+                            type: string
+                          scheduling:
+                            description: |-
+                              scheduling configures this component's LPX scheduling attempts.
+                              Omission means no deadline.
+                            properties:
+                              attemptDeadlineSeconds:
+                                description: |-
+                                  attemptDeadlineSeconds limits how long each LPR may remain pending.
+                                  Omission means unlimited; the value is not a solver budget.
+                                format: int64
+                                maximum: 9223372036
+                                minimum: 1
+                                type: integer
+                            type: object
+                        required:
+                          - buildId
+                        type: object
                       minAvailable:
                         description: |-
                           minAvailable maps to Grove PodCliqueScalingGroup minAvailable for
@@ -29224,6 +29290,11 @@ spec:
                           leader and one worker role. Admission defaults omitted replicas to 1 for
                           leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                           preserves the implicit multinode role layout.
+
+                          LPX components each require an agent role. A DGD may contain independent
+                          LPX components, each with its own conductor role, or a shared draft and
+                          target pair with a conductor role only on the target. Every LPX role
+                          requires its own podTemplate.
                         items:
                           description: |-
                             ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -29241,7 +29312,7 @@ spec:
                               description: |-
                                 podTemplate defines the Pod configuration for this role. Admission permits
                                 it only when the enclosing component type explicitly supports role-specific
-                                Pod templates. No component type supports it in this release.
+                                Pod templates.
                               properties:
                                 metadata:
                                   description: |-
@@ -37458,6 +37529,7 @@ spec:
                           - decode
                           - planner
                           - epp
+                          - lpx
                         type: string
                     required:
                       - name
@@ -37466,11 +37538,21 @@ spec:
                       - message: eppConfig may only be set when type is epp
                         rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                       - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                        rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                        rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                       - message: type is immutable after it is set
                         rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
+                      - message: lpx may only be set when type is lpx
+                        rule: '!has(self.lpx) || (has(self.type) && self.type == ''lpx'')'
+                      - message: lpx is required when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'') || has(self.lpx)'
+                      - message: LPX Pod templates belong to roles
+                        rule: '!(has(self.type) && self.type == ''lpx'') || !has(self.podTemplate)'
+                      - message: replicas must be positive when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                      - message: scalingAdapter is not supported when type is lpx
+                        rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
@@ -37804,6 +37886,8 @@ spec:
                 - message: spec.restart must be unset on create; set spec.restart.id after creation to request a restart
                   optionalOldSelf: true
                   rule: oldSelf.hasValue() || !has(self.restart)
+                - message: spec.restart.strategy.type must be Parallel when the graph contains LPX components
+                  rule: '!has(self.restart) || !has(self.components) || !self.components.exists(c, has(c.type) && c.type == ''lpx'') || (has(self.restart.strategy) && has(self.restart.strategy.type) && self.restart.strategy.type == ''Parallel'')'
             status:
               description: status reflects the current observed state of this graph deployment.
               properties:

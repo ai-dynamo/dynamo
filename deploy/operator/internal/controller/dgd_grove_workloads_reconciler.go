@@ -71,19 +71,21 @@ func newGroveWorkloadsReconciler(
 
 func (r *groveWorkloadsReconciler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	source *nvidiacomv1beta1.DynamoGraphDeployment,
+	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(dgd)
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(source)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
-		dgd,
+		source,
+		ordinary,
 		restartState,
 		checkpointInfos,
 		workerHashTransition.hashChanged,
@@ -92,18 +94,29 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
+
+	// An LPX-only graph still reconciles its stable resources.
+	if renderedPodCliqueSet.desired == nil {
+		stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
+		if err != nil {
+			return ReconcileResult{}, err
+		}
+		return checkResourcesReadiness(stableResources), nil
+	}
+
+	// Converge the ordinary PCS before rollout or readiness observation.
+	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, source, renderedPodCliqueSet)
 	if err != nil {
-		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
+
 	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
 	if workerHashTransition.needsCommit() && !pcsWasWritten {
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
 		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&
-			!podCliqueSetUsesGroveWorkerHashSuffix(dgd, renderedPodCliqueSet.existing)
-		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
+			!podCliqueSetUsesGroveWorkerHashSuffix(source, renderedPodCliqueSet.existing)
+		observed, err := podCliqueSetObservesWorkerHash(source, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
@@ -111,7 +124,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 			)
 		}
 		if observed {
-			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, source, workerHashTransition, true); err != nil {
 				return ReconcileResult{}, failWorkloadProgram(
 					reasonRollingUpdateFailed,
 					fmt.Errorf("project observed Grove worker hash: %w", err),
@@ -120,19 +133,19 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
+	if err := r.scaler.Reconcile(ctx, renderedPodCliqueSet.renderDeployment, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, dgd, renderedPodCliqueSet.renderDeployment)
+	stableResources, err := r.stableResources.Reconcile(ctx, source, renderedPodCliqueSet.renderDeployment)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
-		dgd,
+		renderedPodCliqueSet.renderDeployment,
 		syncedPodCliqueSet,
 	)
 	if err != nil {
@@ -145,6 +158,8 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	return result, nil
 }
 
+// reconcilePodCliqueSet returns the current PCS and whether it was created or updated.
+// The rendered desired PCS must be non-nil.
 func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -11465,6 +11465,10 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
+                    LPX components each require an agent role. A DGD may contain independent
+                    LPX components, each with its own conductor role, or a shared draft and
+                    target pair with a conductor role only on the target. Every LPX role
+                    requires its own podTemplate.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -11482,7 +11486,7 @@ spec:
                         description: |-
                           PodTemplate defines the Pod configuration for this role. Admission permits
                           it only when the enclosing component type explicitly supports role-specific
-                          Pod templates. No component type supports it in this release.
+                          Pod templates.
                         properties:
                           metadata:
                             description: |-
@@ -19706,12 +19710,18 @@ spec:
                   type: array
               type: object
               x-kubernetes-validations:
+                - message: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                  rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.componentType) && self.componentType == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: componentType is immutable after it is set
                   rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
+                - message: replicas must be positive when componentType is lpx
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                - message: scalingAdapter is not supported when componentType is lpx
+                  rule: '!(has(self.componentType) && self.componentType == ''lpx'' && has(self.scalingAdapter) && has(self.scalingAdapter.enabled) && self.scalingAdapter.enabled == true)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -28641,6 +28651,11 @@ spec:
                     leader and one worker role. Admission defaults omitted replicas to 1 for
                     leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
                     preserves the implicit multinode role layout.
+
+                    LPX components each require an agent role. A DGD may contain independent
+                    LPX components, each with its own conductor role, or a shared draft and
+                    target pair with a conductor role only on the target. Every LPX role
+                    requires its own podTemplate.
                   items:
                     description: |-
                       ComponentRoleSpec configures one named Pod-producing role inside a compound component.
@@ -28658,7 +28673,7 @@ spec:
                         description: |-
                           podTemplate defines the Pod configuration for this role. Admission permits
                           it only when the enclosing component type explicitly supports role-specific
-                          Pod templates. No component type supports it in this release.
+                          Pod templates.
                         properties:
                           metadata:
                             description: |-
@@ -36846,18 +36861,27 @@ spec:
                     - decode
                     - planner
                     - epp
+                    - lpx
                   type: string
               required: []
               type: object
               x-kubernetes-validations:
+                - message: standalone LPX DynamoComponentDeployments are not supported; use DynamoGraphDeployment
+                  rule: '!(has(self.type) && self.type == ''lpx'')'
                 - message: eppConfig may only be set when type is epp
                   rule: '!has(self.eppConfig) || (has(self.type) && self.type == ''epp'')'
                 - message: minAvailable must be less than or equal to replicas unless replicas is 0
-                  rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
+                  rule: '!has(self.minAvailable) || (!has(self.replicas) && has(self.type) && self.type == ''lpx'') || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
                 - message: type is immutable after it is set
                   rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
+                - message: LPX Pod templates belong to roles
+                  rule: '!(has(self.type) && self.type == ''lpx'') || !has(self.podTemplate)'
+                - message: replicas must be positive when type is lpx
+                  rule: '!(has(self.type) && self.type == ''lpx'' && has(self.replicas) && self.replicas < 1)'
+                - message: scalingAdapter is not supported when type is lpx
+                  rule: '!(has(self.type) && self.type == ''lpx'' && has(self.scalingAdapter))'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:

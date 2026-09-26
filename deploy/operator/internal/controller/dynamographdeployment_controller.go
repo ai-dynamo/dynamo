@@ -184,7 +184,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Dispatch exclusively through the persisted provider.
 	program, err := r.selectWorkloadProgram(provider)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -270,9 +269,10 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
-			generationOrDeletionChangedPredicate(),
+			dgdPrimaryPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
+		Owns(&nvidiacomv1alpha1.LPXGraphDeployment{}).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),

@@ -341,6 +341,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
 		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
 
+	ready := IsDeploymentReady(deployment)
 	serviceReplicaStatus := &nvidiacomv1beta1.ComponentReplicaStatus{
 		ComponentKind:     nvidiacomv1beta1.ComponentKindDeployment,
 		ComponentNames:    []string{deployment.Name},
@@ -362,7 +363,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}
 	gpuShapeStatus := &gpuShape
 
-	if IsDeploymentReady(deployment) {
+	if ready {
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
 			status:               metav1.ConditionTrue,
@@ -1002,7 +1003,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 	}
 
 	m := ctrl.NewControllerManagedBy(mgr).
-		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
+		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(commonController.GenerationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
 		Owns(&appsv1.Deployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
