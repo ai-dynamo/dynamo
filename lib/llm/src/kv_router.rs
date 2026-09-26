@@ -541,6 +541,28 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
             (ErrorType::ResourceExhausted, true)
         }
         scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
+        scheduling::KvSchedulerError::DoNotQueue {
+            policy_class,
+            pending_count,
+            pending_isl_tokens,
+            pending_cached_tokens,
+        } => {
+            return DynamoError::builder()
+                .error_type(ErrorType::RateLimited)
+                .reason(
+                    dynamo_runtime::error::ErrorReason::new("router.do_not_queue")
+                        .expect("registered do-not-queue reason"),
+                )
+                .message("request opted out of router queueing")
+                .public_details(dynamo_runtime::error::PublicDetails::RouterQueue {
+                    policy_class,
+                    pending_count,
+                    pending_isl_tokens,
+                    pending_cached_tokens,
+                })
+                .build()
+                .into();
+        }
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };
@@ -565,6 +587,28 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
     } else {
         error.build().into()
     }
+}
+
+fn raw_do_not_queue_response(error: &anyhow::Error) -> Option<RouterResponse> {
+    let error = error.downcast_ref::<DynamoError>()?;
+    if error.reason().as_str() != "router.do_not_queue" {
+        return None;
+    }
+    let dynamo_runtime::error::PublicDetails::RouterQueue {
+        policy_class,
+        pending_count,
+        pending_isl_tokens,
+        pending_cached_tokens,
+    } = error.public_details()?
+    else {
+        return None;
+    };
+    Some(RouterResponse::DoNotQueue {
+        policy_class: policy_class.clone(),
+        pending_count: *pending_count,
+        pending_isl_tokens: *pending_isl_tokens,
+        pending_cached_tokens: *pending_cached_tokens,
+    })
 }
 
 fn cancelled_error(context_id: &str) -> anyhow::Error {
@@ -1223,8 +1267,53 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<FindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_and_do_not_queue(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+    }
+
+    /// Select a worker with the normal scheduler policy, optionally rejecting
+    /// the request when it would remain queued after this scheduling round.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn find_best_match_details_with_policy_class_and_do_not_queue(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
+    ) -> anyhow::Result<FindBestMatchOutcome> {
         let admitted = self
-            .find_best_match_details_with_policy_class_admitted(
+            .find_best_match_details_with_policy_class_admitted_and_do_not_queue(
                 context_id,
                 tokens,
                 block_mm_infos,
@@ -1241,6 +1330,7 @@ impl KvRouter {
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await?;
         if let Some(booking) = admitted.booking {
@@ -1273,6 +1363,50 @@ impl KvRouter {
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
+        self.find_best_match_details_with_policy_class_admitted_and_do_not_queue(
+            context_id,
+            tokens,
+            block_mm_infos,
+            router_config_override,
+            update_states,
+            return_routing_hashes,
+            lora_name,
+            cache_namespace,
+            priority_jump,
+            strict_priority,
+            policy_class,
+            session_context,
+            expected_output_tokens,
+            pinned_worker,
+            allowed_worker_ids,
+            routing_constraints,
+            false,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_with_policy_class_admitted_and_do_not_queue(
+        &self,
+        context_id: Option<&str>,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        update_states: bool,
+        return_routing_hashes: bool,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        policy_class: Option<String>,
+        session_context: Option<dynamo_kv_router::SessionContext>,
+        expected_output_tokens: Option<u32>,
+        pinned_worker: Option<WorkerWithDpRank>,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         self.find_best_match_details_with_policy_class_inner(
             context_id,
             tokens,
@@ -1291,6 +1425,7 @@ impl KvRouter {
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
+            do_not_queue,
             FindBestMatchAdmission::WithAdmission,
         )
         .await
@@ -1316,6 +1451,7 @@ impl KvRouter {
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
         admission: FindBestMatchAdmission,
     ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         let start = Instant::now();
@@ -1371,6 +1507,7 @@ impl KvRouter {
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue: do_not_queue && is_admitted_routing,
                 admission: core_admission,
                 track_active_blocks: self.kv_router_config.router_track_active_blocks,
                 return_routing_hashes: return_routing_hashes || session_index_context.is_some(),
@@ -1880,28 +2017,32 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                 routing_constraints,
                 priority_jump,
                 strict_priority,
+                do_not_queue,
                 lora_name,
                 cache_namespace,
             } => {
                 let request_context = ctx.context();
-                let mut schedule = Box::pin(self.find_best_match_details_with_policy_class(
-                    Some(&context_id),
-                    &tokens,
-                    block_mm_infos.as_deref(),
-                    None,
-                    true,
-                    false,
-                    lora_name,
-                    cache_namespace,
-                    priority_jump,
-                    strict_priority,
-                    policy_class,
-                    None,
-                    None,
-                    None,
-                    None,
-                    routing_constraints,
-                ));
+                let mut schedule = Box::pin(
+                    self.find_best_match_details_with_policy_class_and_do_not_queue(
+                        Some(&context_id),
+                        &tokens,
+                        block_mm_infos.as_deref(),
+                        None,
+                        true,
+                        false,
+                        lora_name,
+                        cache_namespace,
+                        priority_jump,
+                        strict_priority,
+                        policy_class,
+                        None,
+                        None,
+                        None,
+                        None,
+                        routing_constraints,
+                        do_not_queue,
+                    ),
+                );
                 let outcome = tokio::select! {
                     biased;
 
@@ -1933,7 +2074,10 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
                     Ok(FindBestMatchOutcome::QueueRejected { rejection }) => {
                         RouterResponse::QueueRejected { rejection }
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => match raw_do_not_queue_response(&error) {
+                        Some(response) => response,
+                        None => return Err(error),
+                    },
                 }
             }
             RouterRequest::PotentialLoads {
@@ -2030,6 +2174,135 @@ mod tests {
         assert!(crate::http::service::metrics::request_deadline_exceeded(
             &decoded
         ));
+    }
+
+    #[test]
+    fn do_not_queue_maps_to_rate_limited_with_public_queue_snapshot() {
+        let error = map_scheduler_error(KvSchedulerError::DoNotQueue {
+            policy_class: "latency".to_string(),
+            pending_count: 2,
+            pending_isl_tokens: 128,
+            pending_cached_tokens: 64,
+        });
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("do-not-queue should use the semantic error contract");
+        assert_eq!(dynamo_error.class(), ErrorType::RateLimited);
+        assert_eq!(dynamo_error.reason().as_str(), "router.do_not_queue");
+        assert_eq!(
+            dynamo_error.public_details(),
+            Some(&dynamo_runtime::error::PublicDetails::RouterQueue {
+                policy_class: "latency".to_string(),
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            })
+        );
+
+        assert!(matches!(
+            raw_do_not_queue_response(&error),
+            Some(RouterResponse::DoNotQueue {
+                policy_class,
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            }) if policy_class == "latency"
+        ));
+    }
+
+    #[tokio::test]
+    async fn raw_router_new_rejects_only_when_it_would_wait() {
+        use futures::StreamExt;
+        use std::time::Duration;
+
+        let router = make_router(
+            "raw-do-not-queue",
+            HashMap::from([(
+                0,
+                ModelRuntimeConfig {
+                    max_num_batched_tokens: Some(1024),
+                    ..Default::default()
+                },
+            )]),
+            2,
+            fixed_policy(None, WorkerWithDpRank::from_worker_id(0)),
+            None,
+            None,
+            "decode",
+            KvRouterConfig {
+                use_kv_events: false,
+                router_track_active_blocks: false,
+                router_track_prefill_tokens: true,
+                router_queue_threshold: Some(0.0),
+                skip_initial_worker_wait: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let opted_in: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[11,12,21,22],"do_not_queue":true}"#)
+                .unwrap();
+        let active = SingleIn::new(opted_in.clone());
+        let active_id = active.context().id().to_string();
+        let mut first = tokio::time::timeout(Duration::from_secs(5), router.generate(active))
+            .await
+            .expect("idle worker should admit the opted-in request")
+            .unwrap();
+        assert!(matches!(
+            first.next().await.unwrap().data,
+            Some(RouterResponse::New { worker_id: 0, .. })
+        ));
+
+        let default_request: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[31,32]}"#).unwrap();
+        let waiting = SingleIn::new(default_request);
+        let waiting_id = waiting.context().id().to_string();
+        let mut pending = Box::pin(router.generate(waiting));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    _ = &mut pending => panic!("default request returned before queueing"),
+                    _ = tokio::task::yield_now() => {
+                        if router.pending_count() == 1 {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("default request should wait in the router queue");
+
+        let mut rejected = tokio::time::timeout(
+            Duration::from_secs(5),
+            router.generate(SingleIn::new(opted_in)),
+        )
+        .await
+        .expect("opted-in request should reject while busy")
+        .unwrap();
+        assert!(matches!(
+            rejected.next().await.unwrap().data,
+            Some(RouterResponse::DoNotQueue {
+                pending_count: 1,
+                pending_isl_tokens: 2,
+                ..
+            })
+        ));
+        assert_eq!(router.pending_count(), 1);
+        assert_eq!(router.pending_isl_tokens(), 2);
+
+        router.free(&active_id).await.unwrap();
+        let mut admitted = tokio::time::timeout(Duration::from_secs(5), &mut pending)
+            .await
+            .expect("freeing the active request should dispatch the queued request")
+            .unwrap();
+        assert!(matches!(
+            admitted.next().await.unwrap().data,
+            Some(RouterResponse::New { worker_id: 0, .. })
+        ));
+        router.free(&waiting_id).await.unwrap();
     }
 
     #[test]
@@ -2731,6 +3004,7 @@ mod tests {
                     None,
                     None,
                     RoutingConstraints::default(),
+                    false,
                     admission,
                 )
                 .await
@@ -2916,6 +3190,7 @@ mod tests {
                     None,
                     None,
                     RoutingConstraints::default(),
+                    false,
                     FindBestMatchAdmission::WithAdmission,
                 )
                 .await
@@ -3064,6 +3339,7 @@ mod tests {
                 None,
                 None,
                 RoutingConstraints::default(),
+                false,
                 FindBestMatchAdmission::WithAdmission,
             )
             .await

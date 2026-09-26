@@ -989,6 +989,8 @@ pub enum RouterRequest {
         priority_jump: f64,
         #[serde(default, skip_serializing_if = "is_zero")]
         strict_priority: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        do_not_queue: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lora_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1025,10 +1027,15 @@ impl Default for RouterRequest {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            do_not_queue: false,
             lora_name: None,
             cache_namespace: None,
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn is_zero(value: &u32) -> bool {
@@ -1053,6 +1060,12 @@ pub enum RouterResponse {
         #[serde(default)]
         dp_rank: DpRank,
         overlap_blocks: u32,
+    },
+    DoNotQueue {
+        policy_class: String,
+        pending_count: usize,
+        pending_isl_tokens: usize,
+        pending_cached_tokens: usize,
     },
     QueueRejected {
         rejection: crate::scheduling::QueueRejection,
@@ -2579,6 +2592,69 @@ mod tests {
     }
 
     #[test]
+    fn test_router_request_new_do_not_queue_compatibility() {
+        let mut request: RouterRequest =
+            serde_json::from_str(r#"{"method":"new","tokens":[1,2,3]}"#).unwrap();
+        assert!(matches!(
+            &request,
+            RouterRequest::New {
+                do_not_queue: false,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("do_not_queue")
+                .is_none()
+        );
+
+        let RouterRequest::New { do_not_queue, .. } = &mut request else {
+            unreachable!();
+        };
+        *do_not_queue = true;
+        let serialized = serde_json::to_value(&request).unwrap();
+        assert_eq!(serialized["do_not_queue"], true);
+        assert!(matches!(
+            serde_json::from_value::<RouterRequest>(serialized).unwrap(),
+            RouterRequest::New {
+                do_not_queue: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_router_response_do_not_queue_serialization() {
+        let response = RouterResponse::DoNotQueue {
+            policy_class: "latency".to_string(),
+            pending_count: 2,
+            pending_isl_tokens: 128,
+            pending_cached_tokens: 64,
+        };
+        let serialized = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "method": "do_not_queue",
+                "policy_class": "latency",
+                "pending_count": 2,
+                "pending_isl_tokens": 128,
+                "pending_cached_tokens": 64,
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<RouterResponse>(serialized).unwrap(),
+            RouterResponse::DoNotQueue {
+                policy_class,
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            } if policy_class == "latency"
+        ));
+    }
+
+    #[test]
     fn test_router_request_new_serialization_with_priority_jump() {
         let request = RouterRequest::New {
             tokens: vec![1, 2, 3],
@@ -2586,6 +2662,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 5.0,
             strict_priority: 0,
+            do_not_queue: false,
             lora_name: None,
             cache_namespace: None,
         };
@@ -2614,6 +2691,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            do_not_queue: false,
             lora_name: Some("adapter-a".to_string()),
             cache_namespace: None,
         };
@@ -2658,6 +2736,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 4,
+            do_not_queue: false,
             lora_name: None,
             cache_namespace: None,
         };
@@ -2684,6 +2763,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            do_not_queue: false,
             lora_name: None,
             cache_namespace: None,
         };
@@ -2701,6 +2781,7 @@ mod tests {
             routing_constraints: RoutingConstraints::default(),
             priority_jump: 0.0,
             strict_priority: 0,
+            do_not_queue: false,
             lora_name: None,
             cache_namespace: Some("tenant-a".to_string()),
         };

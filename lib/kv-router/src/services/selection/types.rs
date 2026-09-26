@@ -433,6 +433,8 @@ pub struct SelectRequest {
     pub session_id: Option<String>,
     pub session_context: Option<SelectionSessionContext>,
     pub affinity_target: Option<WorkerAffinityTarget>,
+    #[serde(default)]
+    pub do_not_queue: bool,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
@@ -445,7 +447,8 @@ pub struct SelectRequest {
     /// selection can succeed where an admitted one would have been rejected.
     /// A `selection_id` still caches the booking inputs for a follow-up
     /// `create_reservation`. Ignored on `select_and_reserve`, which always
-    /// books.
+    /// books. `do_not_queue` is also ignored because advisory selection skips
+    /// queue admission.
     #[serde(default)]
     pub advisory: bool,
 }
@@ -473,6 +476,8 @@ pub struct SelectAndReserveRequest {
     pub session_id: Option<String>,
     pub session_context: Option<SelectionSessionContext>,
     pub affinity_target: Option<WorkerAffinityTarget>,
+    #[serde(default)]
+    pub do_not_queue: bool,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
@@ -713,5 +718,34 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "token_ids": [1, 2, 3, 4] }))
                 .expect("valid reserve request");
         assert!(request.take_session_context().is_none());
+    }
+
+    #[test]
+    fn do_not_queue_defaults_to_false_and_accepts_explicit_false() {
+        let select: SelectRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4]
+        }))
+        .expect("select request without do_not_queue");
+        assert!(!select.do_not_queue);
+
+        let select: SelectRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "do_not_queue": false
+        }))
+        .expect("select request with do_not_queue false");
+        assert!(!select.do_not_queue);
+
+        let reserve: SelectAndReserveRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4]
+        }))
+        .expect("reserve request without do_not_queue");
+        assert!(!reserve.do_not_queue);
+
+        let reserve: SelectAndReserveRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "do_not_queue": false
+        }))
+        .expect("reserve request with do_not_queue false");
+        assert!(!reserve.do_not_queue);
     }
 }

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
@@ -52,6 +52,7 @@ struct TokenizeResult {
     cache_namespace: Option<String>,
     priority_jump: f64,
     strict_priority: u32,
+    do_not_queue: bool,
     routing_constraints: RoutingConstraints,
     tokens_safe_to_inject: bool,
 }
@@ -318,6 +319,11 @@ impl Router {
         // and multimodal routing hashes are preserved.
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let do_not_queue = request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.do_not_queue)
+            .unwrap_or(false);
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = cache_namespace_from_request(request, headers);
 
@@ -330,6 +336,7 @@ impl Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            do_not_queue,
             routing_constraints,
             tokens_safe_to_inject: true,
         })
@@ -355,6 +362,11 @@ impl Router {
     ) -> Result<TokenizeResult> {
         let priority_jump = extract_priority_jump(request.nvext.as_ref());
         let strict_priority = extract_strict_priority(request.nvext.as_ref());
+        let do_not_queue = request
+            .nvext
+            .as_ref()
+            .and_then(|n| n.do_not_queue)
+            .unwrap_or(false);
         let routing_constraints = extract_routing_constraints(request.nvext.as_ref());
         let cache_namespace = cache_namespace_from_request(&request, headers);
 
@@ -373,6 +385,7 @@ impl Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            do_not_queue,
             routing_constraints,
             tokens_safe_to_inject,
         })
@@ -482,6 +495,7 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<PrefillReservation> {
         self.prefill_router
             .reserve_prefill_worker(
@@ -495,9 +509,10 @@ impl Router {
                 policy_class,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
+            .context("Prefill reservation failed")
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
@@ -522,12 +537,13 @@ impl Router {
         policy_class: Option<String>,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
+        do_not_queue: bool,
     ) -> Result<(WorkerWithDpRank, u32)> {
         let config_override = decode_router_config_override(is_disaggregated);
 
         let outcome = self
             .decode_router
-            .find_best_match_details_with_policy_class(
+            .find_best_match_details_with_policy_class_and_do_not_queue(
                 None,
                 tokens,
                 None,
@@ -544,9 +560,10 @@ impl Router {
                 None,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))?;
+            .context("Decode query failed")?;
 
         match outcome {
             FindBestMatchOutcome::Routed {
@@ -1440,6 +1457,7 @@ impl EndpointPicker for Router {
             cache_namespace,
             priority_jump,
             strict_priority,
+            do_not_queue,
             routing_constraints,
             tokens_safe_to_inject,
         } = self
@@ -1463,18 +1481,27 @@ impl EndpointPicker for Router {
                 policy_class.clone(),
                 allowed_worker_ids.clone(),
                 routing_constraints.clone(),
+                do_not_queue,
             )
             .await;
 
         let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "Prefill routing failed; falling back to aggregated mode"
-                );
-                false
-            }
+            Err(e) => match prefill_failure_action(e.as_ref()) {
+                // Do not retry a no-queue prefill rejection through the
+                // aggregated path. That would perform a second admission
+                // decision after the client explicitly requested fast failure.
+                PrefillFailureAction::Backpressure(message) => {
+                    return Err(PickError::Backpressure(message));
+                }
+                PrefillFailureAction::FallbackToAggregated => {
+                    tracing::debug!(
+                        error = %e,
+                        "Prefill routing failed; falling back to aggregated mode"
+                    );
+                    false
+                }
+            },
         };
 
         let (decode_worker, _overlap) = self
@@ -1487,9 +1514,13 @@ impl EndpointPicker for Router {
                 policy_class,
                 allowed_worker_ids,
                 routing_constraints,
+                do_not_queue,
             )
             .await
-            .map_err(|e| PickError::RoutingFailed(e.to_string()))?;
+            .map_err(|e| match do_not_queue_error_message(e.as_ref()) {
+                Some(message) => PickError::Backpressure(message),
+                None => PickError::RoutingFailed(e.to_string()),
+            })?;
 
         // TODO(epp-endpoint-reconciliation): Reconcile Dynamo discovery with the
         // pod reflector and retry selection when the chosen worker has no endpoint.
@@ -1656,12 +1687,84 @@ impl EndpointPicker for Router {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PrefillFailureAction {
+    Backpressure(String),
+    FallbackToAggregated,
+}
+
+fn prefill_failure_action(error: &(dyn std::error::Error + 'static)) -> PrefillFailureAction {
+    match do_not_queue_error_message(error) {
+        Some(message) => PrefillFailureAction::Backpressure(message),
+        None => PrefillFailureAction::FallbackToAggregated,
+    }
+}
+
+fn do_not_queue_error_message(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(dynamo_error) = error.downcast_ref::<dynamo_runtime::error::DynamoError>()
+            && dynamo_error.reason().as_str() == "router.do_not_queue"
+        {
+            let message = match dynamo_error.public_details() {
+                Some(dynamo_runtime::error::PublicDetails::RouterQueue {
+                    policy_class,
+                    pending_count,
+                    pending_isl_tokens,
+                    pending_cached_tokens,
+                }) => format!(
+                    "request opted out of router queueing for policy class {policy_class} \
+                     (pending_count={pending_count}, pending_isl_tokens={pending_isl_tokens}, \
+                     pending_cached_tokens={pending_cached_tokens})"
+                ),
+                _ => "request opted out of router queueing".to_string(),
+            };
+            return Some(message);
+        }
+        current = error.source();
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
 
     use std::sync::{Arc, atomic::Ordering};
+
+    #[test]
+    fn prefill_do_not_queue_error_does_not_fall_back_to_aggregated_routing() {
+        let do_not_queue = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::RateLimited)
+            .reason(
+                dynamo_runtime::error::ErrorReason::new("router.do_not_queue")
+                    .expect("registered reason"),
+            )
+            .message("request opted out of router queueing")
+            .public_details(dynamo_runtime::error::PublicDetails::RouterQueue {
+                policy_class: "default".to_string(),
+                pending_count: 1,
+                pending_isl_tokens: 16,
+                pending_cached_tokens: 0,
+            })
+            .build();
+        let do_not_queue = anyhow::Error::new(do_not_queue).context("Prefill reservation failed");
+        assert_eq!(
+            prefill_failure_action(do_not_queue.as_ref()),
+            PrefillFailureAction::Backpressure(
+                "request opted out of router queueing for policy class default \
+                 (pending_count=1, pending_isl_tokens=16, pending_cached_tokens=0)"
+                    .to_string()
+            )
+        );
+
+        let capacity_error = anyhow::anyhow!("no eligible prefill worker");
+        assert_eq!(
+            prefill_failure_action(capacity_error.as_ref()),
+            PrefillFailureAction::FallbackToAggregated
+        );
+    }
 
     /// Proves the core feature: `nvext.agent_hints.priority` lifts into a
     /// non-zero `priority_jump`, and absence collapses to `0.0`. If this

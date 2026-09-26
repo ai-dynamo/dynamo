@@ -7585,6 +7585,34 @@ mod tests {
     }
 
     #[test]
+    fn do_not_queue_maps_to_http_429() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .error_type(dynamo_runtime::error::ErrorType::RateLimited)
+            .reason(dynamo_runtime::error::ErrorReason::new("router.do_not_queue").unwrap())
+            .public_details(dynamo_runtime::error::PublicDetails::RouterQueue {
+                policy_class: "latency".to_string(),
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            })
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.code, StatusCode::TOO_MANY_REQUESTS.as_u16());
+        assert_eq!(
+            response.1.details.as_deref(),
+            Some(&serde_json::json!({
+                "type": "router_queue",
+                "policy_class": "latency",
+                "pending_count": 2,
+                "pending_isl_tokens": 128,
+                "pending_cached_tokens": 64,
+            }))
+        );
+    }
+
+    #[test]
     fn test_nested_invalid_argument_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 

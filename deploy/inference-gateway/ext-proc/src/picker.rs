@@ -182,6 +182,8 @@ pub enum PickError {
     NoEndpoints,
     #[error("routing failed: {0}")]
     RoutingFailed(String),
+    #[error("backpressure: {0}")]
+    Backpressure(String),
     /// Malformed client input (unparseable body, or a 4xx from the renderer) → 400.
     #[error("invalid request: {0}")]
     InvalidRequest(String),

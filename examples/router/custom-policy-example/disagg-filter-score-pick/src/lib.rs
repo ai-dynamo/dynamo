@@ -162,6 +162,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
+            do_not_queue: false,
             session_context: None,
             overlap: OverlapSignals::default(),
             kv_transfer_candidates: None,

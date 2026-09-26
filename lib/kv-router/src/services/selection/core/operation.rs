@@ -36,6 +36,9 @@ pub struct SelectionOperation<'a> {
     pub session_context: Option<SessionContext>,
     pub session: SessionBinding,
     pub affinity_target: Option<WorkerAffinityTarget>,
+    /// Reject this request if normal scheduling would leave it pending.
+    /// Advisory admissions always ignore this flag.
+    pub do_not_queue: bool,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
