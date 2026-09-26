@@ -256,11 +256,46 @@ where
         Adapter: IngressResponseEncoder<U>,
     {
         let context = stream.context();
+        // Reuse cancellation futures so each response does not recreate their waiters.
+        let stopped = context.stopped();
+        let killed = context.killed();
+        tokio::pin!(stopped, killed);
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)
         let mut send_complete_final = true;
         let mut saw_error_response = false;
-        while let Some(resp) = stream.next().await {
+        loop {
+            // Exit the pump when the request context is stopped/killed even if
+            // the engine stream never yields again: a response stream that
+            // stops yielding without terminating would otherwise pin the work
+            // handler (and its inflight accounting) for the rest of the
+            // process lifetime.
+            let resp = tokio::select! {
+                // Cancellation is not successful EOF, even if both are ready.
+                // Check `killed` first: a killed context also resolves
+                // `stopped`, and the two exits differ in whether the
+                // complete-final marker is still attempted.
+                biased;
+                _ = &mut killed => {
+                    // Hard cancel (client disconnect, protocol violation,
+                    // transport read error). The pump must not block on a
+                    // stream that may never end, but a killed context is not
+                    // a graceful teardown: fall through to the complete-final
+                    // attempt so a peer that is already gone stays a counted
+                    // error.
+                    break;
+                }
+                _ = &mut stopped => {
+                    // Peer-requested stop: the response-plane reader tears
+                    // down on stop and treats a closed stream as a clean
+                    // end, so exit without the terminal marker. Dropping
+                    // the engine stream propagates cancellation to a
+                    // producer that is still running.
+                    return;
+                }
+                resp = stream.next() => resp,
+            };
+            let Some(resp) = resp else { break };
             tracing::trace!("Sending response: {:?}", resp);
             let encoded = match self
                 .payload_adapter
@@ -447,6 +482,7 @@ where
         Ok((control_msg, data))
     }
 }
+
 /// The output of [`IngressDispatch::parse_and_build_request`]: the typed
 /// request the engine consumes, plus the bits of the on-wire control
 /// message the shared handler needs after parsing (the response-stream
@@ -1051,7 +1087,7 @@ mod tests {
     use crate::pipeline::network::{Ingress, RequestPlanePayloadCodec, StreamSender};
     use crate::pipeline::{Context, ManyOut, ResponseStream, SingleIn};
     use crate::protocols::annotated::Annotated;
-    use futures::stream;
+    use futures::{FutureExt, stream};
     use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, Opts};
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1544,6 +1580,135 @@ mod tests {
                 .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
                 .get(),
             0
+        );
+    }
+
+    /// A response stream that stops yielding without terminating must not pin
+    /// the pump forever: once the request context is stopped or killed, the
+    /// pump exits (dropping the stream and its inflight accounting) instead of
+    /// blocking on `stream.next()` for the rest of the process lifetime.
+    /// Cancellation must also win over a stream that has already reached EOF.
+    #[tokio::test]
+    async fn hung_response_stream_exits_on_context_cancellation() {
+        for (kill, eof_ready) in [(false, false), (true, false), (false, true), (true, true)] {
+            let ingress = TestIngress::new();
+            let notifier = Arc::new(tokio::sync::Notify::new());
+            ingress
+                .set_endpoint_health_check_notifier(notifier.clone())
+                .unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let publisher = StreamSender { tx, prologue: None };
+
+            let ctx = Context::new(serde_json::json!({}));
+            let engine_ctx = ctx.context();
+
+            let dropped = Arc::new(());
+            let stream_marker = dropped.clone();
+            let inner = stream::poll_fn(move |_| {
+                let _ = &stream_marker;
+                if eof_ready {
+                    std::task::Poll::Ready(None)
+                } else {
+                    std::task::Poll::Pending
+                }
+            });
+            let response_stream: ManyOut<TestResponse> =
+                ResponseStream::new(Box::pin(inner), engine_ctx.clone());
+
+            let pump = ingress.pump_response_stream(
+                response_stream,
+                &publisher,
+                RequestPlanePayloadCodec::Json,
+            );
+            tokio::pin!(pump);
+            if !eof_ready {
+                // The pump is parked on a stream that never wakes it; only the
+                // context state can end it.
+                assert!(futures::poll!(&mut pump).is_pending());
+            }
+            if kill {
+                engine_ctx.kill();
+            } else {
+                engine_ctx.stop_generating();
+            }
+            tokio::time::timeout(Duration::from_secs(1), &mut pump)
+                .await
+                .expect("cancellation must unblock the pump");
+            assert_eq!(
+                Arc::strong_count(&dropped),
+                1,
+                "engine stream must be dropped"
+            );
+            if kill {
+                // A killed context is not a graceful teardown: the
+                // complete-final marker is still attempted, so a receiver
+                // that is still attached observes a clean end (and a dead
+                // one keeps the transport failure counted).
+                let TwoPartMessageType::DataOnly(data) = rx.try_recv().unwrap().into_message_type()
+                else {
+                    panic!("expected final data frame after kill");
+                };
+                let final_frame: serde_json::Value = serde_json::from_slice(&data).unwrap();
+                assert_eq!(final_frame["complete_final"], true);
+                assert!(rx.try_recv().is_err());
+                assert!(
+                    notifier.notified().now_or_never().is_some(),
+                    "a completed final marker must notify endpoint health"
+                );
+            } else {
+                // A peer-requested stop tears down without the terminal
+                // marker; the reader treats a closed stream as a clean end.
+                assert!(
+                    matches!(
+                        rx.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ),
+                    "stop must not send a complete_final frame"
+                );
+                assert!(
+                    notifier.notified().now_or_never().is_none(),
+                    "stop must not notify endpoint health"
+                );
+            }
+        }
+    }
+
+    /// The clean counterpart: a stream that ends on its own still sends the
+    /// `complete_final` frame and notifies the endpoint health check.
+    #[tokio::test]
+    async fn normal_eof_sends_final_and_notifies_health() {
+        let ingress = TestIngress::new();
+        let notifier = Arc::new(tokio::sync::Notify::new());
+        ingress
+            .set_endpoint_health_check_notifier(notifier.clone())
+            .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let publisher = StreamSender { tx, prologue: None };
+        let ctx = Context::new(serde_json::json!({}));
+        let response_stream: ManyOut<TestResponse> =
+            ResponseStream::new(Box::pin(stream::empty()), ctx.context());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            ingress.pump_response_stream(
+                response_stream,
+                &publisher,
+                RequestPlanePayloadCodec::Json,
+            ),
+        )
+        .await
+        .expect("normal EOF must complete");
+
+        let TwoPartMessageType::DataOnly(data) = rx.try_recv().unwrap().into_message_type() else {
+            panic!("expected final data frame");
+        };
+        let final_frame: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(final_frame["complete_final"], true);
+        assert!(final_frame["data"].is_null());
+        assert!(rx.try_recv().is_err());
+        assert!(
+            notifier.notified().now_or_never().is_some(),
+            "clean EOF must notify endpoint health"
         );
     }
 }
