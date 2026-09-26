@@ -40,6 +40,7 @@ while [[ $# -gt 0 ]]; do
             echo "  VLLM_PREFILL_NIXL_SIDE_CHANNEL_PORT  Prefill NIXL port (default: 5601)"
             echo "  VLLM_DECODE_NIXL_SIDE_CHANNEL_PORT   Decode NIXL port (default: 5602)"
             echo "  VLLM_PREFILL_KV_EVENT_PORT   Prefill KV event port (default: 20081)"
+            echo "  MAX_MODEL_LEN                Maximum model length (default: 4096)"
             exit 0
             ;;
         *)

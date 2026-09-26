@@ -192,21 +192,106 @@ pub(crate) fn request() -> PreprocessedRequest {
         .expect("request")
 }
 
-pub(crate) fn epd_image_request() -> PreprocessedRequest {
+const IMAGE_A_URI: &str = "data:image/png;base64,aW1hZ2UtYQ==";
+const IMAGE_B_URI: &str = "data:image/png;base64,aW1hZ2UtYg==";
+const VIDEO_URL: &str = "https://example.com/sample.mp4";
+
+pub(crate) fn epd_request(media: Vec<(&str, Vec<MultimodalData>)>) -> PreprocessedRequest {
     let mut request = request();
     request.output_options.prompt_logprobs = None;
-    request.multi_modal_data = Some(std::collections::HashMap::from([(
-        "image_url".to_string(),
+    request.multi_modal_data = Some(
+        media
+            .into_iter()
+            .map(|(key, items)| (key.to_string(), items))
+            .collect(),
+    );
+    request
+}
+
+pub(crate) fn epd_image_request() -> PreprocessedRequest {
+    let mut request = epd_request(vec![(
+        "image_url",
         vec![
-            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2UtYQ==".to_string()),
-            MultimodalData::RawUrl("data:image/png;base64,aW1hZ2UtYg==".to_string()),
+            MultimodalData::RawUrl(IMAGE_A_URI.to_string()),
+            MultimodalData::RawUrl(IMAGE_B_URI.to_string()),
         ],
-    )]));
+    )]);
     request.multi_modal_uuids = Some(std::collections::HashMap::from([(
         "image_url".to_string(),
         vec![Some("image-a".to_string()), Some("image-b".to_string())],
     )]));
     request
+}
+
+fn url_media(sources: &[&str]) -> Vec<MultimodalData> {
+    sources
+        .iter()
+        .map(|source| MultimodalData::Url(source.parse().expect("valid media URL")))
+        .collect()
+}
+
+pub(crate) fn video_media() -> Vec<MultimodalData> {
+    url_media(&[VIDEO_URL])
+}
+
+pub(crate) fn epd_video_request() -> PreprocessedRequest {
+    epd_request(vec![("video_url", video_media())])
+}
+
+// The frontend passes media URLs through without UUIDs. A video also disables
+// exact multimodal routing, so the frontend sends no `mm_hashes`.
+pub(crate) fn epd_image_video_request() -> PreprocessedRequest {
+    epd_request(vec![
+        ("image_url", url_media(&[IMAGE_A_URI, IMAGE_B_URI])),
+        ("video_url", video_media()),
+    ])
+}
+
+pub(crate) type WireMedia = Vec<(pb::Modality, String, Option<pb::media_item::Source>)>;
+
+pub(crate) fn wire_media(request: &pb::GenerateRequest) -> WireMedia {
+    let mut media = request
+        .media
+        .iter()
+        .map(|item| (item.modality(), item.uuid.clone(), item.source.clone()))
+        .collect::<Vec<_>>();
+    // Stable sort: vLLM binds the items of one modality to placeholders in order.
+    media.sort_by_key(|(modality, _, _)| *modality);
+    media
+}
+
+/// The input media of a request without `mm_hashes`, grouped by modality in
+/// input order, to compare with `wire_media`.
+pub(crate) fn expected_wire_media(request: &PreprocessedRequest) -> WireMedia {
+    let media = request.multi_modal_data.as_ref().expect("raw media");
+    let mut expected = Vec::new();
+    for (key, modality) in [
+        ("image_url", pb::Modality::Image),
+        ("video_url", pb::Modality::Video),
+        ("audio_url", pb::Modality::Audio),
+    ] {
+        let uuids = request
+            .multi_modal_uuids
+            .as_ref()
+            .and_then(|uuids| uuids.get(key));
+        for (index, item) in media.get(key).into_iter().flatten().enumerate() {
+            let source = match item {
+                MultimodalData::Url(url) => url.to_string(),
+                MultimodalData::RawUrl(source) => source.clone(),
+                _ => panic!("test media must carry a source"),
+            };
+            let source = if source.starts_with("data:") {
+                pb::media_item::Source::DataUri(source)
+            } else {
+                pb::media_item::Source::Url(source)
+            };
+            let uuid = uuids
+                .and_then(|uuids| uuids[index].clone())
+                .unwrap_or_default();
+            expected.push((modality, uuid, Some(source)));
+        }
+    }
+    expected
 }
 
 pub(crate) fn decode_request() -> PreprocessedRequest {
