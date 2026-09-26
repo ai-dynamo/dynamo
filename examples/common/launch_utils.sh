@@ -249,24 +249,36 @@ CURL_EOF
     echo "=========================================="
 }
 
-# wait_for_ready <url> [timeout_seconds]
+# wait_for_ready <url> [timeout_seconds] [pid ...]
 #
 # Polls an HTTP endpoint until it returns 200 or timeout is reached.
 # Useful for waiting for a worker to finish loading before starting the
-# next one (e.g. disaggregated same-GPU deployments where concurrent
-# model loading causes OOM).
+# next one (e.g. disaggregated same-GPU deployments that serialize startup).
 #
 # Args:
 #   url              HTTP URL to poll (e.g. http://localhost:8081/health)
 #   timeout_seconds  Max seconds to wait (default: 30)
+#   pid ...          Optional background PIDs to watch. A worker that dies while
+#                    loading never answers, so without this the poll spends the
+#                    whole timeout on a dead process and buries the real error.
+#                    `kill -0` is enough here: bash reaps its own background
+#                    children, so the PID stops resolving once the child is gone.
 #
-# Returns 0 on success, 1 on timeout.
+# Returns 0 when ready, 1 on timeout, 2 if any watched PID exited first.
 wait_for_ready() {
     local _url="$1"
     local _timeout="${2:-30}"
+    local _pids=("${@:3}")
+    local _pid
     local _start=$SECONDS
     echo "Polling $_url (timeout: ${_timeout}s)..."
     while (( SECONDS - _start < _timeout )); do
+        for _pid in "${_pids[@]}"; do
+            if [[ -n "$_pid" ]] && ! kill -0 "$_pid" 2>/dev/null; then
+                echo "WARNING: process $_pid exited after $(( SECONDS - _start ))s, before $_url was ready" >&2
+                return 2
+            fi
+        done
         if curl -sf --max-time 2 "$_url" > /dev/null 2>&1; then
             echo "Ready after $(( SECONDS - _start ))s"
             return 0
