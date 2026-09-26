@@ -290,7 +290,15 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
 </ParamField>
 
 <ParamField path="dynamo_component_router_kv_hit_rate" type="histogram">
-  Predicted KV cache hit rate at routing time (0.0–1.0).
+  Predicted KV cache hit rate at routing time (0.0–1.0). Each request contributes one `overlap / isl` ratio, so averaging this histogram weights every request equally regardless of length.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_overlap_blocks_total" type="counter">
+  Predicted KV cache overlap blocks summed over routed requests. Divide by `dynamo_component_router_kv_isl_blocks_total` for a block-weighted hit rate — the frontend's view of KV reuse, aggregated the same way backends aggregate their own prefix cache hit and query totals, so the two can be read side by side. The frontend view is recorded when the routing decision is made and will not equal the worker view exactly; the gap covers blocks evicted between decision and execution, and decisions whose dispatch does not complete.
+</ParamField>
+
+<ParamField path="dynamo_component_router_kv_isl_blocks_total" type="counter">
+  Request ISL blocks summed over routed requests. Denominator for `dynamo_component_router_kv_overlap_blocks_total`.
 </ParamField>
 
 <ParamField path="dynamo_component_router_non_max_overlap_selections_total" type="counter">

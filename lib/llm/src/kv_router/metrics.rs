@@ -1032,6 +1032,8 @@ pub struct RouterRequestMetrics {
     pub input_sequence_tokens: prometheus::Histogram,
     pub output_sequence_tokens: prometheus::Histogram,
     pub kv_hit_rate: prometheus::Histogram,
+    pub kv_overlap_blocks_total: prometheus::Counter,
+    pub kv_isl_blocks_total: prometheus::IntCounter,
     pub kv_transfer_estimated_latency_seconds: prometheus::Histogram,
     pub shared_cache_hit_rate: prometheus::Histogram,
     pub shared_cache_beyond_blocks: prometheus::Histogram,
@@ -1115,6 +1117,20 @@ impl RouterRequestMetrics {
                         Some(prometheus::linear_buckets(0.0, 0.05, 21).unwrap()),
                     )
                     .expect("failed to create router_kv_hit_rate");
+                let kv_overlap_blocks_total = metrics
+                    .create_counter(
+                        &router_metric(frontend_service::KV_OVERLAP_BLOCKS_TOTAL),
+                        "Predicted KV cache overlap blocks summed over routed requests; divide by router_kv_isl_blocks_total for a block-weighted hit rate",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_overlap_blocks_total");
+                let kv_isl_blocks_total = metrics
+                    .create_intcounter(
+                        &router_metric(frontend_service::KV_ISL_BLOCKS_TOTAL),
+                        "Request ISL blocks summed over routed requests; denominator for router_kv_overlap_blocks_total",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_kv_isl_blocks_total");
                 let kv_transfer_estimated_latency_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::KV_TRANSFER_ESTIMATED_LATENCY_SECONDS),
@@ -1166,6 +1182,8 @@ impl RouterRequestMetrics {
                     input_sequence_tokens,
                     output_sequence_tokens,
                     kv_hit_rate,
+                    kv_overlap_blocks_total,
+                    kv_isl_blocks_total,
                     kv_transfer_estimated_latency_seconds,
                     shared_cache_hit_rate,
                     shared_cache_beyond_blocks,
@@ -1174,6 +1192,39 @@ impl RouterRequestMetrics {
                 })
             })
             .clone()
+    }
+
+    /// Unregistered metric handles for tests that only read recorded values.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        fn hist(name: &str) -> prometheus::Histogram {
+            prometheus::Histogram::with_opts(HistogramOpts::new(name, name)).unwrap()
+        }
+        Self {
+            requests_started_total: IntCounter::new("requests_started_total", "test").unwrap(),
+            requests_total: IntCounter::new("requests_total", "test").unwrap(),
+            time_to_first_token_seconds: hist("ttft_seconds"),
+            inter_token_latency_seconds: hist("itl_seconds"),
+            input_sequence_tokens: hist("isl_tokens"),
+            output_sequence_tokens: hist("osl_tokens"),
+            kv_hit_rate: hist("kv_hit_rate"),
+            kv_overlap_blocks_total: prometheus::Counter::new("kv_overlap_blocks_total", "test")
+                .unwrap(),
+            kv_isl_blocks_total: IntCounter::new("kv_isl_blocks_total", "test").unwrap(),
+            kv_transfer_estimated_latency_seconds: hist("kv_transfer_seconds"),
+            shared_cache_hit_rate: hist("shared_cache_hit_rate"),
+            shared_cache_beyond_blocks: hist("shared_cache_beyond_blocks"),
+            non_max_overlap_selections_total: IntCounterVec::new(
+                Opts::new("non_max_overlap_selections_total", "test"),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
+            overlap_blocks_lost: HistogramVec::new(
+                HistogramOpts::new("overlap_blocks_lost", "test"),
+                &[labels::WORKER_TYPE],
+            )
+            .unwrap(),
+        }
     }
 
     /// Use fresh, unregistered lifecycle counters and retain all other metric handles.
@@ -1185,6 +1236,23 @@ impl RouterRequestMetrics {
             requests_total: prometheus::IntCounter::new("requests_total", "test").unwrap(),
             ..self.clone()
         })
+    }
+
+    /// Record predicted KV cache overlap for a routed request, block-weighted.
+    ///
+    /// `kv_hit_rate` observes one `overlap / isl` ratio per request, so averaging it
+    /// yields a mean of ratios. Summing numerator and denominator separately keeps the
+    /// per-request ISL as the weight, giving a ratio of sums instead -- the same
+    /// aggregation backends use for their own prefix cache hit and query totals.
+    /// The two differ whenever ISL is skewed across requests.
+    ///
+    /// This is the frontend's view, taken when the routing decision is made. It is not
+    /// expected to equal the worker's reported rate: blocks can be evicted between the
+    /// decision and execution, and a decision whose dispatch fails is still a decision
+    /// the router made. Comparing the two views is the point; the gap is the signal.
+    pub fn observe_kv_overlap_blocks(&self, overlap_blocks: f64, isl_blocks: usize) {
+        self.kv_overlap_blocks_total.inc_by(overlap_blocks);
+        self.kv_isl_blocks_total.inc_by(isl_blocks as u64);
     }
 
     /// Record a selection that sacrificed KV cache overlap.
@@ -1434,6 +1502,32 @@ impl RemoteIndexerMetrics {
 mod tests {
     use super::*;
     use prometheus::{Encoder, TextEncoder};
+
+    /// The overlap counters divide as a ratio of sums, not the histogram's mean of ratios.
+    #[test]
+    fn test_kv_overlap_counters_are_block_weighted() {
+        let metrics = RouterRequestMetrics::for_test();
+        metrics.observe_kv_overlap_blocks(0.0, 1);
+        metrics.observe_kv_overlap_blocks(99.0, 100);
+
+        assert_eq!(metrics.kv_overlap_blocks_total.get(), 99.0);
+        assert_eq!(metrics.kv_isl_blocks_total.get(), 101);
+
+        let block_weighted =
+            metrics.kv_overlap_blocks_total.get() / metrics.kv_isl_blocks_total.get() as f64;
+        assert!((block_weighted - 99.0 / 101.0).abs() < 1e-9);
+    }
+
+    /// Overlap is fractional under weighted scoring, so the numerator must not truncate.
+    #[test]
+    fn test_kv_overlap_counter_keeps_fractional_blocks() {
+        let metrics = RouterRequestMetrics::for_test();
+        metrics.observe_kv_overlap_blocks(5.75, 8);
+        metrics.observe_kv_overlap_blocks(3.5, 8);
+
+        assert_eq!(metrics.kv_overlap_blocks_total.get(), 9.25);
+        assert_eq!(metrics.kv_isl_blocks_total.get(), 16);
+    }
 
     fn gather_pef(registry: &prometheus::Registry) -> String {
         let encoder = TextEncoder::new();
