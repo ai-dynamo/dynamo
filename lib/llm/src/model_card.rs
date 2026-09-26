@@ -1139,9 +1139,6 @@ impl ModelDeploymentCard {
                 // Only include the important fields
                 let mut bytes_to_hash: Vec<u8> = Vec::with_capacity(512);
                 bytes_to_hash.extend(self.display_name.as_bytes());
-                if let Some(source_path) = self.source_path.as_ref() {
-                    bytes_to_hash.extend(source_path.as_bytes());
-                }
 
                 // The files can be either a URL or a local path, so we ignore that and hash their
                 // checksum instead, which won't change wherever they are.
@@ -2843,6 +2840,18 @@ mod tests {
         let cf2 = cf_for("/m/b.json");
         a.extra_files.extend([cf1.clone(), cf2.clone()]);
         b.extra_files.extend([cf2, cf1]);
+        assert_eq!(a.mdcsum(), b.mdcsum());
+    }
+
+    #[test]
+    fn mdcsum_ignores_source_path() {
+        let baseline = super::ModelDeploymentCard::with_name_only("model");
+        let mut a = super::ModelDeploymentCard::with_name_only("model");
+        let mut b = super::ModelDeploymentCard::with_name_only("model");
+        a.source_path = Some("/models/model".to_string());
+        b.source_path = Some("/mnt/model-cache/model".to_string());
+
+        assert_eq!(baseline.mdcsum(), a.mdcsum());
         assert_eq!(a.mdcsum(), b.mdcsum());
     }
 
