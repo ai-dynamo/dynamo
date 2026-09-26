@@ -1367,7 +1367,7 @@ mod integration_tests {
                 {
                     let system_health = drt.system_health();
                     let system_health_lock = system_health.lock();
-                    system_health_lock.register_health_check_target(
+                    let _ = system_health_lock.register_health_check_target(
                         endpoint,
                         crate::component::Instance {
                             component: "test_component".to_string(),
