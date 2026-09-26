@@ -317,9 +317,14 @@ impl ServedIndexerService {
         if mode == ServedIndexerMode::Approximate {
             #[cfg(test)]
             tests::pause_record_startup(&component).await;
-            startup
-                .endpoints
-                .push(start_record_endpoint(component.clone(), bindings.clone()).await?);
+            match start_record_endpoint(component.clone(), bindings.clone()).await {
+                Ok(endpoint) => startup.endpoints.push(endpoint),
+                Err(error) => {
+                    // Keep cleanup owned even if the caller cancels while waiting for it.
+                    tokio::spawn(shutdown_endpoints(startup.into_endpoints())).await?;
+                    return Err(error);
+                }
+            }
         }
 
         Ok(Arc::new(Self {
@@ -884,6 +889,76 @@ mod tests {
         })
         .await
         .expect("cancelled startup did not clean up and recover");
+    }
+
+    #[tokio::test]
+    async fn failed_record_startup_waits_for_query_cleanup() {
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (drt, component) = registry_test_component("failed-record-startup").await;
+            let key = service_key(&component);
+            let (startup_reached, startup_release) = install_pause(&STARTUP_PAUSES, key.clone());
+            let (cleanup_reached, cleanup_release) = install_pause(&RETIREMENT_PAUSES, key.clone());
+            let startup = tokio::spawn({
+                let component = component.clone();
+                async move { get_or_start_service(component, ServedIndexerMode::Approximate).await }
+            });
+            startup_reached.await.unwrap();
+
+            // Force record registration to fail after the query endpoint is already running.
+            let conflicting_record = drt
+                .discovery()
+                .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                    namespace: component.namespace().name(),
+                    component: component.name().to_string(),
+                    endpoint: KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT.to_string(),
+                    transport: dynamo_runtime::component::TransportType::Nats(
+                        "conflict".to_string(),
+                    ),
+                    device_type: None,
+                    request_plane_codec: None,
+                })
+                .await
+                .unwrap();
+            startup_release.send(()).unwrap();
+            cleanup_reached.await.unwrap();
+            assert!(
+                !startup.is_finished(),
+                "startup returned before query cleanup"
+            );
+            assert!(service_creation_lock(&key).try_lock().is_err());
+            cleanup_release.send(()).unwrap();
+            assert!(startup.await.unwrap().is_err());
+
+            drt.discovery()
+                .unregister(conflicting_record)
+                .await
+                .unwrap();
+            let query = DiscoveryQuery::ComponentEndpoints {
+                namespace: component.namespace().name(),
+                component: component.name().to_string(),
+            };
+            assert!(
+                drt.discovery()
+                    .list(query.clone())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let handle = ensure_served_indexer_service(
+                component,
+                ServedIndexerMode::Approximate,
+                "model-a".to_string(),
+                Indexer::None,
+            )
+            .await
+            .expect("startup must be immediately retryable after cleanup");
+            assert_eq!(drt.discovery().list(query).await.unwrap().len(), 2);
+            drop(handle);
+            shutdown_and_settle(drt).await;
+        })
+        .await
+        .expect("failed record startup did not clean up and recover");
     }
 
     #[tokio::test]
