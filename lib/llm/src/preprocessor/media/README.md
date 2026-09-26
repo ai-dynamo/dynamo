@@ -47,7 +47,10 @@ register_model(
 > **Incompatible with `Dockerfile.frontend`**: Frontend media decoding, including libjpeg-turbo image decoding, is not supported when using `Dockerfile.frontend`. The standalone frontend image does not include the required NIXL/UCX dependencies or `libturbojpeg` runtime library.
 
 > [!WARNING]
-> **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `Failed to initialize required backends: [UCX: No UCX plugin found]`.
+> **Requires GPU node**: The frontend must run on a node with GPU access. During media processing, decoded tensors are written to GPU memory via NIXL, which requires `libcuda.so.1` to be available. Running the frontend on a CPU-only node will fail with something like: `add UCX backend to media-loader NIXL agent: No UCX plugin found`.
+
+> [!NOTE]
+> **NIXL progress thread**: The progress thread of the frontend's NIXL agent sleeps in `poll()` for at most the delay, rounded up to whole milliseconds (default 1 ms), and wakes early on UCX events. `DYN_MM_NIXL_PROGRESS_DELAY_US` sets the delay in microseconds, from `0` to `1000000`; other values use the default. When the frontend and the backend reader cannot share memory or use RDMA (for example, the frontend runs in its own pod with no RDMA device), UCX falls back to TCP. There each read pays about +0.7 ms per 3 MiB and +3 ms per 12 MiB with the default delay (UCX 1.22, same-host TCP A/B). Set `DYN_MM_NIXL_PROGRESS_DELAY_US=0` to trade one core per agent for that latency.
 
 > [!WARNING]
 > **Video decoding**: Video decoding needs to be enabled via the `dynamo-llm/media-ffmpeg` rust feature. The following ffmpeg dynamic libraries must be available on the system: `libavcodec`, `libavdevice`, `libavfilter`, `libavformat`, `libswresample`, `libswscale`. These are available in dynamo dockerfiles rendered with `enable_media_ffmpeg` set to true in `container/context.yaml`.
