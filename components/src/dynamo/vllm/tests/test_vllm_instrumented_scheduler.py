@@ -4100,8 +4100,7 @@ def test_prefill_point_with_exact_batch_shape_is_saved():
     ]
 
 
-@pytest.mark.parametrize("fpm_count", [0, 2])
-def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
+def _decode_point_and_fpm():
     point = BenchmarkPoint(
         point_type="decode",
         benchmark_id=4,
@@ -4114,10 +4113,30 @@ def test_benchmark_point_rejects_non_single_fpm_count(fpm_count):
             "sum_decode_kv_tokens": 48,
         }
     }
-    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(fpm_count)])
+    return point, fpm
+
+
+def test_benchmark_point_rejects_multiple_fpms():
+    # Two FPMs under one benchmark_id means the point isolation broke: abort.
+    point, fpm = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [fpm.copy() for _ in range(2)])
 
     with pytest.raises(RuntimeError, match="exactly one FPM"):
         InstrumentedScheduler._bench_save_current_point(stub)
+
+
+def test_benchmark_point_with_no_fpm_is_skipped_not_aborted():
+    # The deadline passed before a single FPM was recorded (first pass at a
+    # fresh giant shape, kernel JIT): a group-synchronized skip, not a sweep abort.
+    point, _ = _decode_point_and_fpm()
+    stub = _benchmark_save_stub(point, [])
+
+    InstrumentedScheduler._bench_save_current_point(stub)
+
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == [
+        SkippedBenchmarkPoint(point=point, reason="no_fpm_before_deadline")
+    ]
 
 
 def test_decode_point_with_no_fpm_stops_waiting_at_deadline(monkeypatch):
@@ -5285,11 +5304,12 @@ def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
 @pytest.mark.core
 @pytest.mark.parametrize("ctx", [2, 1000])
 def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monkeypatch):
-    # Four one-block chains fit, but their two private tail blocks per
-    # request raise the warmup bound to twelve. Reaching depth 8 (or starting
-    # below it) must not mark the short point as covered by real KV.
+    # Four one-block chains fit, but the private tail block each shadow takes
+    # at these contexts (exact per-rung reserve, one block per group here)
+    # raises the warmup bound to eight. Reaching depth 8 (or starting below
+    # it) must not mark the short point as covered by real KV.
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
-    stub = _kvwarm_planner_stub(usable_blocks=11)
+    stub = _kvwarm_planner_stub(usable_blocks=7)
     short = BenchmarkPoint(point_type="decode", batch_size=4, total_kv_read_tokens=8)
     deepest = replace(short, total_kv_read_tokens=4 * ctx)
     stub._bench_grid = deque([deepest, short] if ctx > 2 else [short])
@@ -5304,8 +5324,8 @@ def test_kvwarm_does_not_build_a_stage_over_budget_at_the_depth_floor(ctx, monke
         {
             "batch": 4,
             "depth": min(ctx + 4, 8),
-            "required_blocks": 12,
-            "usable_blocks": 11,
+            "required_blocks": 8,
+            "usable_blocks": 7,
         }
     ]
     stub._bench_active_req_ids = set()
@@ -5660,6 +5680,106 @@ def test_kvwarm_shadow_pool_shortfall_matches_tail_arithmetic():
     # Without the pool API the check is skipped rather than guessed.
     del pool.get_num_free_blocks
     assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [40, 47], 3) == 0
+
+
+def test_kvwarm_shadow_registration_keeps_positional_table_for_sliding_window():
+    """An admission cap bounds resident blocks, not the positional table: a
+    sliding-window group keeps absolute positions (null placeholders included),
+    so the shadow at ctx=152 forks table index 9, never the last ``cap`` entries."""
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    mgr._max_admission_blocks_per_request = 4
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=True)
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 152, 3
+    )
+    assert table == ([0, 1, 2, 3, 4, 5, 6, 7, 8, 1000],)
+    assert mgr.cows == [(9, 1000)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 9
+
+
+def test_kvwarm_shadow_registration_forks_circular_tail_table():
+    """GLM5-Next's k-pool tail: one circularly reused block per request
+    (admission cap 1, excluded from prefix caching). The chain holds a single
+    block whatever its depth; the shadow shares nothing and forks that block."""
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    mgr.req_to_blocks["chain"] = chain[:1]
+    mgr.block_size = 4
+    mgr._max_admission_blocks_per_request = 1
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 152, 3
+    )
+    assert table == ([1000],)
+    assert mgr.cows == [(0, 1000)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 0
+
+
+class MambaManager(_FakeManager):
+    """Type name is what ``_kvwarm_live_state_manager`` keys on."""
+
+
+def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
+    """At an exact block boundary vLLM reads the previous state at
+    ceil(ctx/bs)-1, one position below ctx//bs. The live-state fork must cover
+    that read slot too (``recurrent_shadow_range``), or the shadow starts from a
+    pruned checkpoint: ctx=32, bs=16 -> positions 1..2 forked from the live block 9."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = [_FakeBlock(i) for i in range(10)]
+    mgr = MambaManager(chain, cow=True)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 32, 3
+    )
+    assert table == ([0, 1000, 1001],)
+    assert mgr.cows == [(9, 1000), (9, 1001)]
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 1
+    # the per-context reserve and the pool-shortfall mirror agree on the span
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 2
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [32], 3) == 0
+
+
+def _dp_planner_stub(monkeypatch, points, usable_blocks=100):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_planner_stub(usable_blocks=usable_blocks)
+    stub._bench_dp_size = 2
+    stub._bench_expected_points = sum(
+        EAGER_WARMUP_REASON not in p.sample_reasons for p in points
+    )
+    stub._bench_grid = deque(points)
+    return stub
+
+
+def test_kvwarm_dp_filter_rejects_uncovered_explicit_points(monkeypatch):
+    covered = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16, sample_reasons=["explicit"]
+    )
+    deep = BenchmarkPoint(
+        point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500, sample_reasons=["explicit"]
+    )
+    stub = _dp_planner_stub(monkeypatch, [covered, deep])
+    with pytest.raises(RuntimeError, match=r"explicit decode point.*batch=3, total_kv_read_tokens=1500"):
+        stub._kvwarm_prepare("decode")
+
+
+def test_kvwarm_dp_filter_counts_only_real_points(monkeypatch):
+    covered = BenchmarkPoint(point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16)
+    replica = replace(covered, benchmark_id=3, sample_reasons=[EAGER_WARMUP_REASON])
+    deep = BenchmarkPoint(point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500)
+    stub = _dp_planner_stub(monkeypatch, [covered, deep, replica])
+    stub._kvwarm_prepare("decode")
+    kept = list(stub._bench_grid)
+    assert [(p.batch_size, p.total_kv_read_tokens) for p in kept] == [(1, 16), (1, 16)]
+    assert stub._bench_expected_points == 1
+    assert [p.benchmark_id for p in kept] == [1, 2]
 
 
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():
