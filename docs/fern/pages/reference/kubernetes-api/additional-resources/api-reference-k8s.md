@@ -1494,6 +1494,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `name` _string_ | Name references a PVC name defined in the top-level PVCs map |  | Required: \{\} <br /> |
 | `mountPoint` _string_ | MountPoint specifies where to mount the volume.<br />If useAsCompilationCache is true and mountPoint is not specified,<br />a backend-specific default will be used. |  |  |
+| `subPath` _string_ | Only used when UseAsCompilationCache is true |  |  |
 | `useAsCompilationCache` _boolean_ | UseAsCompilationCache indicates this volume should be used as a compilation cache.<br />When true, backend-specific environment variables will be set and default mount points may be used. | false |  |
 
 
@@ -1605,6 +1606,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `pvcName` _string_ | pvcName references a user-created PVC by name. The PVC must exist in<br />the same namespace as the DynamoGraphDeployment. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `mountPath` _string_ | mountPath overrides the backend-specific default mount path. When<br />empty, the operator selects a default appropriate for the backend<br />framework. |  | Optional: \{\} <br /> |
+| `subPath` _string_ | subPath override for the complication cache volume mount. |  | Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointConfig
