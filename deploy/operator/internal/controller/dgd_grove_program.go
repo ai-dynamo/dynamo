@@ -23,7 +23,6 @@ import (
 	"slices"
 	"time"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -171,15 +170,14 @@ func (p *groveProgram) Reconcile(
 	}
 
 	// Keep LPX creation and updates after ordinary reconciliation and restart selection.
-	var child *nvidiacomv1alpha1.LPXGraphDeployment
 	if req.DGD.HasLPXComponent() {
-		child, err = p.lpx.Reconcile(ctx, req.DGD)
+		child, err := p.lpx.Reconcile(ctx, req.DGD)
 		if err != nil {
 			return programResult, fmt.Errorf("reconcile LPX child: %w", err)
 		}
+		result = mergeLPXChildStatus(req.DGD, child, result)
 	}
 
-	result = mergeLPXChildStatus(req.DGD, child, result)
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {

@@ -513,11 +513,28 @@ func TestPipelineRequestDeadlineContinuesDuringRequestDeletion(t *testing.T) {
 	tail = getTestPipelineRequest(t, ctx, r.Client, child.Namespace, tail.Name)
 	require.False(t, tail.DeletionTimestamp.IsZero())
 
+	t.Log("Restore the recorded failure after a transient error without losing the surviving deadline")
+	require.NoError(t, r.Get(ctx, reconcileRequest.NamespacedName, child))
+	failure := meta.FindStatusCondition(child.Status.Conditions, schedulingFailedCondition).DeepCopy()
+	r.modelRegistry = &snapshotFailureRegistry{ModelRegistry: registry, err: errors.New("registry unavailable")}
+	_, err := r.Reconcile(ctx, reconcileRequest)
+	require.ErrorContains(t, err, "registry unavailable")
+	r.modelRegistry = registry
+	result, err := r.Reconcile(ctx, reconcileRequest)
+	require.NoError(t, err)
+	require.Positive(t, result.RequeueAfter)
+	require.LessOrEqual(t, result.RequeueAfter, 30*time.Second)
+	require.NoError(t, r.Get(ctx, reconcileRequest.NamespacedName, child))
+	require.Equal(t, failure, meta.FindStatusCondition(child.Status.Conditions, schedulingFailedCondition))
+	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
+	require.Equal(t, v1alpha1.LPXReadyReasonFailed, ready.Reason)
+	require.Equal(t, failure.Message, ready.Message)
+
 	t.Log("Continue enforcing the surviving request's independent deadline")
 	prefix = getTestPipelineRequest(t, ctx, r.Client, child.Namespace, prefix.Name)
 	prefix.Status = newTestPipelineRequest(child, pcs, prefix.Name, time.Now().Add(-time.Minute), lpxv1alpha1.RequestPhasePending).Status
 	require.NoError(t, r.Update(ctx, prefix))
-	_, err := r.Reconcile(ctx, reconcileRequest)
+	_, err = r.Reconcile(ctx, reconcileRequest)
 	require.NoError(t, err)
 	requirePipelineRequestNotFound(t, ctx, r.Client, child.Namespace, prefix.Name)
 }

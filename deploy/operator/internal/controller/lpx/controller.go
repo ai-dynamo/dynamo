@@ -294,12 +294,18 @@ func (r *graphReconciler) reconcileWorkloads(
 	}
 
 	// Failure blocks publication while each workload independently cleans up expired suffixes.
-	if len(expiredRequests) > 0 || isSchedulingFailedConditionCurrent(deployment) {
+	if len(expiredRequests) > 0 {
 		retained := slices.DeleteFunc(slices.Collect(maps.Values(requests)), func(request *lpxv1alpha1.LPUPipelineRequest) bool {
 			_, desired := desiredRequests[request.Name]
 			return !desired
 		})
 		return r.reconcileSchedulingFailure(ctx, deployment, pcsgs, explicitReplicas, retained, expiredRequests)
+	}
+
+	// Keep publication blocked after the failed requests have been removed.
+	if isSchedulingFailedConditionCurrent(deployment) {
+		setSchedulingFailedCondition(deployment, false)
+		return ctrl.Result{}, nil
 	}
 
 	acknowledgeSchedulingRetry(deployment)
