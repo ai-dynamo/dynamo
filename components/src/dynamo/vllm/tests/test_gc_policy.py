@@ -75,7 +75,9 @@ def test_gc_maintain_freezes_objects(monkeypatch):
     try:
         frozen = gc_policy.gc_maintain()
         assert frozen > 0
-        assert frozen == gc.get_freeze_count()
+        # gc.get_freeze_count() is process-global and drops when a frozen object is
+        # later deallocated, so only the bound holds, not exact equality.
+        assert 0 < gc.get_freeze_count() <= frozen
     finally:
         gc.unfreeze()
 
