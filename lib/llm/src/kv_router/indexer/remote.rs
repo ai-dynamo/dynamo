@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Weak};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -225,7 +225,21 @@ type ServiceKey = (u64, String, String);
 
 static SERVED_INDEXER_SERVICES: LazyLock<DashMap<ServiceKey, Arc<ServedIndexerService>>> =
     LazyLock::new(DashMap::new);
-static SERVICE_CREATION_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+type ServiceCreationLocks = HashMap<ServiceKey, Weak<Mutex<()>>>;
+static SERVICE_CREATION_LOCKS: LazyLock<parking_lot::Mutex<ServiceCreationLocks>> =
+    LazyLock::new(Default::default);
+
+fn service_creation_lock(key: &ServiceKey) -> Arc<Mutex<()>> {
+    let mut locks = SERVICE_CREATION_LOCKS.lock();
+    // Reclaim keys from retired runtimes without dropping locks still owned by waiters.
+    locks.retain(|_, lock| lock.strong_count() != 0);
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key.clone(), Arc::downgrade(&lock));
+    lock
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServedIndexerMode {
@@ -471,7 +485,8 @@ async fn get_or_start_service(
         return Ok(existing);
     }
 
-    let _guard = SERVICE_CREATION_LOCK.lock().await;
+    let creation_lock = service_creation_lock(&key);
+    let _guard = creation_lock.lock().await;
     let mut ignored_instance_ids = HashSet::new();
     if let Some(existing) = cached_service(&key) {
         if existing.mode == mode && !existing.is_retired() {
@@ -907,6 +922,15 @@ mod tests {
             assert!(futures::poll!(replacement.as_mut()).is_pending());
             assert!(Arc::ptr_eq(&cached_service(&key).unwrap(), &service));
             assert!(service.is_retired());
+            let unrelated_component = component.namespace().component("unrelated").unwrap();
+            let unrelated = ensure_served_indexer_service(
+                unrelated_component,
+                ServedIndexerMode::EventDriven,
+                "model-b".to_string(),
+                Indexer::None,
+            )
+            .await
+            .expect("another component must start while retirement is paused");
             release.send(()).unwrap();
             let handle = replacement.await.unwrap();
             assert!(!Arc::ptr_eq(&cached_service(&key).unwrap(), &service));
@@ -920,6 +944,7 @@ mod tests {
                 .unwrap();
             assert_eq!(endpoints.len(), 1);
             assert_query_callable(&component).await;
+            drop(unrelated);
             drop(handle);
             shutdown_and_settle(drt).await;
         })
