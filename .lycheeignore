@@ -88,3 +88,8 @@
 # Introduced by the same PR as its docs link: the K-EXAONE 2.0 recipe does not exist on main
 # until this PR merges, so these blob/main URLs 404 during review. Remove after merge.
 ^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/k-exaone-2\.0
+
+# Introduced by the same PR as their docs links: the A.X-K2 H200 recipe trees (perf/h200,
+# vllm/agg-h200, vllm/disagg-h200) do not exist on main until this PR merges, so these
+# tree/blob main URLs 404 during review. Remove after merge.
+^https://github\.com/ai-dynamo/dynamo/(tree|blob)/main/recipes/ax-k2/(perf/h200|vllm/(agg|disagg)-h200)
