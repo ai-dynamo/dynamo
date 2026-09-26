@@ -325,6 +325,44 @@ class TestReasoningParserForwarding:
         assert calls == {"called": True}
 
     @pytest.mark.asyncio
+    async def test_generate_tokens_omits_session_id_for_old_vllm(self):
+        from vllm.sampling_params import SamplingParams
+
+        handler = _make_handler()
+        calls = {}
+
+        async def fake_generate(
+            prompt,
+            sampling_params,
+            request_id,
+            *,
+            lora_request=None,
+            data_parallel_rank=None,
+            trace_headers=None,
+            priority=0,
+            reasoning_ended=None,
+            reasoning_parser_kwargs=None,
+        ):
+            calls["called"] = True
+            if False:
+                yield None
+
+        handler.engine_client = MagicMock()
+        handler.engine_client.generate = fake_generate
+
+        chunks = []
+        async for chunk in handler.generate_tokens(
+            PatchedTokensPrompt(prompt_token_ids=[1]),
+            SamplingParams(max_tokens=1),
+            "req-1",
+            session_id="session-1",
+        ):
+            chunks.append(chunk)
+
+        assert chunks == []
+        assert calls == {"called": True}
+
+    @pytest.mark.asyncio
     async def test_generate_tokens_emits_routed_experts_on_final_chunk(self):
         from vllm.sampling_params import SamplingParams
 

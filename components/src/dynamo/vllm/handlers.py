@@ -1043,6 +1043,22 @@ def _engine_generate_reasoning_kwargs(
     return kwargs
 
 
+def _engine_generate_session_kwargs(
+    engine_client: Any, session_id: str | None
+) -> dict[str, str | None]:
+    try:
+        parameters = inspect.signature(engine_client.generate).parameters.values()
+    except (TypeError, ValueError):
+        return {"session_id": session_id}
+    if any(
+        parameter.name == "session_id"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    ):
+        return {"session_id": session_id}
+    return {}
+
+
 def _engine_generate_reasoning_support(
     engine_client: Any,
 ) -> tuple[bool, bool] | None:
@@ -3299,7 +3315,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     data_parallel_rank=data_parallel_rank,
                     trace_headers=trace_headers,
                     priority=priority,
-                    session_id=session_id,
+                    **_engine_generate_session_kwargs(self.engine_client, session_id),
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -3931,7 +3947,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
-                    session_id=session_id,
+                    **_engine_generate_session_kwargs(self.engine_client, session_id),
                 )
 
                 async for res in gen:
@@ -4130,7 +4146,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
-                        session_id=session_id,
+                        **_engine_generate_session_kwargs(
+                            self.engine_client, session_id
+                        ),
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,
