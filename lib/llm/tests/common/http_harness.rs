@@ -252,8 +252,39 @@ fn find_sse_frame_separator(bytes: &[u8]) -> Option<(usize, usize)> {
     None
 }
 
+#[allow(dead_code)]
 pub async fn parse_json_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
     validate_terminal_data(body, "response SSE stream")?;
+    parse_json_sse_events(body).await
+}
+
+#[allow(dead_code)]
+pub async fn parse_responses_sse(body: &str) -> Result<Vec<JsonSseEvent>> {
+    if body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .any(|data| data.trim() == "[DONE]")
+    {
+        return Err(anyhow!("Responses SSE stream contains a [DONE] sentinel"));
+    }
+
+    let events = parse_json_sse_events(body).await?;
+    let terminal = events.iter().position(|event| {
+        matches!(
+            event.event.as_str(),
+            "response.completed" | "response.incomplete" | "response.failed"
+        )
+    });
+    match terminal {
+        Some(index) if index + 1 == events.len() => Ok(events),
+        Some(_) => Err(anyhow!(
+            "Responses SSE stream contains data after its terminal event"
+        )),
+        None => Err(anyhow!("Responses SSE stream is missing a terminal event")),
+    }
+}
+
+async fn parse_json_sse_events(body: &str) -> Result<Vec<JsonSseEvent>> {
     let mut messages = create_message_stream(body);
     let mut events = Vec::new();
 
