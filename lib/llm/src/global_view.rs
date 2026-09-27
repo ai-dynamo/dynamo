@@ -46,7 +46,13 @@ impl CatalogProjection {
                 && descriptor
                     .registrations
                     .iter()
-                    .any(|registration| registration.canonical_model_id == model)
+                    .any(|registration| {
+                        registration.canonical_model_id == model
+                            && matches!(
+                                registration.target.as_ref().and_then(|target| target.target.as_ref()),
+                                Some(crate::kv_dc_relay::wan::grpc::protocol::v1::model_target::Target::Base(_))
+                            )
+                    })
         });
         let producer = matching.next()?;
         matching.next().is_none().then_some(producer)
@@ -196,7 +202,7 @@ mod tests {
     use crate::kv_dc_relay::wan::grpc::protocol::{
         BaseModelTarget, CkfFormat, DigestIdentity, DynamoEndpointId, IdentitySource,
         IndexerDomainId, KvPoolCatalogSnapshot, KvPoolId, KvQueryHashFormat, KvQuerySemantics,
-        ModelRegistration, ModelTarget, ProducerIdentity, RELAY_CONTRACT_MARKER,
+        LoraModelTarget, ModelRegistration, ModelTarget, ProducerIdentity, RELAY_CONTRACT_MARKER,
         RELAY_PROTOCOL_VERSION, RelayIdentity, TopologyEntry, TopologyMember,
     };
     use bytes::Bytes;
@@ -329,6 +335,21 @@ mod tests {
         assert!(
             projection
                 .sole_aggregated_overlap_producer("model")
+                .is_none()
+        );
+
+        let mut lora = descriptor("dynamo-mocker");
+        lora.registrations[0].canonical_model_id = "adapter".into();
+        lora.registrations[0].target = Some(ModelTarget {
+            target: Some(model_target::Target::Lora(LoraModelTarget {
+                base_model: "model".into(),
+                adapter: "adapter".into(),
+            })),
+        });
+        projection.producers = vec![lora];
+        assert!(
+            projection
+                .sole_aggregated_overlap_producer("adapter")
                 .is_none()
         );
     }

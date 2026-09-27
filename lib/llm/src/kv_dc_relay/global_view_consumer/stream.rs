@@ -61,10 +61,16 @@ impl CkfStreamSession {
         if !descriptor
             .pool_roles
             .contains(&(WorkerRole::Aggregated as i32))
-            || !descriptor
-                .registrations
-                .iter()
-                .any(|registration| registration.canonical_model_id == model)
+            || !descriptor.registrations.iter().any(|registration| {
+                registration.canonical_model_id == model
+                    && matches!(
+                        registration
+                            .target
+                            .as_ref()
+                            .and_then(|target| target.target.as_ref()),
+                        Some(wire::v1::model_target::Target::Base(_))
+                    )
+            })
         {
             bail!("CKF producer is not an aggregated source for this model");
         }
