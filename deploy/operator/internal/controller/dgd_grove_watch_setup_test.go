@@ -34,6 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
+// groveWatchTestNamespace is the namespace the Grove watch fixtures live in.
+const groveWatchTestNamespace = "dynamo"
+
 // TestGroveWatchSetupMapPodGangToRequests covers how a scheduler PodGang is
 // resolved back to the DGD that owns it.
 func TestGroveWatchSetupMapPodGangToRequests(t *testing.T) {
@@ -54,7 +57,7 @@ func TestGroveWatchSetupMapPodGangToRequests(t *testing.T) {
 	}{
 		{
 			name: "a labelled PodGang owned through its PodCliqueSet resolves to the DGD",
-			obj:  podGangForWatch("serving-graph-0-anchor", namespace, truncatedPCSName),
+			obj:  podGangForWatch("serving-graph-0-anchor", truncatedPCSName),
 			existingPCS: podCliqueSetOwnedByDGD(
 				truncatedPCSName, namespace, dgdName,
 			),
@@ -63,17 +66,17 @@ func TestGroveWatchSetupMapPodGangToRequests(t *testing.T) {
 		},
 		{
 			name:         "a PodGang without the part-of label returns no requests",
-			obj:          podGangForWatch("orphan-podgang", namespace, ""),
+			obj:          podGangForWatch("orphan-podgang", ""),
 			wantRequests: 0,
 		},
 		{
 			name:         "a PodGang whose PodCliqueSet is not cached yet returns no requests",
-			obj:          podGangForWatch("serving-graph-0-anchor", namespace, truncatedPCSName),
+			obj:          podGangForWatch("serving-graph-0-anchor", truncatedPCSName),
 			wantRequests: 0,
 		},
 		{
 			name: "a PodGang whose PodCliqueSet has no controller owner returns no requests",
-			obj:  podGangForWatch("serving-graph-0-anchor", namespace, truncatedPCSName),
+			obj:  podGangForWatch("serving-graph-0-anchor", truncatedPCSName),
 			existingPCS: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: truncatedPCSName, Namespace: namespace},
 			},
@@ -81,7 +84,7 @@ func TestGroveWatchSetupMapPodGangToRequests(t *testing.T) {
 		},
 		{
 			name: "a PodGang whose PodCliqueSet is owned by another controller returns no requests",
-			obj:  podGangForWatch("serving-graph-0-anchor", namespace, truncatedPCSName),
+			obj:  podGangForWatch("serving-graph-0-anchor", truncatedPCSName),
 			existingPCS: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      truncatedPCSName,
@@ -131,7 +134,7 @@ func TestPodGangEventPredicates(t *testing.T) {
 	const podGangName = "serving-graph-0-anchor"
 
 	base := func() *schedulergrovev1alpha1.PodGang {
-		return podGangForWatch(podGangName, "dynamo", "serving-graph")
+		return podGangForWatch(podGangName, "serving-graph")
 	}
 
 	testCases := []struct {
@@ -216,9 +219,9 @@ func TestPodGangEventPredicates(t *testing.T) {
 
 // podGangForWatch builds a scheduler PodGang as Grove labels it for one
 // PodCliqueSet. An empty pcsName models a PodGang without the part-of label.
-func podGangForWatch(name, namespace, pcsName string) *schedulergrovev1alpha1.PodGang {
+func podGangForWatch(name, pcsName string) *schedulergrovev1alpha1.PodGang {
 	podGang := &schedulergrovev1alpha1.PodGang{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: groveWatchTestNamespace},
 	}
 	if pcsName != "" {
 		podGang.Labels = map[string]string{
