@@ -691,7 +691,7 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 	source := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "ordinary", Namespace: "default"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
-			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1)),
+			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
 		}}},
 	}
@@ -706,15 +706,16 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 				return delegated.Get(ctx, key, obj, opts...)
 			},
 		}).Build()
+	config := &configv1alpha1.OperatorConfiguration{}
+	config.Namespace.Restricted = source.Namespace
 	program := (&DynamoGraphDeploymentReconciler{
-		Client: kube, Config: &configv1alpha1.OperatorConfiguration{}, Recorder: events.NewFakeRecorder(10),
+		Client: kube, Config: config, Recorder: events.NewFakeRecorder(10),
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
 	}).newGroveProgram()
 
-	t.Log("Reach the ordinary shared-resource error without depending on an LPX child")
-	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
-	require.ErrorContains(t, err, "RBAC manager not initialized")
-	require.Equal(t, v1beta1.DGDStateFailed, result.Status.State)
+	t.Log("Reconcile ordinary workloads without depending on an LPX child")
+	_, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
 	require.Zero(t, childReads)
 }
 
