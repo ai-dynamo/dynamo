@@ -5,6 +5,7 @@
 
 mod actor;
 mod discovery;
+pub mod global_view_consumer;
 mod host;
 mod identity;
 mod load;
