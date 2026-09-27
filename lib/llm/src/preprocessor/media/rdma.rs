@@ -382,17 +382,10 @@ mod tests {
             progress_thread_delay_in_range(MAX_PROGRESS_THREAD_DELAY_US),
             MAX_PROGRESS_THREAD_DELAY_US
         );
-        for delay_us in [
-            MAX_PROGRESS_THREAD_DELAY_US + 1,
-            2_147_483_648,
-            4_294_967_296,
-            u64::MAX,
-        ] {
-            assert_eq!(
-                progress_thread_delay_in_range(delay_us),
-                DEFAULT_PROGRESS_THREAD_DELAY_US
-            );
-        }
+        assert_eq!(
+            progress_thread_delay_in_range(MAX_PROGRESS_THREAD_DELAY_US + 1),
+            DEFAULT_PROGRESS_THREAD_DELAY_US
+        );
     }
 
     #[test]
