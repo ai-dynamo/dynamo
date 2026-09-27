@@ -132,6 +132,16 @@ fn max_tokens(
 fn multimodal_input(
     request: &PreprocessedRequest,
 ) -> Result<Option<pb::MultimodalInput>, DynamoError> {
+    if request
+        .multi_modal_uuids
+        .iter()
+        .flat_map(|uuids| uuids.values().flatten())
+        .any(|uuid| uuid.as_deref().is_some_and(|uuid| !uuid.is_empty()))
+    {
+        return Err(client::invalid_request(
+            "multimodal cache UUIDs are not supported by the TensorRT-LLM sidecar",
+        ));
+    }
     let Some(media) = request.multi_modal_data.as_ref() else {
         return Ok(None);
     };

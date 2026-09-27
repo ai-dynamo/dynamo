@@ -32,10 +32,10 @@ registration, request conversion, transport, cancellation, and abort.
 
 The initial protocol does **not** support disaggregated (prefill/decode)
 serving, image URLs that must be fetched (`http://`, `https://`), video or audio
-input, `mm_processor_kwargs` or image options in `media_io_kwargs`, LoRA,
-KV-aware routing, encode workers, beam search, or `n > 1`. Disaggregation is
-excluded because the `Generate` response contract carries no context-phase
-handoff.
+input, `mm_processor_kwargs` or image options in `media_io_kwargs`, media cache
+UUIDs, LoRA, KV-aware routing, encode workers, beam search, or `n > 1`.
+Disaggregation is excluded because the `Generate` response contract carries no
+context-phase handoff.
 
 TensorRT-LLM's gRPC service does not report whether the model accepts images,
 so the sidecar forwards them to any model. TensorRT-LLM fails an image request

@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_backend_common::{
-    FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions, PreprocessedRequest,
-    SamplingOptions, StopConditions, StopReason,
+    BackendError, ErrorType, FinishReason, GenerateContext, LLMEngine, MultimodalData,
+    OutputOptions, PreprocessedRequest, SamplingOptions, StopConditions, StopReason,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
@@ -667,6 +667,39 @@ fn image_processing_options_are_rejected() {
     let mut text = request();
     text.mm_processor_kwargs = Some(json!({"do_resize": false}));
     build_generate_request(&text, "req", None).expect("text request must build");
+}
+
+#[test]
+fn multimodal_cache_uuids_are_rejected() {
+    let with_uuids = |mut req: PreprocessedRequest, uuids: [Option<&str>; 2]| {
+        req.multi_modal_uuids = Some(HashMap::from([(
+            "image_url".to_string(),
+            uuids.map(|uuid| uuid.map(str::to_string)).to_vec(),
+        )]));
+        build_generate_request(&req, "req", None)
+    };
+    let images = || {
+        with_images(
+            request(),
+            &[
+                "data:image/jpeg;base64,aW1hZ2UtYQ==",
+                "data:image/jpeg;base64,aW1hZ2UtYg==",
+            ],
+        )
+    };
+    // The protobuf has no field for a client cache identity.
+    for req in [images(), request()] {
+        let error = with_uuids(req, [None, Some("cat")]).expect_err("must reject");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(
+            error.public_message(),
+            Some("multimodal cache UUIDs are not supported by the TensorRT-LLM sidecar")
+        );
+    }
+    with_uuids(images(), [None, Some("")]).expect("empty UUID entries must build");
 }
 
 #[test]
