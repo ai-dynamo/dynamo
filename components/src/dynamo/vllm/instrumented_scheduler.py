@@ -5429,10 +5429,16 @@ class InstrumentedScheduler(AsyncScheduler):
         """Recurrent-state groups served by live-state borrowing (hybrid live-state mode,
         random mode off).
         """
+        # Keyed on the KV-cache spec like the eligibility gate ("Mamba" in the spec
+        # name) and the random-state path (``isinstance(spec, MambaSpec)``), not on
+        # manager class names, so a vLLM rename or subclass cannot silently route a
+        # recurrent group to the positional path. The k-pool tail is not a recurrent
+        # state table; it is served by the circular-table predicate.
+        spec = getattr(manager, "kv_cache_spec", None)
         return (
             self._bench_hybrid_live_state
             and not self._bench_random_kda
-            and type(manager).__name__ in ("MambaManager", "KpoolTailManager")
+            and (isinstance(spec, MambaSpec) or "Mamba" in type(spec).__name__)
         )
 
     def _kvwarm_random_state_manager(self, manager) -> bool:

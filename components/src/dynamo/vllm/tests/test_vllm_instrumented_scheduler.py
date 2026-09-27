@@ -5716,8 +5716,14 @@ def test_kvwarm_shadow_registration_forks_circular_tail_table():
     assert mgr.num_cached_block["shadow"] == 0
 
 
+class _FakeMambaSpec:
+    """Spec whose class name carries "Mamba", the key of the recurrent-group checks."""
+
+
 class MambaManager(_FakeManager):
-    """Type name is what ``_kvwarm_live_state_manager`` keys on."""
+    def __init__(self, chain_blocks, cow=True):
+        super().__init__(chain_blocks, cow=cow)
+        self.kv_cache_spec = _FakeMambaSpec()
 
 
 def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
