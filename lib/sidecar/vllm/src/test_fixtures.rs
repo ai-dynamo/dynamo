@@ -230,7 +230,7 @@ fn url_media(sources: &[&str]) -> Vec<MultimodalData> {
         .collect()
 }
 
-pub(crate) fn video_media() -> Vec<MultimodalData> {
+fn video_media() -> Vec<MultimodalData> {
     url_media(&[VIDEO_URL])
 }
 
@@ -260,8 +260,7 @@ pub(crate) fn wire_media(request: &pb::GenerateRequest) -> WireMedia {
     media
 }
 
-/// The input media of a request without `mm_hashes`, grouped by modality in
-/// input order, to compare with `wire_media`.
+// Ignores `extra_args.mm_hashes`, which also sets image UUIDs on the wire.
 pub(crate) fn expected_wire_media(request: &PreprocessedRequest) -> WireMedia {
     let media = request.multi_modal_data.as_ref().expect("raw media");
     let mut expected = Vec::new();
