@@ -16,6 +16,7 @@ FROM ${EFA_BASE_IMAGE} AS aws
 
 ARG TARGETARCH
 ARG EFA_VERSION
+ARG CUDA_MAJOR
 ARG MOONCAKE_VERSION
 
 {% if target == "runtime" %}
@@ -62,7 +63,6 @@ ENV EFA_VERSION="${EFA_VERSION}"
 RUN {{ pkg_cache_mount }} \
     set -eu; \
     {{ pkg_cache_env }}; \
-    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "${CUDA_MAJOR}" = "13" ]; then \
         MOONCAKE_PKG=mooncake-transfer-engine-cuda13; \
         MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa-cuda13; \
