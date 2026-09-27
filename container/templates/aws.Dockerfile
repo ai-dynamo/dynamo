@@ -14,7 +14,9 @@
 
 FROM ${EFA_BASE_IMAGE} AS aws
 
+ARG TARGETARCH
 ARG EFA_VERSION
+ARG MOONCAKE_VERSION
 
 {% if target == "runtime" %}
 USER root
@@ -37,6 +39,62 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     ldconfig
 
 ENV EFA_VERSION="${EFA_VERSION}"
+
+{% if device == "cuda" and framework in ("vllm", "sglang") %}
+{# Install packages the same way each framework runtime template does, so only
+   the installer, its cache mount, and cache env differ. Define those as pkg_*
+   primitives once here, then reuse them for every package installed below.
+   - vLLM   -> uv into system Python, sharing the uv-root cache (vllm_runtime.Dockerfile)
+   - SGLang -> plain pip --break-system-packages, pip cache (sglang_runtime.Dockerfile) #}
+{% if framework == "vllm" %}
+{% set pkg_cache_mount = "--mount=type=cache,id=uv-root-" ~ context.dynamo.uv_version ~ ",target=/root/.cache/uv,sharing=locked" %}
+{% set pkg_cache_env = "export UV_CACHE_DIR=/root/.cache/uv" %}
+{% set pkg_uninstall = "uv pip uninstall --system" %}
+{% set pkg_install = "uv pip install --system --no-deps" %}
+{% else %}
+{% set pkg_cache_mount = "--mount=type=cache,target=/root/.cache/pip,sharing=locked" %}
+{% set pkg_cache_env = "export PIP_CACHE_DIR=/root/.cache/pip" %}
+{% set pkg_uninstall = "pip uninstall --break-system-packages -y" %}
+{% set pkg_install = "pip install --break-system-packages --no-deps" %}
+{% endif %}
+# Mooncake EFA wheel swapping
+# Mooncake EFA wheels are published for x86_64 only.
+RUN {{ pkg_cache_mount }} \
+    set -eu; \
+    {{ pkg_cache_env }}; \
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
+    if [ "${CUDA_MAJOR}" = "13" ]; then \
+        MOONCAKE_PKG=mooncake-transfer-engine-cuda13; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa-cuda13; \
+    else \
+        MOONCAKE_PKG=mooncake-transfer-engine; \
+        MOONCAKE_EFA_PKG=mooncake-transfer-engine-efa; \
+    fi; \
+    if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "TARGETARCH=${TARGETARCH}: ${MOONCAKE_EFA_PKG} is x86_64-only, \
+keeping ${MOONCAKE_PKG} (Mooncake EFA protocol unavailable)"; \
+    else \
+        {{ pkg_uninstall }} "${MOONCAKE_PKG}" 2>/dev/null || true; \
+        {{ pkg_install }} \
+            "${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
+        # Verify by distribution metadata rather than importing the module: the
+        # extension links libcuda.so.1, absent from a GPU-less builder.
+        python3 -c "import importlib.metadata as m; m.version('${MOONCAKE_EFA_PKG}')"; \
+        ! python3 -c "import importlib.metadata as m; m.version('${MOONCAKE_PKG}')" 2>/dev/null; \
+    fi
+
+# Mooncake protocol configuration
+# Mooncake EFA wheels are published for x86_64 only,
+# Set the mooncake protocol to efa on amd64, other arch to rdma
+ARG ARCH_IF_NOT_AMD64=${TARGETARCH#amd64}
+ARG PROTOCOL_IF_NOT_AMD64=${ARCH_IF_NOT_AMD64:+rdma}
+ENV MOONCAKE_PROTOCOL=${PROTOCOL_IF_NOT_AMD64:-efa}
+
+# upstream vLLM and SGLang images do not have /etc/shinit_v2
+# Manually set to ofi so NCCL will find the ofi-nccl transport library
+ENV NCCL_NET_PLUGIN=ofi
+ENV NCCL_TUNER_PLUGIN=ofi
+{% endif %}
 
 {% if framework == "trtllm" %}
 # After the upstream mesonpy refactor, libplugin_LIBFABRIC.so lands under the
