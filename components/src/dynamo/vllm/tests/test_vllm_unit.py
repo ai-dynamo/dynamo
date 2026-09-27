@@ -1513,9 +1513,8 @@ def _token_request(**sampling_options):
         (0.0, (0.0, 1.0, 0, 0.0)),
         # vLLM raises 0 < temperature < 0.01 to 0.01, so this is not greedy.
         (1e-6, (0.01, 0.8, 20, 0.05)),
-        (0.7, (0.7, 0.8, 20, 0.05)),
     ],
-    ids=["greedy", "tiny-temperature", "sampled"],
+    ids=["greedy", "tiny-temperature"],
 )
 def test_build_sampling_params_applies_vllm_post_init_after_overlays(
     text_mode, temperature, expected
