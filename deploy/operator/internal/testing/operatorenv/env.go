@@ -495,6 +495,7 @@ func crdDirectoryPaths(opts Options) []string {
 		filepath.Join(root, "internal", "controller", "testing", "run.ai"),
 		filepath.Join(root, "internal", "controller", "testing", "inference.networking.k8s.io"),
 		filepath.Join(root, "internal", "controller", "testing", "grove.io"),
+		filepath.Join(root, "internal", "controller", "testing", "scheduler.grove.io"),
 	}
 }
 

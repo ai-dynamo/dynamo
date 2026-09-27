@@ -69,6 +69,12 @@ func (p *componentProgram) Reconcile(
 ) (programResult workloadProgramResult, retErr error) {
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
+
+	// The component pathway has no scheduler placement surface, so it reports
+	// Unsupported rather than retaining a score from a previous Grove reconcile.
+	programResult.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
+		State: nvidiacomv1beta1.PlacementScoreStateUnsupported,
+	}
 	defer func() {
 		if retErr == nil {
 			return

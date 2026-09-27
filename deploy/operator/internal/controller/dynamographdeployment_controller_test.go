@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	schedulergrovev1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
@@ -67,6 +68,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		schedulergrovev1alpha1.AddToScheme,
 		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {

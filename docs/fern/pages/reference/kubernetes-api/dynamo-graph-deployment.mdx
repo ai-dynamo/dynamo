@@ -220,7 +220,7 @@ The operator maintains observed state under `status`.
 </Indent>
 
 <ParamField path="status.placement" type="PlacementStatus">
-  Scheduler placement score and reporting state. The schema is available, but the controller does not yet populate this field.
+  Scheduler placement score and reporting state. Populated on the Grove pathway from the placement scores the scheduler publishes on the PodGangs of the current PodCliqueSet generation. Deployments on the component pathway report `Unsupported`, because they have no scheduler placement surface.
 </ParamField>
 
 <Indent>

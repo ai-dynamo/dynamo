@@ -355,6 +355,14 @@ rules:
   - update
   - watch
 - apiGroups:
+  - scheduler.grove.io
+  resources:
+  - podgangs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - scheduling.run.ai
   resources:
   - queues

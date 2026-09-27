@@ -35,6 +35,7 @@ type groveProgram struct {
 	workloads       *groveWorkloadsReconciler
 	scalingAdapters *dgdScalingAdaptersReconciler
 	topology        *dgdGroveTopologyConditionReconciler
+	placement       *dgdPlacementScoreReconciler
 	gate            features.Gate
 }
 
@@ -65,6 +66,7 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 		),
 		scalingAdapters: newDGDScalingAdaptersReconciler(r.Client, r.Recorder),
 		topology:        newDGDGroveTopologyConditionReconciler(r.Client),
+		placement:       newDGDPlacementScoreReconciler(r.Client),
 		gate:            r.RuntimeConfig.Gate,
 	}
 }
@@ -98,6 +100,10 @@ func (p *groveProgram) Reconcile(
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
 		p.topology.Reconcile(ctx, req.DGD, &programResult)
+
+		// Project the placement observation on every attempt so status never
+		// retains a score from a previous reconcile.
+		p.placement.Reconcile(ctx, req.DGD, &programResult)
 	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",

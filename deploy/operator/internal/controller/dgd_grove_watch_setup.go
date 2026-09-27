@@ -21,8 +21,10 @@ import (
 	"context"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	schedulergrovev1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,6 +69,13 @@ func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 			&grovev1alpha1.PodCliqueScalingGroup{},
 			handler.EnqueueRequestsFromMapFunc(s.mapPodCliqueScalingGroupToRequests),
 			builder.WithPredicates(pcsgEventPredicates()),
+		).
+		// The scheduler publishes the placement score on the PodGang after the
+		// PodGangs themselves exist, so a score-only update needs its own watch.
+		Watches(
+			&schedulergrovev1alpha1.PodGang{},
+			handler.EnqueueRequestsFromMapFunc(s.mapPodGangToRequests),
+			builder.WithPredicates(podGangEventPredicates()),
 		)
 }
 
@@ -95,6 +104,23 @@ func pcsgEventPredicates() predicate.Funcs {
 			return oldOK &&
 				newOK &&
 				pcsgStatusChangeIsSignificant(oldScalingGroup, newScalingGroup)
+		},
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
+}
+
+// podGangEventPredicates admits only the PodGang status field the DGD status
+// consumes, so unrelated PodGang churn does not requeue the graph.
+func podGangEventPredicates() predicate.Funcs {
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return false },
+		DeleteFunc: func(event.DeleteEvent) bool { return false },
+		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
+			oldPodGang, oldOK := updateEvent.ObjectOld.(*schedulergrovev1alpha1.PodGang)
+			newPodGang, newOK := updateEvent.ObjectNew.(*schedulergrovev1alpha1.PodGang)
+			return oldOK &&
+				newOK &&
+				!ptr.Equal(oldPodGang.Status.PlacementScore, newPodGang.Status.PlacementScore)
 		},
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
@@ -178,6 +204,60 @@ func (s *groveWatchSetup) mapPodCliqueScalingGroupToRequests(
 		NamespacedName: types.NamespacedName{
 			Name:      pcsOwnerRef.Name,
 			Namespace: pcsg.Namespace,
+		},
+	}}
+}
+
+// mapPodGangToRequests walks PodGang -> PodCliqueSet -> DGD because the
+// PodCliqueSet name can be truncated and therefore cannot safely stand in for
+// the DGD name.
+func (s *groveWatchSetup) mapPodGangToRequests(
+	ctx context.Context,
+	obj client.Object,
+) []ctrl.Request {
+	podGang, ok := obj.(*schedulergrovev1alpha1.PodGang)
+	if !ok {
+		return nil
+	}
+
+	pcsName := podGang.GetLabels()[grovecommon.LabelPartOfKey]
+	if pcsName == "" {
+		log.FromContext(ctx).V(1).Info(
+			"PodGang missing PodCliqueSet part-of label",
+			"podGang", podGang.Name,
+			"namespace", podGang.Namespace,
+		)
+		return nil
+	}
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	if err := s.reader.Get(ctx, types.NamespacedName{
+		Name:      pcsName,
+		Namespace: podGang.Namespace,
+	}, pcs); err != nil {
+		log.FromContext(ctx).V(1).Info(
+			"failed to look up PodCliqueSet for PodGang",
+			"podGang", podGang.Name,
+			"pcsName", pcsName,
+			"error", err,
+		)
+		return nil
+	}
+
+	pcsOwnerRef := metav1.GetControllerOf(pcs)
+	if pcsOwnerRef == nil || pcsOwnerRef.Kind != consts.ResourceTypeDynamoGraphDeployment {
+		log.FromContext(ctx).V(1).Info(
+			"PodCliqueSet missing DynamoGraphDeployment controller ownerReference",
+			"pcsName", pcs.Name,
+			"namespace", pcs.Namespace,
+		)
+		return nil
+	}
+
+	return []ctrl.Request{{
+		NamespacedName: types.NamespacedName{
+			Name:      pcsOwnerRef.Name,
+			Namespace: podGang.Namespace,
 		},
 	}}
 }
