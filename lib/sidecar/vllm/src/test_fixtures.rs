@@ -119,6 +119,20 @@ pub(crate) fn encoder_handoff() -> serde_json::Value {
     })
 }
 
+// vLLM keys encoder-cache entries by media item, so a video request must hand
+// off a video entry.
+pub(crate) fn encoder_handoff_for(image: bool, video: bool) -> serde_json::Value {
+    let mut handoff = encoder_handoff();
+    if video {
+        let items = handoff["ec_items"].as_array_mut().expect("EC items");
+        if !image {
+            items.clear();
+        }
+        items.push(json!({"key": "video-a", "shape": [1, 1560, 2048]}));
+    }
+    handoff
+}
+
 pub(crate) fn encode_response(
     ec_transfer_params: Option<prost_types::Struct>,
 ) -> pb::GenerateResponse {
