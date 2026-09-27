@@ -29,6 +29,7 @@ async-trait = { workspace = true }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 futures = { workspace = true }
+percent-encoding = "2.3.2"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

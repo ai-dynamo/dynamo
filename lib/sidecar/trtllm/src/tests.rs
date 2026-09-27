@@ -507,6 +507,19 @@ fn image_data_uris_are_forwarded_in_request_order() {
 }
 
 #[test]
+fn percent_encoded_image_data_uris_are_decoded() {
+    let req = with_images(request(), &["data:image/png;base64,aW1hZ2UtYQ%3D%3D"]);
+    let proto = build_generate_request(&req, "req", None).expect("image request must build");
+    assert_eq!(
+        proto
+            .multimodal_input
+            .expect("multimodal_input must be set")
+            .image_data,
+        [b"image-a".to_vec()]
+    );
+}
+
+#[test]
 fn omitted_max_tokens_for_an_image_is_an_upper_bound() {
     let mut req = with_routing_info(
         with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]),
@@ -535,6 +548,7 @@ fn unsupported_media_is_rejected_before_dispatch() {
     assert_rejected(image("data:image/png,rawbytes"), "must have the form");
     assert_rejected(image("data:image/png;base64"), "must have the form");
     assert_rejected(image("data:image/png;base64,@@@"), "not valid base64");
+    assert_rejected(image("data:image/png;base64,aW1hZ2UtYQ%3D%3"), "not valid base64");
     assert_rejected(image("data:image/png;base64,"), "no image bytes");
     assert_rejected(
         |r| {

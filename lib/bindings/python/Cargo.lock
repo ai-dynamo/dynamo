@@ -2641,6 +2641,7 @@ dependencies = [
  "dynamo-backend-common",
  "dynamo-sidecar-common",
  "futures",
+ "percent-encoding",
  "prost 0.13.5",
  "serde_json",
  "tokio",

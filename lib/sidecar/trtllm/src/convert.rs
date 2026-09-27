@@ -9,6 +9,7 @@
 //! before dispatch: the `Generate` response contract carries no disaggregation
 //! handoff, and the sidecar streams a single sequence.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -16,6 +17,7 @@ use dynamo_backend_common::{
     DynamoError, FinishReason, LLMEngineOutput, MultimodalData, PreprocessedRequest, StopReason,
     TopLogprob, usage,
 };
+use percent_encoding::percent_decode_str;
 
 use crate::client;
 use crate::proto as pb;
@@ -194,7 +196,8 @@ fn multimodal_input(
 
 /// Decodes `data:[<media type>][;<param>...];base64,<data>`. TensorRT-LLM
 /// identifies the image format from the bytes, so the media type is not
-/// checked. The scheme and the `base64` marker are case-insensitive (RFC 2397).
+/// checked. The scheme and the `base64` marker are case-insensitive, and the
+/// data can be percent-encoded (RFC 2397).
 fn decode_image_data_uri(source: &str) -> Result<Vec<u8>, DynamoError> {
     if !source
         .get(..5)
@@ -215,6 +218,8 @@ fn decode_image_data_uri(source: &str) -> Result<Vec<u8>, DynamoError> {
         .ok_or_else(|| {
             client::invalid_request("image data URI must have the form data:<type>;base64,<data>")
         })?;
+    // A malformed escape stays as `%`, which the base64 decoder rejects.
+    let payload = Cow::<[u8]>::from(percent_decode_str(payload));
     let bytes = BASE64_STANDARD.decode(payload).map_err(|error| {
         client::invalid_request_with_detail(
             "image data URI is not valid base64",
