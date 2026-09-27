@@ -2274,7 +2274,9 @@ class InstrumentedScheduler(AsyncScheduler):
             raise ValueError("benchmark hybrid_live_state must be a boolean")
         self._bench_hybrid_live_state = self._bench_config.hybrid_live_state
         if self._bench_hybrid_live_state and self._bench_random_kda:
-            raise ValueError("benchmark hybrid_live_state and randomize_kda_state are mutually exclusive")
+            raise ValueError(
+                "benchmark hybrid_live_state and randomize_kda_state are mutually exclusive"
+            )
         if (
             self._bench_random_kda
             and vllm_config.parallel_config.worker_cls != RANDOM_KDA_WORKER
@@ -2960,11 +2962,13 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_config.prefill_max_new_token_samples,
         )
         if getattr(self, "need_mamba_block_aligned_split", False):
-            # Hybrid align mode splits any chunk that crosses a cache-block boundary at that boundary, so a point
-            # whose per-request new-token count is above one block and not block-aligned can never run as planned
-            # and fails the feasibility check below. The cudagraph axis (powers of two) has no such values, which
-            # leaves small-batch prefill with more than one block of new tokens uncollected -- exactly the steps a
-            # served long prompt produces (block-multiple chunks). Add block-multiple totals for the small batch
+            # Hybrid align mode splits any chunk that crosses a cache-block boundary at
+            # that boundary, so a point whose per-request new-token count is above one
+            # block and not block-aligned can never run as planned and fails the
+            # feasibility check below. The cudagraph axis (powers of two) has no such
+            # values, which leaves small-batch prefill with more than one block of new
+            # tokens uncollected -- exactly the steps a served long prompt produces
+            # (block-multiple chunks). Add block-multiple totals for the small batch
             # presets so those shapes are on the grid.
             total_prefill_tokens = self._bench_block_aligned_prefill_axis(
                 total_prefill_tokens, max_tokens
@@ -3013,11 +3017,15 @@ class InstrumentedScheduler(AsyncScheduler):
     def _bench_block_aligned_prefill_axis(
         self, axis: Sequence[int], max_tokens: int
     ) -> list[int]:
-        """Union of ``axis`` with ``batch * k * block_size`` totals (k >= 2, batch in the power-of-two presets)
-        that fit ``max_tokens``: per-request chunks of whole cache blocks are the only multi-block chunks a hybrid
-        align-mode scheduler runs unsplit."""
+        """Union of ``axis`` with ``batch * k * block_size`` totals (k >= 2, batch in the
+        power-of-two presets) that fit ``max_tokens``: per-request chunks of whole cache
+        blocks are the only multi-block chunks a hybrid align-mode scheduler runs
+        unsplit.
+        """
         block_size = int(
-            getattr(getattr(self, "cache_config", None), "block_size", 0) or self.block_size or 0
+            getattr(getattr(self, "cache_config", None), "block_size", 0)
+            or self.block_size
+            or 0
         )
         if block_size <= 0:
             return list(axis)
@@ -3277,11 +3285,13 @@ class InstrumentedScheduler(AsyncScheduler):
     ) -> int:
         """Predict the shared-pool block footprint of one request.
 
-        ``resident_chain``: a prefilled kvwarm chain that stays resident and keeps growing across stages holds TWO
-        Mamba 'align' state blocks per group (current + previous aligned boundary; vLLM MambaSpec sizes align mode as
-        page_size * (2 + num_speculative_blocks)). A freshly injected decode request holds one (+1 when it pins a
-        prefix-cache hit). Under-counting the chain footprint let the stage plan admit more chains than the pool holds
-        (stage-build deadlock at the pool edge)."""
+        ``resident_chain``: a prefilled kvwarm chain that stays resident and keeps
+        growing across stages holds TWO Mamba 'align' state blocks per group (current +
+        previous aligned boundary; vLLM MambaSpec sizes align mode as page_size * (2 +
+        num_speculative_blocks)). A freshly injected decode request holds one (+1 when
+        it pins a prefix-cache hit). Under-counting the chain footprint let the stage
+        plan admit more chains than the pool holds (stage-build deadlock at the pool
+        edge)."""
         coordinator = getattr(
             getattr(self, "kv_cache_manager", None), "coordinator", None
         )
@@ -3324,16 +3334,22 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 blocks = 2 + speculative_blocks + checkpoint_blocks
                 if resident_chain:
-                    # A parked kvwarm chain: below one cache block it holds only its live state (no boundary crossed
-                    # yet -- v1 built 192 chains x 258 tokens in a 3306-block pool); past the first boundary the
-                    # align-mode pair (current + previous boundary) plus retained checkpoints, measured on
-                    # GLM-5.3-Flash at ~1 per 7680 tokens (3.6/group @26k, 7/group @53k at TP4; 3/group @13k and
-                    # @26k at TP1). Under-counting this let a stage admit more chains than the pool holds
-                    # (stage-build deadlock at the pool edge); over-counting demotes big rungs to fake KV.
+                    # A parked kvwarm chain: below one cache block it holds only its
+                    # live state (no boundary crossed yet -- v1 built 192 chains x 258
+                    # tokens in a 3306-block pool); past the first boundary the
+                    # align-mode pair (current + previous boundary) plus retained
+                    # checkpoints, measured on GLM-5.3-Flash at ~1 per 7680 tokens
+                    # (3.6/group @26k, 7/group @53k at TP4; 3/group @13k and @26k at
+                    # TP1). Under-counting this let a stage admit more chains than the
+                    # pool holds (stage-build deadlock at the pool edge); over-counting
+                    # demotes big rungs to fake KV.
                     if num_tokens < block_size:
                         blocks = 1 + speculative_blocks
                     else:
-                        blocks = max(blocks, 1 + math.ceil(num_tokens / 7680) + speculative_blocks)
+                        blocks = max(
+                            blocks,
+                            1 + math.ceil(num_tokens / 7680) + speculative_blocks,
+                        )
             elif mamba_cache_mode is not None:
                 blocks += speculative_blocks
 
@@ -5245,25 +5261,33 @@ class InstrumentedScheduler(AsyncScheduler):
         # agreeing on both.
         worst_case_tail = self._kvwarm_shadow_tail_blocks(repeats)
         for batch, depth in list(plan.items()):
-            # Reserve the tails the rung's OWN points take (exact per-group arithmetic at each measured context),
-            # bounded by the worst case; the worst case alone (two blocks per group) over-reserves on hybrids.
+            # Reserve the tails the rung's OWN points take (exact per-group arithmetic
+            # at each measured context), bounded by the worst case; the worst case alone
+            # (two blocks per group) over-reserves on hybrids.
             shadow_tail_blocks = min(
                 worst_case_tail,
                 max(
-                    (self._kvwarm_shadow_tail_blocks_for(ctx, margin) for ctx in rung_ctxs.get(batch, ())),
+                    (
+                        self._kvwarm_shadow_tail_blocks_for(ctx, margin)
+                        for ctx in rung_ctxs.get(batch, ())
+                    ),
                     default=worst_case_tail,
                 ),
             )
             usable = self._bench_grid_usable_blocks(batch, reserve_watermark=True)
-            # Plan against a margin of the pool: the per-request footprint estimate is a lower bound (block-boundary
-            # rounding, transient Mamba boundary blocks), and a stage whose chains do not ALL fit loses its real
-            # coverage, so a small margin buys full stages. Under attention-DP every rank must build the same stages:
-            # leave more headroom (a per-rank stall would desynchronize the ranks) -- 15% for DP>1, 5% otherwise.
+            # Plan against a margin of the pool: the per-request footprint estimate is a
+            # lower bound (block-boundary rounding, transient Mamba boundary blocks),
+            # and a stage whose chains do not ALL fit loses its real coverage, so a
+            # small margin buys full stages. Under attention-DP every rank must build
+            # the same stages: leave more headroom (a per-rank stall would desynchronize
+            # the ranks) -- 15% for DP>1, 5% otherwise.
             _margin = 0.85 if getattr(self, "_bench_dp_size", 1) > 1 else 0.95
             pool = int(usable * _margin)
             while depth > 8 and (
                 (
-                    self._bench_blocks_per_req(depth, apply_admission_cap=True, resident_chain=True)
+                    self._bench_blocks_per_req(
+                        depth, apply_admission_cap=True, resident_chain=True
+                    )
                     + shadow_tail_blocks
                 )
                 * batch
@@ -5271,10 +5295,14 @@ class InstrumentedScheduler(AsyncScheduler):
             ):
                 depth -= 1
             required = (
-                self._bench_blocks_per_req(depth, apply_admission_cap=True, resident_chain=True) + shadow_tail_blocks
+                self._bench_blocks_per_req(
+                    depth, apply_admission_cap=True, resident_chain=True
+                )
+                + shadow_tail_blocks
             ) * batch
-            # The margin only steers the depth trim above; whether a stage is built at all is decided against the
-            # full pool, as upstream does (a rung already at the depth floor is not demoted by the margin).
+            # The margin only steers the depth trim above; whether a stage is built at
+            # all is decided against the full pool, as upstream does (a rung already at
+            # the depth floor is not demoted by the margin).
             if required > usable:
                 # Reaching the depth floor does not prove the fleet fits.
                 # This also covers an initially short chain below the floor.
@@ -5298,14 +5326,17 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 depth = 0
             plan[batch] = depth
-        # Slot budget: a stage parks ``batch`` chains on the worker and measures each of its points by injecting
-        # ``batch`` shadow requests on top, so ``2 * batch`` request slots must exist (worker asserts "No free indices"
-        # otherwise). Rungs above that fall back to fake injection (measured after the chains are released). On models
-        # whose max_num_seqs is memory-capped (Mamba/KDA state blocks) this bites at batch > max_num_seqs / 2.
+        # Slot budget: a stage parks ``batch`` chains on the worker and measures each of
+        # its points by injecting ``batch`` shadow requests on top, so ``2 * batch``
+        # request slots must exist (worker asserts "No free indices" otherwise). Rungs
+        # above that fall back to fake injection (measured after the chains are
+        # released). On models whose max_num_seqs is memory-capped (Mamba/KDA state
+        # blocks) this bites at batch > max_num_seqs / 2.
         try:
             slots = int(self._bench_capacity_limit("max_num_running_reqs"))
         except (AttributeError, TypeError, ValueError):
-            slots = 0  # capacity unknown (e.g. partially constructed scheduler): leave the plan alone
+            # capacity unknown (e.g. partially constructed scheduler): leave the plan alone
+            slots = 0
         if slots > 0:
             for batch in [b for b in plan if 2 * b > slots]:
                 plan.pop(batch)
@@ -5317,31 +5348,42 @@ class InstrumentedScheduler(AsyncScheduler):
         warmed_pts = [p for p in decode_pts if self._kvwarm_plan_covers(p)]
         fake_pts = [p for p in decode_pts if not self._kvwarm_plan_covers(p)]
         if getattr(self, "_bench_dp_size", 1) > 1 and fake_pts:
-            # Attention-DP: fake injection is not rank-consistent on the small per-rank pools (TP1): points truncate or
-            # OOM on some ranks, get skipped, and the group_prepare barrier times out (observed dep4: dozens of
-            # measured_decode_context_mismatch skips then "timed out waiting for attention-DP benchmark group_prepare").
-            # Keep the grid real-KV only under DP; renumber so published ids stay contiguous and 1-based.
-            # Explicit manifest points carry the contract "measured or rejected with an error": never drop them silently.
+            # Attention-DP: fake injection is not rank-consistent on the small per-rank
+            # pools (TP1): points truncate or OOM on some ranks, get skipped, and the
+            # group_prepare barrier times out (observed dep4: dozens of
+            # measured_decode_context_mismatch skips then "timed out waiting for
+            # attention-DP benchmark group_prepare"). Keep the grid real-KV only under
+            # DP; renumber so published ids stay contiguous and 1-based. Explicit
+            # manifest points carry the contract "measured or rejected with an error":
+            # never drop them silently.
             explicit = [pt for pt in fake_pts if "explicit" in pt.sample_reasons]
             if explicit:
                 coords = ", ".join(
-                    f"(batch={pt.batch_size}, total_kv_read_tokens={pt.total_kv_read_tokens})" for pt in explicit
+                    f"(batch={pt.batch_size}, total_kv_read_tokens={pt.total_kv_read_tokens})"
+                    for pt in explicit
                 )
                 raise RuntimeError(
-                    "KVWARM: attention-DP runs measure real-KV points only, and the warm-up plan cannot cover "
-                    f"explicit decode point(s) {coords} (rung depth trimmed by the per-rank pool / slot budget); "
-                    "lower the requested batch or context, or run without attention-DP"
+                    "KVWARM: attention-DP runs measure real-KV points only, and the "
+                    f"warm-up plan cannot cover explicit decode point(s) {coords} "
+                    "(rung depth trimmed by the per-rank pool / slot budget); lower "
+                    "the requested batch or context, or run without attention-DP"
                 )
             logger.warning(
-                "KVWARM: attention-DP (dp_size=%d): dropping %d fake-fallback decode points; grid is real-KV only",
-                self._bench_dp_size, len(fake_pts),
+                "KVWARM: attention-DP (dp_size=%d): dropping %d fake-fallback decode "
+                "points; grid is real-KV only",
+                self._bench_dp_size,
+                len(fake_pts),
             )
             fake_pts = []
-            renumbered = [replace(pt, benchmark_id=i + 1) for i, pt in enumerate(other_pts + warmed_pts)]
+            renumbered = [
+                replace(pt, benchmark_id=i + 1)
+                for i, pt in enumerate(other_pts + warmed_pts)
+            ]
             other_pts = [pt for pt in renumbered if pt.point_type != "decode"]
             warmed_pts = [pt for pt in renumbered if pt.point_type == "decode"]
-            # Eager warm-up replicas are executed but their results are discarded (``_bench_save_current_point``):
-            # count only real points, as ``_bench_build_grid`` does.
+            # Eager warm-up replicas are executed but their results are discarded
+            # (``_bench_save_current_point``): count only real points, as
+            # ``_bench_build_grid`` does.
             self._bench_expected_points = sum(
                 EAGER_WARMUP_REASON not in pt.sample_reasons for pt in renumbered
             )
@@ -5364,23 +5406,29 @@ class InstrumentedScheduler(AsyncScheduler):
 
     @staticmethod
     def _kvwarm_admission_cap(manager) -> int | None:
-        """Per-request block cap of an admission-capped KV-cache group (vLLM ``_max_admission_blocks_per_request``,
-        e.g. sliding-window and k-pool-tail managers); None for groups whose tables grow with the context."""
+        """Per-request block cap of an admission-capped KV-cache group (vLLM
+        ``_max_admission_blocks_per_request``, e.g. sliding-window and k-pool-tail
+        managers); None for groups whose tables grow with the context.
+        """
         cap = getattr(manager, "_max_admission_blocks_per_request", None)
         return cap if isinstance(cap, int) and cap > 0 else None
 
     def _kvwarm_circular_table_manager(self, manager) -> bool:
-        """True for admission-capped groups whose block table is a fixed-length circular buffer rather than a
-        position-indexed table (GLM5-Next's k-pool tail: one block per request, excluded from prefix caching).
-        Sliding-window / chunked-local groups are admission-capped too, but keep positional tables with null
-        placeholders for expired positions, so they take the positional path."""
+        """True for admission-capped groups whose block table is a fixed-length circular
+        buffer rather than a position-indexed table (GLM5-Next's k-pool tail: one block
+        per request, excluded from prefix caching). Sliding-window / chunked-local
+        groups are admission-capped too, but keep positional tables with null
+        placeholders for expired positions, so they take the positional path.
+        """
         if self._kvwarm_admission_cap(manager) is None:
             return False
         spec = getattr(manager, "kv_cache_spec", None)
         return getattr(spec, "participates_in_prefix_caching", True) is False
 
     def _kvwarm_live_state_manager(self, manager) -> bool:
-        """Recurrent-state groups served by live-state borrowing (hybrid live-state mode, random mode off)."""
+        """Recurrent-state groups served by live-state borrowing (hybrid live-state mode,
+        random mode off).
+        """
         return (
             self._bench_hybrid_live_state
             and not self._bench_random_kda
@@ -5393,25 +5441,39 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     def _kvwarm_shadow_tail_blocks_for(self, ctx_len: int, headroom: int) -> int:
-        """Private tail blocks one shadow at ``ctx_len`` takes across the KV-cache groups (the exact arithmetic of
-        ``_kvwarm_register_shadow`` / ``_kvwarm_shadow_pool_shortfall``): the write positions ctx .. ctx+headroom
-        minus the shared full prefix blocks; random-state groups their state-table span; admission-capped groups
-        their whole (capped) table. The worst case (``_kvwarm_shadow_tail_blocks``) charges two blocks per group
-        for any context; on a hybrid with many small groups that alone pushes the large rungs over the pool."""
-        coordinator = getattr(getattr(self, "kv_cache_manager", None), "coordinator", None)
+        """Private tail blocks one shadow at ``ctx_len`` takes across the KV-cache groups
+        (the exact arithmetic of ``_kvwarm_register_shadow`` /
+        ``_kvwarm_shadow_pool_shortfall``): the write positions ctx .. ctx+headroom
+        minus the shared full prefix blocks; random-state groups their state-table span;
+        admission-capped groups their whole (capped) table. The worst case
+        (``_kvwarm_shadow_tail_blocks``) charges two blocks per group for any context;
+        on a hybrid with many small groups that alone pushes the large rungs over the
+        pool.
+        """
+        coordinator = getattr(
+            getattr(self, "kv_cache_manager", None), "coordinator", None
+        )
         managers = getattr(coordinator, "single_type_managers", ())
         if not managers:
             block_size = int(getattr(self.cache_config, "block_size", 16) or 16)
             return -(-(ctx_len + 1 + headroom) // block_size) - ctx_len // block_size
         need = 0
         for manager in managers:
-            bs = int(getattr(manager, "block_size", getattr(self.cache_config, "block_size", 16)))
-            if self._kvwarm_random_state_manager(manager) or self._kvwarm_live_state_manager(manager):
+            bs = int(
+                getattr(
+                    manager, "block_size", getattr(self.cache_config, "block_size", 16)
+                )
+            )
+            if self._kvwarm_circular_table_manager(manager):
+                need += (
+                    self._kvwarm_admission_cap(manager) or 0
+                )  # fixed ring, whatever the mode
+                continue
+            if self._kvwarm_random_state_manager(
+                manager
+            ) or self._kvwarm_live_state_manager(manager):
                 first, end = recurrent_shadow_range(ctx_len, headroom, bs)
                 need += end - first
-                continue
-            if self._kvwarm_circular_table_manager(manager):
-                need += self._kvwarm_admission_cap(manager) or 0
                 continue
             need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return need
@@ -5433,7 +5495,10 @@ class InstrumentedScheduler(AsyncScheduler):
                     headroom
                     + int(
                         self._kvwarm_random_state_manager(manager)
-                        or self._kvwarm_live_state_manager(manager)
+                        or (
+                            self._kvwarm_live_state_manager(manager)
+                            and not self._kvwarm_circular_table_manager(manager)
+                        )
                     )
                 )
                 // manager.block_size
@@ -5834,18 +5899,28 @@ class InstrumentedScheduler(AsyncScheduler):
                 n_shared = ctx_len // bs
                 n_total = -(-(ctx_len + 1 + headroom) // bs)
                 chain_blocks = list(mgr.req_to_blocks[chain_id])
-                live_state = self._kvwarm_live_state_manager(mgr) and bool(chain_blocks)
-                if live_state:
-                    # Recurrent state is read at ceil(ctx/bs)-1 and written at the admission and steady positions
-                    # (``recurrent_shadow_range``); at an exact block boundary the read slot is the last SHARED
-                    # entry, which may be a pruned/null checkpoint. Fork the whole read/write span privately.
-                    n_shared, n_total = recurrent_shadow_range(ctx_len, headroom, bs)
-                circular = self._kvwarm_circular_table_manager(mgr) and len(chain_blocks) <= (
-                    self._kvwarm_admission_cap(mgr) or 0
+                circular = self._kvwarm_circular_table_manager(mgr) and len(
+                    chain_blocks
+                ) <= (self._kvwarm_admission_cap(mgr) or 0)
+                # A circular table (k-pool tail) is a fixed ring, never a positional
+                # state table: it keeps its own geometry even when live-state mode is on
+                # (the manager matches both predicates).
+                live_state = (
+                    not circular
+                    and self._kvwarm_live_state_manager(mgr)
+                    and bool(chain_blocks)
                 )
-                if circular and not live_state:
-                    # Circular fixed-length table (k-pool tail): the chain holds ``cap`` blocks whatever its depth and
-                    # the runner's table for the group has ``cap`` columns, so the shadow shares nothing and forks the
+                if live_state:
+                    # Recurrent state is read at ceil(ctx/bs)-1 and written at the
+                    # admission and steady positions (``recurrent_shadow_range``); at an
+                    # exact block boundary the read slot is the last SHARED entry, which
+                    # may be a pruned/null checkpoint. Fork the whole read/write span
+                    # privately.
+                    n_shared, n_total = recurrent_shadow_range(ctx_len, headroom, bs)
+                if circular:
+                    # Circular fixed-length table (k-pool tail): the chain holds ``cap``
+                    # blocks whatever its depth and the runner's table for the group has
+                    # ``cap`` columns, so the shadow shares nothing and forks the
                     # chain's block(s) instead of walking positional indices.
                     n_shared = 0
                     n_total = len(chain_blocks)
@@ -5858,12 +5933,15 @@ class InstrumentedScheduler(AsyncScheduler):
                         )
                     tail_src = chain_blocks[n_shared:n_total]
                 if live_state:
-                    # Live-state mode for recurrent groups: the state has no per-position history and the only
-                    # valid state a chain holds is in its LIVE (last) block. Entries below it are align-mode
-                    # retention checkpoints that may already be evicted and recycled; a shadow at ctx << chain
-                    # depth forked from chain_blocks[ctx // bs] copies a stale block, its hidden state degenerates
-                    # and MoE routing collapses (2-3x too-fast decode steps measured on GLM-5.3-Flash). Fork the
-                    # private span from the live block instead: a valid, deeper-context state.
+                    # Live-state mode for recurrent groups: the state has no
+                    # per-position history and the only valid state a chain holds is in
+                    # its LIVE (last) block. Entries below it are align-mode retention
+                    # checkpoints that may already be evicted and recycled; a shadow at
+                    # ctx << chain depth forked from chain_blocks[ctx // bs] copies a
+                    # stale block, its hidden state degenerates and MoE routing
+                    # collapses (2-3x too-fast decode steps measured on GLM-5.3-Flash).
+                    # Fork the private span from the live block instead: a valid,
+                    # deeper-context state.
                     tail_src = [chain_blocks[-1]] * len(tail_src)
                 fresh = block_pool.get_new_blocks(len(tail_src))
                 staged.append((mgr, n_shared, chain_blocks[:n_shared], tail_src, fresh))
@@ -5914,11 +5992,15 @@ class InstrumentedScheduler(AsyncScheduler):
                 getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
             )
             for ctx_len in context_lengths:
-                if self._kvwarm_random_state_manager(mgr) or self._kvwarm_live_state_manager(mgr):
+                if self._kvwarm_circular_table_manager(mgr):
+                    need += (
+                        self._kvwarm_admission_cap(mgr) or 0
+                    )  # circular table: the whole table is private
+                elif self._kvwarm_random_state_manager(
+                    mgr
+                ) or self._kvwarm_live_state_manager(mgr):
                     first, end = recurrent_shadow_range(ctx_len, headroom, bs)
                     need += end - first
-                elif self._kvwarm_circular_table_manager(mgr):
-                    need += self._kvwarm_admission_cap(mgr) or 0  # circular table: the whole table is private
                 else:
                     need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
         return max(0, need - int(free_fn()))
@@ -6206,11 +6288,15 @@ class InstrumentedScheduler(AsyncScheduler):
             and getattr(self, "_bench_dp_size", 1) > 1
             and self._kvwarm_warm_eligible()
         ):
-            # Attention-DP grids are real-KV only (``_kvwarm_prepare``); a point reaches here without coverage only
-            # when its rung's stage failed afterwards (group verdict, so every rank sees the same point). Fake
-            # injection is not rank-consistent, so record a skip instead -- explicit points raise in the skip path.
+            # Attention-DP grids are real-KV only (``_kvwarm_prepare``); a point reaches
+            # here without coverage only when its rung's stage failed afterwards (group
+            # verdict, so every rank sees the same point). Fake injection is not
+            # rank-consistent, so record a skip instead -- explicit points raise in the
+            # skip path.
             logger.warning(
-                "KVWARM: attention-DP point without real-KV coverage (stage failed): skipping %s", point
+                "KVWARM: attention-DP point without real-KV coverage (stage failed): "
+                "skipping %s",
+                point,
             )
             self._bench_skip_point(point, "stage_failed_under_attention_dp")
             self._bench_current_point = None
@@ -6252,7 +6338,9 @@ class InstrumentedScheduler(AsyncScheduler):
             repeats = min(repeats, max(1, self.max_model_len - 1 - max_ctx))
             if not kvwarm_real:
                 multi = sum(
-                    self._bench_blocks_per_req(max(c, 2) + repeats, apply_admission_cap=True)
+                    self._bench_blocks_per_req(
+                        max(c, 2) + repeats, apply_admission_cap=True
+                    )
                     for c in injected_lengths
                 )
                 if multi > self._bench_usable_blocks(
@@ -6389,17 +6477,22 @@ class InstrumentedScheduler(AsyncScheduler):
                     validation_failure = (dp_rank, reason)
                 if point.point_type == "decode":
                     measured_decode_totals[dp_rank] = int(
-                        fpm.get("scheduled_requests", {}).get("sum_decode_kv_tokens", -1)
+                        fpm.get("scheduled_requests", {}).get(
+                            "sum_decode_kv_tokens", -1
+                        )
                     )
             if (
                 point.point_type == "decode"
                 and validation_failure is None
                 and len(set(measured_decode_totals.values())) > 1
             ):
-                # Giant fake-KV points may run one batch short of the plan; the normalization below must move every
-                # rank to the SAME coordinate, otherwise the rank artifacts disagree and the merge rejects them.
+                # Giant fake-KV points may run one batch short of the plan; the
+                # normalization below must move every rank to the SAME coordinate,
+                # otherwise the rank artifacts disagree and the merge rejects them.
                 odd = next(
-                    r for r, m in measured_decode_totals.items() if m != measured_decode_totals[rank_results[0]["dp_rank"]]
+                    r
+                    for r, m in measured_decode_totals.items()
+                    if m != measured_decode_totals[rank_results[0]["dp_rank"]]
                 )
                 validation_failure = (odd, "giant_measured_coordinate_mismatch")
 
@@ -6444,10 +6537,12 @@ class InstrumentedScheduler(AsyncScheduler):
                 return
 
             if point.point_type == "decode":
-                # Benign giant-KV fake off-by-batch (accepted by _bench_fpm_validation_failure): the steady step
-                # measured one token per request short of the declared coordinate. Record the point AT THE MEASURED
-                # coordinate so the artifact stays self-consistent -- the collector re-checks
-                # scheduled.sum_decode_kv_tokens == point.total_kv_read_tokens exactly and fails the whole cell otherwise.
+                # Benign giant-KV fake off-by-batch (accepted by
+                # _bench_fpm_validation_failure): the steady step measured one token per
+                # request short of the declared coordinate. Record the point AT THE
+                # MEASURED coordinate so the artifact stays self-consistent -- the
+                # collector re-checks scheduled.sum_decode_kv_tokens ==
+                # point.total_kv_read_tokens exactly and fails the whole cell otherwise.
                 measured = set(measured_decode_totals.values())
                 if len(measured) == 1:
                     m = measured.pop()
@@ -6455,7 +6550,10 @@ class InstrumentedScheduler(AsyncScheduler):
                         point = replace(
                             point,
                             total_kv_read_tokens=m,
-                            sample_reasons=[*point.sample_reasons, "giant_fake_off_by_batch"],
+                            sample_reasons=[
+                                *point.sample_reasons,
+                                "giant_fake_off_by_batch",
+                            ],
                         )
             self._bench_results.append(
                 BenchmarkPointResult(
@@ -6482,7 +6580,9 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_current_fpms = []
         self._bench_point_deadline = 0.0
 
-    def _bench_fpm_validation_failure(self, point: BenchmarkPoint, fpm: dict) -> str | None:
+    def _bench_fpm_validation_failure(
+        self, point: BenchmarkPoint, fpm: dict
+    ) -> str | None:
         scheduled = fpm.get("scheduled_requests", {})
         batch_size_key = (
             "num_prefill_requests"
@@ -6497,10 +6597,12 @@ class InstrumentedScheduler(AsyncScheduler):
             if scheduled.get("sum_prefill_kv_tokens") != point.total_kv_read_tokens:
                 return "measured_kv_read_mismatch"
         elif scheduled.get("sum_decode_kv_tokens") != point.total_kv_read_tokens:
-            # Giant-KV fake points: the repeated-steady-step fake path measures exactly one token per request short
-            # of the declared coordinate (measured == declared - batch, all requests admitted). That is a <0.1%
-            # context shift on a giant point; accept it at the declared coordinate (like context_clamped) instead
-            # of skipping the point and failing the strict all-or-nothing publish gate.
+            # Giant-KV fake points: the repeated-steady-step fake path measures exactly
+            # one token per request short of the declared coordinate (measured ==
+            # declared - batch, all requests admitted). That is a <0.1% context shift on
+            # a giant point; accept it at the declared coordinate (like context_clamped)
+            # instead of skipping the point and failing the strict all-or-nothing
+            # publish gate.
             measured = scheduled.get("sum_decode_kv_tokens")
             if (
                 "kvwarm_fake_fallback" in (point.sample_reasons or ())

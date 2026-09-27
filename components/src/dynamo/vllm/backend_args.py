@@ -486,10 +486,12 @@ class DynamoVllmArgGroup(ArgGroup):
             env_var="DYN_BENCHMARK_HYBRID_LIVE_STATE",
             default=False,
             help=(
-                "Hybrid (KDA/Mamba) models: let the real-KV decode warm-up run with recurrent-state groups "
-                "forked from the parked chain's live state block instead of skipping the warm-up. Attention KV "
-                "is the chain's real prefix; the recurrent state is a valid but deeper-context state (shallow "
-                "points read a few percent fast). Mutually exclusive with --benchmark-randomize-kda-state."
+                "Hybrid (KDA/Mamba) models: let the real-KV decode warm-up run with "
+                "recurrent-state groups forked from the parked chain's live state block "
+                "instead of skipping the warm-up. Attention KV is the chain's real prefix; "
+                "the recurrent state is a valid but deeper-context state (shallow points "
+                "read a few percent fast). Mutually exclusive with "
+                "--benchmark-randomize-kda-state."
             ),
         )
         add_argument(
@@ -724,7 +726,8 @@ class DynamoVllmConfig(ConfigBase):
     def _validate_benchmark_sampling(self) -> None:
         if self.benchmark_hybrid_live_state and self.benchmark_randomize_kda_state:
             raise ValueError(
-                "--benchmark-hybrid-live-state and --benchmark-randomize-kda-state are mutually exclusive"
+                "--benchmark-hybrid-live-state and --benchmark-randomize-kda-state "
+                "are mutually exclusive"
             )
         if self.benchmark_hybrid_live_state and self.benchmark_mode not in (
             "decode",

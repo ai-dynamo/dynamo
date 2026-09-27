@@ -5747,6 +5747,38 @@ def test_kvwarm_live_state_shadow_forks_the_recurrent_read_slot_at_a_boundary():
     assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [32], 3) == 0
 
 
+class KpoolTailManager(_FakeManager):
+    """Matches BOTH the live-state type check and the circular-table predicate."""
+
+
+def test_kvwarm_live_state_keeps_circular_kpool_geometry():
+    """With live-state on, the k-pool tail (one circular block, admission cap 1,
+    excluded from prefix caching) must keep its ring geometry: fork the single
+    block, never walk ``recurrent_shadow_range`` positions (65 entries at ctx 255)."""
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = [_FakeBlock(0)]
+    mgr = KpoolTailManager(chain, cow=True)
+    mgr.block_size = 4
+    mgr._max_admission_blocks_per_request = 1
+    mgr.kv_cache_spec = SimpleNamespace(participates_in_prefix_caching=False)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 255, 3
+    )
+    assert table == ([1000],)
+    assert mgr.cows == [(0, 1000)]
+    assert zero_ids == []
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 255, 3) == 1
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [255], 3) == 0
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3) == 2
+
+
 def _dp_planner_stub(monkeypatch, points, usable_blocks=100):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = _kvwarm_planner_stub(usable_blocks=usable_blocks)
@@ -5760,20 +5792,34 @@ def _dp_planner_stub(monkeypatch, points, usable_blocks=100):
 
 def test_kvwarm_dp_filter_rejects_uncovered_explicit_points(monkeypatch):
     covered = BenchmarkPoint(
-        point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16, sample_reasons=["explicit"]
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=1,
+        total_kv_read_tokens=16,
+        sample_reasons=["explicit"],
     )
     deep = BenchmarkPoint(
-        point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500, sample_reasons=["explicit"]
+        point_type="decode",
+        benchmark_id=2,
+        batch_size=3,
+        total_kv_read_tokens=1500,
+        sample_reasons=["explicit"],
     )
     stub = _dp_planner_stub(monkeypatch, [covered, deep])
-    with pytest.raises(RuntimeError, match=r"explicit decode point.*batch=3, total_kv_read_tokens=1500"):
+    with pytest.raises(
+        RuntimeError, match=r"explicit decode point.*batch=3, total_kv_read_tokens=1500"
+    ):
         stub._kvwarm_prepare("decode")
 
 
 def test_kvwarm_dp_filter_counts_only_real_points(monkeypatch):
-    covered = BenchmarkPoint(point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16)
+    covered = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=1, total_kv_read_tokens=16
+    )
     replica = replace(covered, benchmark_id=3, sample_reasons=[EAGER_WARMUP_REASON])
-    deep = BenchmarkPoint(point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500)
+    deep = BenchmarkPoint(
+        point_type="decode", benchmark_id=2, batch_size=3, total_kv_read_tokens=1500
+    )
     stub = _dp_planner_stub(monkeypatch, [covered, deep, replica])
     stub._kvwarm_prepare("decode")
     kept = list(stub._bench_grid)
