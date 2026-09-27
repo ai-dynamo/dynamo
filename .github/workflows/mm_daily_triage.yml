@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Daily multimodality (mm) triage automation.
+# Posts a categorized report of `multimodal`-labeled issues/PRs, grouped by
+# category and by current engager, to the pinned tracking issue labeled
+# `mm-triage-report`. See scripts/mm_triage_report.py for report generation.
+
+name: 'Multimodality daily triage report'
+on:
+  schedule:
+    - cron: '15 14 * * *'  # 06:15 PST / 07:15 PDT daily
+  workflow_dispatch: {}
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  mm-triage-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 scripts/mm_triage_report.py --out /tmp/mm_report.md
+
+      - name: Find tracking issue
+        id: tracking
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          number=$(gh issue list --repo "$GITHUB_REPOSITORY" \
+            --label mm-triage-report --state open --limit 1 --json number \
+            --jq '.[0].number')
+          if [ -z "$number" ]; then
+            echo "::error::No open issue labeled mm-triage-report found. Create the pinned tracking issue first."
+            exit 1
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Post report comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ steps.tracking.outputs.number }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file /tmp/mm_report.md
