@@ -28,8 +28,7 @@ registration, request conversion, transport, cancellation, and abort.
 - `Abort` on cancellation
 - Image input as base64 data URIs (for example `data:image/png;base64,...`) in
   `image_url` content parts. The sidecar sends the image bytes to TensorRT-LLM
-  in request order, and TensorRT-LLM decodes and processes them. Validated with
-  `Qwen/Qwen3-VL-2B-Instruct` on TensorRT-LLM 1.3.0rc26.
+  in request order, and TensorRT-LLM decodes and processes them.
 
 The initial protocol does **not** support disaggregated (prefill/decode)
 serving, image URLs that must be fetched (`http://`, `https://`), video or audio
