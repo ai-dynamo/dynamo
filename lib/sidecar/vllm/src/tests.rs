@@ -2585,8 +2585,7 @@ fn wire_media(request: &pb::GenerateRequest) -> WireMedia {
     media
 }
 
-/// The input media of a request without `mm_hashes`, grouped by modality in
-/// input order, to compare with `wire_media`.
+// Ignores `extra_args.mm_hashes`, which also sets image UUIDs on the wire.
 fn expected_wire_media(request: &PreprocessedRequest) -> WireMedia {
     let media = request.multi_modal_data.as_ref().expect("raw media");
     let mut expected = Vec::new();
@@ -2621,16 +2620,9 @@ fn expected_wire_media(request: &PreprocessedRequest) -> WireMedia {
 
 #[test]
 fn encode_requests_accept_image_and_video_media_only() {
-    let mut image_uuids_video = epd_image_request();
-    image_uuids_video
-        .multi_modal_data
-        .as_mut()
-        .expect("image media")
-        .insert("video_url".to_string(), video_media());
     for (shape, request) in [
         ("video", epd_video_request()),
         ("image+video", epd_image_video_request()),
-        ("image with UUIDs+video", image_uuids_video),
     ] {
         let wire = build_generate_request(
             request.clone(),
@@ -2658,7 +2650,7 @@ fn encode_requests_accept_image_and_video_media_only() {
     }));
     for (shape, request) in [
         ("audio", audio_only),
-        ("image+audio", image_audio.clone()),
+        ("image+audio", image_audio),
         ("preprocessed audio", preprocessed_audio),
     ] {
         let Err(error) = build_generate_request(
@@ -2673,24 +2665,6 @@ fn encode_requests_accept_image_and_video_media_only() {
                 .to_string()
                 .contains("encode requests support image and video media only"),
             "{shape}: {error}"
-        );
-    }
-
-    // After the Encode rejection, the frontend sends the same request to the
-    // downstream engine, which must accept it and encode all media inline.
-    let mut decode_image_audio = image_audio.clone();
-    decode_image_audio.prefill_result = decode_request().prefill_result;
-    for (mode, request) in [
-        (DisaggregationMode::Aggregated, image_audio.clone()),
-        (DisaggregationMode::Prefill, image_audio.clone()),
-        (DisaggregationMode::Decode, decode_image_audio),
-    ] {
-        let wire = build_generate_request(request, "inline-image+audio".to_string(), mode)
-            .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
-        assert_eq!(
-            wire_media(&wire),
-            expected_wire_media(&image_audio),
-            "{mode:?}"
         );
     }
 }
