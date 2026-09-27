@@ -253,8 +253,6 @@ lib/sidecar/vllm/launch/disagg_multimodal_epd.sh
 
 The examples run one `vllm-rs` process and one Dynamo sidecar for each role. The encoder uses `--mm-encoder-only`, eager execution, and disabled prefix caching. The sidecar rejects media UUIDs that contain path separators, NUL bytes, or dot path components before forwarding them as connector keys. `ECExampleConnector` is a validation connector; production deployments should select an EC connector whose transport and storage semantics fit the deployment.
 
-The examples set a 4096-token context. A video request can need more tokens than that; set `MAX_MODEL_LEN` to increase the limit.
-
 The sidecar opens eight gRPC connections by default. This avoided
 connection-level throttling in high-concurrency sidecar tests. Override the
 pool size with `--grpc-connections` or `DYN_SIDECAR_GRPC_CONNECTIONS`.
