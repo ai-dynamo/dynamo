@@ -733,7 +733,6 @@ fn apply_cr_event(
                         next.insert(cr_name, cached);
                     }
                 } else if let Some(name) = cr.metadata.name.clone() {
-                    // nameless CR already handled; fallback: still track observed
                     observed.insert(name);
                 }
             }
