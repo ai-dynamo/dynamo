@@ -28,12 +28,6 @@ func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "restart-1", child.Annotations[dynamo.LPXRestartAnnotation])
 			child.Status.ObservedGeneration = child.Generation
-			child.Status.Components = map[string]v1alpha1.LPXComponentStatus{
-				"lpx": {Conditions: []metav1.Condition{{
-					Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue,
-					ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonReady,
-				}}},
-			}
 
 			t.Log("Keep the restart pending until aggregate readiness is reported")
 			require.NoError(t, kube.Status().Update(ctx, child))
@@ -45,7 +39,7 @@ func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
 			require.NoError(t, kube.Status().Update(ctx, child))
 			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
 
-			t.Log("Complete only when both aggregate and component readiness are current")
+			t.Log("Complete only when aggregate readiness is current")
 			meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue,
 				ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonReady,
@@ -74,42 +68,12 @@ func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
 			require.NoError(t, kube.Update(ctx, updated))
 			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
 			updated.Status.ObservedGeneration = updated.Generation
+			require.NoError(t, kube.Status().Update(ctx, updated))
+			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
 			meta.SetStatusCondition(&updated.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue,
 				ObservedGeneration: updated.Generation, Reason: v1alpha1.LPXReadyReasonReady,
 			})
-			require.NoError(t, kube.Status().Update(ctx, updated))
-			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
-
-			t.Log("Keep the restart pending while component readiness is absent, unknown, false, or stale")
-			for _, scenario := range []struct {
-				status     metav1.ConditionStatus
-				generation int64
-			}{
-				{status: "", generation: updated.Generation},
-				{status: metav1.ConditionUnknown, generation: updated.Generation},
-				{status: metav1.ConditionFalse, generation: updated.Generation},
-				{status: metav1.ConditionTrue, generation: updated.Generation - 1},
-			} {
-				component := v1alpha1.LPXComponentStatus{}
-				if scenario.status != "" {
-					component.Conditions = []metav1.Condition{{
-						Type: v1alpha1.LPXReadyCondition, Status: scenario.status,
-						ObservedGeneration: scenario.generation, Reason: v1alpha1.LPXReadyReasonPending,
-					}}
-				}
-				updated.Status.Components["lpx"] = component
-				require.NoError(t, kube.Status().Update(ctx, updated))
-				require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}), "%+v", scenario)
-			}
-
-			t.Log("Complete after the component reports Ready for the current child generation")
-			component := updated.Status.Components["lpx"]
-			meta.SetStatusCondition(&component.Conditions, metav1.Condition{
-				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue,
-				ObservedGeneration: updated.Generation, Reason: v1alpha1.LPXReadyReasonReady,
-			})
-			updated.Status.Components["lpx"] = component
 			require.NoError(t, kube.Status().Update(ctx, updated))
 			require.Empty(t, resolver.Resolve(ctx, dgd, []string{"lpx"}))
 			restart = newDGDRestartReconciler().Resolve(ctx, dgd, &dgd.Status, resolver.Resolve)

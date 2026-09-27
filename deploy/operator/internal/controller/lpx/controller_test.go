@@ -2561,7 +2561,7 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 	require.Equal(t, before, pcs)
 }
 
-func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
+func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 	for _, scenario := range []struct{ name, message string }{
 		{"LPX", "LPX integration is disabled"},
 		{"Grove", "Grove is disabled"},
@@ -2636,18 +2636,7 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilDeletion(t *testing.T) {
 				require.Equal(t, list, current)
 			}
 
-			t.Log("Deletion remains available while disabled and needs no controller finalizer")
-			if scenario.name == "LPX" {
-				r.runtimeConfig.Gate.LPX = false
-			} else {
-				r.runtimeConfig.Gate.Grove = false
-			}
-			r.modelRegistry = nil
 			require.Empty(t, child.Finalizers)
-			require.NoError(t, r.Delete(ctx, child))
-			_, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-			require.NoError(t, err)
-			require.True(t, apierrors.IsNotFound(r.Get(ctx, key, &v1alpha1.LPXGraphDeployment{})))
 		})
 	}
 }

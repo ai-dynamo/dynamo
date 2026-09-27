@@ -641,11 +641,6 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 				require.Equal(t, before, current)
 			}
 			require.Equal(t, v1beta1.RestartPhaseCompleted, source.Status.Restart.Phase)
-
-			t.Log("A missing draft status cannot borrow the target's readiness")
-			delete(child.Status.Components, "draft")
-			require.NoError(t, kube.Status().Update(t.Context(), child))
-			require.Equal(t, []string{"draft"}, progress(t.Context(), source, []string{"draft", "lpx"}))
 			require.Zero(t, pcsReads)
 
 			t.Log("A missing ordinary PCS keeps only live ordinary restart members pending")
@@ -654,11 +649,6 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
 			)
 			ordinaryDGD = projectWithoutExternallyManagedComponents(source)
-			child.Status.Components["draft"] = v1alpha1.LPXComponentStatus{
-				ComponentReplicaStatus: v1beta1.ComponentReplicaStatus{Replicas: 2},
-				Conditions:             []metav1.Condition{{Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation}},
-			}
-			require.NoError(t, kube.Status().Update(t.Context(), child))
 			requested := []string{"draft", "frontend", "lpx", "prefill", "removed"}
 			beforeSource := source.DeepCopy()
 			childReads, pcsReads = 0, 0

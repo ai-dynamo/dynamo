@@ -28,18 +28,10 @@ func (r *lpxRestartProgressResolver) Resolve(
 	source *v1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
-	child := r.observeRestart(ctx, source)
-	remaining := make([]string, 0, len(inProgress))
-	for _, name := range inProgress {
-		if child != nil {
-			ready := meta.FindStatusCondition(child.Status.Components[name].Conditions, v1alpha1.LPXReadyCondition)
-			if ready != nil && ready.Status == metav1.ConditionTrue && ready.ObservedGeneration == child.Generation {
-				continue
-			}
-		}
-		remaining = append(remaining, name)
+	if r.observeRestart(ctx, source) == nil {
+		return inProgress
 	}
-	return remaining
+	return nil
 }
 
 // resolveCompositeGroveRestartProgress composes child-owned LPX and ordinary Grove observations.
