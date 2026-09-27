@@ -71,13 +71,12 @@ func newGroveWorkloadRenderer(
 
 func (r *groveWorkloadRenderer) Render(
 	ctx context.Context,
-	source *nvidiacomv1beta1.DynamoGraphDeployment,
 	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 	workerGenerationChanged bool,
 ) (*grovePodCliqueSetRender, error) {
-	if source == nil || ordinary == nil {
+	if ordinary == nil {
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a DynamoGraphDeployment")
 	}
 	if r.reader == nil {
@@ -97,7 +96,7 @@ func (r *groveWorkloadRenderer) Render(
 	}
 
 	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(ordinary, existingPodCliqueSet, workerGenerationChanged)
-	renderDeployment, err := groveRenderDeployment(ordinary, source, existingPodCliqueSet, workerHashSuffixNeeded)
+	renderDeployment, err := groveRenderDeployment(ordinary, existingPodCliqueSet, workerHashSuffixNeeded)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +132,6 @@ func (r *groveWorkloadRenderer) Render(
 
 func groveRenderDeployment(
 	ordinary *nvidiacomv1beta1.DynamoGraphDeployment,
-	hashSource *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	workerHashSuffix bool,
 ) (*nvidiacomv1beta1.DynamoGraphDeployment, error) {
@@ -144,7 +142,7 @@ func groveRenderDeployment(
 	if !workerHashSuffix {
 		return renderDeployment, nil
 	}
-	if err := applyGroveWorkerHashSuffix(renderDeployment, hashSource); err != nil {
+	if err := applyGroveWorkerHashSuffix(renderDeployment, ordinary); err != nil {
 		return nil, err
 	}
 	return renderDeployment, nil

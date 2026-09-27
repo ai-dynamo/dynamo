@@ -93,7 +93,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 	renderedPodCliqueSet, err := r.renderer.Render(
 		ctx,
-		source,
 		ordinary,
 		restartState,
 		checkpointInfos,

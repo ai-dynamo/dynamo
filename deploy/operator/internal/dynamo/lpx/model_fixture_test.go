@@ -44,7 +44,6 @@ type fakeModelServiceClient struct {
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
 	list          *modelpb.ModelFileList
-	listErr       error
 
 	metadataContexts []context.Context
 }
@@ -84,9 +83,6 @@ func (c *fakeModelServiceClient) ListModelFiles(
 ) (*modelpb.ModelFileList, error) {
 	c.listRequests = append(c.listRequests, request)
 	c.metadataContexts = append(c.metadataContexts, ctx)
-	if c.listErr != nil {
-		return nil, c.listErr
-	}
 	if c.list != nil {
 		return c.list, nil
 	}

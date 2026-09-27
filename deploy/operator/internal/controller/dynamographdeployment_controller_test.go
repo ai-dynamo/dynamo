@@ -1387,7 +1387,7 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	generatedPCS := renderedPCS.desired
 	renderDGD := renderedPCS.renderDeployment
@@ -1685,7 +1685,7 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, dgd, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	renderDGD := renderedPCS.renderDeployment
 	prefill := renderDGD.GetComponentByName("prefill")
