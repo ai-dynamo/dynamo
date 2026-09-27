@@ -286,14 +286,6 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	source.Namespace, source.UID, source.Generation = env.Namespace(), "", 0
 	require.NoError(t, env.Client().Create(t.Context(), source))
 
-	t.Log("Persist the pending component projection using the real DGD status schema")
-	result := mergeLPXChildStatus(source, nil, ReconcileResult{})
-	source.Status.Components = result.ComponentStatus
-	source.Status.State = result.State
-	require.NoError(t, env.Client().Status().Update(t.Context(), source))
-	require.Equal(t, v1beta1.ComponentKindPodCliqueScalingGroup, source.Status.Components["lpx"].ComponentKind)
-	require.Zero(t, source.Status.Components["lpx"].Replicas)
-
 	t.Log("Hand off the beta source to one independently observed alpha child with its beta DGD owner")
 	handoff := &dgdLPXHandoff{client: env.Client()}
 	child, err := handoff.Reconcile(t.Context(), source)
@@ -305,6 +297,14 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	revision, err := dynamo.LPXInputRevision(source, child.Annotations[dynamo.LPXRestartAnnotation])
 	require.NoError(t, err)
 	require.Equal(t, revision, child.Spec.InputRevision)
+
+	t.Log("Persist the pending component projection using the real DGD status schema")
+	result := mergeLPXChildStatus(source, child, ReconcileResult{})
+	source.Status.Components = result.ComponentStatus
+	source.Status.State = result.State
+	require.NoError(t, env.Client().Status().Update(t.Context(), source))
+	require.Equal(t, v1beta1.ComponentKindPodCliqueScalingGroup, source.Status.Components["lpx"].ComponentKind)
+	require.Zero(t, source.Status.Components["lpx"].Replicas)
 
 	t.Log("Persist the child's download payload and project its actionable failure")
 	child.Status.ObservedGeneration = child.Generation

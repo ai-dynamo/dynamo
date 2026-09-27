@@ -212,12 +212,10 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	require.Len(t, result.ComponentStatus, 2)
 	require.Equal(t, child.Status.Components["lpx"].ComponentReplicaStatus, result.ComponentStatus["lpx"])
 
-	t.Log("Reject missing or stale children and stale Ready conditions")
-	for _, failure := range []string{"missing-child", "generation", "condition"} {
+	t.Log("Reject stale children and stale Ready conditions")
+	for _, failure := range []string{"generation", "condition"} {
 		stale := child.DeepCopy()
 		switch failure {
-		case "missing-child":
-			stale = nil
 		case "generation":
 			stale.Status.ObservedGeneration--
 		case "condition":
