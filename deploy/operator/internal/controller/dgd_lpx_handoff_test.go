@@ -808,11 +808,19 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true, Checkpoint: true}},
 	}
 	program := parent.newGroveProgram()
+	var adapterDeletes []string
+	program.scalingAdapters.Client = interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
+		Delete: func(ctx context.Context, delegated client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			adapterDeletes = append(adapterDeletes, obj.GetName())
+			return delegated.Delete(ctx, obj, opts...)
+		},
+	})
 
 	t.Log("Publish ordinary resources independently of the child's pending download")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
+	require.Equal(t, []string{generateAdapterName(source.Name, "prefill")}, adapterDeletes)
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	ordinaryDGD := projectWithoutExternallyManagedComponents(source)
 	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(ordinaryDGD.Name, ordinaryDGD.Spec.Components)}
