@@ -38,18 +38,14 @@ pub struct FilterFormat {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FormatError {
-    #[cfg(test)]
     #[error("unsupported CKF format version {0} (expected {FORMAT_VERSION})")]
     Version(u16),
-    #[cfg(test)]
     #[error("unsupported fingerprint width {0} (expected {FINGERPRINT_BITS})")]
     FingerprintBits(u8),
-    #[cfg(test)]
     #[error("unsupported slots per bucket {0} (expected {SLOTS_PER_BUCKET})")]
     SlotsPerBucket(u8),
     #[error("bucket count {0} is not a power of two in 2..={MAX_BUCKET_COUNT}")]
     BucketCount(usize),
-    #[cfg(test)]
     #[error("format mismatch: expected {expected:?}, received seed {seed:#x} buckets {buckets}")]
     Mismatch {
         expected: FilterFormat,
@@ -66,7 +62,6 @@ impl FilterFormat {
         Ok(Self { seed, bucket_count })
     }
 
-    #[cfg(test)]
     fn validate(
         self,
         version: u16,
@@ -103,49 +98,36 @@ pub struct BucketImage {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ImagesWireError {
-    #[cfg(test)]
     #[error("CBI1 frame has {actual} bytes, exceeding the maximum {maximum}")]
     FrameTooLarge { actual: usize, maximum: usize },
     #[error("delta has {actual} images, exceeding the CBI1 maximum {maximum}")]
     DeltaImageCount { actual: usize, maximum: usize },
-    #[cfg(test)]
     #[error("snapshot chunk has {actual} words, exceeding the CBI1 maximum {maximum}")]
     SnapshotChunkWordCount { actual: usize, maximum: usize },
     #[error("bucket {bucket} is outside the declared {bucket_count}-bucket lane")]
     BucketIndex { bucket: u32, bucket_count: usize },
-    #[cfg(test)]
     #[error("snapshot has {actual} buckets, format declares {expected}")]
     SnapshotBucketCount { expected: usize, actual: usize },
-    #[cfg(test)]
     #[error("frame shorter than the CBI1 header")]
     Truncated,
-    #[cfg(test)]
     #[error("bad CBI1 magic")]
     Magic,
-    #[cfg(test)]
     #[error("unsupported CBI1 wire version {0}")]
     WireVersion(u16),
-    #[cfg(test)]
     #[error("unknown CBI1 frame flags {0:#06x}")]
     Flags(u16),
-    #[cfg(test)]
     #[error("CBI1 body checksum mismatch")]
     Checksum,
-    #[cfg(test)]
     #[error("CBI1 frame body is malformed")]
     Malformed,
-    #[cfg(test)]
     #[error(transparent)]
     Format(#[from] FormatError),
-    #[cfg(test)]
     #[error("snapshot chunk sequence violation")]
     ChunkSequence,
-    #[cfg(test)]
     #[error("snapshot chunks do not cover the lane")]
     IncompleteCoverage,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImagesHeader {
     pub dc_id: u64,
@@ -154,7 +136,6 @@ pub struct ImagesHeader {
     pub bucket_count: u64,
 }
 
-#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum ImagesFrame {
     SnapshotChunk {
@@ -275,28 +256,24 @@ fn patch_checksum(frame: &mut [u8]) {
     frame[IMAGES_HEADER_LEN - 4..IMAGES_HEADER_LEN].copy_from_slice(&checksum.to_le_bytes());
 }
 
-#[cfg(test)]
 fn read_u16(bytes: &[u8], at: usize) -> u16 {
     let mut value = [0; 2];
     value.copy_from_slice(&bytes[at..at + 2]);
     u16::from_le_bytes(value)
 }
 
-#[cfg(test)]
 fn read_u32(bytes: &[u8], at: usize) -> u32 {
     let mut value = [0; 4];
     value.copy_from_slice(&bytes[at..at + 4]);
     u32::from_le_bytes(value)
 }
 
-#[cfg(test)]
 fn read_u64(bytes: &[u8], at: usize) -> u64 {
     let mut value = [0; 8];
     value.copy_from_slice(&bytes[at..at + 8]);
     u64::from_le_bytes(value)
 }
 
-#[cfg(test)]
 pub fn decode(expected: FilterFormat, bytes: &[u8]) -> Result<ImagesFrame, ImagesWireError> {
     if bytes.len() < IMAGES_HEADER_LEN {
         return Err(ImagesWireError::Truncated);
@@ -348,7 +325,6 @@ pub fn decode(expected: FilterFormat, bytes: &[u8]) -> Result<ImagesFrame, Image
     }
 }
 
-#[cfg(test)]
 fn decode_delta(header: ImagesHeader, body: &[u8]) -> Result<ImagesFrame, ImagesWireError> {
     if body.len() < DELTA_BODY_PREFIX {
         return Err(ImagesWireError::Malformed);
@@ -388,7 +364,6 @@ fn decode_delta(header: ImagesHeader, body: &[u8]) -> Result<ImagesFrame, Images
     })
 }
 
-#[cfg(test)]
 fn decode_snapshot_chunk(
     header: ImagesHeader,
     body: &[u8],
@@ -436,7 +411,6 @@ fn decode_snapshot_chunk(
     })
 }
 
-#[cfg(test)]
 pub struct SnapshotAssembly {
     epoch: u64,
     chunk_count: u32,
@@ -446,7 +420,6 @@ pub struct SnapshotAssembly {
     images: Vec<BucketImage>,
 }
 
-#[cfg(test)]
 impl SnapshotAssembly {
     pub fn new(format: FilterFormat) -> Self {
         Self {
