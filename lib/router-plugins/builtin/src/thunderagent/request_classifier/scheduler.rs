@@ -1612,7 +1612,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state.wait_status("next", &notify), WaitStatus::Waiting);
-        assert!(state.normal_usage.get(&worker0).is_none());
+        assert!(!state.normal_usage.contains_key(&worker0));
         assert!(state.cancel_request("next", &capacities, now));
         assert_eq!(state.normal_usage[&worker0], 800);
     }
@@ -1669,7 +1669,7 @@ mod tests {
             .unwrap();
         assert_eq!(state.wait_status("next", &notify), WaitStatus::Waiting);
         assert_eq!(state.normal_usage[&worker0], 800);
-        assert!(state.normal_usage.get(&worker1).is_none());
+        assert!(!state.normal_usage.contains_key(&worker1));
         assert!(state.cancel_request("next", &capacities, now));
         assert_eq!(state.normal_usage[&worker1], 800);
     }
