@@ -175,6 +175,9 @@ impl GrpcTransport {
             cancel.clone(),
             KvEventRelayServiceConfig {
                 pool_heartbeat_interval: Duration::from_millis(config.pool_heartbeat_interval_ms),
+                catalog_heartbeat_interval: Duration::from_millis(
+                    config.catalog_heartbeat_interval_ms,
+                ),
                 readiness_heartbeat_interval: Duration::from_millis(
                     config.readiness_heartbeat_interval_ms,
                 ),

@@ -19,6 +19,7 @@ pub struct KvDcRelayGrpcConfig {
     pub keepalive_interval_ms: u64,
     pub keepalive_timeout_ms: u64,
     pub pool_heartbeat_interval_ms: u64,
+    pub catalog_heartbeat_interval_ms: u64,
     pub readiness_heartbeat_interval_ms: u64,
     pub snapshot_progress_timeout_ms: u64,
     pub load_window_ms: u64,
@@ -43,6 +44,7 @@ impl KvDcRelayGrpcConfig {
             keepalive_interval_ms: 20_000,
             keepalive_timeout_ms: 10_000,
             pool_heartbeat_interval_ms: 10_000,
+            catalog_heartbeat_interval_ms: 10_000,
             readiness_heartbeat_interval_ms: 10_000,
             snapshot_progress_timeout_ms: 60_000,
             load_window_ms: 1_000,
@@ -67,6 +69,10 @@ impl KvDcRelayGrpcConfig {
             (
                 "pool_heartbeat_interval_ms",
                 self.pool_heartbeat_interval_ms,
+            ),
+            (
+                "catalog_heartbeat_interval_ms",
+                self.catalog_heartbeat_interval_ms,
             ),
             (
                 "readiness_heartbeat_interval_ms",
@@ -257,6 +263,7 @@ mod tests {
         assert_invalid!(keepalive_interval_ms);
         assert_invalid!(keepalive_timeout_ms);
         assert_invalid!(pool_heartbeat_interval_ms);
+        assert_invalid!(catalog_heartbeat_interval_ms);
         assert_invalid!(readiness_heartbeat_interval_ms);
         assert_invalid!(snapshot_progress_timeout_ms);
         assert_invalid!(load_window_ms);
@@ -268,6 +275,7 @@ mod tests {
         config.keepalive_interval_ms = MAX_TIMER_DURATION_MS;
         config.keepalive_timeout_ms = MAX_TIMER_DURATION_MS;
         config.pool_heartbeat_interval_ms = MAX_TIMER_DURATION_MS;
+        config.catalog_heartbeat_interval_ms = MAX_TIMER_DURATION_MS;
         config.readiness_heartbeat_interval_ms = MAX_TIMER_DURATION_MS;
         config.snapshot_progress_timeout_ms = MAX_TIMER_DURATION_MS;
         config.load_window_ms = MAX_TIMER_DURATION_MS;
