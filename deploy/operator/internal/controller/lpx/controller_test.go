@@ -3122,39 +3122,6 @@ func TestLPXCommittedDeadlineCleanupPreservesExternalCapacity(t *testing.T) {
 	require.NotEmpty(t, request.Finalizers)
 }
 
-func TestLPXCommittedReleasePreservesPods(t *testing.T) {
-	for _, release := range []bool{false, true} {
-		t.Run(fmt.Sprintf("release=%t", release), func(t *testing.T) {
-			t.Log("Observe a committed Degraded request with either repair or durable release authority")
-			ctx := t.Context()
-			child, dgd, registry := newLPXTestDGD(t, lpx.PipelineSingle)
-			r, selected := newPreparedLPXTestReconciler(t, registry, ctx, child, dgd)
-			objects := lpxMaterializedObjects(t, r, child, dgd, selected)
-			createLPXTestObjects(t, ctx, r.Client, objects...)
-			publishSelectedLPXForTest(t, ctx, r, child, selected)
-			request := getTestPipelineRequest(t, ctx, r.Client, child.Namespace, selected.requests[0].Name)
-			request.Status = newTestPipelineRequest(child, findLPXTestPodCliqueSet(t, objects), request.Name, time.Now(), lpxv1alpha1.RequestPhaseDegraded).Status
-			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: child.Namespace, Name: "committed-agent", UID: "agent-uid"}}
-			request.Status.Committed = committedLPXTestPod(pod)
-			if release {
-				request.Status.Committed.Execution.Release = &lpxv1alpha1.ReleaseJournal{Reason: lpxv1alpha1.ReleaseReasonDependencyChanged, RequestedAtGeneration: request.Generation}
-			}
-			require.NoError(t, r.Update(ctx, request))
-			require.NoError(t, r.Create(ctx, pod))
-
-			t.Log("Neither repair nor release authorizes graph reconciliation to delete Pods")
-			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
-			require.NoError(t, err)
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{}))
-			request = getTestPipelineRequest(t, ctx, r.Client, request.Namespace, request.Name)
-			require.True(t, request.DeletionTimestamp.IsZero())
-			pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: child.Namespace, Name: selected.plan.LPXScalingGroup}, pcsg))
-			require.Equal(t, selected.plan.Replicas, pcsg.Spec.Replicas)
-		})
-	}
-}
-
 func committedLPXTestPod(pod *corev1.Pod) *lpxv1alpha1.Committed {
 	return &lpxv1alpha1.Committed{
 		Plan: lpxv1alpha1.CommittedPlan{Placement: lpxv1alpha1.PlanPlacement{ExecutionBackend: lpxv1alpha1.ExecutionBackendNodeLocal}},

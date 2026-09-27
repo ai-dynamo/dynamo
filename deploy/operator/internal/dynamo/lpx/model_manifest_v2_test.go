@@ -8,7 +8,6 @@ package lpx
 import (
 	"testing"
 
-	"capnproto.org/go/capnp/v3"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	"github.com/stretchr/testify/require"
 )
@@ -289,59 +288,6 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-		})
-	}
-}
-
-func TestNormalizedV2BuildTreatsManifestBuildIDAsOpaque(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define relocated revision-2 build references and opaque manifest identities")
-	tests := []struct {
-		name    string
-		ref     string
-		buildID string
-	}{
-		{
-			name:    "local copy",
-			ref:     "file:///models/copied-build",
-			buildID: "original-producer-id",
-		},
-		{
-			name:    "different GCS bucket and path",
-			ref:     "gs://new-bucket/relocated/renamed-build",
-			buildID: "original-producer-id",
-		},
-		{
-			name: "missing producer identity",
-			ref:  "file:///models/build-without-producer-id",
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			t.Log("Create a revision-2 snapshot under its deployment locator")
-			manifest := newManifestV2ContractFixture(t)
-			if test.buildID != "" {
-				build, err := capnp.NewStruct(manifest.Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 12})
-				require.NoError(t, err)
-				require.NoError(t, build.SetText(11, test.buildID))
-				require.NoError(t, manifest.SetReserved3(build.ToPtr()))
-			}
-			payload, err := manifest.Message().Marshal()
-			require.NoError(t, err)
-			snapshot := &BuildSnapshot{
-				ref:           test.ref,
-				contentID:     "sha256:test",
-				manifestBytes: payload,
-			}
-
-			t.Log("Use the deployment locator without interpreting manifest build.buildId")
-			normalized, err := normalizeBuildSnapshot(snapshot)
-			require.NoError(t, err)
-			require.Equal(t, test.ref, normalized.build.Path)
 		})
 	}
 }

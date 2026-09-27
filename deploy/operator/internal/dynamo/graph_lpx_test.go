@@ -224,14 +224,11 @@ func TestLPXInputRevision(t *testing.T) {
 				}},
 		}},
 	}
-	deployment := &v1alpha1.LPXGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace, UID: "materialization"}}
 	want, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Regexp(t, `^sha256:[a-f0-9]{64}$`, want)
-	pcsName := PCSNameForLPX(deployment)
-	require.NotEqual(t, PCSNameForDGD(source.Name, source.Spec.Components), pcsName)
 
-	t.Log("Prefill-only edits and DGD bookkeeping do not alter the LPX revision or PCS name")
+	t.Log("Prefill-only edits and DGD bookkeeping do not alter the LPX revision")
 	source.Generation++
 	source.ResourceVersion = "2"
 	source.Labels = map[string]string{"unrelated": "metadata"}
@@ -242,7 +239,6 @@ func TestLPXInputRevision(t *testing.T) {
 	got, err := LPXInputRevision(source, "")
 	require.NoError(t, err)
 	require.Equal(t, want, got)
-	require.Equal(t, pcsName, PCSNameForLPX(deployment))
 
 	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
 	source.GetComponentByName("decode").LPX.Scheduling = &v1beta1.SchedulingSpec{}

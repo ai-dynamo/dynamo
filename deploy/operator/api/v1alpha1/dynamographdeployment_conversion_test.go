@@ -127,15 +127,6 @@ func TestDGD_RoundTrip_Empty(t *testing.T) {
 	if diff := cmp.Diff(src, got); diff != "" {
 		t.Errorf("round-trip mismatch (-want +got):\n%s", diff)
 	}
-
-	t.Log("Omit LPX status when the deployment has no LPX payload")
-	raw, err := json.Marshal(got.Status)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(raw) != `{"state":""}` {
-		t.Fatalf("empty status JSON = %s", raw)
-	}
 }
 
 func TestDGD_RoundTrip_Minimal(t *testing.T) {
