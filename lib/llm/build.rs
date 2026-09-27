@@ -50,6 +50,10 @@ fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
         .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
+    println!("cargo:rerun-if-changed=src/grpc/protos/kv_dc_relay.proto");
+    tonic_build::configure()
+        .build_server(false)
+        .compile_protos(&["src/grpc/protos/kv_dc_relay.proto"], &["src/grpc/protos"])?;
     println!("cargo:rerun-if-changed=src/kv_dc_relay/wan/grpc/protocol/relay.proto");
     let descriptor_path = PathBuf::from(env::var(OUT_DIR)?).join("relay_descriptor.bin");
     tonic_build::configure()
