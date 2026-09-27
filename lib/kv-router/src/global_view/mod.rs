@@ -7,6 +7,7 @@
 //! across process and relay restarts, while relay and KV producer generations
 //! are tracked separately by the source adapter.
 
+pub mod source;
 pub mod state;
 
 use std::fmt;
