@@ -32,6 +32,27 @@ pub struct CatalogProjection {
     pub producers: Vec<KvPoolDescriptor>,
 }
 
+impl CatalogProjection {
+    /// The first POC scores aggregated requests only when exactly one
+    /// aggregated KV producer advertises this model. Other roles are retained
+    /// in the catalog, but their cache state has no agreed DGD-level meaning
+    /// for an aggregated request. Multiple matching producers are ambiguous
+    /// until local worker selection can be aligned with the overlap estimate.
+    pub fn sole_aggregated_overlap_producer(&self, model: &str) -> Option<&KvPoolDescriptor> {
+        let mut matching = self.producers.iter().filter(|descriptor| {
+            descriptor
+                .pool_roles
+                .contains(&(WorkerRole::Aggregated as i32))
+                && descriptor
+                    .registrations
+                    .iter()
+                    .any(|registration| registration.canonical_model_id == model)
+        });
+        let producer = matching.next()?;
+        matching.next().is_none().then_some(producer)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RelayProjectionError {
     #[error(transparent)]
@@ -270,6 +291,46 @@ mod tests {
             }
             _ => panic!("expected catalog"),
         }
+    }
+
+    #[test]
+    fn aggregated_overlap_requires_one_matching_producer() {
+        let aggregated = descriptor("dynamo-mocker");
+        let mut decode = descriptor("dynamo-mocker");
+        decode.pool_roles = vec![WorkerRole::Decode as i32];
+        let mut second_aggregated = descriptor("dynamo-mocker");
+        second_aggregated
+            .serving_endpoint
+            .as_mut()
+            .unwrap()
+            .component = "other".into();
+
+        let mut projection = CatalogProjection {
+            observation: PoolObservation::Catalog {
+                models: vec!["model".into()],
+                roles: vec![PoolRole::Aggregated, PoolRole::Decode],
+                frontend_endpoint: None,
+                hardware: Vec::new(),
+                status: status(123),
+            },
+            producers: vec![aggregated, decode],
+        };
+        assert!(
+            projection
+                .sole_aggregated_overlap_producer("model")
+                .is_some()
+        );
+        assert!(
+            projection
+                .sole_aggregated_overlap_producer("other")
+                .is_none()
+        );
+        projection.producers.push(second_aggregated);
+        assert!(
+            projection
+                .sole_aggregated_overlap_producer("model")
+                .is_none()
+        );
     }
 
     #[test]
