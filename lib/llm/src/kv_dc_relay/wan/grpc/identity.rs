@@ -26,7 +26,7 @@ pub(super) fn unix_timestamp<const UNITS_PER_SECOND: u128>() -> u64 {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum WireConversionError {
+pub(crate) enum WireConversionError {
     #[error(transparent)]
     InvalidIdentity(#[from] proto::WireIdentityError),
     #[error("wire pool ID has invalid {field} identity source {value}")]
@@ -94,6 +94,30 @@ pub(super) fn producer_to_wire(identity: ProducerIdentity) -> proto::ProducerIde
         layout_generation: identity.layout_generation(),
         ckf_format: Some(format_to_wire(identity.format())),
     }
+}
+
+/// Convert a validated v1 producer identity into the CKF consumer's native key.
+pub(crate) fn producer_from_wire(
+    wire: &proto::ProducerIdentity,
+) -> Result<ProducerIdentity, WireConversionError> {
+    proto::validate_producer_identity(wire)?;
+    let pool_id = pool_id_from_wire(
+        wire.pool_id
+            .as_ref()
+            .ok_or(proto::WireIdentityError::MissingField("pool ID"))?,
+    )?;
+    let format = wire
+        .ckf_format
+        .as_ref()
+        .ok_or(proto::WireIdentityError::MissingField("CKF format"))?;
+    let bucket_count = usize::try_from(format.bucket_count)
+        .map_err(|_| proto::WireIdentityError::BucketCountOverflow)?;
+    Ok(ProducerIdentity::new(
+        pool_id,
+        wire.producer_incarnation,
+        wire.layout_generation,
+        DcCkfFormatIdentity::new(format.seed, bucket_count),
+    ))
 }
 
 pub(super) fn format_to_wire(format: DcCkfFormatIdentity) -> proto::CkfFormat {

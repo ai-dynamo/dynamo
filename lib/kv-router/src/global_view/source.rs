@@ -45,6 +45,7 @@ pub struct PlaneLease {
     generation: u64,
 }
 
+#[derive(Clone)]
 pub enum PoolObservation {
     Catalog {
         models: Vec<String>,

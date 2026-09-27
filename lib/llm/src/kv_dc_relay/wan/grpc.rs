@@ -14,4 +14,5 @@ mod service;
 mod source;
 
 pub use config::KvDcRelayGrpcConfig;
+pub(crate) use identity::producer_from_wire;
 pub(crate) use server::GrpcTransport;
