@@ -488,6 +488,7 @@ impl State {
         };
         let session_id = request.session_id.clone();
         let input_tokens = request.input_tokens;
+        let pinned_worker = request.pinned_worker;
         let was_new = request.prior_program.is_none();
         let Some(program) = self.programs.get(&session_id) else {
             return false;
@@ -497,6 +498,26 @@ impl State {
 
         if lifecycle == ProgramLifecycle::Paused {
             return self.defer_program(&session_id, now);
+        }
+
+        // The eventual hard-pin destination must have room before release.
+        // If its card is unavailable, retain the existing cold-start path and
+        // let the router validate the pin; another worker's card cannot size it.
+        if let Some(pin) = pinned_worker
+            && capacities.is_live(pin)
+            && let Some(capacity) = capacities.capacity(pin)
+        {
+            let used = self.normal_usage.get(&pin).copied().unwrap_or(0);
+            let current_charge = (assigned_worker == Some(pin))
+                .then(|| self.program_charge(program))
+                .flatten()
+                .map_or(0, |(_, tokens)| tokens);
+            let projected = used
+                .saturating_sub(current_charge)
+                .saturating_add(self.buffered_program_tokens(&session_id));
+            if projected > capacity {
+                return self.defer_program(&session_id, now);
+            }
         }
 
         if !capacities.has_usable_capacity() {
@@ -1435,6 +1456,222 @@ mod tests {
         assert_eq!(state.wait_status("new", &notify), WaitStatus::Waiting);
         assert!(state.cancel_request("new", &capacities, now));
         assert_eq!(state.wait_status("new", &notify), WaitStatus::Missing);
+    }
+
+    #[test]
+    fn hard_pin_waits_when_only_another_worker_has_capacity() {
+        let now = Instant::now();
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let capacities = WorkerCapacitySnapshot::new([(worker0, 1_000), (worker1, 1_000)])
+            .with_live_workers([worker0, worker1]);
+        let mut state = state(ThunderAgentConfig::default());
+        state
+            .register(
+                RequestRegistration::new(
+                    "existing".into(),
+                    "existing".into(),
+                    700,
+                    RequestProgress::new(700).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.normal_usage[&worker0], 800);
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "new".into(),
+                    "new".into(),
+                    300,
+                    RequestProgress::new(300).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("new", &notify), WaitStatus::Waiting);
+        assert_eq!(state.normal_usage[&worker0], 800);
+        assert_eq!(state.normal_usage.get(&worker1), None);
+
+        state.reconcile(&capacities, now + state.config.scheduler_interval());
+        assert_eq!(state.wait_status("new", &notify), WaitStatus::Waiting);
+        let expanded = WorkerCapacitySnapshot::new([(worker0, 1_500), (worker1, 1_000)])
+            .with_live_workers([worker0, worker1]);
+        state.reconcile(&expanded, now + state.config.scheduler_interval());
+        assert_eq!(
+            state.wait_status("new", &notify),
+            WaitStatus::Released(Some(worker0))
+        );
+        assert_eq!(state.normal_usage[&worker0], 1_200);
+    }
+
+    #[test]
+    fn hard_pin_without_a_capacity_card_keeps_its_exact_target() {
+        let now = Instant::now();
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let capacities =
+            WorkerCapacitySnapshot::new([(worker1, 1_000)]).with_live_workers([worker0, worker1]);
+        let mut state = state(ThunderAgentConfig::default());
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "pinned".into(),
+                    "pinned".into(),
+                    100,
+                    RequestProgress::new(100).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+
+        assert_eq!(
+            state.wait_status("pinned", &notify),
+            WaitStatus::Released(Some(worker0))
+        );
+        assert_eq!(state.normal_usage[&worker0], 200);
+        assert_eq!(state.normal_usage.get(&worker1), None);
+    }
+
+    #[test]
+    fn pinned_continuation_waits_when_its_current_worker_cannot_fit_growth() {
+        let now = Instant::now();
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let capacities = capacities(&[(0, 1_000)]);
+        let mut state = state(ThunderAgentConfig::default());
+        state
+            .register(
+                RequestRegistration::new(
+                    "first".into(),
+                    "session".into(),
+                    700,
+                    RequestProgress::new(700).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        state.on_event(
+            ClassifyEvent::Completed {
+                request_id: "first".into(),
+                worker: worker0,
+                context_tokens: Some(700),
+            },
+            &capacities,
+            now,
+        );
+
+        // The existing charge is already in normal_usage; it must be
+        // subtracted once when checking a continuation that still fits.
+        let fits = state
+            .register(
+                RequestRegistration::new(
+                    "fits".into(),
+                    "session".into(),
+                    800,
+                    RequestProgress::new(800).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            state.wait_status("fits", &fits),
+            WaitStatus::Released(Some(worker0))
+        );
+        assert_eq!(state.normal_usage[&worker0], 900);
+        assert!(state.cancel_request("fits", &capacities, now));
+        assert_eq!(state.normal_usage[&worker0], 800);
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "next".into(),
+                    "session".into(),
+                    1_100,
+                    RequestProgress::new(1_100).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("next", &notify), WaitStatus::Waiting);
+        assert!(state.normal_usage.get(&worker0).is_none());
+        assert!(state.cancel_request("next", &capacities, now));
+        assert_eq!(state.normal_usage[&worker0], 800);
+    }
+
+    #[test]
+    fn pinned_continuation_waits_when_changing_to_a_full_worker() {
+        let now = Instant::now();
+        let worker0 = WorkerWithDpRank::new(0, 0);
+        let worker1 = WorkerWithDpRank::new(1, 0);
+        let capacities = capacities(&[(0, 1_000), (1, 1_000)]);
+        let mut state = state(ThunderAgentConfig::default());
+        for (request_id, session_id, worker) in [
+            ("blocker", "blocker", worker0),
+            ("first", "session", worker1),
+        ] {
+            state
+                .register(
+                    RequestRegistration::new(
+                        request_id.into(),
+                        session_id.into(),
+                        700,
+                        RequestProgress::new(700).0,
+                        false,
+                    )
+                    .with_pinned_worker(Some(worker)),
+                    &capacities,
+                    now,
+                )
+                .unwrap();
+        }
+        state.on_event(
+            ClassifyEvent::Completed {
+                request_id: "first".into(),
+                worker: worker1,
+                context_tokens: Some(700),
+            },
+            &capacities,
+            now,
+        );
+
+        let notify = state
+            .register(
+                RequestRegistration::new(
+                    "next".into(),
+                    "session".into(),
+                    300,
+                    RequestProgress::new(300).0,
+                    false,
+                )
+                .with_pinned_worker(Some(worker0)),
+                &capacities,
+                now,
+            )
+            .unwrap();
+        assert_eq!(state.wait_status("next", &notify), WaitStatus::Waiting);
+        assert_eq!(state.normal_usage[&worker0], 800);
+        assert!(state.normal_usage.get(&worker1).is_none());
+        assert!(state.cancel_request("next", &capacities, now));
+        assert_eq!(state.normal_usage[&worker1], 800);
     }
 
     #[test]
