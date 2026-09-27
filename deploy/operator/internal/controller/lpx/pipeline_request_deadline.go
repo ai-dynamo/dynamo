@@ -26,6 +26,10 @@ const pipelineRequestDeadlineRetryInterval = 5 * time.Second
 // Creation time bounds the initial wait for the scheduler. On reused requests,
 // the scheduler-supplied start takes precedence for later scheduling cycles.
 func pipelineRequestDeadlines(requests map[string]*lpxv1alpha1.LPUPipelineRequest, secondsByModel map[string]*int64, next time.Time) ([]*lpxv1alpha1.LPUPipelineRequest, time.Time) {
+	if len(secondsByModel) == 0 {
+		return nil, next
+	}
+
 	var expired []*lpxv1alpha1.LPUPipelineRequest
 	now := time.Now()
 	for _, request := range requests {

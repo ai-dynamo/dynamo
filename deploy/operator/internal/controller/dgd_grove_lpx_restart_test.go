@@ -34,6 +34,18 @@ func TestLPXRestartRequiresCurrentInputRevision(t *testing.T) {
 					ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonReady,
 				}}},
 			}
+
+			t.Log("Keep the restart pending until aggregate readiness is reported")
+			require.NoError(t, kube.Status().Update(ctx, child))
+			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
+			meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionFalse,
+				ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonPending,
+			})
+			require.NoError(t, kube.Status().Update(ctx, child))
+			require.Equal(t, []string{"lpx"}, resolver.Resolve(ctx, dgd, []string{"lpx"}))
+
+			t.Log("Complete only when both aggregate and component readiness are current")
 			meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
 				Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue,
 				ObservedGeneration: child.Generation, Reason: v1alpha1.LPXReadyReasonReady,

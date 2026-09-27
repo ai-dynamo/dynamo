@@ -37,6 +37,7 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		starts           []*metav1.Time
 		created          *metav1.Time
 		seconds          *int64
+		noPolicies       bool
 		noStatus         bool
 		deleting         bool
 		lastPlanRevision int64
@@ -45,6 +46,8 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 		previousWake     time.Time
 	}{
 		{name: "disabled deadline", starts: []*metav1.Time{oldStart}},
+		{name: "omitted scheduling", starts: []*metav1.Time{oldStart}, noPolicies: true},
+		{name: "omitted scheduling preserves prior deadline", starts: []*metav1.Time{oldStart}, noPolicies: true, previousWake: now, wantWake: now},
 		{name: "no requests", seconds: ptr.To(int64(30))},
 		{name: "no scheduler receipt expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), noStatus: true, wantExpired: []string{"request-0"}},
 		{name: "no scheduling start expires from creation", starts: []*metav1.Time{nil}, seconds: ptr.To(int64(30)), wantExpired: []string{"request-0"}},
@@ -85,7 +88,11 @@ func TestPipelineRequestDeadlines(t *testing.T) {
 			}
 
 			t.Log("Return only expired requests and the earliest still-active deadline")
-			expired, wake := pipelineRequestDeadlines(requests, map[string]*int64{"default": tc.seconds}, tc.previousWake)
+			policies := map[string]*int64{"default": tc.seconds}
+			if tc.noPolicies {
+				policies = nil
+			}
+			expired, wake := pipelineRequestDeadlines(requests, policies, tc.previousWake)
 			var names []string
 			for _, request := range expired {
 				names = append(names, request.Name)

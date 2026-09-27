@@ -102,15 +102,15 @@ func (r *lpxRestartProgressResolver) observeRestart(
 		return nil
 	}
 
-	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
-	revision, err := dynamo.LPXInputRevision(source, source.Spec.Restart.ID)
-	if err != nil || child.Spec.InputRevision != revision {
+	// Skip input hashing until the child reports current readiness.
+	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
+	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != child.Generation {
 		return nil
 	}
 
-	// The current input must also have a Ready receipt for the child's current generation.
-	ready := meta.FindStatusCondition(child.Status.Conditions, v1alpha1.LPXReadyCondition)
-	if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration != child.Generation {
+	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
+	revision, err := dynamo.LPXInputRevision(source, source.Spec.Restart.ID)
+	if err != nil || child.Spec.InputRevision != revision {
 		return nil
 	}
 	return child
