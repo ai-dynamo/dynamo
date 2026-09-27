@@ -9,6 +9,6 @@ mod scorer;
 pub mod stats;
 mod stream;
 
-pub use coordinator::{run_relay_view, run_relay_view_epoch};
+pub use coordinator::{run_relay_view, run_relay_view_epoch, run_relay_view_with_stats};
 pub use scorer::RelayCkfOverlapStore;
 pub use stream::run_exact_aggregated_producer;

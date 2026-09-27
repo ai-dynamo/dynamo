@@ -9,12 +9,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::global_view::source::{PlaneLease, PoolObservationAssembler, SourcePlane};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 use super::scorer::RelayCkfOverlapStore;
+use super::stats::{StatsCatalog, run_stats_view};
 use super::stream::run_exact_aggregated_producer;
 use crate::global_view::{RelayPoolScope, project_catalog, project_readiness};
 use crate::kv_dc_relay::wan::grpc::protocol::{
@@ -33,10 +34,14 @@ struct Epoch {
     catalog_lease: PlaneLease,
     readiness_lease: PlaneLease,
     active_ckf: Option<ActiveCkf>,
+    stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
 }
 
 impl Epoch {
-    fn new(assembler: Arc<PoolObservationAssembler>) -> Result<Self> {
+    fn new(
+        assembler: Arc<PoolObservationAssembler>,
+        stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
+    ) -> Result<Self> {
         let catalog_lease = assembler.open(SourcePlane::Catalog)?;
         let readiness_lease = match assembler.open(SourcePlane::Readiness) {
             Ok(lease) => lease,
@@ -50,6 +55,7 @@ impl Epoch {
             catalog_lease,
             readiness_lease,
             active_ckf: None,
+            stats_catalog_tx,
         })
     }
 
@@ -63,6 +69,9 @@ impl Epoch {
 impl Drop for Epoch {
     fn drop(&mut self) {
         self.stop_ckf();
+        if let Some(tx) = &self.stats_catalog_tx {
+            tx.send_replace(None);
+        }
         self.assembler.disconnect(self.catalog_lease);
         self.assembler.disconnect(self.readiness_lease);
     }
@@ -71,7 +80,7 @@ impl Drop for Epoch {
 /// Keep the DGD view connected across stream failures. Each retry starts a
 /// fresh catalog/readiness epoch and can only score a newly validated CKF
 /// producer. The delay uses bounded equal jitter across router replicas.
-pub async fn run_relay_view(
+async fn run_relay_view_publishing(
     channel: Channel,
     scope: RelayPoolScope,
     model: String,
@@ -79,6 +88,7 @@ pub async fn run_relay_view(
     assembler: Arc<PoolObservationAssembler>,
     store: Arc<RelayCkfOverlapStore>,
     cancel: CancellationToken,
+    stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
 ) -> Result<()> {
     if model.trim().is_empty()
         || scope.runtime_namespace.trim().is_empty()
@@ -95,7 +105,7 @@ pub async fn run_relay_view(
     let mut backoff = Duration::from_millis(500);
     loop {
         let started = Instant::now();
-        let result = run_relay_view_epoch(
+        let result = run_relay_view_epoch_publishing(
             channel.clone(),
             scope.clone(),
             model.clone(),
@@ -103,6 +113,7 @@ pub async fn run_relay_view(
             Arc::clone(&assembler),
             Arc::clone(&store),
             cancel.child_token(),
+            stats_catalog_tx.clone(),
         )
         .await;
         if cancel.is_cancelled() {
@@ -126,11 +137,37 @@ pub async fn run_relay_view(
     }
 }
 
-/// Watch complete Relay snapshots until cancellation or any stream failure.
-/// A failed/closed CKF stream also ends this connection epoch so the caller can
-/// reconnect and fetch a new catalog before subscribing to another generation.
-/// All three observations are invalidated on exit, including task cancellation.
-pub async fn run_relay_view_epoch(
+/// Consume the catalog/CKF Relay and the separate PR #13187 stats listener
+/// against one DGD assembler. Deployment supplies the stats proxy channel.
+pub async fn run_relay_view_with_stats(
+    relay_channel: Channel,
+    stats_channel: Channel,
+    scope: RelayPoolScope,
+    model: String,
+    subscriber_id: String,
+    assembler: Arc<PoolObservationAssembler>,
+    store: Arc<RelayCkfOverlapStore>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    let (catalog_tx, catalog_rx) = watch::channel(None);
+    tokio::try_join!(
+        run_relay_view_publishing(
+            relay_channel,
+            scope,
+            model,
+            subscriber_id,
+            Arc::clone(&assembler),
+            store,
+            cancel.child_token(),
+            Some(catalog_tx),
+        ),
+        run_stats_view(stats_channel, catalog_rx, assembler, cancel.child_token()),
+    )?;
+    Ok(())
+}
+
+/// Existing Relay-only entry point for deployments without the stats proxy.
+pub async fn run_relay_view(
     channel: Channel,
     scope: RelayPoolScope,
     model: String,
@@ -139,10 +176,37 @@ pub async fn run_relay_view_epoch(
     store: Arc<RelayCkfOverlapStore>,
     cancel: CancellationToken,
 ) -> Result<()> {
+    run_relay_view_publishing(
+        channel,
+        scope,
+        model,
+        subscriber_id,
+        assembler,
+        store,
+        cancel,
+        None,
+    )
+    .await
+}
+
+/// Watch complete Relay snapshots until cancellation or any stream failure.
+/// A failed/closed CKF stream also ends this connection epoch so the caller can
+/// reconnect and fetch a new catalog before subscribing to another generation.
+/// All three observations are invalidated on exit, including task cancellation.
+async fn run_relay_view_epoch_publishing(
+    channel: Channel,
+    scope: RelayPoolScope,
+    model: String,
+    subscriber_id: String,
+    assembler: Arc<PoolObservationAssembler>,
+    store: Arc<RelayCkfOverlapStore>,
+    cancel: CancellationToken,
+    stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
+) -> Result<()> {
     if model.trim().is_empty() {
         bail!("Global View model must be non-empty");
     }
-    let mut epoch = Epoch::new(assembler)?;
+    let mut epoch = Epoch::new(assembler, stats_catalog_tx)?;
     let mut catalog_client = wire::KvEventRelayClient::new(channel.clone());
     let mut readiness_client = wire::KvEventRelayClient::new(channel.clone());
     let mut catalog_stream = catalog_client
@@ -180,8 +244,14 @@ pub async fn run_relay_view_epoch(
                 last_catalog_revision = Some(update.revision);
                 let projection = project_catalog(&update, &scope, now_unix_ms())?;
                 let selected = projection.sole_aggregated_overlap_producer(&model).cloned();
+                let stats_catalog = relay_key.and_then(|relay| {
+                    StatsCatalog::from_projection(&projection, &model, relay)
+                });
                 if !epoch.assembler.apply(epoch.catalog_lease, projection.observation.clone())? {
                     bail!("Relay catalog observation was superseded");
+                }
+                if let Some(tx) = &epoch.stats_catalog_tx {
+                    tx.send_replace(stats_catalog);
                 }
                 if epoch.active_ckf.as_ref().map(|active| &active.descriptor) == selected.as_ref() {
                     continue;
@@ -239,6 +309,28 @@ pub async fn run_relay_view_epoch(
             }
         }
     }
+}
+
+pub async fn run_relay_view_epoch(
+    channel: Channel,
+    scope: RelayPoolScope,
+    model: String,
+    subscriber_id: String,
+    assembler: Arc<PoolObservationAssembler>,
+    store: Arc<RelayCkfOverlapStore>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    run_relay_view_epoch_publishing(
+        channel,
+        scope,
+        model,
+        subscriber_id,
+        assembler,
+        store,
+        cancel,
+        None,
+    )
+    .await
 }
 
 fn check_relay(expected: &mut Option<(u64, u64)>, relay: Option<&RelayIdentity>) -> Result<()> {
