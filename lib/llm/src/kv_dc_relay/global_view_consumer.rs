@@ -6,6 +6,7 @@
 
 mod coordinator;
 mod scorer;
+pub mod stats;
 mod stream;
 
 pub use coordinator::{run_relay_view, run_relay_view_epoch};
