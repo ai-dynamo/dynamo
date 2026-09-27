@@ -7,6 +7,8 @@
 //! across process and relay restarts, while relay and KV producer generations
 //! are tracked separately by the source adapter.
 
+#[cfg(feature = "global-view-diagnostics")]
+pub mod http;
 pub mod source;
 pub mod state;
 
