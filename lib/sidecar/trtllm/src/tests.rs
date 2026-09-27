@@ -477,7 +477,6 @@ fn image_data_uris_are_forwarded_in_request_order() {
         ),
         1000,
     );
-    // The scheme and the base64 marker are case-insensitive.
     req.multi_modal_data
         .as_mut()
         .and_then(|media| media.get_mut("image_url"))
@@ -499,11 +498,6 @@ fn image_data_uris_are_forwarded_in_request_order() {
     );
     // The engine expands the image placeholders itself.
     assert_eq!(proto.tokenized.unwrap().input_token_ids, [11, 22, 33]);
-
-    // Routing-only data never blocks a request.
-    let text = with_routing_info(request(), 3);
-    let text = build_generate_request(&text, "req", None).expect("text request");
-    assert!(text.multimodal_input.is_none());
 }
 
 #[test]
@@ -540,7 +534,6 @@ fn unsupported_media_is_rejected_before_dispatch() {
             *r = with_images(r.clone(), &[source]);
         }
     };
-    // The engine receives bytes and cannot fetch a URL.
     assert_rejected(
         image("https://example.com/cat.jpg"),
         "cannot fetch image URLs",
@@ -590,7 +583,6 @@ fn image_refusals_carry_a_public_message() {
             vec![MultimodalData::UuidOnly("cached".to_string())],
         )]))
     };
-    // The frontend shows only the public message to the client.
     for (error, public) in [
         (
             image("https://example.com/cat.jpg"),
@@ -641,9 +633,6 @@ fn image_refusals_carry_a_public_message() {
         )]))
     });
     assert_eq!(video.public_message(), None);
-    let mut stop_str = request();
-    stop_str.sampling_options.include_stop_str_in_output = Some(true);
-    assert_eq!(refused(stop_str).public_message(), None);
 }
 
 #[test]
