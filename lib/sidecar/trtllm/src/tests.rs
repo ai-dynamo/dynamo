@@ -541,7 +541,10 @@ fn unsupported_media_is_rejected_before_dispatch() {
     assert_rejected(image("data:image/png,rawbytes"), "must have the form");
     assert_rejected(image("data:image/png;base64"), "must have the form");
     assert_rejected(image("data:image/png;base64,@@@"), "not valid base64");
-    assert_rejected(image("data:image/png;base64,aW1hZ2UtYQ%3D%3"), "not valid base64");
+    assert_rejected(
+        image("data:image/png;base64,aW1hZ2UtYQ%3D%3"),
+        "not valid base64",
+    );
     assert_rejected(image("data:image/png;base64,"), "no image bytes");
     assert_rejected(
         |r| {
