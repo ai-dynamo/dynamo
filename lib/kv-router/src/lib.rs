@@ -11,6 +11,7 @@ pub(crate) mod cleanup;
 pub mod conditional_disagg;
 mod lookup_update;
 
+pub mod global_view;
 pub mod identity;
 pub mod indexer;
 pub mod kv_hints;
