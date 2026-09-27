@@ -5,7 +5,7 @@
 //! The caller owns reconnect/backoff and the deployed Global Router lifecycle.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use dynamo_kv_router::global_view::source::{PlaneLease, PoolObservationAssembler, SourcePlane};
@@ -65,6 +65,64 @@ impl Drop for Epoch {
         self.stop_ckf();
         self.assembler.disconnect(self.catalog_lease);
         self.assembler.disconnect(self.readiness_lease);
+    }
+}
+
+/// Keep the DGD view connected across stream failures. Each retry starts a
+/// fresh catalog/readiness epoch and can only score a newly validated CKF
+/// producer. The delay uses bounded equal jitter across router replicas.
+pub async fn run_relay_view(
+    channel: Channel,
+    scope: RelayPoolScope,
+    model: String,
+    subscriber_id: String,
+    assembler: Arc<PoolObservationAssembler>,
+    store: Arc<RelayCkfOverlapStore>,
+    cancel: CancellationToken,
+) -> Result<()> {
+    if model.trim().is_empty()
+        || scope.runtime_namespace.trim().is_empty()
+        || scope.frontend_endpoint.trim().is_empty()
+    {
+        bail!("Global View model and relay scope must be non-empty");
+    }
+    if subscriber_id.is_empty()
+        || subscriber_id.len() > 118
+        || subscriber_id.chars().any(char::is_control)
+    {
+        bail!("Global View subscriber ID is invalid or too long");
+    }
+    let mut backoff = Duration::from_millis(500);
+    loop {
+        let started = Instant::now();
+        let result = run_relay_view_epoch(
+            channel.clone(),
+            scope.clone(),
+            model.clone(),
+            subscriber_id.clone(),
+            Arc::clone(&assembler),
+            Arc::clone(&store),
+            cancel.child_token(),
+        )
+        .await;
+        if cancel.is_cancelled() {
+            return Ok(());
+        }
+        match result {
+            Ok(()) => tracing::warn!("Relay Global View epoch ended without cancellation"),
+            Err(error) => tracing::warn!(%error, "Relay Global View epoch failed; reconnecting"),
+        }
+        if started.elapsed() >= Duration::from_secs(30) {
+            backoff = Duration::from_millis(500);
+        }
+        let half = backoff / 2;
+        let jitter_ms = rand::random::<u64>() % (half.as_millis() as u64 + 1);
+        let delay = half + Duration::from_millis(jitter_ms);
+        tokio::select! {
+            _ = cancel.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(delay) => {}
+        }
+        backoff = (backoff * 2).min(Duration::from_secs(30));
     }
 }
 

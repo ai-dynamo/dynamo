@@ -20,6 +20,7 @@ use crate::kv_dc_relay::wan::grpc::protocol::{
 };
 
 /// Configured local frontend is distinct from a relay's worker KV endpoint.
+#[derive(Clone)]
 pub struct RelayPoolScope {
     pub runtime_namespace: String,
     pub frontend_endpoint: String,
