@@ -88,6 +88,12 @@ func (p *groveProgram) Reconcile(
 			fmt.Errorf("selected workload provider %q is unavailable because Grove is disabled", workloadProviderGrove),
 		)
 		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
+
+		// Grove is unavailable here, so no score is observable. Clear one from an
+		// earlier reconcile instead of reporting it as still current.
+		programResult.Status.Placement = &nvidiacomv1beta1.PlacementStatus{
+			State: nvidiacomv1beta1.PlacementScoreStateUnknown,
+		}
 		return programResult, reconcile.TerminalError(err)
 	}
 

@@ -163,12 +163,6 @@ func TestPodGangEventPredicates(t *testing.T) {
 			want:          true,
 		},
 		{
-			name:          "an unchanged placement score is filtered",
-			previousScore: ptr.To(0.4),
-			nextScore:     ptr.To(0.4),
-			want:          false,
-		},
-		{
 			name:          "a metadata-only change is filtered",
 			previousScore: ptr.To(0.4),
 			nextScore:     ptr.To(0.4),
@@ -208,12 +202,14 @@ func TestPodGangEventPredicates(t *testing.T) {
 		})
 	}
 
-	t.Log("Given PodGang create, delete, and generic events")
+	t.Log("Given PodGang create, generic, and delete events")
 	predicates := podGangEventPredicates()
 
-	t.Log("Then none of them requeue the DGD on their own")
+	t.Log("Then a deletion requeues the DGD, because nothing follows it")
+	assert.True(t, predicates.Delete(event.DeleteEvent{Object: base()}))
+
+	t.Log("And create and generic events do not")
 	assert.False(t, predicates.Create(event.CreateEvent{Object: base()}))
-	assert.False(t, predicates.Delete(event.DeleteEvent{Object: base()}))
 	assert.False(t, predicates.Generic(event.GenericEvent{Object: base()}))
 }
 

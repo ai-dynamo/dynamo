@@ -110,11 +110,13 @@ func pcsgEventPredicates() predicate.Funcs {
 }
 
 // podGangEventPredicates admits only the PodGang status field the DGD status
-// consumes, so unrelated PodGang churn does not requeue the graph.
+// consumes, so unrelated PodGang churn does not requeue the graph. Deletions are
+// admitted because a removed PodGang is the last event for that gang: if it
+// contributed the reported score, nothing else would recompute the aggregate.
 func podGangEventPredicates() predicate.Funcs {
 	return predicate.Funcs{
 		CreateFunc: func(event.CreateEvent) bool { return false },
-		DeleteFunc: func(event.DeleteEvent) bool { return false },
+		DeleteFunc: func(event.DeleteEvent) bool { return true },
 		UpdateFunc: func(updateEvent event.UpdateEvent) bool {
 			oldPodGang, oldOK := updateEvent.ObjectOld.(*schedulergrovev1alpha1.PodGang)
 			newPodGang, newOK := updateEvent.ObjectNew.(*schedulergrovev1alpha1.PodGang)

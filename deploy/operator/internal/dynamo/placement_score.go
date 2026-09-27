@@ -53,7 +53,7 @@ func AggregatePlacementScore(
 	var scored int
 	var lowest float64
 
-	// Reduce the reported scores to the worst placement observed so far.
+	// Fold the usable reports together, counting how many were usable.
 	for i := range gangs {
 		score := gangs[i].Status.PlacementScore
 		if score == nil || *score < placementScoreLowerBound || *score > placementScoreUpperBound {

@@ -98,9 +98,15 @@ func TestDGDWorkloadProgramSelection(t *testing.T) {
 }
 
 func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
-	t.Log("Create a DGD request and an unavailable Grove program")
+	t.Log("Create a DGD carrying a score from an earlier Grove reconcile, and an unavailable Grove program")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Generation: 3},
+		Status: nvidiacomv1beta1.DynamoGraphDeploymentStatus{
+			Placement: &nvidiacomv1beta1.PlacementStatus{
+				Score: ptr.To(0.9),
+				State: nvidiacomv1beta1.PlacementScoreStateReported,
+			},
+		},
 	}
 	program := &groveProgram{gate: features.Gates{}}
 
@@ -115,6 +121,11 @@ func TestSelectedGroveProgramDoesNotFallbackWhenUnavailable(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 	assert.Equal(t, string(reasonSelectedWorkloadProviderUnavailable), ready.Reason)
 	assert.Contains(t, ready.Message, "Grove is disabled")
+
+	t.Log("Verify the old score is cleared, because no score is observable while Grove is unavailable")
+	require.NotNil(t, result.Status.Placement)
+	assert.Equal(t, nvidiacomv1beta1.PlacementScoreStateUnknown, result.Status.Placement.State)
+	assert.Nil(t, result.Status.Placement.Score)
 }
 
 func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
