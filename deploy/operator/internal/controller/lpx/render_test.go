@@ -472,7 +472,7 @@ func TestLPXReplicaChangesUpdateCyborgTemplate(t *testing.T) {
 	t.Log("Render omitted hybrid capacity for two I/O endpoints with two clients each")
 	root := t.TempDir()
 	const buildID = "split-io"
-	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, buildID, testV2GraphManifestFixture{
+	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
 		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
 		partitionCount: 1, numChips: 8, devicesPerNode: 8,
 		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
@@ -589,7 +589,7 @@ func TestRuntimeTemplateChangesPreservePartitionConfig(t *testing.T) {
 	}
 	const buildID = "single-v2-manifest-defaults/build_manifest_defaults"
 	registryRoot := t.TempDir()
-	writeTestGraphBuild(t, registryRoot, buildID, testGbuildManifestCapnp(t, buildID))
+	writeTestGraphBuild(t, registryRoot, buildID, testGbuildManifestCapnp(t))
 	registry, err := lpx.NewModelRegistry(registryRoot, nil)
 	require.NoError(t, err)
 
@@ -695,7 +695,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 		},
 	}
 	for buildID, fixture := range v2Builds {
-		writeTestGraphBuild(t, registryRoot, buildID, testV2GraphManifestCapnp(t, buildID, fixture))
+		writeTestGraphBuild(t, registryRoot, buildID, testV2GraphManifestCapnp(t, fixture))
 	}
 
 	v3Builds := map[string]testV3GraphManifestFixture{
@@ -708,7 +708,7 @@ func newTestDataModelRegistry(t *testing.T, registryRoot string) lpx.ModelRegist
 		"node-local-v3-hx-sd-target": {},
 	}
 	for buildID, fixture := range v3Builds {
-		writeTestGraphBuild(t, registryRoot, buildID, testV3GraphManifestCapnp(t, buildID, fixture))
+		writeTestGraphBuild(t, registryRoot, buildID, testV3GraphManifestCapnp(t, fixture))
 	}
 
 	registry, err := lpx.NewModelRegistry(registryRoot, nil)
@@ -764,17 +764,7 @@ func newTestGraphProgram(
 	return deployment, program
 }
 
-func populateTestGraphBuild(t *testing.T, manifest manifestcapnpv2.Manifest, wireBuildID string) {
-	t.Helper()
-
-	t.Log("Populate the compiler-owned build identity used only as opaque provenance")
-	build, err := capnp.NewStruct(manifest.Segment(), capnp.ObjectSize{DataSize: 8, PointerCount: 12})
-	require.NoError(t, err)
-	require.NoError(t, build.SetText(11, wireBuildID))
-	require.NoError(t, manifest.SetReserved3(build.ToPtr()))
-}
-
-func testGbuildManifestCapnp(t *testing.T, registryDir string) []byte {
+func testGbuildManifestCapnp(t *testing.T) []byte {
 	t.Helper()
 
 	const topology = "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106"
@@ -783,7 +773,6 @@ func testGbuildManifestCapnp(t *testing.T, registryDir string) []byte {
 	manifest, err := manifestcapnpv2.NewRootManifest(seg)
 	require.NoError(t, err)
 	manifest.SetContractRevision(manifestcapnpv2.CurrentContractRevision)
-	populateTestGraphBuild(t, manifest, filepath.Base(registryDir))
 
 	model, err := manifest.NewModel()
 	require.NoError(t, err)
@@ -841,11 +830,10 @@ func testGbuildManifestCapnp(t *testing.T, registryDir string) []byte {
 	return data
 }
 
-func testV2GraphManifestCapnp(t *testing.T, buildID string, fixture testV2GraphManifestFixture) []byte {
+func testV2GraphManifestCapnp(t *testing.T, fixture testV2GraphManifestFixture) []byte {
 	t.Helper()
 
 	message, manifest := newTestGraphManifest(t)
-	populateTestGraphBuild(t, manifest, filepath.Base(buildID))
 
 	deployment, program := newTestGraphProgram(t, manifest, fixture.compilationMode, uint32(fixture.partitionCount)*fixture.numChips/fixture.devicesPerNode, 8192)
 
@@ -924,11 +912,10 @@ type testV2GraphManifestFixture struct {
 	ioFanoutFactor        uint32
 }
 
-func testV3GraphManifestCapnp(t *testing.T, buildID string, fixture testV3GraphManifestFixture) []byte {
+func testV3GraphManifestCapnp(t *testing.T, fixture testV3GraphManifestFixture) []byte {
 	t.Helper()
 
 	message, manifest := newTestGraphManifest(t)
-	populateTestGraphBuild(t, manifest, buildID)
 
 	_, program := newTestGraphProgram(t, manifest, fixture.compilationMode, 2, 8192)
 	program.SetNumKvCaches(1)
@@ -1023,9 +1010,6 @@ func writeLPXTestBuild(
 
 	t.Log("Encode the V2 manifest header and the tokenizer consumed by rendered runtimes")
 	message, manifest := newTestGraphManifest(t)
-
-	t.Log("Retain the opaque compiler provenance without the removed V1 publication contract")
-	populateTestGraphBuild(t, manifest, buildID)
 
 	t.Log("Describe the same one-batch runtime with explicit V2 runtime I/O and prop-sync evidence")
 	deployment, program := newTestGraphProgram(t, manifest, compilationMode, uint32(len(partitionIDs)*2), 8192)

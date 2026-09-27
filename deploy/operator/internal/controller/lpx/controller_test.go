@@ -237,7 +237,7 @@ func TestLPXExternalCyborgCapacityValidation(t *testing.T) {
 	t.Log("Use two explicitly managed backbones with externally managed workers in groups of four")
 	root := t.TempDir()
 	const buildID = "split-io"
-	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, buildID, testV2GraphManifestFixture{
+	writeTestGraphBuild(t, root, buildID, testV2GraphManifestCapnp(t, testV2GraphManifestFixture{
 		topology:       "URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106",
 		partitionCount: 1, numChips: 8, devicesPerNode: 8,
 		compilationMode:   manifestcapnpv2.CompilationMode_lpx,
