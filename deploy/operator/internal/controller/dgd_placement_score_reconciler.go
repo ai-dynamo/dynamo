@@ -25,6 +25,7 @@ import (
 	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	schedulergrovev1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -80,9 +81,12 @@ func (r *dgdPlacementScoreReconciler) observe(
 		return nil, nvidiacomv1beta1.PlacementScoreStateUnknown
 	}
 
-	// Scope the selection to the current generation so a PodGang draining from a
-	// previous spec cannot lower the reported score.
+	// Match Grove's own PodGang selector for a PodCliqueSet, so the observation
+	// covers exactly the PodGangs Grove considers part of this graph, then scope
+	// it to the current generation so a PodGang draining from a previous spec
+	// cannot lower the reported score.
 	selectorLabels := map[string]string{
+		grovecommon.LabelManagedByKey: grovecommon.LabelManagedByValue,
 		grovecommon.LabelPartOfKey:    pcsName,
 		grovecommon.LabelComponentKey: grovecommon.LabelComponentNamePodGang,
 	}
@@ -105,5 +109,23 @@ func (r *dgdPlacementScoreReconciler) observe(
 		return nil, nvidiacomv1beta1.PlacementScoreStateUnknown
 	}
 
-	return dynamo.AggregatePlacementScore(gangs.Items)
+	return dynamo.AggregatePlacementScore(ownedPodGangs(gangs.Items, pcs))
+}
+
+// ownedPodGangs drops PodGangs that a previous PodCliqueSet of the same name
+// still owns. A recreated PodCliqueSet reuses its name, so the labels alone
+// cannot distinguish its leftover children from the live graph, and a recreated
+// graph with an unchanged spec produces the same generation hash. Grove applies
+// the same ownership filter when it resolves the PodGangs of a PodCliqueSet.
+func ownedPodGangs(
+	gangs []schedulergrovev1alpha1.PodGang,
+	pcs *grovev1alpha1.PodCliqueSet,
+) []schedulergrovev1alpha1.PodGang {
+	owned := make([]schedulergrovev1alpha1.PodGang, 0, len(gangs))
+	for i := range gangs {
+		if metav1.IsControlledBy(&gangs[i], pcs) {
+			owned = append(owned, gangs[i])
+		}
+	}
+	return owned
 }

@@ -27,6 +27,7 @@ import (
 	schedulergrovev1alpha1 "github.com/ai-dynamo/grove/scheduler/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -44,6 +45,16 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		generationTwo = "gen-2"
 	)
 
+	// livePCS is the PodCliqueSet the DGD currently owns. previousPCS is an earlier
+	// incarnation with the same name and, deliberately, the same generation hash:
+	// a recreated PodCliqueSet reuses its name and an unchanged spec produces an
+	// unchanged hash, so only the UID distinguishes their children.
+	livePCS := placementPCSSpec{name: dgdName, uid: "live-pcs-uid", generationHash: ptr.To(generationOne)}
+	nextPCS := placementPCSSpec{name: dgdName, uid: "live-pcs-uid", generationHash: ptr.To(generationTwo)}
+	unpublishedPCS := placementPCSSpec{name: dgdName, uid: "live-pcs-uid"}
+	previousPCS := placementPCSSpec{name: dgdName, uid: "previous-pcs-uid", generationHash: ptr.To(generationOne)}
+	foreignPCS := placementPCSSpec{name: otherDGD, uid: "foreign-pcs-uid", generationHash: ptr.To(generationOne)}
+
 	testCases := []struct {
 		name      string
 		objects   []client.Object
@@ -57,14 +68,14 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		},
 		{
 			name:      "a PodCliqueSet with no PodGangs yet is indeterminate",
-			objects:   []client.Object{placementPCS(dgdName, namespace, ptr.To(generationOne))},
+			objects:   []client.Object{livePCS.object(namespace)},
 			wantState: nvidiacomv1beta1.PlacementScoreStateUnknown,
 		},
 		{
 			name: "a scored PodGang of the current generation is reported",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationOne)),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationOne, ptr.To(0.42)),
+				livePCS.object(namespace),
+				livePCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.42)),
 			},
 			wantScore: ptr.To(0.42),
 			wantState: nvidiacomv1beta1.PlacementScoreStateReported,
@@ -72,9 +83,9 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		{
 			name: "the worst placement wins across the current generation",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationOne)),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationOne, ptr.To(0.9)),
-				placementPG(dgdName+"-0-scaleout", namespace, dgdName, generationOne, ptr.To(0.2)),
+				livePCS.object(namespace),
+				livePCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.9)),
+				livePCS.podGang(dgdName+"-0-scaleout", namespace, generationOne, ptr.To(0.2)),
 			},
 			wantScore: ptr.To(0.2),
 			wantState: nvidiacomv1beta1.PlacementScoreStateReported,
@@ -82,9 +93,9 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		{
 			name: "an unscored PodGang of the current generation makes the observation partial",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationOne)),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationOne, ptr.To(0.75)),
-				placementPG(dgdName+"-0-scaleout", namespace, dgdName, generationOne, nil),
+				livePCS.object(namespace),
+				livePCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.75)),
+				livePCS.podGang(dgdName+"-0-scaleout", namespace, generationOne, nil),
 			},
 			wantScore: ptr.To(0.75),
 			wantState: nvidiacomv1beta1.PlacementScoreStatePartial,
@@ -92,8 +103,8 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		{
 			name: "a PodGang from a previous generation is excluded",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationTwo)),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationOne, ptr.To(0.1)),
+				nextPCS.object(namespace),
+				nextPCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.1)),
 			},
 			wantState: nvidiacomv1beta1.PlacementScoreStateUnknown,
 		},
@@ -102,9 +113,9 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 			// worse than the current one must not drag the reported score down.
 			name: "a stale scored PodGang does not lower the current generation's score",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationTwo)),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationTwo, ptr.To(0.5)),
-				placementPG(dgdName+"-0-scaleout", namespace, dgdName, generationOne, ptr.To(0.1)),
+				nextPCS.object(namespace),
+				nextPCS.podGang(dgdName+"-0-anchor", namespace, generationTwo, ptr.To(0.5)),
+				nextPCS.podGang(dgdName+"-0-scaleout", namespace, generationOne, ptr.To(0.1)),
 			},
 			wantScore: ptr.To(0.5),
 			wantState: nvidiacomv1beta1.PlacementScoreStateReported,
@@ -112,16 +123,36 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 		{
 			name: "a PodGang of a different PodCliqueSet is excluded",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, ptr.To(generationOne)),
-				placementPG(otherDGD+"-0-anchor", namespace, otherDGD, generationOne, ptr.To(0.3)),
+				livePCS.object(namespace),
+				foreignPCS.podGang(otherDGD+"-0-anchor", namespace, generationOne, ptr.To(0.3)),
+			},
+			wantState: nvidiacomv1beta1.PlacementScoreStateUnknown,
+		},
+		{
+			// Labels and a matching generation hash cannot distinguish a leftover
+			// child of a recreated PodCliqueSet, so the owner UID must.
+			name: "a PodGang owned by a previous PodCliqueSet of the same name is excluded",
+			objects: []client.Object{
+				livePCS.object(namespace),
+				livePCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.6)),
+				previousPCS.podGang(dgdName+"-0-scaleout", namespace, generationOne, ptr.To(0.05)),
+			},
+			wantScore: ptr.To(0.6),
+			wantState: nvidiacomv1beta1.PlacementScoreStateReported,
+		},
+		{
+			name: "a PodGang without a controller owner is excluded",
+			objects: []client.Object{
+				livePCS.object(namespace),
+				unownedPodGang(livePCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.8))),
 			},
 			wantState: nvidiacomv1beta1.PlacementScoreStateUnknown,
 		},
 		{
 			name: "a PodGang is scored before the PodCliqueSet publishes a generation",
 			objects: []client.Object{
-				placementPCS(dgdName, namespace, nil),
-				placementPG(dgdName+"-0-anchor", namespace, dgdName, generationOne, ptr.To(0.65)),
+				unpublishedPCS.object(namespace),
+				unpublishedPCS.podGang(dgdName+"-0-anchor", namespace, generationOne, ptr.To(0.65)),
 			},
 			wantScore: ptr.To(0.65),
 			wantState: nvidiacomv1beta1.PlacementScoreStateReported,
@@ -142,7 +173,7 @@ func TestDGDPlacementScoreReconcilerObserve(t *testing.T) {
 			result := &workloadProgramResult{}
 			reconciler.Reconcile(context.Background(), dgd, result)
 
-			t.Log("Then status.placement reports only the current generation's observation")
+			t.Log("Then status.placement reports only the current graph's observation")
 			require.NotNil(t, result.Status.Placement, "placement status must always be set")
 			require.Equal(t, tc.wantState, result.Status.Placement.State, "unexpected placement state")
 
@@ -189,30 +220,33 @@ func TestDGDPlacementScoreReconcilerClearsStaleScore(t *testing.T) {
 	require.Nil(t, result.Status.Placement.Score, "the previous score must not linger")
 }
 
-// placementDGD builds the DGD under observation. The name is short enough that
-// the derived PodCliqueSet name equals the DGD name.
-func placementDGD(name, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
-	return &nvidiacomv1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-	}
+// placementPCSSpec describes one PodCliqueSet incarnation: the name Grove labels
+// its children with, the UID that distinguishes a recreated PodCliqueSet of the
+// same name, and the generation hash it has published. It is a value, so a test
+// can describe several incarnations without sharing mutable state.
+type placementPCSSpec struct {
+	name           string
+	uid            types.UID
+	generationHash *string
 }
 
-// placementPCS builds the PodCliqueSet Grove created for the DGD. A nil
-// generation hash models a PodCliqueSet that has not published one yet.
-func placementPCS(name, namespace string, generationHash *string) *grovev1alpha1.PodCliqueSet {
+// object builds the PodCliqueSet. The name is short enough that the derived
+// PodCliqueSet name equals the DGD name.
+func (p placementPCSSpec) object(namespace string) *grovev1alpha1.PodCliqueSet {
 	return &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: p.name, Namespace: namespace, UID: p.uid},
 		Status: grovev1alpha1.PodCliqueSetStatus{
-			CurrentGenerationHash: generationHash,
+			CurrentGenerationHash: p.generationHash,
 		},
 	}
 }
 
-// placementPG builds a scheduler PodGang as Grove labels it: owned by the
-// PodCliqueSet through the part-of label, tagged as a PodGang component, and
-// stamped with the PodCliqueSet generation it was created for.
-func placementPG(
-	name, namespace, pcsName, generationHash string,
+// podGang builds a scheduler PodGang that this PodCliqueSet incarnation owns, as
+// Grove creates it: managed by the Grove operator, labelled with the PodCliqueSet
+// name and the PodGang component, stamped with the generation it was created for,
+// and controlled by the PodCliqueSet.
+func (p placementPCSSpec) podGang(
+	name, namespace, generationHash string,
 	score *float64,
 ) *schedulergrovev1alpha1.PodGang {
 	return &schedulergrovev1alpha1.PodGang{
@@ -220,13 +254,35 @@ func placementPG(
 			Name:      name,
 			Namespace: namespace,
 			Labels: map[string]string{
-				grovecommon.LabelPartOfKey:                  pcsName,
+				grovecommon.LabelManagedByKey:               grovecommon.LabelManagedByValue,
+				grovecommon.LabelPartOfKey:                  p.name,
 				grovecommon.LabelComponentKey:               grovecommon.LabelComponentNamePodGang,
 				grovecommon.LabelPodCliqueSetGenerationHash: generationHash,
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "PodCliqueSet",
+				Name:       p.name,
+				UID:        p.uid,
+				Controller: ptr.To(true),
+			}},
 		},
 		Status: schedulergrovev1alpha1.PodGangStatus{
 			PlacementScore: score,
 		},
+	}
+}
+
+// unownedPodGang strips the controller owner reference, modelling a PodGang that
+// carries the right labels and generation without belonging to any PodCliqueSet.
+func unownedPodGang(podGang *schedulergrovev1alpha1.PodGang) *schedulergrovev1alpha1.PodGang {
+	podGang.OwnerReferences = nil
+	return podGang
+}
+
+// placementDGD builds the DGD under observation.
+func placementDGD(name, namespace string) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 	}
 }

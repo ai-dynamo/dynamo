@@ -54,13 +54,13 @@ func TestGroveDGDPlacementScoreProjection(t *testing.T) {
 	require.NoError(t, env.Client().Create(ctx, dgd))
 
 	pcsName := dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components)
-	waitForPodCliqueSet(t, ctx, env, dgd, pcsName)
+	pcs := waitForPodCliqueSet(t, ctx, env, dgd, pcsName)
 
 	t.Log("With no PodGang scored yet the DGD reports an indeterminate placement")
 	waitForPlacement(t, ctx, env, dgd, nvidiacomv1beta1.PlacementScoreStateUnknown, nil)
 
 	t.Log("Create the scheduler's PodGang for the current PodCliqueSet")
-	gang := placementScoreTestPodGang(env.Namespace(), pcsName)
+	gang := placementScoreTestPodGang(env.Namespace(), pcs)
 	require.NoError(t, env.Client().Create(ctx, gang))
 
 	t.Log("Publish a placement score on the PodGang")
@@ -78,23 +78,32 @@ func TestGroveDGDPlacementScoreProjection(t *testing.T) {
 }
 
 // waitForPodCliqueSet waits until the operator has rendered the PodCliqueSet for
-// a DGD, which is what ties the DGD to the scheduler's PodGangs.
+// a DGD, which is what ties the DGD to the scheduler's PodGangs, and returns it
+// so a test can build a PodGang that the PodCliqueSet owns.
 func waitForPodCliqueSet(
 	t *testing.T,
 	ctx context.Context,
 	env *operatorenv.TestEnv,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcsName string,
-) {
+) *grovev1alpha1.PodCliqueSet {
 	t.Helper()
+	pcs := &grovev1alpha1.PodCliqueSet{}
 	dynamotesting.Eventually(t, func() (bool, string) {
-		pcs := &grovev1alpha1.PodCliqueSet{}
+		current := &grovev1alpha1.PodCliqueSet{}
 		key := types.NamespacedName{Name: pcsName, Namespace: dgd.Namespace}
-		if err := env.Client().Get(ctx, key, pcs); err != nil {
+		if err := env.Client().Get(ctx, key, current); err != nil {
 			return false, fmt.Sprintf("get PodCliqueSet %s: %v", pcsName, err)
 		}
+		// The PodGang selection matches on the owner UID, which is only assigned
+		// once the API server has created the object.
+		if current.UID == "" {
+			return false, "PodCliqueSet has no UID yet"
+		}
+		pcs = current
 		return true, "PodCliqueSet exists"
 	}, placementScoreTestTimeout, groveSuffixTestInterval, "operator did not render the Grove PodCliqueSet")
+	return pcs
 }
 
 // waitForPlacement waits until the DGD status reports the expected placement.
@@ -138,17 +147,25 @@ func waitForPlacement(
 	}, placementScoreTestTimeout, groveSuffixTestInterval, "DGD did not report the expected placement")
 }
 
-// placementScoreTestPodGang builds a scheduler PodGang as Grove labels it for one
+// placementScoreTestPodGang builds a scheduler PodGang as Grove creates it for a
 // PodCliqueSet, with no score published yet.
-func placementScoreTestPodGang(namespace, pcsName string) *schedulergrovev1alpha1.PodGang {
+func placementScoreTestPodGang(namespace string, pcs *grovev1alpha1.PodCliqueSet) *schedulergrovev1alpha1.PodGang {
 	return &schedulergrovev1alpha1.PodGang{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      pcsName + "-anchor",
+			Name:      pcs.Name + "-anchor",
 			Namespace: namespace,
 			Labels: map[string]string{
-				grovecommon.LabelPartOfKey:    pcsName,
+				grovecommon.LabelManagedByKey: grovecommon.LabelManagedByValue,
+				grovecommon.LabelPartOfKey:    pcs.Name,
 				grovecommon.LabelComponentKey: grovecommon.LabelComponentNamePodGang,
 			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: grovev1alpha1.SchemeGroupVersion.String(),
+				Kind:       "PodCliqueSet",
+				Name:       pcs.Name,
+				UID:        pcs.UID,
+				Controller: ptr.To(true),
+			}},
 		},
 	}
 }
