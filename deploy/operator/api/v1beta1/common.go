@@ -694,10 +694,10 @@ const (
 // status object so future placement signals (e.g. scheduler contract version,
 // last-report timestamp, per-unit reports) can be added without a schema break.
 //
-// The score source is an open question in DEP #10064 (Grove mirror, typed Grove
-// scheduler API, or unstructured provider). Until a source is selected and
-// implemented, the DGD controller does not write this field; the schema and
-// conversion are landed here so downstream consumers can rely on the shape.
+// The DGD controller writes this field on every reconcile: the Grove pathway
+// reports the score the scheduler publishes on the PodGangs of the current
+// PodCliqueSet generation, and the component pathway reports Unsupported because
+// it has no scheduler placement surface.
 type PlacementStatus struct {
 	// score is the DGD-level scheduler placement score aggregated from
 	// relevant scheduler placement units. Normalized to [0.0, 1.0] where higher
