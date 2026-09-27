@@ -5,5 +5,7 @@
 //! Catalog ownership and reconnect policy remain with the caller.
 
 mod scorer;
+mod stream;
 
 pub use scorer::RelayCkfOverlapStore;
+pub use stream::run_exact_aggregated_producer;
