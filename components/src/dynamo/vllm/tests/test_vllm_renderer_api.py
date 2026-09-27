@@ -16,6 +16,7 @@ import importlib
 import inspect
 
 import pytest
+from packaging.version import Version
 
 # Import vllm first to ensure it's properly loaded before accessing submodules.
 _vllm = importlib.import_module("vllm")
