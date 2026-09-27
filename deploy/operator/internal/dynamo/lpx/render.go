@@ -89,7 +89,7 @@ func RenderNodeLocal(
 	if err != nil {
 		return nil, err
 	}
-	configMap, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
+	configMap, configHash, err := renderRuntimeConfigMap(plan.ResourcePrefix+"-lpu", resolvedPartitionData(projections))
 	if err != nil {
 		return nil, err
 	}
@@ -98,11 +98,12 @@ func RenderNodeLocal(
 
 	// Render the optional Cyborg config and construct final resource order once.
 	var (
-		cyborgConfigMap *corev1.ConfigMap
-		extraResources  []client.Object
+		cyborgConfigMap  *corev1.ConfigMap
+		cyborgConfigHash string
+		extraResources   []client.Object
 	)
 	if v2HybridRuntime {
-		cyborgConfigMap, err = workload.renderCyborgConfigMap(plan)
+		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
 		if err != nil {
 			return nil, err
 		}
@@ -111,8 +112,6 @@ func RenderNodeLocal(
 	} else {
 		extraResources = []client.Object{configMap}
 	}
-
-	configHash := LPUConfigMapHash(configMap)
 
 	// Consume the independently rendered conductor without copying Agent startup or placement.
 	var conductor *grovev1alpha1.PodCliqueTemplateSpec
@@ -219,6 +218,7 @@ func RenderNodeLocal(
 			modelStoragePath,
 			agentTemplateNames,
 			cyborgConfigMap,
+			cyborgConfigHash,
 		); err != nil {
 			return nil, err
 		}

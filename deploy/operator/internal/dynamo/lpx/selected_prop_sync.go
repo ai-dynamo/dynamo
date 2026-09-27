@@ -19,6 +19,11 @@ func validateSelectedPropSyncGraph(
 	subject string,
 	requireCompatibleTopology bool,
 ) ([]int, error) {
+	// Empty chain sets have no references or edges to validate.
+	if len(chains) == 0 {
+		return []int{}, nil
+	}
+
 	// Index every physical partition once for both reference validation and connector projection.
 	partitionPositions := make(map[int]int, len(partitions))
 	for position, partition := range partitions {

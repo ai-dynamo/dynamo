@@ -20,12 +20,12 @@ func TestRenderRuntimeConfigMapSizeLimit(t *testing.T) {
 		"text":   strings.Repeat("é", corev1.MaxSecretSize/2-1),
 		"suffix": "é",
 	}
-	_, err := renderRuntimeConfigMap("test-lpu", data)
+	_, _, err := renderRuntimeConfigMap("test-lpu", data)
 	require.NoError(t, err)
 
 	t.Log("Reject one extra byte with a named error and no usable ConfigMap")
 	data["suffix"] += "x"
-	configMap, err := renderRuntimeConfigMap("test-lpu", data)
+	configMap, _, err := renderRuntimeConfigMap("test-lpu", data)
 	require.Nil(t, configMap)
 	require.ErrorContains(t, err, `rendered LPX ConfigMap "test-lpu-`)
 	require.ErrorContains(t, err, "data is 1048577 bytes; maximum is 1048576")
@@ -36,14 +36,16 @@ func TestLPXRuntimeConfigNamesMatchPodIdentity(t *testing.T) {
 		t.Run(root, func(t *testing.T) {
 			t.Log("Render immutable runtime tables for PCS and Pod-label identity bounds")
 			data := map[string]string{"runtime": "config"}
-			lpu, err := renderRuntimeConfigMap(root+"-lpu", data)
+			lpu, lpuHash, err := renderRuntimeConfigMap(root+"-lpu", data)
 			require.NoError(t, err)
-			decode, err := renderRuntimeConfigMap(root+"-decode", data)
+			decode, decodeHash, err := renderRuntimeConfigMap(root+"-decode", data)
 			require.NoError(t, err)
 
 			t.Log("Resolve the same LPU table from Pod identity and preserve each role suffix")
-			require.Equal(t, root+"-lpu-"+LPUConfigMapHash(lpu)[:16], lpu.Name)
-			require.Equal(t, root+"-decode-"+LPUConfigMapHash(decode)[:16], decode.Name)
+			require.Equal(t, LPUConfigMapHash(lpu), lpuHash)
+			require.Equal(t, LPUConfigMapHash(decode), decodeHash)
+			require.Equal(t, root+"-lpu-"+lpuHash[:16], lpu.Name)
+			require.Equal(t, root+"-decode-"+decodeHash[:16], decode.Name)
 			require.Empty(t, validation.IsDNS1123Subdomain(lpu.Name))
 			require.Empty(t, validation.IsDNS1123Subdomain(decode.Name))
 		})

@@ -24,13 +24,14 @@ import (
 
 const lpuConfigVolumeName = "config"
 
-func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, error) {
+func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.ConfigMap, string, error) {
 	// Name immutable configuration from the content hash used by Pod templates.
 	configMap := &corev1.ConfigMap{
 		Immutable: ptr.To(true),
 		Data:      data,
 	}
-	configMap.Name = fmt.Sprintf("%s-%.16s", namePrefix, LPUConfigMapHash(configMap))
+	configHash := LPUConfigMapHash(configMap)
+	configMap.Name = fmt.Sprintf("%s-%.16s", namePrefix, configHash)
 
 	// Reject oversized configuration before any caller can publish it.
 	totalSize := 0
@@ -38,14 +39,14 @@ func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.
 		totalSize += len(value)
 	}
 	if totalSize > corev1.MaxSecretSize {
-		return nil, fmt.Errorf(
+		return nil, "", fmt.Errorf(
 			"rendered LPX ConfigMap %q data is %d bytes; maximum is %d",
 			configMap.Name,
 			totalSize,
 			corev1.MaxSecretSize,
 		)
 	}
-	return configMap, nil
+	return configMap, configHash, nil
 }
 
 // LPUConfigMapHash returns the hash stamped on LPU runtime Pod templates.

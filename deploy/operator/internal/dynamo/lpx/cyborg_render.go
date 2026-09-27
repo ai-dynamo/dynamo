@@ -26,6 +26,7 @@ func configureHybridCyborg(
 	modelStoragePath string,
 	agentTemplateNames []string,
 	cyborgConfigMap *corev1.ConfigMap,
+	cyborgConfigHash string,
 ) error {
 	container := common.FindContainerByName(cyborg.Spec.PodSpec.Containers, commonconsts.MainContainerName)
 
@@ -53,7 +54,7 @@ func configureHybridCyborg(
 		if err := withLPUConfigVolume(&cyborg.Spec.PodSpec, cyborgConfigMap.Name, true); err != nil {
 			return err
 		}
-		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = LPUConfigMapHash(cyborgConfigMap)
+		cyborg.Annotations[v1alpha1.AnnotationExtraResourcesHash] = cyborgConfigHash
 	}
 	cyborg.Spec.StartsAfter = slices.Clone(agentTemplateNames)
 	return nil
