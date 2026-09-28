@@ -692,11 +692,13 @@ requirements.txt                                                                
 /deploy/operator/internal/gpu/discovery.go                                                              @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /examples/backends/tritonserver/Dockerfile                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/llm/src/block_manager/metrics_kvbm.rs                                                              @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-observability-codeowners
+/lib/sidecar/testkit/tests/support/vllm.rs                                                              @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/thunderagent_router/                                                             @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-agents-codeowners
 /components/src/dynamo/vllm/health_check.py                                                             @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/*xpu*                                                             @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-xpu-codeowners
 /lib/llm/src/http/service/busy_threshold.rs                                                             @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /container/templates/vllm_runtime.Dockerfile                                                            @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
+/lib/sidecar/testkit/tests/support/sglang.rs                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners
 /tests/fault_tolerance/cancellation/utils.py                                                            @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-observability-codeowners
 /tests/serve/multimodal_profiles/vllm_xpu.py                                                            @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-xpu-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners
 /components/src/dynamo/sglang/health_check.py                                                           @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-observability-codeowners
