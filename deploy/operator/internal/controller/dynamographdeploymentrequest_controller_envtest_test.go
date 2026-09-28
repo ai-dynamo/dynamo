@@ -173,8 +173,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			Expect(validationCondition.Status).Should(Equal(metav1.ConditionTrue))
 			Expect(validationCondition.Reason).Should(Equal("ValidationPassed"))
 			Expect(validationCondition.ObservedGeneration).Should(Equal(updated.Generation))
-			Expect(validationCondition.Message).Should(Equal(MessageValidationPassed))
-			Expect(strings.TrimSpace(validationCondition.Message)).ShouldNot(BeEmpty())
+			Expect(validationCondition.Message).Should(Equal("DGDR spec validation passed"))
 		})
 
 		It("Should pass validation with minimal config", func() {
