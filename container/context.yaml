@@ -91,6 +91,9 @@ vllm:
     runtime_image: vllm/vllm-openai-xpu
     base_image_tag: v0.27.1
     runtime_image_tag: v0.27.1
+    # Match the vLLM 0.27.1 XPU image. vLLM-Omni 0.28 imports APIs only
+    # available in vLLM 0.28 and fails during vLLM plugin discovery.
+    vllm_omni_ref: "v0.27.0rc1"
     baseline_sbom: vllm-openai-xpu@3309c2e1
   cpu:
     base_image: ubuntu

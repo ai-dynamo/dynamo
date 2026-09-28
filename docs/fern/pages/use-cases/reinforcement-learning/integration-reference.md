@@ -68,6 +68,7 @@ Before admitting a sample to training, verify:
 
 | Data | Dynamo surface | Contract boundary |
 |---|---|---|
+| Prompt token IDs | Named `nvext.prompt_token_ids` | Returns the effective single-prompt token sequence used after preprocessing, including token arrays or `nvext.token_data` supplied through the request. |
 | Generated token IDs | Named `nvext.completion_token_ids`, or the native SGLang stream | Use the engine-returned sequence; exact placement depends on the selected interface. |
 | Selected and prompt log probabilities | Standard completion log probabilities, named `nvext.prompt_logprobs`, or native SGLang metadata | Check support and alignment on the exact backend and response path. |
 | Routed experts and raw engine data | Opt-in `nvext.routed_experts` or `nvext.engine_data` | Backend-specific. Prefer named fields over the raw engine payload. |
@@ -206,7 +207,7 @@ Even two vLLM deployments can expose different route families because the Python
 |---|---|---|---|
 | [verl](verl.md) | Experimental | Shared Dynamo frontend with colocated vLLM rollout workers | The public recipe owns CUDA IPC updates through Ray/ZMQ control. Choose native Dynamo routing or ThunderAgent as distinct variants. |
 | [NeMo RL](nemo-rl.md) | Experimental | NeMo RL-managed Dynamo/vLLM fleet on Slurm and Ray | Fixed non-colocated fleet with framework-owned NCCL refit; not an external Dynamo deployment. |
-| [SLIME](https://github.com/THUDM/slime) | Integration in progress | Proposed shared SGLang `/generate` path with direct engine control | No merged, maintained Dynamo recipe yet; discovery and update ownership remain unsettled. |
+| [Slime](slime.md) | Experimental fixed worker set | Dynamo sidecars manage stock SGLang engines for [streaming external rollouts](https://github.com/THUDM/slime/pull/2272) | The [fixed-worker-set example](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md#integration-examples) sends generation through the Dynamo frontend. Slime uses static engine Services for control and weight updates. The example does not support elastic discovery or external-engine recovery. |
 | [Prime-RL](https://github.com/PrimeIntellect-ai/prime-rl) | Router available; full integration in progress | Prime-RL documents the Dynamo router as a drop-in option; a proposed Dynamo/vLLM sidecar adds worker discovery and external updates | Routing can be evaluated today, but the full adapter remains in upstream development and is not a released compatibility surface. |
 | [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF), [Miles](https://github.com/fleet-ai/miles-fleet), [SkyRL](https://github.com/NovaSky-AI/SkyRL), and [Polar](https://github.com/NVIDIA-NeMo/ProRL-Agent-Server) | No Dynamo guide | No maintained Dynamo adapter was found in the reviewed public sources | Add a guide only after a maintained integration completes the same generation, update, failure, and ownership checks. |
 
