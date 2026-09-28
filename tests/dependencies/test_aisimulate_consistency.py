@@ -145,7 +145,10 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
         "--requirement /opt/dynamo/container/deps/requirements.aisimulate.txt"
         in wheel_builder
     )
+    assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
+    assert "--no-index" in wheel_builder
+    assert "--find-links https://pypi.nvidia.com/aisimulate/" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

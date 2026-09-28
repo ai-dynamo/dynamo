@@ -11,6 +11,9 @@ use dynamo_kv_router::services::selection::{
 ///
 /// Custom catalogs replace this crate and register their own factories. The default catalog is
 /// intentionally empty so `default` always selects Dynamo's built-in worker selector.
+///
+/// The policies Dynamo ships are registered separately from `dynamo-custom-policy-builtin`, so
+/// replacing this crate adds policies alongside them rather than displacing them.
 pub fn register(
     _registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
