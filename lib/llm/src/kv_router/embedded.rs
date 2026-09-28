@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
+use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::DEFAULT_MAX_BATCHED_TOKENS;
 use dynamo_kv_router::scheduling::{
@@ -28,7 +29,7 @@ use dynamo_kv_router::services::selection::{
     HostReplication, HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost,
     SelectionOperation, SelectionOutcome, SelectionPartition, SelectionRun, SelectionScheduler,
     SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
-    WorkerRequest, WorkerSelectionPolicyRegistry,
+    WorkerRequest,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use tokio_util::sync::CancellationToken;
@@ -87,15 +88,19 @@ fn record_queue_rejection(
     }
 }
 
-fn update_queue_metrics(per_class: &[RouterQueueMetricHandles], scheduler: &SelectionScheduler) {
+fn update_queue_metrics(
+    per_class: &[RouterQueueMetricHandles],
+    mut stats_for: impl FnMut(usize) -> Option<dynamo_kv_router::queue::ClassQueueStats>,
+) {
     for (class_index, handles) in per_class.iter().enumerate() {
-        let Some(stats) = scheduler.class_queue_stats(class_index) else {
+        let Some(stats) = stats_for(class_index) else {
             debug_assert!(
                 false,
                 "missing queue counters for policy class {class_index}"
             );
             continue;
         };
+        handles.update_admission(stats.received_total, stats.rejected_due_time_passed_total);
         handles.pending_requests.set(stats.pending_count as i64);
         handles
             .pending_isl_tokens
@@ -117,7 +122,9 @@ fn spawn_queue_metrics_updater(
         let period = Duration::from_secs(60);
         let mut recheck = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
         loop {
-            update_queue_metrics(&handles, partition.scheduler());
+            update_queue_metrics(&handles, |index| {
+                partition.scheduler().class_queue_stats(index)
+            });
             tokio::select! {
                 _ = cancellation_token.cancelled() => break,
                 changed = queue_updates.changed() => {
@@ -174,20 +181,6 @@ pub(crate) struct EmbeddedSelection {
     /// the scheduler's `class_queue_stats`.
     queue_metrics: Vec<RouterQueueMetricHandles>,
     queue_metric_indices: HashMap<String, usize>,
-}
-
-static INSTALLED_POLICY_REGISTRY: OnceLock<WorkerSelectionPolicyRegistry> = OnceLock::new();
-
-/// Install the process-wide worker-selection policy registry (linked custom
-/// policies) that embedded selection partitions resolve `KvRouterConfig`
-/// policy instances against. Returns `false` if one is already installed.
-pub fn install_worker_selection_policy_registry(registry: WorkerSelectionPolicyRegistry) -> bool {
-    INSTALLED_POLICY_REGISTRY.set(registry).is_ok()
-}
-
-/// The installed registry, or the built-in default.
-pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
-    INSTALLED_POLICY_REGISTRY.get().cloned().unwrap_or_default()
 }
 
 /// Bridges the partition's scheduler load snapshots to the router's
@@ -261,9 +254,10 @@ impl EmbeddedSelection {
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
-            WorkerSelectionPolicyRegistry::default(),
+            RouterPluginRegistry::default(),
         )
         .worker_selection_policy_factory(args.policy_factory)
+        .host_manages_request_lifecycle()
         .indexer_threads(1)
         .host(SelectionHost {
             load: HostLoad {
@@ -376,7 +370,9 @@ impl EmbeddedSelection {
         if let Some(rejection) = rejection {
             record_queue_rejection(&self.queue_metrics, &self.queue_metric_indices, rejection);
         }
-        update_queue_metrics(&self.queue_metrics, self.partition.scheduler());
+        update_queue_metrics(&self.queue_metrics, |index| {
+            self.partition.scheduler().class_queue_stats(index)
+        });
     }
 
     pub(crate) fn affinity_coordinator(
@@ -568,6 +564,47 @@ pub(crate) fn worker_request_from_runtime_config(
 mod tests {
     use super::*;
     use dynamo_kv_router::services::selection::SchedulerLoadSink;
+
+    #[test]
+    fn queue_metrics_are_updated_by_class_index() {
+        let handles = ["latency", "bulk"]
+            .map(|class| ROUTER_QUEUE_METRICS.handles("index-test", "decode", class));
+        let stats = [
+            dynamo_kv_router::queue::ClassQueueStats {
+                received_total: 10,
+                rejected_due_time_passed_total: 1,
+                pending_count: 2,
+                pending_isl_tokens: 128,
+                pending_cached_tokens: 64,
+            },
+            dynamo_kv_router::queue::ClassQueueStats {
+                received_total: 20,
+                rejected_due_time_passed_total: 3,
+                pending_count: 3,
+                pending_isl_tokens: 384,
+                pending_cached_tokens: 192,
+            },
+        ];
+
+        update_queue_metrics(&handles, |index| stats.get(index).copied());
+        update_queue_metrics(&handles, |index| stats.get(index).copied());
+        for (handles, stats) in handles.iter().zip(stats) {
+            assert_eq!(handles.received_total.get(), stats.received_total);
+            assert_eq!(
+                handles.rejected_due_time_passed_total.get(),
+                stats.rejected_due_time_passed_total
+            );
+            assert_eq!(handles.pending_requests.get(), stats.pending_count as i64);
+            assert_eq!(
+                handles.pending_isl_tokens.get(),
+                stats.pending_isl_tokens as i64
+            );
+            assert_eq!(
+                handles.pending_cached_tokens.get(),
+                stats.pending_cached_tokens as i64
+            );
+        }
+    }
 
     #[test]
     fn worker_request_mirrors_runtime_config() {

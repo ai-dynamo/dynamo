@@ -13,11 +13,14 @@ set, and resolved paths must stay inside it.
 from __future__ import annotations
 
 import base64
+from unittest.mock import MagicMock
 
 import pytest
 
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
+from dynamo.common.multimodal import media_source as media_source_module
 from dynamo.common.multimodal.media_source import (
+    decode_data_uri,
     describe_media_source,
     is_local_media_url,
     read_local_media_bytes,
@@ -106,6 +109,29 @@ async def test_reads_base64_data_uri():
 async def test_malformed_data_uri_rejected(url, match):
     with pytest.raises(UrlValidationError, match=match):
         await read_local_media_bytes(url, UrlValidationPolicy())
+
+
+@pytest.mark.parametrize("size", [3, 4, 5], ids=["no-padding", "two-pad", "one-pad"])
+def test_decode_data_uri_size_bound_is_exact(size):
+    url = "data:video/mp4;base64," + base64.b64encode(b"x" * size).decode()
+    assert decode_data_uri(url, max_bytes=size) == b"x" * size
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=size - 1)
+
+
+def test_decode_data_uri_size_bound_rejects_before_unquote(monkeypatch):
+    """A payload that is entirely percent-escaped is 3x its unescaped length,
+    so both the raw and unescaped forms already exceed max_bytes -- the
+    outcome alone can't tell the pre-unquote guard apart from the
+    post-unquote one. Replacing unquote() with a spy and asserting it is
+    never called is what actually proves the guard runs first."""
+    spy = MagicMock()
+    monkeypatch.setattr(media_source_module, "unquote", spy)
+    payload = "%41" * 10_000_000
+    url = "data:video/mp4;base64," + payload
+    with pytest.raises(UrlValidationError, match="maximum allowed size"):
+        decode_data_uri(url, max_bytes=1024)
+    spy.assert_not_called()
 
 
 async def test_unsupported_scheme_rejected():

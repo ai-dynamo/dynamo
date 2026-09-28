@@ -165,7 +165,7 @@ def extract_mm_urls(
     has_user_uuid = False
 
     for msg in messages:
-        if not isinstance(msg, dict) or msg.get("role") != "user":
+        if not isinstance(msg, dict) or msg.get("role") not in ("user", "tool"):
             continue
         content = msg.get("content")
         if not isinstance(content, list):

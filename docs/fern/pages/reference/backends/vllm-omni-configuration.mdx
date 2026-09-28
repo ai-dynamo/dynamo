@@ -22,8 +22,8 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
 <ParamField path="--stage-configs-path" type="path">
   Path to stage config YAML (optional; vLLM-Omni uses model defaults if omitted).
 </ParamField>
-<ParamField path="--boundary-ratio" type="float" default="0.875">
-  MoE expert switching boundary.
+<ParamField path="--boundary-ratio" type="float">
+  MoE expert switching boundary. If omitted, the vLLM-Omni model pipeline selects its default.
 </ParamField>
 <ParamField path="--flow-shift" type="float">
   Scheduler flow_shift (5.0 for 720p, 12.0 for 480p).
@@ -39,7 +39,12 @@ These are the vLLM-Omni orchestration flags. The omni worker also accepts the sa
   separate from request-time LoRA loading.
 </ParamField>
 <ParamField path="--diffusion-attention-backend" type="string">
-  Default diffusion attention backend, such as `TRTLLM_ATTN` or `FLASH_ATTN`.
+  Default diffusion attention backend, such as `TRTLLM_ATTN`, `FLASH_ATTN`, or
+  `FASTVIDEO_VSA`.
+</ParamField>
+<ParamField path="--fastvideo-vsa-topk" type="int">
+  Key/value blocks retained per query block by `FASTVIDEO_VSA`. The value must
+  be positive; FastH3 VSA starts with 64.
 </ParamField>
 
 ## Memory & Performance

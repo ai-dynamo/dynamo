@@ -1686,8 +1686,6 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # One annotated envelope per iteration carries both data and the
-        # llm_metrics annotation; observer strips the annotation before SSE.
         assert len(chunks) == 1
         envelope = chunks[0]
 
@@ -1704,16 +1702,15 @@ class TestRoutedEnginePath:
             "created": envelope["data"]["created"],
             "model": MODEL,
             "object": "chat.completion.chunk",
+            "llm_metrics": {
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "chunk_tokens": 1,
+            },
         }
 
-        assert envelope["event"] == "llm_metrics"
-        assert len(envelope["comment"]) == 1
-        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-        assert json.loads(envelope["comment"][0]) == {
-            "input_tokens": 3,
-            "output_tokens": 1,
-            "chunk_tokens": 1,
-        }
+        assert "event" not in envelope
+        assert "comment" not in envelope
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
@@ -1757,7 +1754,7 @@ class TestRoutedEnginePath:
             )
         ]
 
-        metrics = json.loads(chunks[0]["comment"][0])
+        metrics = chunks[0]["data"]["llm_metrics"]
         assert metrics["image_count"] == 2
         assert metrics["video_count"] == 1
         # audio has zero parts, so the key is omitted from the emitted metrics.

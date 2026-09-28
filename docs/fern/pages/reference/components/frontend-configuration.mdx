@@ -69,6 +69,14 @@ The Rust HTTP server also reads these environment variables, which are not expos
   See [Runtime Configuration](runtime-configuration.mdx) for `DYN_TCP_MAX_MESSAGE_SIZE`.
 </ParamField>
 
+<ParamField path="DYN_HTTP_LISTEN_BACKLOG" type="integer" default="4096">
+  Listen backlog of the frontend socket, for both plain HTTP and TLS, capped by
+  the kernel at `net.core.somaxconn`. Raise it when many clients open connections
+  within a few seconds (for example a load client with one connection per
+  session): connections that arrive while the accept queue is full are delayed
+  or, depending on the host's TCP settings, fail.
+</ParamField>
+
 <ParamField path="DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS" type="integer" default="5">
   Maximum time the Frontend waits for admitted HTTP response bodies and `/v1/realtime` WebSocket
   tasks to finish after shutdown begins. New inference requests are rejected while draining.
@@ -127,13 +135,13 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
 ### KV scoring and cache locality
 
 <ParamField path="--load-aware / --no-load-aware" type="boolean" default="false">
-  Preset for KV load-aware routing without cache-reuse signals; implies `--router-mode kv`.
+  Preset for KV load-aware routing; implies `--router-mode kv`. Disables device-cache credit, KV event consumption, and remote/shared cache indexers. The worker-selection policy's `CACHE` declaration still controls local approximate indexing.
 
   Environment variable: `DYN_ROUTER_LOAD_AWARE`
 </ParamField>
 
 <ParamField path="--router-kv-overlap-score-credit" type="float" default="1.0">
-  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative.
+  Credit multiplier for device-local prefix overlap. The value must be finite and nonnegative. Setting it to zero does not disable indexing; cache setup follows the worker-selection policy's `WorkerInputs::CACHE` declaration.
   Values greater than `1.0` give device overlap extra credit, but adjusted prefill cost is
   clamped at zero. See [Configuration and Tuning](../../developer-guide/knowledge-base/modular-components/router/configuration-and-tuning.md#tuning-guidelines).
 
