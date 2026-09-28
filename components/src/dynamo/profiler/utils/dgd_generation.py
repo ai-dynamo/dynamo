@@ -63,7 +63,7 @@ def _load_latest_database_version() -> Optional[Callable[..., Optional[str]]]:
     try:
         perf_database = importlib.import_module("aisimulate_core.sdk.perf_database")
     except ModuleNotFoundError as e:
-        if e.name not in ("aisimulate_core", "aiconfigurator_core"):
+        if e.name != "aisimulate_core":
             raise
         return None
     return perf_database.get_latest_database_version

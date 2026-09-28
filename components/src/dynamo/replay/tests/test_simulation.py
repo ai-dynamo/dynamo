@@ -529,13 +529,13 @@ def test_public_prediction_bootstrap_prefers_canonical_worker_policy():
 def test_custom_timing_without_capacity_does_not_resolve_unused_model(
     monkeypatch, timing
 ):
-    import aisimulate.aic
+    import aisimulate.capacity
 
     def unexpected_capacity_lookup(**kwargs):
         raise AssertionError("custom timing must not look up an unused model")
 
     monkeypatch.setattr(
-        aisimulate.aic, "estimate_num_gpu_blocks", unexpected_capacity_lookup
+        aisimulate.capacity, "estimate_num_gpu_blocks", unexpected_capacity_lookup
     )
     args = simulation.DynamoReplayRunner._engine_args(
         {

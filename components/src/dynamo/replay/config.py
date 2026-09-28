@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
-from aisimulate.aic import materialize_aic_num_gpu_blocks
+from aisimulate.capacity import materialize_aic_num_gpu_blocks
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.mocker.args import (

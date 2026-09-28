@@ -229,7 +229,7 @@ def test_canonical_session_matches_native_static_query_oracle(nextn, attention_d
 
 
 def test_canonical_capacity_forwards_scheduler_options(monkeypatch):
-    import aisimulate.aic
+    import aisimulate.capacity
 
     from dynamo._internal.ais import estimate_canonical_num_gpu_blocks
 
@@ -239,7 +239,9 @@ def test_canonical_capacity_forwards_scheduler_options(monkeypatch):
         calls.append(raw)
         return {**raw, "num_gpu_blocks": 123}
 
-    monkeypatch.setattr(aisimulate.aic, "materialize_aic_num_gpu_blocks", materialize)
+    monkeypatch.setattr(
+        aisimulate.capacity, "materialize_aic_num_gpu_blocks", materialize
+    )
     config = {
         "model": "model",
         "system": "h200_sxm",

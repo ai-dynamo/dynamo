@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify Dynamo consumes AIC through the consolidated AISimulate release."""
+"""Verify Dynamo consumes the canonical AISimulate wheel and namespaces."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 import textwrap
-from importlib import metadata
+from importlib import metadata, resources
 from pathlib import Path
 
 import pytest
@@ -47,7 +47,7 @@ def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
 
         class WithoutAIS(importlib.abc.MetaPathFinder):
             def find_spec(self, fullname, path=None, target=None):
-                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core', 'aiconfigurator_core'}:
+                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core'}:
                     raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
 
         sys.meta_path.insert(0, WithoutAIS())
@@ -139,14 +139,13 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
     assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
     assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
-        "git": "https://github.com/ai-dynamo/aisimulate.git",
-        "rev": "fbd465d9ac14d37a6e73371ba4736a9364371eb5",
+        "version": "=0.13.0-dev.202609270000000058",
         "optional": True,
         "features": ["python"],
     }
 
 
-def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
+def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
@@ -155,14 +154,22 @@ def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
     release_files = {str(path) for path in release.files or []}
 
     assert not (release_requirements & LEGACY_DISTRIBUTIONS)
-    assert "aiconfigurator/__init__.py" in release_files
-    assert "aiconfigurator_core/__init__.py" in release_files
+    assert "aisimulate/__init__.py" in release_files
+    assert "aisimulate_core/__init__.py" in release_files
+    assert not any(
+        path.split("/", 1)[0] in {"aiconfigurator", "aiconfigurator_core"}
+        for path in release_files
+    )
 
-    import aiconfigurator
-    import aiconfigurator_core
-    from aiconfigurator_core.sdk import RustForwardPassPerfModel
-    from aisimulate_core.sdk import RustForwardPassPerfModel as PublicPerfModel
+    from aisimulate.sdk.task_v2 import Task
+    from aisimulate_core.sdk import RustForwardPassPerfModel
 
-    assert aiconfigurator is not None
-    assert aiconfigurator_core is not None
-    assert RustForwardPassPerfModel is PublicPerfModel
+    assert Task is not None
+    assert callable(RustForwardPassPerfModel.best_available)
+    core_root = resources.files("aisimulate_core")
+    assert core_root.joinpath("model_configs/Qwen--Qwen3-32B_config.json").is_file()
+    assert core_root.joinpath("systems/h200_sxm.yaml").is_file()
+    legacy_cli = next(
+        entry for entry in release.entry_points if entry.name == "aiconfigurator"
+    )
+    assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"

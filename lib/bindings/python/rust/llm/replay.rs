@@ -2039,6 +2039,7 @@ fn build_synthetic_workload(
             stddev: 0.0,
         },
         shared_prefix_ratio,
+        cached_prefix_tokens: 0,
         num_prefix_groups,
         first_turn_arrivals,
         inter_turn_delays: if inter_turn_delay_ms == 0.0 {

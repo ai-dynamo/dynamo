@@ -42,7 +42,7 @@ pytestmark = [
 
 def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
     def raise_missing_root(_):
-        raise ModuleNotFoundError(name="aiconfigurator_core")
+        raise ModuleNotFoundError(name="aisimulate_core")
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.dgd_generation.importlib.import_module",
@@ -54,7 +54,7 @@ def test_aic_import_treats_missing_root_package_as_optional(monkeypatch):
 
 @pytest.mark.parametrize(
     "missing_module",
-    ["aiconfigurator_core.sdk.operations.attention", "unrelated_dependency"],
+    ["aisimulate_core.sdk.operations.attention", "unrelated_dependency"],
 )
 def test_aic_import_propagates_internal_or_unrelated_missing_module(
     monkeypatch, missing_module

@@ -204,7 +204,7 @@ def create_session(config, *, worker_type: str | None = None) -> AisSession:
 
 def estimate_canonical_num_gpu_blocks(config, **scheduler_options) -> int:
     """Estimate capacity from the exact resolved canonical estimator identity."""
-    from aisimulate.aic import materialize_aic_num_gpu_blocks
+    from aisimulate.capacity import materialize_aic_num_gpu_blocks
 
     payload = config.to_dict() if hasattr(config, "to_dict") else dict(config)
     payload.setdefault("estimation_mode", "auto")
