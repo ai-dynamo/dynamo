@@ -6,13 +6,15 @@
  * backend support belongs to FeatureHeatmap; this component owns requirements
  * and limitations that appear only when two otherwise available features are
  * used together.
- *
- * Server component (no "use client").
  */
 
 import { FEATURE_INTERACTIONS } from "./releases.data";
 
 const FI_CSS = `
+.dynref-fi-scroll {
+    overflow-x: auto;
+}
+
 .dynref-fi-table {
     width: 100%;
     margin: 0;
@@ -87,38 +89,40 @@ export function FeatureInteractions({ backend }: { backend: string }) {
       <div className="dynref-panel-header">
         <span className="dynref-h">{entry.backend} Constraints</span>
       </div>
-      <table className="dynref-fi-table">
-        <thead>
-          <tr>
-            <th scope="col">Feature combination</th>
-            <th scope="col">Status</th>
-            <th scope="col">Constraint</th>
-          </tr>
-        </thead>
-        <tbody>
-          {entry.constraints.map((constraint) => (
-            <tr key={constraint.features.join("+")}>
-              <th className="dynref-fi-combination" scope="row">
-                {constraint.features.join(" + ")}
-              </th>
-              <td>
-                <span className={`dynref-fi-status dynref-fi-status--${constraint.status}`}>
-                  {constraint.label}
-                </span>
-              </td>
-              <td>
-                {constraint.note}
-                {constraint.source && (
-                  <>
-                    {" "}
-                    <a href={constraint.source}>Source</a>
-                  </>
-                )}
-              </td>
+      <div className="dynref-fi-scroll">
+        <table className="dynref-fi-table">
+          <thead>
+            <tr>
+              <th scope="col">Feature combination</th>
+              <th scope="col">Status</th>
+              <th scope="col">Constraint</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {entry.constraints.map((constraint) => (
+              <tr key={constraint.features.join("+")}>
+                <th className="dynref-fi-combination" scope="row">
+                  {constraint.features.join(" + ")}
+                </th>
+                <td>
+                  <span className={`dynref-fi-status dynref-fi-status--${constraint.status}`}>
+                    {constraint.label}
+                  </span>
+                </td>
+                <td>
+                  {constraint.note}
+                  {constraint.source && (
+                    <>
+                      {" "}
+                      <a href={constraint.source}>Source</a>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
       <p className="dynref-grid-note">
         This table lists only combinations whose behavior is not clear from the base feature support
         table.

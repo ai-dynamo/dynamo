@@ -1152,12 +1152,6 @@ export const FEATURE_INTERACTIONS: BackendInteractions[] = [
         note: "The Rust frontend supports models handled by `llm-multimodal`; the Python path delegates to vLLM's multimodal processor.",
         source: "/dynamo/dev/multimodal/multimodal-kv-routing",
       },
-      {
-        features: ["LoRA", "KV-Aware Routing"],
-        status: "yes",
-        label: "Supported with requirement",
-        note: "Dynamo routes requests by LoRA adapter affinity.",
-      },
     ],
   },
   {
