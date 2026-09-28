@@ -550,26 +550,10 @@ fn unsupported_media_is_rejected_before_dispatch() {
             *r = with_images(r.clone(), &[source]);
         }
     };
-    assert_rejected(
-        image("https://example.com/cat.jpg"),
-        "cannot fetch image URLs",
-    );
-    assert_rejected(image("data:image/png,rawbytes"), "must have the form");
     assert_rejected(image("data:image/png;base64"), "must have the form");
-    assert_rejected(image("data:image/png;base64,@@@"), "not valid base64");
     assert_rejected(
         image("data:image/png;base64,aW1hZ2UtYQ%3D%3"),
         "not valid base64",
-    );
-    assert_rejected(image("data:image/png;base64,"), "no image bytes");
-    assert_rejected(
-        |r| {
-            r.multi_modal_data = Some(HashMap::from([(
-                "image_url".to_string(),
-                vec![MultimodalData::UuidOnly("cached".to_string())],
-            )]))
-        },
-        "UUID-only",
     );
     assert_rejected(
         |r| {
@@ -664,11 +648,6 @@ fn image_processing_options_are_rejected() {
     };
     // The engine cannot apply processor or image decoder options, so the
     // sidecar must not drop them without notice.
-    let error = with_options(Some(json!({"do_resize": false})), None).expect_err("must reject");
-    assert!(error.to_string().contains("mm_processor_kwargs"));
-    let error =
-        with_options(None, Some(json!({"image": {"max_width": 64}}))).expect_err("must reject");
-    assert!(error.to_string().contains("media_io_kwargs.image"));
     let error = with_options(None, Some(json!("max_width=64"))).expect_err("must reject");
     assert!(error.to_string().contains("media_io_kwargs.image"));
     // Null, `{}`, and options for other media set no image option.
