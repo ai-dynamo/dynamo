@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::ConcurrentRadixTreeCompressed;
-use crate::ThreadPoolIndexer;
 use crate::approx::PruneConfig;
 use crate::config::{ApproximateCachePolicyKind, KvRouterConfig};
 use crate::indexer::{
@@ -22,6 +21,7 @@ use crate::protocols::{
     DpRank, ExternalSequenceBlockHash, KvCacheEventData, LocalBlockHash, OverlapScores,
     ResidencyProjection, ResidencyRoutingSnapshot, RouterEvent, WorkerId, WorkerWithDpRank,
 };
+use crate::{SharedKvCache, ThreadPoolIndexer};
 
 use super::lookup::{HashInput, merge_side_or_warn};
 use super::session_updates::{SessionMutation, SessionUpdateSender};
@@ -252,6 +252,7 @@ pub enum Indexer {
         primary: KvIndexer,
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         primary_records_routing_decisions: bool,
         session_updates: Option<SessionUpdateSender>,
     },
@@ -259,6 +260,7 @@ pub enum Indexer {
         primary: Arc<ThreadPoolIndexer<ConcurrentRadixTreeCompressed>>,
         lower_tier: LowerTierIndexers,
         approx: Option<SideIndexer>,
+        shared_cache: Option<Arc<dyn SharedKvCache>>,
         primary_records_routing_decisions: bool,
         session_updates: Option<SessionUpdateSender>,
     },
@@ -275,6 +277,20 @@ pub enum Indexer {
 }
 
 impl Indexer {
+    pub fn set_shared_cache(&mut self, shared_cache: Option<Arc<dyn SharedKvCache>>) {
+        match self {
+            Self::Single {
+                shared_cache: observer,
+                ..
+            }
+            | Self::Concurrent {
+                shared_cache: observer,
+                ..
+            } => *observer = shared_cache,
+            Self::Remote { .. } | Self::None => {}
+        }
+    }
+
     fn approx(&self) -> Option<&SideIndexer> {
         match self {
             Self::Single { approx, .. }
@@ -353,6 +369,25 @@ impl Indexer {
                 return Ok(());
             }
         };
+        if targets_primary && let KvCacheEventData::Stored(data) = &event.event.data {
+            match self {
+                Self::Single {
+                    shared_cache: Some(observer),
+                    ..
+                }
+                | Self::Concurrent {
+                    shared_cache: Some(observer),
+                    ..
+                } => {
+                    // Identity learning must survive GPU tree rejection, including unknown parents.
+                    observer.observe_stored(
+                        WorkerWithDpRank::new(event.worker_id, event.event.dp_rank),
+                        data,
+                    );
+                }
+                _ => {}
+            }
+        }
         let is_clear = matches!(&event.event.data, KvCacheEventData::Cleared);
         match self {
             Indexer::Single {
@@ -444,6 +479,25 @@ impl Indexer {
                 return Ok(());
             }
         };
+        if targets_primary && let KvCacheEventData::Stored(data) = &event.event.data {
+            match self {
+                Self::Single {
+                    shared_cache: Some(observer),
+                    ..
+                }
+                | Self::Concurrent {
+                    shared_cache: Some(observer),
+                    ..
+                } => {
+                    // Identity learning must survive GPU tree rejection, including unknown parents.
+                    observer.observe_stored(
+                        WorkerWithDpRank::new(event.worker_id, event.event.dp_rank),
+                        data,
+                    );
+                }
+                _ => {}
+            }
+        }
         let session_update = if targets_primary {
             match self {
                 Self::Single {
@@ -919,6 +973,7 @@ pub(crate) mod test_util {
             KvCacheEvent {
                 event_id,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash,
                     start_position: None,
                     blocks,
@@ -938,8 +993,265 @@ mod tests {
     #[cfg(feature = "metrics")]
     use crate::indexer::{METRIC_EVENT_CLEARED, METRIC_STATUS_OK};
     use crate::protocols::{
-        KvCacheEvent, LocalBlockHash, ResidencyDomain, StorageTier, WorkerWithDpRank,
+        KvCacheEvent, KvCacheRemoveData, KvCacheStoreData, LocalBlockHash, ResidencyDomain,
+        SharedCacheHits, StorageTier, TokensWithHashes, WireResidencyDomain, WorkerWithDpRank,
+        compute_seq_hash_for_block,
     };
+    use crate::{SharedCacheQuery, SharedKvCache};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct StoreObserver {
+        stored: Mutex<Vec<(WorkerWithDpRank, KvCacheStoreData)>>,
+    }
+
+    #[async_trait]
+    impl SharedKvCache for StoreObserver {
+        async fn check_blocks(
+            &self,
+            _query: SharedCacheQuery<'_>,
+        ) -> Result<SharedCacheHits, KvRouterError> {
+            Ok(SharedCacheHits::default())
+        }
+
+        fn observe_stored(&self, source: WorkerWithDpRank, data: &KvCacheStoreData) {
+            self.stored.lock().unwrap().push((source, data.clone()));
+        }
+    }
+
+    async fn apply_observed_event(indexer: &Indexer, event: RouterEvent, backpressure: bool) {
+        if backpressure {
+            indexer.try_apply_event(event).await.unwrap();
+        } else {
+            indexer.apply_event_routed(event).await.unwrap();
+        }
+    }
+
+    async fn flush_observed_indexer(indexer: &Indexer) {
+        let lower_tier = match indexer {
+            Indexer::Single {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Remote { .. } | Indexer::None => return,
+        };
+        for indexer in lower_tier.all() {
+            indexer.dump_events().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cache_observer_receives_only_valid_primary_stores() {
+        for (num_threads, backpressure) in [(1, true), (2, true), (1, false), (2, false)] {
+            let mut indexer = create_indexer(4, num_threads);
+            let observer = Arc::new(StoreObserver::default());
+            indexer.set_shared_cache(Some(observer.clone()));
+            let mut expected = Vec::new();
+            for (dp_rank, domain) in [
+                (0, WireResidencyDomain::Known(ResidencyDomain::Worker)),
+                (1, WireResidencyDomain::Missing),
+            ] {
+                let mut event = store_event(7, dp_rank, 1, &[], &[11], StorageTier::Device);
+                event.residency_domain = domain;
+                let KvCacheEventData::Stored(data) = &event.event.data else {
+                    unreachable!();
+                };
+                expected.push((WorkerWithDpRank::new(7, dp_rank), data.clone()));
+                apply_observed_event(&indexer, event, backpressure).await;
+            }
+
+            for tier in [
+                StorageTier::HostPinned,
+                StorageTier::Disk,
+                StorageTier::External,
+            ] {
+                apply_observed_event(
+                    &indexer,
+                    store_event(7, 0, 2, &[], &[21], tier),
+                    backpressure,
+                )
+                .await;
+            }
+            for domain in [
+                WireResidencyDomain::Unknown("future-domain".into()),
+                WireResidencyDomain::Invalid,
+                WireResidencyDomain::Known(ResidencyDomain::CacheOwner),
+            ] {
+                let mut event = store_event(7, 0, 3, &[], &[31], StorageTier::Device);
+                event.residency_domain = domain;
+                apply_observed_event(&indexer, event, backpressure).await;
+            }
+            flush_observed_indexer(&indexer).await;
+            assert_eq!(*observer.stored.lock().unwrap(), expected);
+
+            let matches = indexer
+                .find_matches_by_tier(vec![LocalBlockHash(31)])
+                .await
+                .unwrap();
+            assert!(matches.device.overlap_scores.scores.is_empty());
+
+            let stored_hash = expected[0].1.blocks[0].block_hash;
+            apply_observed_event(
+                &indexer,
+                RouterEvent::new(
+                    7,
+                    KvCacheEvent {
+                        event_id: 4,
+                        dp_rank: 0,
+                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                            block_hashes: vec![stored_hash],
+                        }),
+                    },
+                ),
+                backpressure,
+            )
+            .await;
+            apply_observed_event(
+                &indexer,
+                RouterEvent::new(
+                    7,
+                    KvCacheEvent {
+                        event_id: 5,
+                        dp_rank: 1,
+                        data: KvCacheEventData::Cleared,
+                    },
+                ),
+                backpressure,
+            )
+            .await;
+            indexer.reset_worker_dp_rank_and_wait(7, 0).await.unwrap();
+            flush_observed_indexer(&indexer).await;
+            assert_eq!(*observer.stored.lock().unwrap(), expected);
+            assert!(
+                indexer
+                    .find_matches_by_tier(vec![LocalBlockHash(11)])
+                    .await
+                    .unwrap()
+                    .device
+                    .overlap_scores
+                    .scores
+                    .is_empty()
+            );
+
+            indexer.set_shared_cache(None);
+            apply_observed_event(
+                &indexer,
+                store_event(7, 0, 6, &[], &[41], StorageTier::Device),
+                backpressure,
+            )
+            .await;
+            flush_observed_indexer(&indexer).await;
+            assert_eq!(*observer.stored.lock().unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cache_observer_receives_unknown_parent_before_tree_rejection() {
+        for (num_threads, backpressure) in [(1, true), (2, true), (1, false), (2, false)] {
+            let mut indexer = create_indexer(4, num_threads);
+            let observer = Arc::new(StoreObserver::default());
+            indexer.set_shared_cache(Some(observer.clone()));
+            let worker = WorkerWithDpRank::new(7, 2);
+            let mut event = store_event(7, 2, 1, &[11], &[12, 13], StorageTier::Device);
+            let KvCacheEventData::Stored(data) = &mut event.event.data else {
+                unreachable!();
+            };
+            data.start_position = Some(1);
+            let expected = vec![(worker, data.clone())];
+            assert!(expected[0].1.parent_hash.is_some());
+
+            apply_observed_event(&indexer, event, backpressure).await;
+            assert_eq!(*observer.stored.lock().unwrap(), expected);
+            flush_observed_indexer(&indexer).await;
+            for query in [
+                vec![LocalBlockHash(11), LocalBlockHash(12)],
+                vec![LocalBlockHash(12)],
+            ] {
+                assert!(
+                    indexer
+                        .find_matches_by_tier(query)
+                        .await
+                        .unwrap()
+                        .device
+                        .overlap_scores
+                        .scores
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cache_observer_ignores_approximate_routing_decisions() {
+        for num_threads in [1, 2] {
+            let mut indexer = policy_indexer(
+                num_threads,
+                IndexerPolicy {
+                    primary: PrimaryRetention::ApproximateTtl(Duration::from_secs(60)),
+                    side_ttl: None,
+                },
+            );
+            let observer = Arc::new(StoreObserver::default());
+            indexer.set_shared_cache(Some(observer.clone()));
+            let worker = WorkerWithDpRank::new(7, 0);
+            let hashes = vec![LocalBlockHash(11), LocalBlockHash(12)];
+            indexer
+                .record_hashed_routing_decision(
+                    worker,
+                    hashes.clone(),
+                    compute_seq_hash_for_block(&hashes),
+                )
+                .await
+                .unwrap();
+            let mut tokens = TokensWithHashes::new(vec![1, 2, 3, 4], 4);
+            indexer
+                .process_routing_decision_for_request(&mut tokens, worker)
+                .await
+                .unwrap();
+            flush_observed_indexer(&indexer).await;
+            assert_eq!(
+                indexer
+                    .find_matches_by_tier(hashes)
+                    .await
+                    .unwrap()
+                    .device
+                    .overlap_scores
+                    .scores
+                    .get(&worker),
+                Some(&2)
+            );
+            assert!(observer.stored.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_cache_observer_is_not_retained_by_disabled_indexer() {
+        let observer = Arc::new(StoreObserver::default());
+        let mut indexer = Indexer::None;
+        indexer.set_shared_cache(Some(observer.clone()));
+        assert_eq!(Arc::strong_count(&observer), 1);
+        for backpressure in [true, false] {
+            apply_observed_event(
+                &indexer,
+                store_event(7, 0, 1, &[], &[11], StorageTier::Device),
+                backpressure,
+            )
+            .await;
+        }
+        assert!(observer.stored.lock().unwrap().is_empty());
+    }
 
     /// Apply a Device store and a HostPinned store anchored on it. The tiered
     /// query must surface both tier hits, and the device-tier `find_matches`
@@ -1615,6 +1927,7 @@ pub fn create_indexer_with_policy(
             ),
             lower_tier: LowerTierIndexers::new(num_threads, block_size),
             approx,
+            shared_cache: None,
             primary_records_routing_decisions,
             session_updates: None,
         }
@@ -1628,6 +1941,7 @@ pub fn create_indexer_with_policy(
             ),
             lower_tier: LowerTierIndexers::new(1, block_size),
             approx,
+            shared_cache: None,
             primary_records_routing_decisions,
             session_updates: None,
         }
@@ -1652,6 +1966,7 @@ mod session_tests {
             primary: primary.clone(),
             lower_tier: LowerTierIndexers::new(1, 4),
             approx: None,
+            shared_cache: None,
             primary_records_routing_decisions: false,
             session_updates: Some(SessionUpdateSender::for_legacy(
                 Arc::clone(&session_prefix_index),
@@ -1672,6 +1987,7 @@ mod session_tests {
             primary: Arc::clone(&primary),
             lower_tier: LowerTierIndexers::new(2, 4),
             approx: None,
+            shared_cache: None,
             primary_records_routing_decisions: false,
             session_updates: Some(SessionUpdateSender::for_concurrent(
                 Arc::clone(&session_prefix_index),

@@ -61,6 +61,7 @@ impl SelectionOutcome {
 pub(super) struct RoutingRequestParts<'a> {
     pub(super) token_ids: &'a [TokenIdType],
     pub(super) block_mm_infos: Option<&'a [Option<BlockExtraInfo>]>,
+    pub(super) shared_cache_eligible: bool,
 }
 
 impl<'a> RoutingRequestParts<'a> {
@@ -69,6 +70,7 @@ impl<'a> RoutingRequestParts<'a> {
         Self {
             token_ids,
             block_mm_infos,
+            shared_cache_eligible: request.shared_cache_text_eligible(),
         }
     }
 }
@@ -110,6 +112,7 @@ impl RoutingHost {
                 Some(args.context_id),
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
+                args.routing_parts.shared_cache_eligible,
                 args.router_config_override,
                 args.update_states,
                 args.return_routing_hashes,

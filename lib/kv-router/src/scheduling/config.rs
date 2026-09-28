@@ -386,8 +386,11 @@ pub enum SharedCacheType {
     /// No shared cache (default).
     #[default]
     None,
-    /// HiCache L3 shared cache — queries sglang workers via the request plane.
+    /// SGLang HiCache L3 shared cache, indexed from Mooncake events.
     Hicache,
+    /// vLLM Mooncake Store shared cache, using resolved worker metadata and events.
+    #[serde(rename = "mooncake-store")]
+    MooncakeStore,
 }
 
 /// Retention policy for a router-local primary approximate indexer.
@@ -431,6 +434,7 @@ impl fmt::Display for SharedCacheType {
         match self {
             Self::None => f.write_str("none"),
             Self::Hicache => f.write_str("hicache"),
+            Self::MooncakeStore => f.write_str("mooncake-store"),
         }
     }
 }
@@ -442,8 +446,9 @@ impl FromStr for SharedCacheType {
         match s {
             "none" => Ok(Self::None),
             "hicache" => Ok(Self::Hicache),
+            "mooncake-store" => Ok(Self::MooncakeStore),
             _ => Err(format!(
-                "unknown shared_cache_type: {s:?}, expected 'none' or 'hicache'"
+                "unknown shared_cache_type: {s:?}, expected 'none', 'hicache', or 'mooncake-store'"
             )),
         }
     }
@@ -889,7 +894,8 @@ pub struct KvRouterConfig {
     pub shared_cache_multiplier: f64,
 
     /// Type of external shared KV cache to query during routing.
-    /// "none" (default): disabled. "hicache": query sglang workers for L3 cache state.
+    /// "none" (default): disabled. "hicache": SGLang HiCache state from Mooncake events.
+    /// "mooncake-store": vLLM Mooncake Store state from resolved metadata and events.
     pub shared_cache_type: SharedCacheType,
 
     /// TTL in seconds applied to entries in the local predict-on-route side
@@ -1093,6 +1099,21 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
     }
     if config.enable_session_prefix_index && !config.use_kv_events {
         return Err("enable_session_prefix_index requires use_kv_events=true".to_string());
+    }
+    if config.shared_cache_type == SharedCacheType::MooncakeStore {
+        if config.use_remote_indexer {
+            return Err(
+                "shared_cache_type=mooncake-store requires use_remote_indexer=false".to_string(),
+            );
+        }
+        if !config.use_kv_events {
+            return Err("shared_cache_type=mooncake-store requires use_kv_events=true".to_string());
+        }
+        if config.overlap_score_credit == 0.0 {
+            return Err(
+                "shared_cache_type=mooncake-store requires overlap_score_credit > 0".to_string(),
+            );
+        }
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
         return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
@@ -1757,7 +1778,7 @@ mod tests {
         assert!(error.contains("expected 'fcfs', 'lcfs', or 'wspt'"));
 
         let error = try_config_from_values(&[("DYN_SHARED_CACHE_TYPE", "rdma")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'hicache'"));
+        assert!(error.contains("expected 'none', 'hicache', or 'mooncake-store'"));
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
@@ -1909,6 +1930,97 @@ mod tests {
             ("DYN_SHARED_CACHE_MULTIPLIER", "0.3"),
         ]);
         assert_eq!(explicit.shared_cache_multiplier, 0.3);
+    }
+
+    #[test]
+    fn shared_cache_types_round_trip() {
+        for (value, cache_type) in [
+            ("none", SharedCacheType::None),
+            ("hicache", SharedCacheType::Hicache),
+            ("mooncake-store", SharedCacheType::MooncakeStore),
+        ] {
+            assert_eq!(value.parse::<SharedCacheType>().unwrap(), cache_type);
+            assert_eq!(cache_type.to_string(), value);
+            assert_eq!(serde_json::to_value(cache_type).unwrap(), value);
+            assert_eq!(
+                serde_json::from_value::<SharedCacheType>(serde_json::json!(value)).unwrap(),
+                cache_type,
+            );
+            let config: KvRouterConfig = serde_json::from_value(serde_json::json!({
+                "shared_cache_type": value,
+            }))
+            .unwrap();
+            assert_eq!(config.shared_cache_type, cache_type);
+            let round_trip: KvRouterConfig =
+                serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+            assert_eq!(round_trip.shared_cache_type, cache_type);
+        }
+        for value in ["mooncakestore", "mooncake_store", "MooncakeStore", "redis"] {
+            assert!(value.parse::<SharedCacheType>().is_err());
+            assert!(serde_json::from_value::<SharedCacheType>(serde_json::json!(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn mooncake_store_env_preserves_multiplier_defaults_and_overrides() {
+        let config = config_from_values(&[("DYN_SHARED_CACHE_TYPE", "mooncake-store")]);
+        assert_eq!(config.shared_cache_type, SharedCacheType::MooncakeStore);
+        assert_eq!(config.shared_cache_multiplier, 0.5);
+        assert!(config.validate().is_ok());
+
+        for value in ["0", "0.3", "1"] {
+            let config = config_from_values(&[
+                ("DYN_SHARED_CACHE_TYPE", "mooncake-store"),
+                ("DYN_SHARED_CACHE_MULTIPLIER", value),
+            ]);
+            assert_eq!(
+                config.shared_cache_multiplier,
+                value.parse::<f64>().unwrap()
+            );
+            assert!(config.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn mooncake_store_requires_local_event_learning() {
+        for (field, value, expected_error) in [
+            (
+                "use_remote_indexer",
+                serde_json::json!(true),
+                "shared_cache_type=mooncake-store requires use_remote_indexer=false",
+            ),
+            (
+                "use_kv_events",
+                serde_json::json!(false),
+                "shared_cache_type=mooncake-store requires use_kv_events=true",
+            ),
+            (
+                "overlap_score_credit",
+                serde_json::json!(0.0),
+                "shared_cache_type=mooncake-store requires overlap_score_credit > 0",
+            ),
+        ] {
+            let mut config = serde_json::json!({"shared_cache_type": "mooncake-store"});
+            config[field] = value;
+            let error = serde_json::from_value::<KvRouterConfig>(config.clone()).unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error}");
+
+            for other_type in ["none", "hicache"] {
+                config["shared_cache_type"] = serde_json::json!(other_type);
+                assert!(serde_json::from_value::<KvRouterConfig>(config.clone()).is_ok());
+            }
+        }
+
+        let error = serde_json::from_value::<KvRouterConfig>(serde_json::json!({
+            "shared_cache_type": "mooncake-store",
+            "overlap_score_weight": 0.0,
+        }))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires overlap_score_credit > 0")
+        );
     }
 
     #[test]

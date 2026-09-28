@@ -546,6 +546,23 @@ fn prompt_normalization_uses_mm_routing_info_and_eagle_hashing() {
 }
 
 #[test]
+fn prompt_request_cannot_claim_shared_cache_eligibility() {
+    for claimed_eligibility in [false, true] {
+        let request: PromptRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "cache_salt": "tenant-a",
+            "shared_cache_eligible": claimed_eligibility
+        }))
+        .unwrap();
+        assert!(!request.view().shared_cache_eligible);
+        assert!(!request.clone().view().shared_cache_eligible);
+        assert_eq!(request.view().cache_namespace, Some("tenant-a"));
+        assert_eq!(request.view().token_ids, Some([1, 2, 3, 4].as_slice()));
+    }
+    assert!(!PromptRequest::default().view().shared_cache_eligible);
+}
+
+#[test]
 fn prompt_request_cache_salt_changes_normalized_hashes() {
     let salted: PromptRequest = serde_json::from_value(serde_json::json!({
         "token_ids": [1, 2, 3, 4],

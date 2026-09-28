@@ -379,7 +379,6 @@ impl KvEventSubscriptionHandle {
         self.task_guard = Some(task_guard);
     }
 
-    #[cfg(test)]
     pub(crate) async fn shutdown(mut self) {
         self.cancel.cancel();
         for completion in self.completions.drain(..) {

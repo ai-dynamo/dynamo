@@ -76,6 +76,7 @@ from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKE
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
+from .mooncake_store_runtime import publish_mooncake_store_runtime
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
 from .multimodal_utils.models.nemotron_video_routing import (
@@ -875,6 +876,13 @@ async def register_vllm_model(
     )
     runtime_values = get_engine_cache_info(engine_client)
     num_gpu_blocks = runtime_values["num_gpu_blocks"]
+    await publish_mooncake_store_runtime(
+        runtime_config,
+        engine_client,
+        vllm_config,
+        dp_range=dp_range,
+        event_span=runtime_values["kv_event_block_size"],
+    )
     # Get data_parallel_size from vllm_config (defaults to 1)
     if num_gpu_blocks is None:
         # TODO(upstream-vllm): remove this workaround once vLLM propagates

@@ -11,6 +11,9 @@
 //!    SGLang uses for the configured TP/PP/MLA layout.
 //! 4. Tracks those object keys from the Mooncake master's KV event stream.
 
+mod mooncake_store_contract;
+pub(crate) mod vllm_mooncake_store;
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -32,7 +35,7 @@ use crate::{
     utils::zmq::{connect_sub_socket, multipart_message},
 };
 use dynamo_kv_router::{
-    SharedKvCache,
+    SharedCacheQuery, SharedKvCache,
     indexer::KvRouterError,
     protocols::{SharedCacheHits, WorkerId},
 };
@@ -81,6 +84,8 @@ struct MooncakeObjectEvent {
     tenant_id: String,
     #[serde(default)]
     group_id: Option<String>,
+    #[serde(default)]
+    medium: Option<String>,
 }
 
 /// Mooncake KV publisher payload: `(timestamp_ms, events, dp_rank)` after the empty-topic and
@@ -285,9 +290,7 @@ impl HicacheSharedKvCache {
     }
 
     fn record_subscriber_error(&self) {
-        if let Some(metrics) = RoutingOverheadMetrics::get() {
-            metrics.inc_shared_cache_errors();
-        }
+        record_subscriber_error();
     }
 
     async fn run_subscriber(mut self, cancellation_token: CancellationToken) {
@@ -369,6 +372,12 @@ impl HicacheSharedKvCache {
     }
 }
 
+fn record_subscriber_error() {
+    if let Some(metrics) = RoutingOverheadMetrics::get() {
+        metrics.inc_shared_cache_errors();
+    }
+}
+
 fn parse_mooncake_event_frames(
     frames: &[Vec<u8>],
 ) -> anyhow::Result<(u64, Vec<MooncakeObjectEvent>)> {
@@ -389,10 +398,14 @@ fn parse_mooncake_event_frames(
 impl SharedKvCache for HicacheSharedKvCache {
     async fn check_blocks(
         &self,
-        tokens: &[u32],
-        block_size: u32,
-        cache_namespace: Option<&str>,
+        query: SharedCacheQuery<'_>,
     ) -> Result<SharedCacheHits, KvRouterError> {
+        let SharedCacheQuery {
+            tokens,
+            block_size,
+            cache_namespace,
+            ..
+        } = query;
         if cache_namespace
             .filter(|namespace| !namespace.is_empty())
             .is_some()
@@ -619,6 +632,20 @@ mod tests {
     use super::*;
     use tokio::sync::watch;
 
+    fn query<'a>(
+        tokens: &'a [u32],
+        block_size: u32,
+        cache_namespace: Option<&'a str>,
+    ) -> SharedCacheQuery<'a> {
+        SharedCacheQuery {
+            tokens,
+            block_size,
+            cache_namespace,
+            block_hashes: &[],
+            shared_cache_eligible: true,
+        }
+    }
+
     fn mooncake_config() -> SglangHicacheMooncakeConfig {
         SglangHicacheMooncakeConfig {
             backend: "mooncake".to_string(),
@@ -760,6 +787,7 @@ mod tests {
                 object_key: Some("key-0".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: Some("group-0".to_string()),
+                medium: None,
             }],
             0_u32,
         ))
@@ -857,12 +885,13 @@ mod tests {
                     object_key: Some(object_key),
                     tenant_id: "default".to_string(),
                     group_id: Some(group_id.clone()),
+                    medium: None,
                 })
                 .collect(),
         );
         assert_eq!(
             cache
-                .check_blocks(&[1, 2, 3, 4], config.page_size, None)
+                .check_blocks(query(&[1, 2, 3, 4], config.page_size, None))
                 .await
                 .unwrap()
                 .total_hits,
@@ -879,7 +908,7 @@ mod tests {
 
         assert_eq!(
             cache
-                .check_blocks(&[1, 2, 3, 4], 4, None)
+                .check_blocks(query(&[1, 2, 3, 4], 4, None))
                 .await
                 .unwrap()
                 .total_hits,
@@ -902,23 +931,26 @@ mod tests {
                     object_key: Some(format!("{hash0}_0_k")),
                     tenant_id: "default".to_string(),
                     group_id: None,
+                    medium: None,
                 },
                 MooncakeObjectEvent {
                     event_type: "stored".to_string(),
                     object_key: Some(format!("{hash0}_0_v")),
                     tenant_id: "default".to_string(),
                     group_id: None,
+                    medium: None,
                 },
                 MooncakeObjectEvent {
                     event_type: "stored".to_string(),
                     object_key: Some(format!("{hash1}_0_k")),
                     tenant_id: "default".to_string(),
                     group_id: None,
+                    medium: None,
                 },
             ],
         );
         let hits = cache
-            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .check_blocks(query(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None))
             .await
             .unwrap();
 
@@ -932,10 +964,11 @@ mod tests {
                 object_key: Some(format!("{hash0}_0_v")),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
         let hits = cache
-            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+            .check_blocks(query(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None))
             .await
             .unwrap();
         assert_eq!(hits.total_hits, 0);
@@ -954,17 +987,22 @@ mod tests {
                     object_key: Some(format!("{hash}_0_k")),
                     tenant_id: "default".to_string(),
                     group_id: Some(group_id.clone()),
+                    medium: None,
                 },
                 MooncakeObjectEvent {
                     event_type: "stored".to_string(),
                     object_key: Some(format!("{hash}_0_v")),
                     tenant_id: "default".to_string(),
                     group_id: Some(group_id.clone()),
+                    medium: None,
                 },
             ],
         );
 
-        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        let hits = cache
+            .check_blocks(query(&[1, 2, 3, 4], 4, None))
+            .await
+            .unwrap();
         assert_eq!(hits.total_hits, 1);
         assert!(cache.group_states.get(&group_id).is_some_and(|v| v.1));
 
@@ -975,10 +1013,14 @@ mod tests {
                 object_key: Some(format!("{hash}_0_v")),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
         assert!(cache.group_states.is_empty());
-        let hits = cache.check_blocks(&[1, 2, 3, 4], 4, None).await.unwrap();
+        let hits = cache
+            .check_blocks(query(&[1, 2, 3, 4], 4, None))
+            .await
+            .unwrap();
         assert_eq!(hits.total_hits, 0);
     }
 
@@ -999,13 +1041,14 @@ mod tests {
                         object_key: Some(format!("{hash}_0_{kind}")),
                         tenant_id: "default".to_string(),
                         group_id: Some(group_id.clone()),
+                        medium: None,
                     })
                 })
                 .collect(),
         );
         assert_eq!(
             cache
-                .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None)
+                .check_blocks(query(&[1, 2, 3, 4, 5, 6, 7, 8], 4, None))
                 .await
                 .unwrap()
                 .total_hits,
@@ -1019,6 +1062,7 @@ mod tests {
                 object_key: Some(format!("{hash0}_0_k")),
                 tenant_id: "default".to_string(),
                 group_id: Some(group0.clone()),
+                medium: None,
             }],
         );
 
@@ -1036,6 +1080,7 @@ mod tests {
                 object_key: Some("key-0".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
         cache.apply_batch(
@@ -1045,6 +1090,7 @@ mod tests {
                 object_key: Some("key-0".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
 
@@ -1061,6 +1107,7 @@ mod tests {
                 object_key: Some("key-0".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: Some("group-0".to_string()),
+                medium: None,
             }],
         );
 
@@ -1099,6 +1146,7 @@ mod tests {
                 object_key: Some("key-0".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
         let task = tokio::spawn(cache.clone().run_subscriber(CancellationToken::new()));
@@ -1122,6 +1170,7 @@ mod tests {
                 object_key: Some("old_0_k".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: Some("old-group".to_string()),
+                medium: None,
             }],
         );
         assert!(cache.group_states.contains_key("old-group"));
@@ -1132,6 +1181,7 @@ mod tests {
                 object_key: Some("new_0_k".to_string()),
                 tenant_id: "default".to_string(),
                 group_id: None,
+                medium: None,
             }],
         );
 
@@ -1144,7 +1194,7 @@ mod tests {
     async fn test_check_blocks_skips_mooncake_for_cache_namespace() {
         let cache = HicacheSharedKvCache::new(runtime_watch_with_config(mooncake_config()));
         let hits = cache
-            .check_blocks(&[1, 2, 3, 4, 5, 6, 7, 8], 4, Some("tenant-a"))
+            .check_blocks(query(&[1, 2, 3, 4, 5, 6, 7, 8], 4, Some("tenant-a")))
             .await
             .unwrap();
 

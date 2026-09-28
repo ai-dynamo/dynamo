@@ -1259,6 +1259,10 @@ pub struct KvCacheStoreData {
     pub start_position: Option<u32>,
     /// A list of stored blocked data.
     pub blocks: Vec<KvCacheStoredBlockData>,
+    /// Positive text-only provenance captured before lossy event normalization.
+    /// Missing provenance, including legacy snapshots, must not authorize shared-cache learning.
+    #[serde(default)]
+    pub shared_cache_eligible: bool,
 }
 
 /// Multimodal object information within a block.
@@ -1896,11 +1900,47 @@ mod tests {
             event(
                 event_id,
                 KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: None,
                     start_position: None,
                     blocks: Vec::new(),
                 }),
             )
+        }
+
+        #[test]
+        fn shared_cache_provenance_defaults_false_and_roundtrips() {
+            let legacy = serde_json::json!({
+                "parent_hash": null, "start_position": null, "blocks": [],
+            });
+            let decoded: KvCacheStoreData = serde_json::from_value(legacy.clone()).unwrap();
+            assert!(!decoded.shared_cache_eligible);
+            let decoded: KvCacheStoreData =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&legacy).unwrap()).unwrap();
+            assert!(!decoded.shared_cache_eligible);
+            let legacy_tuple = (
+                Option::<u64>::None,
+                Option::<u32>::None,
+                Vec::<KvCacheStoredBlockData>::new(),
+            );
+            let decoded: KvCacheStoreData =
+                rmp_serde::from_slice(&rmp_serde::to_vec(&legacy_tuple).unwrap()).unwrap();
+            assert!(!decoded.shared_cache_eligible);
+            for shared_cache_eligible in [false, true] {
+                let data = KvCacheStoreData {
+                    shared_cache_eligible,
+                    ..decoded.clone()
+                };
+                let json: KvCacheStoreData =
+                    serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+                let named: KvCacheStoreData =
+                    rmp_serde::from_slice(&rmp_serde::to_vec_named(&data).unwrap()).unwrap();
+                let tuple: KvCacheStoreData =
+                    rmp_serde::from_slice(&rmp_serde::to_vec(&data).unwrap()).unwrap();
+                assert_eq!(json.shared_cache_eligible, shared_cache_eligible);
+                assert_eq!(named.shared_cache_eligible, shared_cache_eligible);
+                assert_eq!(tuple.shared_cache_eligible, shared_cache_eligible);
+            }
         }
 
         #[test]
@@ -2023,6 +2063,7 @@ mod tests {
         let kv_cache_event = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {

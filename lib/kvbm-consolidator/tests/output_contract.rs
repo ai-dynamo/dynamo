@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 
 fn bs(hash: u64, parent: Option<u64>, tokens: Vec<u32>, block_size: usize) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(hash)],
         parent_block_hash: parent.map(BlockHashValue::Unsigned),
         token_ids: tokens,
@@ -38,6 +39,7 @@ fn bs(hash: u64, parent: Option<u64>, tokens: Vec<u32>, block_size: usize) -> Ra
 
 fn bs_lora(hash: u64, tokens: Vec<u32>, lora_name: String) -> RawKvEvent {
     RawKvEvent::BlockStored {
+        shared_cache_eligible: false,
         block_hashes: vec![BlockHashValue::Unsigned(hash)],
         parent_block_hash: None,
         token_ids: tokens,

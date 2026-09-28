@@ -449,6 +449,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: false,
             session_updates: None,
+            shared_cache: None,
         }
     }
 
@@ -463,6 +464,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: false,
             session_updates: None,
+            shared_cache: None,
         }
     }
 
@@ -480,6 +482,7 @@ mod tests {
             approx: None,
             primary_records_routing_decisions: true,
             session_updates: None,
+            shared_cache: None,
         }
     }
 
@@ -902,6 +905,7 @@ mod tests {
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
             session_updates: None,
+            shared_cache: None,
         };
         assert!(indexer.records_routing_decisions());
 
@@ -1037,6 +1041,7 @@ mod tests {
             approx: Some(super::SideIndexer::Concurrent(side)),
             primary_records_routing_decisions: false,
             session_updates: None,
+            shared_cache: None,
         };
 
         let primary_worker = WorkerWithDpRank::new(10, 0);

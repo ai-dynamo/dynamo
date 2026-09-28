@@ -11,6 +11,15 @@ use super::{
 };
 use crate::protocols::*;
 
+#[derive(Clone, Copy, Debug)]
+pub struct SharedCacheQuery<'a> {
+    pub block_hashes: &'a [LocalBlockHash],
+    pub tokens: &'a [u32],
+    pub block_size: u32,
+    pub cache_namespace: Option<&'a str>,
+    pub shared_cache_eligible: bool,
+}
+
 /// Trait for querying an external shared KV cache pool.
 ///
 /// Implementations check which blocks/pages from a request's token sequence
@@ -24,10 +33,10 @@ pub trait SharedKvCache: Send + Sync {
     /// shared-cache hits across isolated cache namespaces.
     async fn check_blocks(
         &self,
-        tokens: &[u32],
-        block_size: u32,
-        cache_namespace: Option<&str>,
+        query: SharedCacheQuery<'_>,
     ) -> Result<SharedCacheHits, KvRouterError>;
+
+    fn observe_stored(&self, _source: WorkerWithDpRank, _data: &KvCacheStoreData) {}
 }
 
 #[async_trait]

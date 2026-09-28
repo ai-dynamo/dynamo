@@ -1860,6 +1860,7 @@ mod tests {
                 primary,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
+                shared_cache: None,
                 primary_records_routing_decisions: false,
                 session_updates: None,
             },
@@ -1991,6 +1992,7 @@ mod tests {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(10),
                         tokens_hash: LocalBlockHash(10),
@@ -2097,6 +2099,7 @@ mod tests {
             primary,
             lower_tier: lower_tiers.clone(),
             approx: None,
+            shared_cache: None,
             primary_records_routing_decisions: false,
             session_updates: None,
         };
@@ -2110,6 +2113,7 @@ mod tests {
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: None,
                         start_position: None,
+                        shared_cache_eligible: false,
                         blocks: vec![
                             KvCacheStoredBlockData {
                                 block_hash: ExternalSequenceBlockHash(101),
@@ -2306,6 +2310,7 @@ mod tests {
                     data: KvCacheEventData::Stored(KvCacheStoreData {
                         parent_hash: None,
                         start_position: None,
+                        shared_cache_eligible: false,
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(event_id),
                             tokens_hash: LocalBlockHash(event_id),

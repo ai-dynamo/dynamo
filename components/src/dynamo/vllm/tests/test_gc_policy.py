@@ -113,6 +113,20 @@ def test_worker_extension_methods(monkeypatch):
         gc.unfreeze()
 
 
+def test_mooncake_composite_retains_fpm_rpc_methods(monkeypatch):
+    gc_policy = _fresh_module(monkeypatch, None)
+    worker_module = importlib.import_module("dynamo.vllm.mooncake_store_worker")
+    worker_module = importlib.reload(worker_module)
+    extension = worker_module.MooncakeStoreFpmWorkerExtension()
+    assert extension.fpm_gc_start() is False
+    assert callable(extension.dynamo_mooncake_store_descriptor)
+    assert extension.fpm_gc_stop.__func__ is gc_policy.FpmGcWorkerExtension.fpm_gc_stop
+    assert (
+        extension.fpm_gc_maintain.__func__
+        is gc_policy.FpmGcWorkerExtension.fpm_gc_maintain
+    )
+
+
 def _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds):
     """The bar for both completion paths: a worker that ran the policy must
     be indistinguishable from one that never did."""

@@ -250,7 +250,9 @@ async fn collect_prepared_corpus_scores(
                     let overlap = indexer.find_matches(request.to_vec()).await?;
                     scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
-                MooncakeOperationPayload::Event(event) => indexer.apply_event(event.clone()).await,
+                MooncakeOperationPayload::Event(event) => {
+                    indexer.apply_event(event.as_ref().clone()).await
+                }
             }
             idx += 1;
         }
@@ -339,7 +341,9 @@ fn collect_direct_ckf_overlap_scores(
                     let overlap = indexer.find_matches_with_mode(request, match_mode)?;
                     scores.push(ComparableOverlapScores::new(overlap, request.len()));
                 }
-                MooncakeOperationPayload::Event(event) => indexer.submit_event(event.clone())?,
+                MooncakeOperationPayload::Event(event) => {
+                    indexer.submit_event(event.as_ref().clone())?
+                }
             }
             idx += 1;
         }
@@ -883,6 +887,7 @@ fn open_loop_preparation_preserves_query_first_ties_and_removed_blocks() -> anyh
                 event: KvCacheEvent {
                     event_id: 8,
                     data: KvCacheEventData::Stored(KvCacheStoreData {
+                        shared_cache_eligible: false,
                         parent_hash: None,
                         start_position: Some(0),
                         blocks: vec![

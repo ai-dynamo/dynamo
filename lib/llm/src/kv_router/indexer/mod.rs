@@ -11,7 +11,7 @@ use anyhow::Result;
 use dynamo_kv_router::{
     ConcurrentRadixTreeCompressed, SessionPrefixIndexer,
     approx::PruneConfig,
-    config::{ApproximateCachePolicyKind, KvRouterConfig},
+    config::{ApproximateCachePolicyKind, KvRouterConfig, SharedCacheType},
     indexer::{
         ApproximateRetentionConfig, KvIndexer, KvIndexerMetrics, LowerTierIndexers,
         ThreadPoolIndexer,
@@ -90,6 +90,9 @@ pub(crate) async fn build(
     session_prefix_index: Option<Arc<SessionPrefixIndexer>>,
 ) -> Result<Indexer> {
     let approximate_policy = resolve_approximate_primary_policy(kv_router_config)?;
+    // Dump provenance is only consumed by a shared-cache observer replaying
+    // stores, so the default configuration does not pay for the map.
+    let shared_cache_provenance = kv_router_config.shared_cache_type != SharedCacheType::None;
     if approximate_policy == ResolvedApproximatePrimaryPolicy::TtlRemoteFallback {
         tracing::warn!(
             use_remote_indexer = kv_router_config.use_remote_indexer,
@@ -166,17 +169,20 @@ pub(crate) async fn build(
                     Some(kv_indexer_metrics),
                 ),
                 approx: None,
+                shared_cache: None,
                 primary_records_routing_decisions: true,
                 session_updates,
             });
         }
 
-        let primary = KvIndexer::new_with_approximate_retention(
+        let primary = KvIndexer::builder(
             cancellation_token.child_token(),
             block_size,
             kv_indexer_metrics.clone(),
-            Some(retention),
-        );
+        )
+        .retention(retention)
+        .shared_cache_provenance(shared_cache_provenance)
+        .build();
         let session_updates = session_prefix_index
             .map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
         return Ok(Indexer::Single {
@@ -187,6 +193,7 @@ pub(crate) async fn build(
                 Some(kv_indexer_metrics),
             ),
             approx: None,
+            shared_cache: None,
             primary_records_routing_decisions: true,
             session_updates,
         });
@@ -217,24 +224,27 @@ pub(crate) async fn build(
                 Some(kv_indexer_metrics),
             ),
             approx,
+            shared_cache: None,
             primary_records_routing_decisions: false,
             session_updates,
         });
     }
 
     let kv_indexer_metrics = KvIndexerMetrics::from_component(component);
-    let primary = KvIndexer::new_with_pruning(
+    let primary = KvIndexer::builder(
         cancellation_token.child_token(),
         block_size,
         kv_indexer_metrics.clone(),
-        None,
-    );
+    )
+    .shared_cache_provenance(shared_cache_provenance)
+    .build();
     let session_updates =
         session_prefix_index.map(|index| SessionUpdateSender::for_legacy(index, primary.clone()));
     Ok(Indexer::Single {
         primary,
         lower_tier: LowerTierIndexers::new_with_metrics(1, block_size, Some(kv_indexer_metrics)),
         approx,
+        shared_cache: None,
         primary_records_routing_decisions: false,
         session_updates,
     })
@@ -263,12 +273,51 @@ fn predict_on_route_side_indexer(
 }
 
 #[cfg(test)]
-pub(super) mod test_util {
-    use dynamo_kv_router::protocols::{
-        ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
-        compute_seq_hash_for_block,
+pub(crate) mod test_util {
+    use dynamo_kv_router::{
+        indexer::KvIndexerInterface,
+        protocols::{
+            ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
+            KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier,
+            compute_seq_hash_for_block,
+        },
+        services::indexer::backend::create_indexer,
     };
+
+    use super::Indexer;
+
+    pub(crate) fn make_test_indexer(block_size: u32) -> Indexer {
+        create_indexer(block_size, 1)
+    }
+
+    pub(crate) fn make_test_concurrent_indexer(block_size: u32) -> Indexer {
+        create_indexer(block_size, 2)
+    }
+
+    pub(crate) async fn flush_indexer(indexer: &Indexer) {
+        let lower_tier = match indexer {
+            Indexer::Single {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+                ..
+            } => {
+                primary.flush_and_wait().await.unwrap();
+                lower_tier
+            }
+            Indexer::Remote { .. } | Indexer::None => return,
+        };
+        for indexer in lower_tier.all() {
+            indexer.dump_events().await.unwrap();
+        }
+    }
 
     pub(crate) fn store_event(
         worker_id: u64,
@@ -310,6 +359,7 @@ pub(super) mod test_util {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks,
                 }),
                 dp_rank,

@@ -558,6 +558,7 @@ fn sequence_to_router_event(sequence: &SequenceData, event_id: u64) -> RouterEve
     let kv_event = KvCacheEvent {
         event_id,
         data: KvCacheEventData::Stored(KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: None,
             start_position: None,
             blocks: sequence

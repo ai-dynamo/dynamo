@@ -303,6 +303,7 @@ mod test_event_processing {
     fn test_convert_event_block_stored() {
         let kv_block_size = 4;
         let raw_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
             parent_block_hash: Some(BlockHashValue::Unsigned(99)),
             token_ids: vec![1, 2, 3, 4, 5, 6, 7, 8],
@@ -339,6 +340,7 @@ mod test_event_processing {
         let token_ids = vec![1, 2, 3, 4];
 
         let base_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -356,6 +358,7 @@ mod test_event_processing {
             session_id: None,
         };
         let lora_evt = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -416,6 +419,7 @@ mod test_event_processing {
         let wc = Arc::new(AtomicU32::new(0));
 
         let evt1 = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -433,6 +437,7 @@ mod test_event_processing {
             session_id: None,
         };
         let evt2 = RawKvEvent::BlockStored {
+            shared_cache_eligible: false,
             block_hashes: vec![BlockHashValue::Unsigned(10)],
             parent_block_hash: None,
             token_ids: token_ids.clone(),
@@ -963,6 +968,7 @@ mod tests_startup_helpers {
         let event = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![
@@ -1056,6 +1062,7 @@ mod tests_startup_helpers {
         let store_event = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -1139,6 +1146,7 @@ mod tests_startup_helpers {
         let store_event = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -1374,6 +1382,7 @@ mod tests_startup_helpers {
             parent_hash,
             start_position,
             blocks,
+            ..
         }) = &event.data
         else {
             panic!("expected KvCacheStoreData");
@@ -1621,6 +1630,7 @@ mod tests_startup_helpers {
         let batch = KvEventBatch {
             ts: 0.0,
             events: vec![RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
                 block_hashes: vec![BlockHashValue::Unsigned(64)],
                 parent_block_hash: None,
                 token_ids: vec![4, 5, 6, 7],
@@ -1639,7 +1649,17 @@ mod tests_startup_helpers {
             }],
             data_parallel_rank: Some(0),
         };
-        let payload = rmps::to_vec(&batch).unwrap();
+        let payload =
+            rmps::to_vec_named(&(batch.ts, &batch.events, batch.data_parallel_rank)).unwrap();
+        let decoded: KvEventBatch =
+            rmps::from_slice(&payload).expect("failed to decode ZMQ test event");
+        assert!(matches!(
+            decoded.events.as_slice(),
+            [RawKvEvent::BlockStored {
+                shared_cache_eligible: false,
+                ..
+            }]
+        ));
 
         let event = tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
             let mut publish_interval =
@@ -1720,6 +1740,7 @@ mod tests_startup_helpers {
         let event_1 = KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![
@@ -1793,6 +1814,7 @@ mod tests_startup_helpers {
         let event_2 = KvCacheEvent {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: None,
                 blocks: vec![
@@ -1908,6 +1930,7 @@ mod test_event_dedup_filter {
 
     fn store_data(hashes: &[u64]) -> KvCacheStoreData {
         KvCacheStoreData {
+            shared_cache_eligible: false,
             parent_hash: None,
             start_position: None,
             blocks: hashes
@@ -2349,6 +2372,7 @@ mod event_processor_tests {
         KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -2662,6 +2686,7 @@ mod event_processor_tests {
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: None,
                 start_position: None,
+                shared_cache_eligible: false,
                 blocks: (0..block_count)
                     .map(|i| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(i as u64),
@@ -2834,6 +2859,7 @@ mod event_processor_tests {
             let event = KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash,
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -2927,6 +2953,7 @@ mod event_processor_tests {
             let event = KvCacheEvent {
                 event_id: i as u64,
                 data: KvCacheEventData::Stored(KvCacheStoreData {
+                    shared_cache_eligible: false,
                     parent_hash: Some(ExternalSequenceBlockHash((i + 1) as u64 * 100)),
                     start_position: None,
                     blocks: vec![KvCacheStoredBlockData {
@@ -2994,6 +3021,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None,
                 start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3010,6 +3038,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
                 start_position: Some(11_111),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3026,6 +3055,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
                 start_position: Some(20),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3219,6 +3249,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -3622,6 +3653,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 100,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -3638,6 +3670,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 101,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(1)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -3656,6 +3689,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 200,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(0)),
                 start_position: None,
                 blocks: vec![KvCacheStoredBlockData {
@@ -3742,6 +3776,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 0,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: None, // Root block with no parent
                 start_position: Some(10),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3759,6 +3794,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 1,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(1)), // Points to previous block
                 start_position: Some(999),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3776,6 +3812,7 @@ mod event_processor_tests {
         tx.send(local_gpu_event(KvCacheEvent {
             event_id: 2,
             data: KvCacheEventData::Stored(KvCacheStoreData {
+                shared_cache_eligible: false,
                 parent_hash: Some(ExternalSequenceBlockHash(2)),
                 start_position: Some(1_234),
                 blocks: vec![KvCacheStoredBlockData {
@@ -3874,6 +3911,7 @@ mod event_plane_batch_tests {
                 data: KvCacheEventData::Stored(KvCacheStoreData {
                     parent_hash: None,
                     start_position: None,
+                    shared_cache_eligible: false,
                     blocks: (0..block_count)
                         .map(|index| KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(

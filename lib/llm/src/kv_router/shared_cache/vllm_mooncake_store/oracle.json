@@ -1,0 +1,1912 @@
+{
+  "_generated": "DO NOT EDIT. Regenerate with components/src/dynamo/vllm/tests/generate_mooncake_oracle.py; --check detects stale output.",
+  "cases": [
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "sliding_window",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": 32
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "fa16_swa16_window32_late",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "sliding_window",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": 32
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "fa16_swa16_window32_final_token",
+      "oracle_hit_tokens": 0,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 64,
+      "reusable_endpoints": [],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+      ]
+    },
+    {
+      "coordinator_alignment": 32,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 32,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "fa16_mamba32_aligned",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": true,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "sliding_window",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": 32
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "fa16_swa16_window32_gap",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        16,
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0",
+            "oracle@model@tp_rank:1@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1",
+            "oracle@model@tp_rank:1@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "tp2_fa16_mamba16_late",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:1@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0",
+            "oracle@model@tp_rank:1@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1",
+            "oracle@model@tp_rank:1@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "tp2_mamba_missing_member",
+      "oracle_hit_tokens": 0,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:1@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 32,
+      "groups": [
+        {
+          "block_size": 32,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 8,
+          "group_id": 1,
+          "kind": "sliding_window",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": 8
+        }
+      ],
+      "hash_block_size": 8,
+      "hashes": [
+        {
+          "digest": "a99e65fd014bdd568012cae9abd39f876e6119e45408fbb794c1201b18359bab",
+          "end_token": 8,
+          "low64": 10718883888860863403
+        },
+        {
+          "digest": "4d1a350e03e341724c60243cd4090cadcfcd7b9256c2be78c6e20c3cce16745d",
+          "end_token": 16,
+          "low64": 14331030419541488733
+        },
+        {
+          "digest": "f6c5b7b4bbbbaea297600d4fa467be060c8b0265a8991f5c41c06cf1a42770dd",
+          "end_token": 24,
+          "low64": 4737906593090728157
+        },
+        {
+          "digest": "f938938df863cbc5a5d77f0324ffc2400eea82f2e8e4a538aee049013ab2c531",
+          "end_token": 32,
+          "low64": 12601152027011237169
+        },
+        {
+          "digest": "ad1b9b90b64b2c6c0934a36bd936dd489b980dd01a64b6faa3ee28ebc1ad7d62",
+          "end_token": 40,
+          "low64": 11812423865671187810
+        },
+        {
+          "digest": "365480fa11070991240ef8c8e4b1e0cd4409efb2af1d431d75d01de177b4a944",
+          "end_token": 48,
+          "low64": 8489318151806560580
+        },
+        {
+          "digest": "9037c2953d5c61949c01626dc5c87fb10b94eb57fc5d9f41b865dfee298d0c26",
+          "end_token": 56,
+          "low64": 13287272489618836518
+        },
+        {
+          "digest": "cda7cbb9c1af608d228171c61f2c1e2a5dfb5067d4bca4d04b626935ac0ccba6",
+          "end_token": 64,
+          "low64": 5432019779802942374
+        }
+      ],
+      "main_event_block_size": 32,
+      "name": "fa32_swa8_window8",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "f938938df863cbc5a5d77f0324ffc2400eea82f2e8e4a538aee049013ab2c531"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "cda7cbb9c1af608d228171c61f2c1e2a5dfb5067d4bca4d04b626935ac0ccba6"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "cda7cbb9c1af608d228171c61f2c1e2a5dfb5067d4bca4d04b626935ac0ccba6"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 32,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 32,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "fa16_mamba32_partial",
+      "oracle_hit_tokens": 48,
+      "partial_hash_hits": true,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ]
+      ],
+      "request_token_count": 49,
+      "reusable_endpoints": [
+        48
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48
+      ]
+    },
+    {
+      "coordinator_alignment": 32,
+      "groups": [
+        {
+          "block_size": 32,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 32,
+      "name": "fa32_mamba16",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 32,
+      "groups": [
+        {
+          "block_size": 32,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 32,
+      "name": "fa32_mamba16_unaligned_state",
+      "oracle_hit_tokens": 0,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "final_token_65",
+      "oracle_hit_tokens": 64,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 65,
+      "reusable_endpoints": [
+        48,
+        64
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64
+      ]
+    },
+    {
+      "coordinator_alignment": 16,
+      "groups": [
+        {
+          "block_size": 16,
+          "group_id": 0,
+          "kind": "full_attention",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:0"
+          ],
+          "window": null
+        },
+        {
+          "block_size": 16,
+          "group_id": 1,
+          "kind": "mamba",
+          "prefixes": [
+            "oracle@model@tp_rank:0@group:1"
+          ],
+          "window": null
+        }
+      ],
+      "hash_block_size": 16,
+      "hashes": [
+        {
+          "digest": "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6",
+          "end_token": 16,
+          "low64": 7982712666671721126
+        },
+        {
+          "digest": "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8",
+          "end_token": 32,
+          "low64": 12675106281628537544
+        },
+        {
+          "digest": "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a",
+          "end_token": 48,
+          "low64": 11576154700054564362
+        },
+        {
+          "digest": "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4",
+          "end_token": 64,
+          "low64": 3578117338907894196
+        }
+      ],
+      "main_event_block_size": 16,
+      "name": "final_token_64",
+      "oracle_hit_tokens": 48,
+      "partial_hash_hits": false,
+      "present": [
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "6358e31578a64b75ebe28cdb99d3beae65de82a2087321dc6ec84ae048faaaa6"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "3c3c50f324aefbdfbb124dfdc541efac3e94e59c40f4be08afe70601eeca92c8"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          0,
+          "oracle@model@tp_rank:0@group:0",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "0728d91353ef7b6761329eaaf146e88046d84f6384628314a0a6c35dd9b88e0a"
+        ],
+        [
+          1,
+          "oracle@model@tp_rank:0@group:1",
+          "71c151a876275d6b365dfa670e47acb855b683a8880eaf3e31a806c3164561b4"
+        ]
+      ],
+      "request_token_count": 64,
+      "reusable_endpoints": [
+        48
+      ],
+      "token_ids": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+      ]
+    }
+  ],
+  "execution": "Unchanged whole pinned AST definitions, postponed annotations, stdlib imports. Real KVCacheSpecRegistry registration, specs, managers, coordinator and ExternalCachedBlockPool. Static object-residency intersection at all required prefixes; no duplicated hit predicate. No torch tensors, network, installed vLLM, or GPU execution.",
+  "pickle_protocol": 5,
+  "provenance": {
+    "distributed/kv_transfer/kv_connector/v1/mooncake/store/coordinator.py": {
+      "definitions": [
+        "StoreSpecGroup",
+        "ExternalCachedBlockPool",
+        "MooncakeStoreCoordinator",
+        "_unwrap_spec",
+        "partial_hash_hits_enabled"
+      ],
+      "sha256": "386033a398ea38495de5d951e990fa9b0139f0134a45157767ae1795ae1cd13b"
+    },
+    "distributed/kv_transfer/kv_connector/v1/mooncake/store/data.py": {
+      "definitions": [
+        "_CompactChunkHashList",
+        "chunk_hashes_for_block_size"
+      ],
+      "sha256": "1ecdc99faa10435bbb988b8ea083e48942a0cc7d51b69e273861a34638b5fea4"
+    },
+    "utils/hashing.py": {
+      "definitions": [
+        "sha256",
+        "xxhash",
+        "xxhash_cbor"
+      ],
+      "sha256": "2e8fcc81dd675ed0fba49de8fd8658b4dab9ae26a917edaf5164bf266c56b4df"
+    },
+    "utils/math_utils.py": {
+      "definitions": [
+        "cdiv"
+      ],
+      "sha256": "65f73de5632a6929e8240f1c79e2e0c1ef57ee29c44d5d6de2ad66b72f26bcb6"
+    },
+    "v1/attention/backends/registry.py": {
+      "definitions": [
+        "_AttentionBackendEnumMeta",
+        "MambaAttentionBackendEnum"
+      ],
+      "sha256": "74375cf729d2504159285b8fd920e00ddd7af2778c806dbf3e78a9b74b96b731"
+    },
+    "v1/core/kv_cache_utils.py": {
+      "definitions": [
+        "BlockHash",
+        "BlockHashWithGroupId",
+        "DEFAULT_NONE_HASH_SEED",
+        "_NON_CRYPTO_HASH_FUNCTIONS",
+        "_NONE_HASH_SEED",
+        "resolve_none_hash_seed",
+        "init_none_hash",
+        "hash_block_tokens",
+        "maybe_convert_block_hash",
+        "KVCacheBlock",
+        "BlockHashListWithBlockSize",
+        "resolve_block_hashes"
+      ],
+      "sha256": "2b3d29bffd425ad65c0ce4e6f3fce6c6562642f0f8f18880adaa14c4cb3c0862"
+    },
+    "v1/core/single_type_kv_cache_manager.py": {
+      "definitions": [
+        "SingleTypeKVCacheManager",
+        "FullAttentionManager",
+        "SlidingWindowManager",
+        "MambaManager"
+      ],
+      "sha256": "15360abf039513fab8f0fe99d7bc36283e63251d83e1c13f99368ae89bf13135"
+    },
+    "v1/kv_cache_interface.py": {
+      "definitions": [
+        "KVQuantMode",
+        "KVCacheGroupRole",
+        "KVCacheSpec",
+        "AttentionSpec",
+        "FullAttentionSpec",
+        "ChunkedLocalAttentionSpec",
+        "SlidingWindowSpec",
+        "MambaSpec",
+        "UniformTypeKVCacheSpecs",
+        "KVCacheGroupSpec"
+      ],
+      "sha256": "718ee51c8b845352f89c5eae8a449984713bc269829f4315e27c0fedf5305ef5"
+    },
+    "v1/kv_cache_spec_registry.py": {
+      "definitions": [
+        "KVCacheSpecMetadata",
+        "_REGISTRY_KVCACHESPEC_LIST",
+        "_REGISTRY_ROLE_MANAGERS",
+        "KVCacheSpecRegistry"
+      ],
+      "sha256": "b4a1d9e686574a9f8927720e2bee687f3a0b61b91487f71e6f21032ef4cf229a"
+    }
+  },
+  "seed_policy": "pythonhashseed-0",
+  "vllm_revision": "1085b64425a9e6f5ca52876ad32e55fda5665f4e"
+}
