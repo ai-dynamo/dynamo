@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Schema for explicit vLLM self-benchmark points."""
+"""Point schema and shared constants for vLLM self-benchmarking."""
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 BenchmarkMode = Literal["prefill", "decode", "agg"]
 BENCHMARK_MODES: tuple[BenchmarkMode, ...] = ("prefill", "decode", "agg")
+
+RANDOM_KDA_REQUEST_PREFIX = "__bench_random_kda_"
+RANDOM_KDA_WORKER = "dynamo.vllm.benchmark_worker.BenchmarkWorker"
+RANDOM_KDA_BOUND = 0.01
+RANDOM_KDA_POLICY = "uniform-request-layer-rank-v1"
 
 
 class _PointCandidate(BaseModel):

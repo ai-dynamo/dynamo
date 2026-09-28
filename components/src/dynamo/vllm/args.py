@@ -30,6 +30,7 @@ from dynamo.common.configuration.groups.runtime_args import (
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.vllm.backend_args import DynamoVllmArgGroup, DynamoVllmConfig
+from dynamo.vllm.benchmark_points import RANDOM_KDA_WORKER
 from dynamo.vllm.constants import DisaggregationMode
 
 from . import envs
@@ -418,8 +419,22 @@ def update_engine_config_with_dynamo(
                     f"is set to '{existing_ext}'. Remove it or unset "
                     f"DYN_FPM_GC_POLICY."
                 )
+        if dynamo_config.benchmark_randomize_kda_state:
+            if engine_config.worker_cls not in ("auto", RANDOM_KDA_WORKER):
+                raise ValueError(
+                    "Random KDA benchmarking requires the standard --worker-cls auto"
+                )
+            if (
+                engine_config.load_format == "gms"
+                or os.environ.get("DYN_GMS_USE_V1") == "true"
+            ):
+                raise ValueError(
+                    "Random KDA benchmarking does not support the GMS worker"
+                )
+            defaults["worker_cls"] = RANDOM_KDA_WORKER
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
+            "randomize_kda_state": dynamo_config.benchmark_randomize_kda_state,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,

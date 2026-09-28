@@ -140,6 +140,22 @@ def test_extracts_multiple_items_per_modality():
     )
 
 
+def test_extracts_tool_message_media():
+    messages = [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/t.png"}}
+            ],
+        }
+    ]
+    assert extract_mm_urls(messages) == (
+        {"image_url": [{"Url": "https://example.com/t.png"}]},
+        None,
+    )
+
+
 def test_ignores_non_user_messages():
     messages = [
         {"role": "system", "content": "You are helpful."},

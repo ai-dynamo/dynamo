@@ -390,7 +390,7 @@ pub(crate) fn terminal_from_meta(
     Ok(output)
 }
 
-fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
+pub(crate) fn terminal_failure(finish_type: &str, finish: &Value) -> DynamoError {
     let message = finish
         .get("message")
         .and_then(Value::as_str)

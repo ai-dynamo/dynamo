@@ -23,6 +23,7 @@ from tests.fault_tolerance.etcd_ha.utils import (
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME, DynamoPortRange
 from tests.utils.device import (
     build_nixl_kv_transfer_config,
+    detect_target_device,
     get_default_vllm_block_size,
 )
 from tests.utils.engine_process import FRONTEND_PORT
@@ -96,6 +97,13 @@ class DynamoWorkerProcess(ManagedProcess):
         env["ETCD_ENDPOINTS"] = ",".join(etcd_endpoints)
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = port
+        if detect_target_device() == "xpu":
+            visible_devices = [
+                device.strip()
+                for device in env.get("ZE_AFFINITY_MASK", "").split(",")
+                if device.strip()
+            ]
+            env["ZE_AFFINITY_MASK"] = visible_devices[0] if visible_devices else "0"
 
         # Both prefill and decode workers need kv-transfer-config for disaggregated mode
         if mode != WorkerMode.AGGREGATED:

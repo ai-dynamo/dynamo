@@ -682,6 +682,8 @@ struct KvRouterConfigSerde {
     router_queue_policy: RouterQueuePolicy,
     use_remote_indexer: bool,
     serve_indexer: bool,
+    #[serde(default)]
+    enable_session_prefix_index: bool,
     shared_cache_multiplier: f64,
     shared_cache_type: SharedCacheType,
     router_predicted_ttl_secs: Option<f64>,
@@ -726,6 +728,7 @@ impl Default for KvRouterConfigSerde {
             router_queue_policy: config.router_queue_policy,
             use_remote_indexer: config.use_remote_indexer,
             serve_indexer: config.serve_indexer,
+            enable_session_prefix_index: config.enable_session_prefix_index,
             shared_cache_multiplier: config.shared_cache_multiplier,
             shared_cache_type: config.shared_cache_type,
             router_predicted_ttl_secs: config.router_predicted_ttl_secs,
@@ -874,6 +877,10 @@ pub struct KvRouterConfig {
     #[serde(default)]
     pub serve_indexer: bool,
 
+    /// Enable bounded per-session logical prefix tracking.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub enable_session_prefix_index: bool,
+
     /// Multiplier for shared cache hits when scoring workers (0.0 to 1.0).
     /// Blocks available in the shared cache are less valuable than device-local blocks
     /// because they need to be fetched. A value of 0.5 means each shared cache hit
@@ -976,6 +983,7 @@ impl Default for KvRouterConfig {
             router_queue_policy: RouterQueuePolicy::default(),
             use_remote_indexer: false,
             serve_indexer: false,
+            enable_session_prefix_index: false,
             shared_cache_multiplier: 0.0,
             shared_cache_type: SharedCacheType::default(),
             router_predicted_ttl_secs: None,
@@ -1040,6 +1048,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_queue_policy: compat.router_queue_policy,
             use_remote_indexer: compat.use_remote_indexer,
             serve_indexer: compat.serve_indexer,
+            enable_session_prefix_index: compat.enable_session_prefix_index,
             shared_cache_multiplier: compat.shared_cache_multiplier,
             shared_cache_type: compat.shared_cache_type,
             router_predicted_ttl_secs: compat.router_predicted_ttl_secs,
@@ -1077,8 +1086,13 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
     if config.use_remote_indexer && config.serve_indexer {
         return Err("use_remote_indexer and serve_indexer are mutually exclusive".to_string());
     }
-    if config.serve_indexer && config.overlap_score_credit == 0.0 {
-        return Err("serve_indexer requires overlap_score_credit > 0".to_string());
+    if config.use_remote_indexer && config.enable_session_prefix_index {
+        return Err(
+            "enable_session_prefix_index is not supported with use_remote_indexer=true".to_string(),
+        );
+    }
+    if config.enable_session_prefix_index && !config.use_kv_events {
+        return Err("enable_session_prefix_index requires use_kv_events=true".to_string());
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
         return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
@@ -1180,6 +1194,18 @@ impl KvRouterConfig {
         Ok(self
             .loaded_policy_config()?
             .and_then(super::policy_config::RouterPolicyConfig::worker_selection))
+    }
+
+    /// Return the custom request-classifier configuration from `router_policy_config`, if any.
+    pub fn request_classifier_config(
+        &self,
+    ) -> Result<
+        Option<&super::policy_config::RequestClassifierConfig>,
+        super::policy_config::RouterPolicyConfigError,
+    > {
+        Ok(self
+            .loaded_policy_config()?
+            .and_then(super::policy_config::RouterPolicyConfig::request_classifier))
     }
 
     /// Return one configured custom worker-selection instance, if any.
@@ -1548,18 +1574,6 @@ impl KvRouterConfig {
             assume_kv_reuse,
             precomputed_block_hashes,
         ))
-    }
-
-    /// Check if KV event subscription should be started.
-    ///
-    /// Returns false if:
-    /// - KV events are disabled (`use_kv_events=false`)
-    /// - Overlap scoring is disabled (`overlap_score_credit=0`)
-    ///
-    /// When false, the router skips starting the KV event subscription entirely,
-    /// avoiding the need to query workers for their local indexer state.
-    pub fn should_subscribe_to_kv_events(&self) -> bool {
-        self.use_kv_events && self.overlap_score_credit > 0.0
     }
 }
 
@@ -2205,6 +2219,27 @@ worker_selection:
     }
 
     #[test]
+    fn session_prefix_index_flag_defaults_off_and_survives_the_wire() {
+        assert!(!KvRouterConfig::default().enable_session_prefix_index);
+
+        let from_legacy: KvRouterConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!from_legacy.enable_session_prefix_index);
+
+        let enabled = KvRouterConfig {
+            enable_session_prefix_index: true,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&enabled).unwrap();
+        assert_eq!(
+            encoded.get("enable_session_prefix_index"),
+            Some(&serde_json::json!(true)),
+            "an explicitly enabled flag must be carried on the wire"
+        );
+        let decoded: KvRouterConfig = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.enable_session_prefix_index);
+    }
+
+    #[test]
     fn kv_router_config_preserves_v1_3_wire_compatibility() {
         let _: KvRouterConfig = serde_json::from_value(serde_json::json!({
             "durable_kv_events": false,
@@ -2225,6 +2260,7 @@ worker_selection:
             "conditional_disagg_eff_isl_ratio_threshold",
             "conditional_disagg_prefill_busy_threshold",
             "conditional_disagg_decode_busy_threshold",
+            "enable_session_prefix_index",
         ] {
             assert!(value.get(post_v1_3_field).is_none(), "{post_v1_3_field}");
         }
@@ -2428,7 +2464,6 @@ models:
 
         assert_eq!(config.overlap_score_credit, 0.0);
         assert_eq!(config.prefill_load_scale, 0.0);
-        assert!(!config.should_subscribe_to_kv_events());
     }
 
     #[test]
@@ -2529,14 +2564,17 @@ models:
     }
 
     #[test]
-    fn test_overlap_credit_zero_skips_kv_event_subscription() {
-        let config = KvRouterConfig {
-            overlap_score_credit: 0.0,
-            use_kv_events: true,
-            ..Default::default()
-        };
-
-        assert!(!config.should_subscribe_to_kv_events());
+    fn indexer_features_do_not_depend_on_scoring_credit() {
+        for (serve_indexer, enable_session_prefix_index) in [(true, false), (false, true)] {
+            let config = KvRouterConfig {
+                overlap_score_credit: 0.0,
+                use_kv_events: true,
+                serve_indexer,
+                enable_session_prefix_index,
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok());
+        }
     }
 
     #[test]

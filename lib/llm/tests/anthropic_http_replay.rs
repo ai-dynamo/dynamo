@@ -4,8 +4,10 @@
 //! Full-HTTP integration coverage for the Anthropic Messages compatibility surface.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
+use dynamo_llm::http::service::metrics::{Endpoint, ErrorType, RequestType, Status};
 use dynamo_protocols::types::{
     ChatCompletionRequestAssistantMessageContent, ChatCompletionRequestMessage,
     ChatCompletionRequestToolMessageContent, ChatCompletionRequestUserMessageContent,
@@ -27,7 +29,7 @@ mod scripted_chat_engine;
 use http_harness::{
     HarnessService, IncrementalSseParser, MODEL, canonicalize, load_agent_fixture, parse_json_sse,
 };
-use scripted_chat_engine::Script;
+use scripted_chat_engine::{Script, ScriptedChatEngine};
 
 const ENV: [(&str, Option<&str>); 2] = [
     (DYN_ENABLE_ANTHROPIC_API, Some("1")),
@@ -93,6 +95,68 @@ async fn unary_text_baseline() {
         assert_eq!(requests[0].inner.stream, Some(true));
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+#[serial]
+async fn streaming_graceful_stop_drains_tail_and_kill_terminates() {
+    temp_env::async_with_vars(ENV, async {
+        for kill_after_stop in [false, true] {
+            let script = load_agent_fixture("text.sse").await.unwrap();
+            let svc = HarnessService::start_with_engine(Arc::new(
+                ScriptedChatEngine::with_interrupted_tail(script, 1, kill_after_stop),
+            ))
+            .await;
+            let response = post_messages(
+                &svc,
+                &json!({
+                    "model": MODEL,
+                    "max_tokens": 64,
+                    "stream": true,
+                    "messages": [{"role": "user", "content": "ping"}]
+                }),
+            )
+            .await;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let raw = tokio::time::timeout(Duration::from_secs(2), response.text())
+                .await
+                .expect("Messages stream must reach EOF after stop or kill")
+                .unwrap();
+
+            assert_eq!(raw.matches("event: message_stop\n").count(), 1);
+            assert_eq!(raw.matches("event: message_delta\n").count(), 1);
+            if kill_after_stop {
+                // Best-effort finalizers still drain on kill, but it must not
+                // be recorded (or signaled with [DONE]) as successful completion.
+                assert!(!raw.contains("data: [DONE]"));
+            } else {
+                assert_eq!(raw.matches("data: [DONE]").count(), 1);
+                let events = parse_json_sse(&raw).await.unwrap();
+                insta::assert_json_snapshot!(
+                    "anthropic_streaming_text",
+                    canonicalize(serde_json::to_value(events).unwrap())
+                );
+            }
+            let (status, error) = if kill_after_stop {
+                (Status::Error, ErrorType::Cancelled)
+            } else {
+                (Status::Success, ErrorType::None)
+            };
+            assert_eq!(svc.metrics.get_inflight_count(MODEL), 0);
+            assert_eq!(
+                svc.metrics.get_request_counter(
+                    MODEL,
+                    &Endpoint::AnthropicMessages,
+                    &RequestType::Stream,
+                    &status,
+                    &error,
+                ),
+                1
+            );
+            svc.shutdown().await;
+        }
     })
     .await;
 }

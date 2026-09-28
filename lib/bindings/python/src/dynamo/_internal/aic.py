@@ -15,11 +15,11 @@ _NEXTN_ACCEPT_RATES_LEN = 5
 # Dynamo's historical default when conditional acceptance rates are omitted.
 _DEFAULT_NEXTN_ACCEPT_RATES = [0.85, 0.3, 0.0, 0.0, 0.0]
 
-# Default backend versions match the AIC-core v0.11.0 perf DB.
+# Resolve defaults through the queryable slots in the pinned AISimulate perf DB.
 DEFAULT_BACKEND_VERSIONS = {
-    "vllm": "0.19.0",
-    "sglang": "0.5.10",
-    "trtllm": "1.3.0rc10",
+    "vllm": "current",
+    "sglang": "current",
+    "trtllm": "current",
 }
 _KV_CAPACITY_BACKENDS = frozenset(DEFAULT_BACKEND_VERSIONS)
 DEFAULT_STATIC_STRIDE = 32
@@ -39,7 +39,7 @@ def _validate_kv_capacity_backend(backend_name: str) -> None:
 
 
 def resolve_backend_version(backend_name: str, backend_version: str | None) -> str:
-    """Return the pinned backend version used for AIC perf lookups."""
+    """Preserve explicit versions; otherwise use the release database current slot."""
     if backend_version is not None:
         return backend_version
     return DEFAULT_BACKEND_VERSIONS.get(backend_name, DEFAULT_BACKEND_VERSIONS["vllm"])

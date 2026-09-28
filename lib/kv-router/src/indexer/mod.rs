@@ -34,6 +34,9 @@
 mod approximate_lru;
 mod branch_sharded;
 mod compressed_radix;
+mod delegate;
+use delegate::HashLifecycle;
+pub use delegate::KvIndexerDelegate;
 mod shard_handle;
 
 use std::any::Any;
@@ -79,6 +82,9 @@ pub mod radix_tree;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod delegate_tests;
 
 // Re-export everything that was public in the old single-file module.
 pub use approximate_lru::*;
