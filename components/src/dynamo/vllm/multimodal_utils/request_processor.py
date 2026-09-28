@@ -38,6 +38,7 @@ from dynamo.common.multimodal.mm_kwargs_transfer import (
 )
 from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
+from dynamo.llm.exceptions import InvalidArgument
 
 from .hash_utils import compute_mm_uuids_from_images
 from .model import ModelFamily, construct_qwen_decode_mm_data, resolve_model_family
@@ -462,8 +463,8 @@ class VllmMultimodalRequestProcessor:
         return expanded
 
     @staticmethod
-    def _multimodal_disabled_error() -> ValueError:
-        return ValueError(
+    def _multimodal_disabled_error() -> InvalidArgument:
+        return InvalidArgument(
             "Received multimodal data but multimodal processing is not enabled. "
             "Use --enable-multimodal flag to enable multimodal processing."
         )

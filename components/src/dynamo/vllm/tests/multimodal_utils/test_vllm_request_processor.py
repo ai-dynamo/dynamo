@@ -412,7 +412,7 @@ async def test_rejects_malformed_encoder_image_item_before_dispatch():
 async def test_rejects_media_when_multimodal_is_disabled():
     processor = _processor(enabled=False)
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -424,7 +424,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -436,7 +436,7 @@ async def test_rejects_media_when_multimodal_is_disabled():
             DisaggregationMode.AGGREGATED,
         )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {
@@ -456,7 +456,7 @@ async def test_decode_cannot_hide_disabled_media_with_expanded_tokens():
         enabled=False,
     )
 
-    with pytest.raises(ValueError, match="--enable-multimodal"):
+    with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
         await _prepare_prompt(
             processor,
             {

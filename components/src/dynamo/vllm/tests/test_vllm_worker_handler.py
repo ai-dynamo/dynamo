@@ -675,7 +675,7 @@ class TestDecodeWorkerMultimodalBranching:
         handler.use_vllm_tokenizer = True
         handler._multimodal_request_processor.enable_multimodal = False
 
-        with pytest.raises(ValueError, match="--enable-multimodal"):
+        with pytest.raises(mod.InvalidArgument, match="--enable-multimodal"):
             async for _ in handler.generate(request_payload, MagicMock()):
                 pass
 
@@ -984,26 +984,21 @@ async def test_prefill_delegates_mode_policy_to_shared_processor():
 
 
 @pytest.mark.asyncio
-async def test_prefill_returns_structured_error_when_multimodal_is_disabled():
+async def test_prefill_raises_typed_error_when_multimodal_is_disabled():
     handler = mod.PrefillWorkerHandler.__new__(mod.PrefillWorkerHandler)
     processor = SimpleNamespace(
         validate_multimodal_request=MagicMock(
-            side_effect=ValueError("use --enable-multimodal")
+            side_effect=mod.InvalidArgument("use --enable-multimodal")
         )
     )
     handler._multimodal_request_processor = processor
     context = MagicMock()
     context.id.return_value = "request-prefill-disabled"
 
-    chunks = [chunk async for chunk in handler.generate({}, context)]
+    with pytest.raises(mod.InvalidArgument, match="use --enable-multimodal"):
+        [chunk async for chunk in handler.generate({}, context)]
 
-    assert chunks == [
-        {
-            "status": "error",
-            "message": "use --enable-multimodal",
-            "disaggregated_params": None,
-        }
-    ]
+    processor.validate_multimodal_request.assert_called_once_with({})
 
 
 # ── Deferred abort (disagg decode KV-transfer safety) tests ────────
