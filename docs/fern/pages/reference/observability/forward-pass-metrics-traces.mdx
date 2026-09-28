@@ -153,7 +153,7 @@ Each data-parallel rank binds `DYN_FORWARDPASS_METRIC_PORT + dp_rank`, defaultin
 
 ## Measurement Protocol in the Self-Benchmark Artifact
 
-Self-benchmark artifacts (`--benchmark-mode`) record a top-level `measurement_protocol` block and a `benchmark_measurement` block inside each retained FPM. The artifact's `schema_version` remains `2`; both new blocks have their own `schema_version: 1`. These fields describe benchmark input construction and timing reduction. They do not appear in live-serving traces.
+Self-benchmark artifacts (`--benchmark-mode`) record a top-level `measurement_protocol` block and a `benchmark_measurement` block inside each retained FPM. The artifact's `schema_version` remains `2`; both blocks have their own `schema_version: 1`. These fields describe benchmark input construction, timing reduction, and observed execution evidence. They do not appear in live-serving traces.
 
 Prompt construction combines `DYN_BENCH_CONTENT_SEED` (default `"0"`) with the point's coordinates, data-parallel rank, and request slot. Selecting a smaller grid or changing benchmark point order does not change that content identity. Different data-parallel ranks intentionally use different content. Compare the same rank's prompt hashes across runs rather than requiring every rank to have the same hash. Pin the model, tokenizer, dataset, content mode, and pool tag when comparing measurements; see [FPM self-benchmark collection](environment-variables.mdx#fpm-self-benchmark-collection).
 
@@ -166,8 +166,9 @@ The shared protocol contains:
 | `prompt_hash_encoding` | `"uint32_le"`; prompt token ids are encoded as unsigned 32-bit little-endian integers before SHA-256 hashing |
 | `independent_repetitions` | `1`; one engine launch supplies one observation per admitted point |
 | `timing_metric` | `"scheduler_wall_time"`; the existing scheduler timing boundary is unchanged, not replaced with CUDA-event timing |
+| `execution_evidence` | Versioned contract for per-sample observations and warmup records; identifies their field names, process-local clock and forward indices, graph-statistics source, and validation scope |
 | `input_evidence_scope` | `"injected_prompt_token_ids"`; hashes cover the prompt ids available at request injection |
-| `unobserved` | Lists inputs or context not established by this evidence: sampled continuation tokens, KV-cache tensors, recurrent-state tensors, and equivalent execution history |
+| `unobserved` | Lists inputs or context not established by this evidence: sampled continuation tokens, KV-cache tensors, recurrent-state tensors, decode real-KV chain warmup history, equivalent execution history, and equivalent graph, kernel, or cache warming |
 | `preparation` | Warm-up iteration count, prefill real-seed and decode real-KV settings, and giant-KV threshold and repeat count |
 
 Each retained FPM's `benchmark_measurement` contains:
@@ -177,12 +178,65 @@ Each retained FPM's `benchmark_measurement` contains:
 | `point_key`, `dp_rank` | Coordinate identity and the rank that produced this observation; the point key is independent of the grid digest and benchmark point id |
 | `prompts.status` | `"recorded"` when injected prompt ids were captured, otherwise `"unavailable"`; missing evidence is not a match |
 | `prompts.sha256`, `prompts.requests` | Combined prompt digest and the request slots, lengths, and individual prompt digests |
-| `preparation` | Actual grid digest, number of completed points before this point, and KV-seeding regime |
+| `preparation` | Actual grid digest, number of completed points before this point, KV-seeding regime, and `warmup_records_before`, the number of prior warmup records, including failed attempts |
 | `expected_internal_samples` | Number of scheduler steps expected for this point, including an admission step when the path uses one |
-| `raw_fpms` | Individual FPMs before reduction, in collection order, including discarded admission measurements and slow samples |
+| `raw_fpms` | Individual FPMs before reduction, in collection order, including discarded admission measurements and slow samples; each carries its own `benchmark_sample` execution evidence |
 | `estimate.method`, `estimate.raw_sample_indices` | Existing reduction (`single_step`, `last_step`, or `adjacent_upper_median`) and the raw samples used for the retained estimate |
 
-The merger requires identical shared protocols in all contributing rank files. It rejects a mixture of legacy artifacts and artifacts with a protocol, and requires point/rank evidence for every member of a synchronized iteration group. Per-rank prompt hashes and raw timings are preserved unchanged; their values need not agree across ranks. Legacy runs without either metadata block remain readable, but the merger does not invent input evidence for them.
+The merger requires identical shared protocols in all contributing rank files. It rejects a mixture of legacy artifacts and artifacts with a protocol, and requires point/rank evidence for every member of a synchronized iteration group. Per-rank prompt hashes, raw timings, and execution observations are preserved unchanged; their values need not agree across ranks. Legacy runs without these metadata blocks remain readable, but the merger does not invent evidence for them.
+
+### Per-Sample Timing and Graph Dispatch
+
+Each `benchmark_measurement.raw_fpms` entry identifies one raw scheduler observation. Its `benchmark_sample` block has this shape:
+
+```json
+{
+  "sample_index": 0,
+  "forward_index": 12,
+  "timing": {
+    "basis": "schedule_to_output",
+    "start_monotonic": 150.0,
+    "end_monotonic": 150.062
+  },
+  "cudagraph": {
+    "status": "observed",
+    "runtime_mode": "PIECEWISE",
+    "num_unpadded_tokens": 80,
+    "num_padded_tokens": 80,
+    "num_paddings": 0
+  }
+}
+```
+
+`sample_index` is the zero-based position in `raw_fpms`. `forward_index` counts nonempty forward outputs during this rank's benchmark, including preparation forwards. Both indices are local to that rank's process; they do not synchronize ranks.
+
+| Timing basis | Interval |
+|---|---|
+| `schedule_to_output` | Completion of scheduling to arrival of the corresponding model-runner output |
+| `inter_output` | Previous model-runner output arrival to current output arrival; used for steady decode samples |
+
+The timestamps use monotonic-clock seconds in the local process, so timestamps from different ranks cannot be subtracted or ordered against each other. An unavailable start timestamp is `null`. `wall_time` retains the native scheduler measurement and existing reduction; these observations do not replace it with GPU execution time. For a reduced estimate, consult `estimate.raw_sample_indices` and the selected raw observations. The retained estimate has no `benchmark_sample`, because a median can combine multiple executions.
+
+In benchmark mode, Dynamo enables vLLM's existing `cudagraph_metrics` option when the runtime exposes it. The per-sample fields come from `ModelRunnerOutput.cudagraph_stats`, without adding GPU timing or synchronization. `runtime_mode` records `NONE`, `PIECEWISE`, or `FULL`; the token counts describe that dispatch's padding. Runtimes or model runners without complete statistics emit `status: "unavailable"` and `null` values. Missing evidence never means `NONE`.
+
+Observed dispatch is separate from the point's `expected_cudagraph_mode` and `expected_capture_size`, and from the engine's resolved graph configuration. A mode and padded token count do not identify the complete graph descriptor, a capture-versus-replay event, or the attention kernel that ran. Equal values alone do not establish equivalent execution.
+
+### Warmup Completion Evidence
+
+Each rank artifact's `warmup_evidence` contains `status` (`recorded` or `unavailable`) and an ordered `records` list. The list covers global warmup, discarded eager-shape replicas, real-prefix seeding, and real-prefix same-shape preparation. An empty recorded list means none of these attempts was recorded. Decode KV-chain preparation retains its existing `kvwarm` metadata; its individual warmup attempts are not recorded here.
+
+| Record field | Meaning |
+|---|---|
+| `kind`, `requested_shape` | `global`, `eager_shape`, `real_prefix_seed`, or `real_prefix_shape`, with the requested prompt lengths or benchmark point |
+| `status` | `running`, `completed`, or `failed`; completion records that the attempt finished, not that a particular graph or kernel was warmed |
+| `forward_index_start`, `forward_index_end` | Start-inclusive, end-exclusive range in this rank's forward indices; an unobserved start or unfinished end can be `null` |
+| `completed_points_before` | Number of retained benchmark points before this attempt |
+| `observed_forward_count` | Number of nonempty forward outputs observed during the attempt |
+| `first_scheduled_requests`, `last_scheduled_requests` | First and last observed scheduler shapes, or `null` when none was observed; intermediate shapes are not retained |
+| `validation` | `status` (`not_performed`, `passed`, or `failed`) and optional failure `reason`; only existing eager-replica shape validation produces a pass or failure |
+| `validation.scope`, `validation.failed_dp_rank` | For eager-replica shape validation, `attention_dp_group` and the failing DP rank, or `null` when none failed; another rank's shape mismatch can fail the group |
+
+The record count grows with warmup attempts; each attempt retains at most two scheduler shapes. The merged artifact keeps these lists under `rank_warmup_evidence`, keyed by DP rank. A rank whose artifact was not loaded has explicit unavailable evidence. Compare each raw sample's `forward_index` with the same rank's warmup ranges to establish ordering. A completed request without shape validation remains `validation.status: "not_performed"`; neither completion nor a shape-validation pass proves matching cache contents, graph preparation, or kernel history.
 
 <Warning>
 Matching prompt hashes establishes only the captured token content. It does not establish matching sampled continuation tokens, initialized cache tensors, memory allocation, graph preparation, or execution history. Full-grid and subset measurements still require a controlled comparison before they can be treated as equivalent repetitions. Adjacent decode steps share preparation and are not independent repetitions; use separate benchmark launches to measure run-to-run variability and retain all attempts.
@@ -190,7 +244,9 @@ Matching prompt hashes establishes only the captured token content. It does not 
 
 ## Engine Provenance in the Self-Benchmark Artifact
 
-A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured once when the instrumented scheduler starts and updated once more after the benchmark finishes, once a worker probe reports what actually ran. The artifact's `schema_version` stays `2`; the block sits between the existing `cudagraph` and `results` keys, and it is simply absent from an artifact whose capture never ran, including every artifact predating this feature.
+A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-parallel rank plus one merged artifact, both separate from the `dynamo.fpm.trace.v1` records above. Each carries an optional top-level `engine` block, captured when the instrumented scheduler starts and updated after the benchmark finishes with available worker-probe replies. This post-run snapshot describes resolved worker configuration; per-forward dispatch belongs to the raw samples described above. The artifact's `schema_version` stays `2`. Artifacts whose capture never ran, including older artifacts, omit `engine`.
+
+The following example shows selected fields from a rank artifact. `worker_probe`, described below, records the complete reply set and its coverage.
 
 ```json
 {
@@ -254,6 +310,7 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
       "data_parallel_rank": 0,
       "tensor_parallel_size": 1,
       "pipeline_parallel_size": 1,
+      "prefill_context_parallel_size": 1,
       "enable_expert_parallel": true,
       "enable_eplb": false,
       "all2all_backend": "deepep_high_throughput",
@@ -282,6 +339,8 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
     },
     "resolved": {
       "tp_rank": 0,
+      "pp_rank": 0,
+      "pcp_rank": 0,
       "worker_rank": 0,
       "dp_rank": 0,
       "attention_backends": {
@@ -289,8 +348,10 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
       },
       "mla_prefill_backend": "FlashAttnPrefillBackend",
       "cudagraph_mode_resolved": "FULL",
-      "cudagraph_capture_sizes_resolved": [1, 2, 4, 8, 16, 32]
+      "cudagraph_capture_sizes_resolved": [1, 2, 4, 8, 16, 32],
+      "capture_errors": {}
     },
+    "resolved_scope": "representative_worker",
     "resolution": "worker_probe"
   }
 }
@@ -302,11 +363,42 @@ A self-benchmark run (`--benchmark-mode`) writes one JSON artifact per data-para
 - `scheduler` and `model` are read directly from the engine's own `scheduler_config` and `model_config` at startup and need no further resolution. `model.max_model_len` is deliberately not here: vLLM's `--max-model-len -1` auto-fit can resolve it differently per rank depending on each rank's free GPU memory, so it is rank-varying data rather than engine identity, and it is already recorded per rank at the artifact's `limits.max_model_len`.
 - `parallel.data_parallel_rank` differs per rank and is excluded from the startup identity comparison. The post-run probe fields described below are written after the merge, so they are not startup identity evidence.
 - `speculative` is `null` unless speculative decoding is configured, in which case it is a four-field summary: `method`, `model`, `num_speculative_tokens`, `draft_tensor_parallel_size`.
-- `graph` freezes what the engine-core process believed about CUDA graphs before the model worker re-resolved them, tagged `"resolution": "pre_resolution"`. Under a multiprocess executor the engine-core process never sees that rewrite, so this sub-block is never updated after capture; the authoritative post-resolution values live only in the top-level `resolved` block, not here.
+- `graph` freezes what the engine-core process believed about CUDA graphs before the model worker re-resolved them, tagged `"resolution": "pre_resolution"`. Under a multiprocess executor the engine-core process never sees that rewrite, so this sub-block is never updated after capture. Post-resolution values belong to individual worker-probe replies, not this startup block.
 - `versions` is a best-effort snapshot (`vllm`, `vllm_build_commit`, `dynamo`, `python`); a single lookup failure leaves just that one key `null` rather than failing the whole block.
-- `resolved` and the top-level `resolution` move through one lifecycle. `resolution` starts `"pending_worker_probe"` at capture time; a one-shot worker probe (a `collective_rpc` under a 30-second timeout, run once after the benchmark finishes) then fills `resolved` from the first worker's probe result (rank 0, since every rank of a run serves the same model with the same backends) and sets `resolution` to `"worker_probe"`, while a probe that times out or raises instead leaves `resolved` as `null` and sets `resolution` to `"probe_failed: <ExceptionType>: <message>"`. The probe result carries `tp_rank`, `worker_rank`, `dp_rank`, `attention_backends` (one entry per attention layer, keyed by layer name), `mla_prefill_backend`, `cudagraph_mode_resolved`, and `cudagraph_capture_sizes_resolved`. The same result back-fills `attention.backend_resolved` (the single backend name when every probed layer agrees, else `null`) and `attention.mla_prefill_backend_resolved`; when the probed layers disagree, `attention.resolution` reads `"worker_probe_mixed"` instead of following the top-level `resolution`, even though the probe itself succeeded.
+- `resolved` retains one valid, rank-labelled worker reply for compatibility, with `resolved_scope: "representative_worker"`. A rank artifact uses only a reply matching its own DP rank; it stays `null` if that rank was not observed. A merged artifact can use one observed worker as a representative, but this does not establish that every worker agrees. Use [Worker Probe Coverage](#worker-probe-coverage) to interpret the observation.
 - `capture_error` appears only when the capture function itself raised partway through; it sits alongside whatever sub-blocks were already built, and a capture failure never costs the run its measurements.
-- The merged artifact keeps one copy of this block. Every contributing rank's startup block must be identical except `parallel.data_parallel_rank`. The comparison also excludes top-level `resolved` and `resolution` defensively; the worker probe fills those fields and the resolved fields under `attention` after the merge has completed. A disagreement in the compared startup fields fails the merge. The merged copy's `parallel.data_parallel_rank` is set to `null`, since the merged document describes every rank at once. A rank whose own capture failed or is missing never blocks the merge; each such rank is instead excluded from the cross-rank identity check and listed, by rank number, in a `capture_errors` map added to the merged block, valued with that rank's own capture error or the literal string `missing engine block`.
+- The merged artifact keeps one copy of this block. Every contributing rank's startup block must be identical except `parallel.data_parallel_rank`. The comparison excludes post-run fields: `resolved`, `resolved_scope`, `resolution`, `worker_probe`, and resolved fields under `attention`. A disagreement in the compared startup fields fails the merge. The merged copy's `parallel.data_parallel_rank` is set to `null`, since the merged document describes every rank at once. A rank whose own capture failed or is missing never blocks the merge; each such rank is instead excluded from the cross-rank identity check and listed, by rank number, in a `capture_errors` map added to the merged block, valued with that rank's own capture error or the literal string `missing engine block`.
+
+### Worker Probe Coverage
+
+After collection, Dynamo makes one `collective_rpc` call under a 30-second timeout. `engine.worker_probe` preserves every returned reply, including duplicates and malformed replies, rather than selecting only the first result. A worker reply includes DP, tensor-parallel (TP), pipeline-parallel (PP), prefill-context-parallel (PCP), and worker ranks; per-layer `attention_backends`; `mla_prefill_backend`; resolved graph mode and capture sizes; and any per-layer `capture_errors`.
+
+| Field | Meaning |
+|---|---|
+| `schema_version`, `scope` | `1` and `post_collection_collective_rpc` |
+| `responses` | Entries containing the reply's zero-based `rpc_index`, its `response`, and validation `issues`; a non-JSON reply is represented by its type and textual representation |
+| `coverage.scope` | `artifact_workers`; coverage is evaluated against the workers described by this artifact |
+| `coverage.expected_dp_ranks` | Expected DP ranks, or `null` when unknown |
+| `coverage.expected_workers_per_dp` | TP size multiplied by PCP size and PP size, or `null` when any size is unknown |
+| `coverage.observed_workers` | Valid, unique worker identities in this artifact's scope |
+| `coverage.missing_dp_ranks` | Expected DP ranks without a usable reply, or `null` when the expected ranks are unknown |
+| `coverage.complete` | True only when the expected topology is known and fully observed, without malformed, duplicate, or failed capture evidence |
+| `disagreements` | Observed configuration fields that disagree; attention backend comparisons use layers observed by more than one worker, because PP stages own different layers |
+| `error` | Probe failure, or `null` |
+
+The engine client's returned reply set can cover fewer DP engines than the RPC broadcasts to. Coverage follows the replies actually returned. For example, a four-rank run with TP, PCP, and PP sizes all set to 1 can return only DP rank 0. The merged artifact then reports missing DP ranks `[1, 2, 3]` and `complete: false`. Rank 0's artifact can have complete local coverage; the other rank artifacts preserve the returned replies but have no local representative. Missing replies do not establish agreement or disagreement.
+
+`engine.resolution` starts as `pending_worker_probe`, then records the outcome:
+
+| Value | Meaning |
+|---|---|
+| `worker_probe` | Complete coverage with no observed setting disagreements |
+| `worker_probe_partial` | Some valid observations, with incomplete or unknown coverage |
+| `worker_probe_mixed` | Valid observations disagree on a compared setting; check coverage separately |
+| `worker_probe_unobserved` | No valid reply matches this artifact's workers |
+| `probe_failed: ...` | The RPC failed, timed out, or returned no usable replies |
+
+`attention.backend_resolved` is the single backend name across valid, in-scope layer observations, or `null` when there are none or multiple names. `attention.mla_prefill_backend_resolved` similarly requires agreement among those observations. `attention.resolution` is `worker_probe_mixed` for mixed layer backend names; otherwise it follows the engine's resolution. These summaries do not extend coverage beyond the recorded replies. Probe or artifact-update failures leave the collected measurements usable.
 
 ## Related
 

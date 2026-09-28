@@ -1841,12 +1841,12 @@ class TestEncodeWorkerEmbeddingCacheCapacity:
             multimodal_embedding_cache_capacity_gb=capacity_gb,
         )
 
-        with patch(
-            "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
-        ) as handler_cls, patch(
-            "dynamo.vllm.worker_factory.register_model", AsyncMock()
-        ), patch(
-            "dynamo.vllm.worker_factory.register_model_taint_route"
+        with (
+            patch(
+                "dynamo.vllm.worker_factory.EncodeWorkerHandler", return_value=handler
+            ) as handler_cls,
+            patch("dynamo.vllm.worker_factory.register_model", AsyncMock()),
+            patch("dynamo.vllm.worker_factory.register_model_taint_route"),
         ):
             await _make_factory()._create_multimodal_encode_worker(
                 runtime, config, asyncio.Event(), []
@@ -1996,11 +1996,7 @@ def test_benchmark_engine_identity_strips_rank_and_probe_fields():
     identity = _benchmark_engine_identity({"engine": _engine_block(3, "FLASH_ATTN")})
 
     assert identity == {
-        "attention": {
-            "backend_requested": "FLASH_ATTN",
-            "backend_resolved": None,
-            "resolution": "pending_worker_probe",
-        },
+        "attention": {"backend_requested": "FLASH_ATTN"},
         "parallel": {"tensor_parallel_size": 4},
         "versions": {"vllm": "0.28.0"},
     }
@@ -2121,6 +2117,13 @@ def test_merge_ignores_probe_filled_engine_fields(tmp_path):
     probed = _engine_block(1)
     probed["resolved"] = {"attention_backends": {"layer.0": "FLASHINFER_MLA"}}
     probed["resolution"] = "worker_probe"
+    probed["resolved_scope"] = "representative_worker"
+    probed["worker_probe"] = {"responses": [{"dp_rank": 1}]}
+    probed["attention"].update(
+        backend_resolved="FLASHINFER_MLA",
+        mla_prefill_backend_resolved="TrtllmRaggedMLAPrefill",
+        resolution="worker_probe_partial",
+    )
 
     merged = _merge_benchmark_rank_results(
         [
@@ -2441,6 +2444,224 @@ def test_merge_rejects_stale_evidence_shared_by_every_rank(tmp_path):
         )
 
 
+def _execution_rank_payloads() -> list[dict]:
+    payloads = _measurement_rank_payloads()
+    for rank, payload in enumerate(payloads):
+        payload["measurement_protocol"]["execution_evidence"] = {
+            "schema_version": 1,
+            "sample_field": "benchmark_sample",
+            "warmup_field": "warmup_evidence",
+            "forward_index_scope": "rank_process",
+            "timing_clock": "process_local_monotonic",
+            "cudagraph_source": "ModelRunnerOutput.cudagraph_stats",
+        }
+        payload["warmup_evidence"] = {
+            "status": "recorded",
+            "records": [
+                {
+                    "kind": "global",
+                    "requested_shape": {"prompt_tokens": 32 + rank},
+                    "status": "completed",
+                    "validation": {"status": "not_performed", "reason": None},
+                    "forward_index_start": 0,
+                    "forward_index_end": 5,
+                    "completed_points_before": 0,
+                    "observed_forward_count": 5,
+                    "first_scheduled_requests": None,
+                    "last_scheduled_requests": None,
+                }
+            ],
+        }
+        group = payload["iteration_groups"][0]
+        for result in group["rank_results"]:
+            measurement = result["fpms"][0]["benchmark_measurement"]
+            measurement["preparation"]["warmup_records_before"] = 1
+            for index, raw in enumerate(measurement["raw_fpms"]):
+                start = result["dp_rank"] * 1000.0 + index
+                raw["benchmark_sample"] = {
+                    "sample_index": index,
+                    "forward_index": 10 + index,
+                    "timing": {
+                        "basis": "inter_output" if index else "schedule_to_output",
+                        "start_monotonic": start,
+                        "end_monotonic": start + raw["wall_time"],
+                    },
+                    "cudagraph": {
+                        "status": "observed",
+                        "runtime_mode": "CUDAGraphMode.FULL",
+                        "num_unpadded_tokens": 2,
+                        "num_padded_tokens": 4,
+                        "num_paddings": 2,
+                    },
+                }
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+    return payloads
+
+
+def test_merge_preserves_execution_samples_and_each_ranks_warmup_ledger(tmp_path):
+    payloads = _execution_rank_payloads()
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", data)
+            for rank, data in enumerate(payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+
+    on_disk = json.loads(json.dumps(merged))
+    assert "warmup_evidence" not in on_disk
+    for rank, source in enumerate(payloads):
+        assert on_disk["rank_warmup_evidence"][str(rank)] == source["warmup_evidence"]
+        actual = on_disk["results"][rank]["fpms"][0]["benchmark_measurement"]
+        assert actual == source["results"][0]["fpms"][0]["benchmark_measurement"]
+    on_disk["rank_warmup_evidence"]["0"]["records"].clear()
+    assert payloads[0]["warmup_evidence"]["records"]
+
+
+def test_merge_records_missing_remote_warmup_history_without_losing_raw_observations(
+    tmp_path,
+):
+    payload = _execution_rank_payloads()[0]
+    remote = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0]
+    sample = remote["benchmark_measurement"]["raw_fpms"][0]["benchmark_sample"]
+    sample["cudagraph"] = {
+        "status": "unavailable",
+        "runtime_mode": None,
+        "num_unpadded_tokens": None,
+        "num_padded_tokens": None,
+        "num_paddings": None,
+    }
+    sample["timing"]["start_monotonic"] = None
+
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+
+    assert merged["results"][1]["fpms"][0] == remote
+    assert merged["rank_warmup_evidence"]["1"] == {
+        "status": "unavailable",
+        "records": [],
+        "reason": "rank_artifact_not_loaded",
+    }
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("dp_rank",), 0),
+        (("counter_id",), 99),
+        (("benchmark_sample", "sample_index"), 1),
+        (("benchmark_sample", "forward_index"), -1),
+        (("benchmark_sample", "timing", "end_monotonic"), 100.0),
+        (("benchmark_sample", "timing", "basis"), "cuda_events"),
+        (("benchmark_sample", "cudagraph", "status"), "unavailable"),
+        (("benchmark_sample", "cudagraph", "num_padded_tokens"), 1),
+        (("benchmark_sample", "cudagraph", "num_paddings"), 0),
+    ],
+)
+def test_merge_rejects_contradictory_raw_execution_evidence(tmp_path, path, value):
+    payload = _execution_rank_payloads()[0]
+    raw = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]["raw_fpms"][0]
+    target = raw
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("indices", [[1, 2, 99], [1, 1], [0, 1, 2, 3]])
+def test_merge_rejects_contradictory_reduction_inputs(tmp_path, indices):
+    payload = _execution_rank_payloads()[0]
+    measurement = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    measurement["estimate"]["raw_sample_indices"] = indices
+
+    with pytest.raises(RuntimeError, match="execution evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_warmup_reference_beyond_recorded_history(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][0]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    evidence["preparation"]["warmup_records_before"] = 2
+
+    with pytest.raises(RuntimeError, match="warmup reference is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_warmup_history_that_completed_after_measurement(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"]["records"][0]["forward_index_end"] = 11
+    payload["warmup_evidence"]["records"][0]["observed_forward_count"] = 11
+    with pytest.raises(RuntimeError, match="warmup reference overlaps measurement"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("count", [4, 99, -1, True, 5.0])
+def test_merge_rejects_contradictory_warmup_forward_count(tmp_path, count):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"]["records"][0]["observed_forward_count"] = count
+
+    with pytest.raises(RuntimeError, match="warmup forward count is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("missing", ["forward_index_start", "observed_forward_count"])
+def test_merge_preserves_unknown_warmup_forward_count_or_start(tmp_path, missing):
+    payload = _execution_rank_payloads()[0]
+    record = payload["warmup_evidence"]["records"][0]
+    del record[missing]
+
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+
+    assert merged["rank_warmup_evidence"]["0"]["records"] == [record]
+
+
+@pytest.mark.parametrize("ledger", [None, {"status": "unavailable", "records": [{}]}])
+def test_merge_rejects_missing_or_contradictory_declared_warmup_ledger(
+    tmp_path, ledger
+):
+    payload = _execution_rank_payloads()[0]
+    payload["warmup_evidence"] = ledger
+    with pytest.raises(RuntimeError, match="warmup evidence is invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_execution_observations_without_declared_contract(tmp_path):
+    payload = _execution_rank_payloads()[0]
+    del payload["measurement_protocol"]["execution_evidence"]
+    del payload["warmup_evidence"]
+    with pytest.raises(
+        RuntimeError, match="execution evidence has no declared contract"
+    ):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
 # --------------------------------------------------------------------------
 # Engine provenance worker probe (AIC-1950, Task 3)
 # --------------------------------------------------------------------------
@@ -2477,12 +2698,18 @@ def _fake_worker(
     data_parallel_rank=5,
     data_parallel_index=None,
     tensor_parallel_size=None,
+    pipeline_parallel_size=None,
+    prefill_context_parallel_size=1,
 ):
     parallel_kwargs = {"data_parallel_rank": data_parallel_rank}
     if data_parallel_index is not None:
         parallel_kwargs["data_parallel_index"] = data_parallel_index
     if tensor_parallel_size is not None:
         parallel_kwargs["tensor_parallel_size"] = tensor_parallel_size
+    if pipeline_parallel_size is not None:
+        parallel_kwargs["pipeline_parallel_size"] = pipeline_parallel_size
+    if prefill_context_parallel_size is not None:
+        parallel_kwargs["prefill_context_parallel_size"] = prefill_context_parallel_size
     return SimpleNamespace(
         rank=rank,
         vllm_config=SimpleNamespace(
@@ -2496,20 +2723,40 @@ def _fake_worker(
     )
 
 
-def _merged_with_engine(tmp_path, rank_count: int = 1) -> dict:
+def _merged_with_engine(
+    tmp_path,
+    rank_count: int = 1,
+    tensor_parallel_size: int = 1,
+    pipeline_parallel_size: int = 1,
+    prefill_context_parallel_size: int = 1,
+) -> dict:
     """A merged document plus the rank files it points at, all on disk."""
     rank_files = []
     for dp_rank in range(rank_count):
         path = tmp_path / f"rank{dp_rank}.json"
-        path.write_text(json.dumps({"engine": _engine_block(dp_rank)}))
+        engine = _engine_block(dp_rank)
+        engine["parallel"].update(
+            tensor_parallel_size=tensor_parallel_size,
+            pipeline_parallel_size=pipeline_parallel_size,
+            prefill_context_parallel_size=prefill_context_parallel_size,
+        )
+        path.write_text(
+            json.dumps({"engine": engine, "dp": {"rank": dp_rank, "size": rank_count}})
+        )
         rank_files.append(str(path))
     merged_path = tmp_path / "merged.json"
     merged = {
         "engine": _engine_block(0),
         "rank_files": rank_files,
         "merged_output_path": str(merged_path),
+        "dp": {"ranks": list(range(rank_count)), "global_size": rank_count},
     }
     merged["engine"]["parallel"]["data_parallel_rank"] = None
+    merged["engine"]["parallel"].update(
+        tensor_parallel_size=tensor_parallel_size,
+        pipeline_parallel_size=pipeline_parallel_size,
+        prefill_context_parallel_size=prefill_context_parallel_size,
+    )
     merged_path.write_text(json.dumps(merged))
     return merged
 
@@ -2544,7 +2791,9 @@ def test_engine_probe_reads_backends_off_the_attention_layers():
         "model.layers.1.mlp": SimpleNamespace(),
     }
 
-    result = probe(_fake_worker(layers, rank=6, tensor_parallel_size=4))
+    result = probe(
+        _fake_worker(layers, rank=6, tensor_parallel_size=4, pipeline_parallel_size=2)
+    )
 
     assert result["attention_backends"] == {
         "model.layers.0.self_attn.attn": "FLASHINFER_MLA",
@@ -2552,6 +2801,9 @@ def test_engine_probe_reads_backends_off_the_attention_layers():
         "model.layers.2.self_attn.attn": "FLASH_ATTN",
     }
     assert "model.layers.3.self_attn.attn" not in result["attention_backends"]
+    assert result["capture_errors"] == {
+        "model.layers.3.self_attn.attn": "RuntimeError: backend selector exploded"
+    }
     # Only the MLA layers contribute a prefill backend; the standard layer
     # does not dilute or clear it, and the exploding layer never reaches its
     # own prefill_backend attribute. Both the class (layer 0) and the
@@ -2565,6 +2817,39 @@ def test_engine_probe_reads_backends_off_the_attention_layers():
     # the raw global rank directly -- 6 % 4 == 2, distinct from both inputs,
     # so this cannot pass by coincidentally echoing one of them.
     assert result["tp_rank"] == 2
+    assert result["pp_rank"] == 1
+    assert result["pcp_rank"] == 0
+
+
+@pytest.mark.parametrize(
+    "tp_size, pp_size, worker_rank, tp_rank, pp_rank, pcp_rank",
+    [
+        (1, 1, 1, 0, 0, 1),
+        (1, 2, 1, 0, 0, 1),
+        (1, 2, 2, 0, 1, 0),
+        (2, 2, 7, 1, 1, 1),
+        (2, 2, 15, 1, 1, 1),
+    ],
+)
+def test_engine_probe_derives_ranks_with_prefill_context_parallelism(
+    tp_size, pp_size, worker_rank, tp_rank, pp_rank, pcp_rank
+):
+    worker = _fake_worker(
+        {},
+        rank=worker_rank,
+        data_parallel_rank=0,
+        data_parallel_index=3,
+        tensor_parallel_size=tp_size,
+        pipeline_parallel_size=pp_size,
+        prefill_context_parallel_size=2,
+    )
+
+    result = _make_engine_probe()(worker)
+
+    assert result["tp_rank"] == tp_rank
+    assert result["pp_rank"] == pp_rank
+    assert result["pcp_rank"] == pcp_rank
+    assert result["dp_rank"] == 3
 
 
 def test_engine_probe_prefers_data_parallel_index_over_zeroed_rank():
@@ -2592,22 +2877,49 @@ def test_engine_probe_tp_rank_is_none_without_tensor_parallel_size():
     result = probe(worker)
 
     assert result["tp_rank"] is None
+    assert result["pp_rank"] is None
+    assert result["pcp_rank"] is None
     assert result["worker_rank"] == 7
+
+
+def test_engine_probe_keeps_pp_and_pcp_unknown_without_pcp_size():
+    worker = _fake_worker(
+        {},
+        rank=1,
+        tensor_parallel_size=1,
+        pipeline_parallel_size=2,
+        prefill_context_parallel_size=None,
+    )
+
+    result = _make_engine_probe()(worker)
+
+    assert result["tp_rank"] == 0
+    assert result["pp_rank"] is None
+    assert result["pcp_rank"] is None
+
+
+def _worker_probe_response(
+    dp_rank=0, worker_rank=0, tp_rank=0, pp_rank=0, pcp_rank=0, backend="FLASHINFER_MLA"
+):
+    return {
+        "dp_rank": dp_rank,
+        "worker_rank": worker_rank,
+        "tp_rank": tp_rank,
+        "pp_rank": pp_rank,
+        "pcp_rank": pcp_rank,
+        "attention_backends": {"model.layers.0.self_attn.attn": backend},
+        "mla_prefill_backend": "TrtllmRaggedMLAPrefill",
+        "cudagraph_mode_resolved": "FULL_AND_PIECEWISE",
+        "cudagraph_capture_sizes_resolved": [1, 2],
+        "capture_errors": {},
+    }
 
 
 def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
     merged = _merged_with_engine(tmp_path, rank_count=2)
-    probe_result = {
-        "tp_rank": 0,
-        "dp_rank": 0,
-        "attention_backends": {"model.layers.0.self_attn.attn": "FLASHINFER_MLA"},
-        "mla_prefill_backend": "TrtllmRaggedMLAPrefill",
-        "cudagraph_mode_resolved": "FULL_AND_PIECEWISE",
-        "cudagraph_capture_sizes_resolved": [1, 2],
-    }
-    engine_client = SimpleNamespace(
-        collective_rpc=AsyncMock(return_value=[probe_result, probe_result])
-    )
+    # Worker ranks are local to their DP engines, not globally unique.
+    replies = [_worker_probe_response(dp_rank=rank) for rank in (0, 1)]
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
 
     asyncio.run(_attach_engine_resolved(merged, engine_client))
 
@@ -2616,7 +2928,8 @@ def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
         engine_client.collective_rpc.call_args.kwargs["timeout"]
         == ENGINE_PROBE_TIMEOUT_SECONDS
     )
-    assert merged["engine"]["resolved"] == probe_result
+    assert merged["engine"]["resolved"] == replies[0]
+    assert merged["engine"]["resolved_scope"] == "representative_worker"
     assert merged["engine"]["resolution"] == "worker_probe"
     assert merged["engine"]["attention"]["backend_resolved"] == "FLASHINFER_MLA"
     assert (
@@ -2625,10 +2938,14 @@ def test_attach_engine_resolved_updates_merged_and_rank_files(tmp_path):
     )
     assert merged["engine"]["attention"]["resolution"] == "worker_probe"
     on_disk = json.loads((tmp_path / "merged.json").read_text())
-    assert on_disk["engine"]["resolved"] == probe_result
+    assert on_disk["engine"]["resolved"] == replies[0]
+    assert [
+        entry["response"] for entry in on_disk["engine"]["worker_probe"]["responses"]
+    ] == replies
+    assert on_disk["engine"]["worker_probe"]["coverage"]["complete"] is True
     for dp_rank in (0, 1):
         rank_doc = json.loads((tmp_path / f"rank{dp_rank}.json").read_text())
-        assert rank_doc["engine"]["resolved"] == probe_result
+        assert rank_doc["engine"]["resolved"] == replies[dp_rank]
         assert rank_doc["engine"]["resolution"] == "worker_probe"
         # The rank's own provenance is untouched.
         assert rank_doc["engine"]["parallel"]["data_parallel_rank"] == dp_rank
@@ -2640,6 +2957,7 @@ def test_attach_engine_resolved_marks_mixed_backends(tmp_path):
         collective_rpc=AsyncMock(
             return_value=[
                 {
+                    **_worker_probe_response(),
                     "attention_backends": {
                         "layer.0": "FLASHINFER_MLA",
                         "layer.1": "TRITON_ATTN",
@@ -2656,6 +2974,232 @@ def test_attach_engine_resolved_marks_mixed_backends(tmp_path):
     assert merged["engine"]["attention"]["resolution"] == "worker_probe_mixed"
     assert merged["engine"]["resolved"]["attention_backends"]["layer.1"] == (
         "TRITON_ATTN"
+    )
+
+
+def test_attach_engine_probe_does_not_copy_local_rpc_response_to_remote_rank(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    reply = _worker_probe_response(dp_rank=1)
+    engine_client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[reply]))
+
+    asyncio.run(_attach_engine_resolved(merged, engine_client))
+
+    assert merged["engine"]["resolved"] == reply
+    assert merged["engine"]["resolution"] == "worker_probe_partial"
+    coverage = merged["engine"]["worker_probe"]["coverage"]
+    assert coverage["expected_dp_ranks"] == [0, 1]
+    assert coverage["missing_dp_ranks"] == [0]
+    assert coverage["complete"] is False
+    unobserved = json.loads((tmp_path / "rank0.json").read_text())["engine"]
+    assert unobserved["resolved"] is None
+    assert unobserved["resolution"] == "worker_probe_unobserved"
+    assert unobserved["attention"]["backend_resolved"] is None
+    observed = json.loads((tmp_path / "rank1.json").read_text())["engine"]
+    assert observed["resolved"] == reply
+    assert observed["resolution"] == "worker_probe"
+
+
+def test_attach_engine_probe_reports_disagreements_without_losing_replies(tmp_path):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    replies = [
+        _worker_probe_response(dp_rank=0),
+        _worker_probe_response(dp_rank=1, backend="FLASH_ATTN"),
+    ]
+    replies[1]["cudagraph_mode_resolved"] = "NONE"
+    replies[1]["cudagraph_capture_sizes_resolved"] = []
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolution"] == "worker_probe_mixed"
+    assert engine["worker_probe"]["coverage"]["complete"] is True
+    assert engine["worker_probe"]["disagreements"] == [
+        "attention_backends",
+        "cudagraph_mode_resolved",
+        "cudagraph_capture_sizes_resolved",
+    ]
+    assert engine["attention"]["backend_resolved"] is None
+    for rank, response in enumerate(replies):
+        local = json.loads((tmp_path / f"rank{rank}.json").read_text())["engine"]
+        assert local["resolved"] == response
+        assert (
+            local["attention"]["backend_resolved"]
+            == response["attention_backends"]["model.layers.0.self_attn.attn"]
+        )
+
+
+def test_attach_engine_probe_keeps_different_pp_layer_sets(tmp_path):
+    merged = _merged_with_engine(tmp_path, pipeline_parallel_size=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(worker_rank=1, pp_rank=1),
+    ]
+    replies[1]["attention_backends"] = {
+        "model.layers.4.self_attn.attn": "FLASHINFER_MLA"
+    }
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    snapshot = merged["engine"]["worker_probe"]
+    assert snapshot["disagreements"] == []
+    assert snapshot["coverage"]["expected_workers_per_dp"] == 2
+    assert snapshot["coverage"]["complete"] is True
+    assert [entry["response"] for entry in snapshot["responses"]] == replies
+
+
+@pytest.mark.parametrize("pp_size, response_count", [(1, 1), (1, 2), (2, 3), (2, 4)])
+def test_attach_engine_probe_counts_pcp_workers_and_preserves_pp_layer_sets(
+    tmp_path, pp_size, response_count
+):
+    merged = _merged_with_engine(
+        tmp_path, pipeline_parallel_size=pp_size, prefill_context_parallel_size=2
+    )
+    replies = []
+    for worker_rank in range(response_count):
+        pp_rank, pcp_rank = divmod(worker_rank, 2)
+        response = _worker_probe_response(
+            worker_rank=worker_rank, pp_rank=pp_rank, pcp_rank=pcp_rank
+        )
+        # PP stages may legitimately choose different backends for disjoint layers.
+        response["attention_backends"] = {
+            f"model.layers.{pp_rank}.self_attn.attn": (
+                "FLASHINFER_MLA" if pp_rank == 0 else "FLASH_ATTN"
+            )
+        }
+        replies.append(response)
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    expected_workers = 2 * pp_size
+    complete = response_count == expected_workers
+    for engine in (
+        merged["engine"],
+        json.loads((tmp_path / "rank0.json").read_text())["engine"],
+    ):
+        snapshot = engine["worker_probe"]
+        assert snapshot["coverage"]["expected_workers_per_dp"] == expected_workers
+        assert snapshot["coverage"]["complete"] is complete
+        assert len(snapshot["coverage"]["observed_workers"]) == response_count
+        assert [
+            worker["pcp_rank"] for worker in snapshot["coverage"]["observed_workers"]
+        ] == [reply["pcp_rank"] for reply in replies]
+        assert [entry["response"] for entry in snapshot["responses"]] == replies
+        assert all(not entry["issues"] for entry in snapshot["responses"])
+        assert snapshot["disagreements"] == []
+        assert engine["resolution"] == (
+            "worker_probe" if complete else "worker_probe_partial"
+        )
+
+
+def test_attach_engine_probe_rejects_duplicate_pcp_slot(tmp_path):
+    merged = _merged_with_engine(tmp_path, prefill_context_parallel_size=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(worker_rank=2),
+    ]
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    snapshot = merged["engine"]["worker_probe"]
+    assert snapshot["coverage"]["complete"] is False
+    assert snapshot["coverage"]["observed_workers"] == []
+    assert all(
+        "duplicate (dp_rank, tp_rank, pcp_rank, pp_rank)" in entry["issues"]
+        for entry in snapshot["responses"]
+    )
+
+
+@pytest.mark.parametrize("invalid", [None, {}, {"attention_backends": []}, object()])
+def test_attach_engine_probe_keeps_good_reply_when_another_is_malformed(
+    tmp_path, invalid
+):
+    merged = _merged_with_engine(tmp_path)
+    good = _worker_probe_response()
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[invalid, good]))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] == good
+    assert engine["resolution"] == "worker_probe_partial"
+    snapshot = engine["worker_probe"]
+    assert len(snapshot["responses"]) == 2
+    assert snapshot["responses"][0]["issues"]
+    assert snapshot["responses"][1]["response"] == good
+    assert snapshot["coverage"]["complete"] is False
+    assert json.loads((tmp_path / "merged.json").read_text())["engine"] == engine
+
+
+def test_attach_engine_probe_marks_duplicate_identities_instead_of_counting_them(
+    tmp_path,
+):
+    merged = _merged_with_engine(tmp_path, rank_count=2)
+    replies = [
+        _worker_probe_response(),
+        _worker_probe_response(),
+        _worker_probe_response(dp_rank=1),
+    ]
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=replies))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] == replies[2]
+    snapshot = engine["worker_probe"]
+    assert snapshot["coverage"]["complete"] is False
+    assert snapshot["coverage"]["missing_dp_ranks"] == [0]
+    assert all(
+        "duplicate (dp_rank, worker_rank)" in entry["issues"]
+        for entry in snapshot["responses"][:2]
+    )
+    assert len(snapshot["responses"]) == 3
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        {"tp_rank": 1},
+        {"pp_rank": 1},
+        {"pcp_rank": 1},
+        {"pcp_rank": True},
+        {"pcp_rank": None},
+        {"dp_rank": True},
+    ],
+)
+def test_attach_engine_probe_rejects_inconsistent_worker_labels(tmp_path, identity):
+    merged = _merged_with_engine(tmp_path)
+    reply = {**_worker_probe_response(), **identity}
+    client = SimpleNamespace(collective_rpc=AsyncMock(return_value=[reply]))
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    engine = merged["engine"]
+    assert engine["resolved"] is None
+    assert engine["worker_probe"]["coverage"]["complete"] is False
+    assert engine["worker_probe"]["responses"][0]["issues"]
+
+
+@pytest.mark.parametrize(
+    "size", ["pipeline_parallel_size", "prefill_context_parallel_size"]
+)
+def test_attach_engine_probe_does_not_claim_complete_when_topology_is_unknown(
+    tmp_path, size
+):
+    merged = _merged_with_engine(tmp_path)
+    del merged["engine"]["parallel"][size]
+    client = SimpleNamespace(
+        collective_rpc=AsyncMock(return_value=[_worker_probe_response()])
+    )
+
+    asyncio.run(_attach_engine_resolved(merged, client))
+
+    assert merged["engine"]["resolution"] == "worker_probe_partial"
+    assert (
+        merged["engine"]["worker_probe"]["coverage"]["expected_workers_per_dp"] is None
     )
 
 
@@ -2721,7 +3265,10 @@ def test_attach_engine_resolved_survives_a_malformed_dict_shaped_result(tmp_path
 
     assert merged["engine"]["resolved"] is None
     assert merged["engine"]["resolution"].startswith("probe_failed:")
-    assert "AttributeError" in merged["engine"]["resolution"]
+    assert (
+        "invalid attention_backends"
+        in merged["engine"]["worker_probe"]["responses"][0]["issues"]
+    )
     assert merged["engine"]["attention"]["backend_resolved"] is None
     on_disk = json.loads((tmp_path / "merged.json").read_text())
     assert on_disk["engine"]["resolution"] == merged["engine"]["resolution"]
@@ -2782,6 +3329,7 @@ def test_attach_engine_resolved_preserves_non_engine_rank_file_content(tmp_path)
         collective_rpc=AsyncMock(
             return_value=[
                 {
+                    **_worker_probe_response(),
                     "attention_backends": {"layer.0": "FLASH_ATTN"},
                     "mla_prefill_backend": None,
                 }
@@ -2792,7 +3340,7 @@ def test_attach_engine_resolved_preserves_non_engine_rank_file_content(tmp_path)
     asyncio.run(_attach_engine_resolved(merged, engine_client))
 
     rewritten = json.loads(rank_path.read_text())
-    assert rewritten["engine"]["resolution"] == "worker_probe"
+    assert rewritten["engine"]["resolution"] == "worker_probe_partial"
     for key in ("schema_version", "artifact_type", "results", "timing", "coverage"):
         assert rewritten[key] == original[key]
 

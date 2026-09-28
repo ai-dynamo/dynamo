@@ -1973,6 +1973,23 @@ class TestForwardPassMetricsActivation:
         assert "Benchmark mode: auto-enabling InstrumentedScheduler" not in caplog.text
 
 
+@pytest.mark.parametrize("benchmark_mode", [None, "prefill", "decode", "agg"])
+@pytest.mark.parametrize("initial_metrics", [False, True])
+def test_cuda_graph_dispatch_metrics_enabled_only_for_benchmark(
+    benchmark_mode, initial_metrics
+):
+    dynamo_cfg = _make_dynamo_config(benchmark_mode=benchmark_mode)
+    engine_cfg = _make_engine_config_with_runner(
+        scheduler_cls=None, cudagraph_metrics=initial_metrics
+    )
+
+    update_engine_config_with_dynamo(dynamo_cfg, engine_cfg)
+
+    assert engine_cfg.cudagraph_metrics is (
+        True if benchmark_mode is not None else initial_metrics
+    )
+
+
 class TestEmbeddingWorkerFlag:
     """Parsing + validation for --embedding-worker."""
 

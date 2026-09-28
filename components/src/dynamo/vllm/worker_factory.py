@@ -169,8 +169,8 @@ def _benchmark_engine_identity(data: dict) -> Optional[dict]:
     run must agree on.
 
     ``parallel.data_parallel_rank`` legitimately differs per rank, and
-    ``resolved`` / ``resolution`` are written after this merge by the
-    launcher's worker probe.
+    Worker observations are written after collection, so they do not
+    participate in the startup identity comparison.
     """
     engine = data.get("engine")
     if not isinstance(engine, dict):
@@ -178,6 +178,12 @@ def _benchmark_engine_identity(data: dict) -> Optional[dict]:
     identity = copy.deepcopy(engine)
     identity.pop("resolved", None)
     identity.pop("resolution", None)
+    identity.pop("resolved_scope", None)
+    identity.pop("worker_probe", None)
+    attention = identity.get("attention")
+    if isinstance(attention, dict):
+        for field in ("backend_resolved", "mla_prefill_backend_resolved", "resolution"):
+            attention.pop(field, None)
     parallel = identity.get("parallel")
     if isinstance(parallel, dict):
         parallel.pop("data_parallel_rank", None)
@@ -191,6 +197,180 @@ def _engine_degraded(engine_block: Any) -> bool:
     built before the exception, alongside ``capture_error``).
     """
     return not isinstance(engine_block, dict) or "capture_error" in engine_block
+
+
+def _validate_execution_measurement(
+    fpm: dict, measurement: dict, previous_forward_index: int
+) -> int:
+    """Check raw observations against their declared point/rank and timing."""
+    rank = measurement["dp_rank"]
+    benchmark_id = fpm["counter_id"]
+
+    def invalid(reason: str) -> RuntimeError:
+        return RuntimeError(
+            "Self-benchmark execution evidence is invalid: "
+            f"rank={rank} benchmark_id={benchmark_id}: {reason}"
+        )
+
+    raw = measurement.get("raw_fpms")
+    expected = measurement.get("expected_internal_samples")
+    if (
+        not isinstance(raw, list)
+        or not raw
+        or type(expected) is not int
+        or expected < len(raw)
+        or "benchmark_sample" in fpm
+    ):
+        raise invalid("missing raw samples or contradictory retained observation")
+    for index, sample_fpm in enumerate(raw):
+        if not isinstance(sample_fpm, dict) or (
+            type(sample_fpm.get("counter_id")) is not int
+            or sample_fpm["counter_id"] != benchmark_id
+            or type(sample_fpm.get("dp_rank")) is not int
+            or sample_fpm["dp_rank"] != rank
+            or sample_fpm.get("worker_id") != fpm.get("worker_id")
+        ):
+            raise invalid(f"raw sample {index} has a different point/rank identity")
+        sample = sample_fpm.get("benchmark_sample")
+        if (
+            not isinstance(sample, dict)
+            or type(sample.get("sample_index")) is not int
+            or sample["sample_index"] != index
+            or type(sample.get("forward_index")) is not int
+            or sample["forward_index"] <= previous_forward_index
+        ):
+            raise invalid(f"raw sample {index} has an invalid sample/forward index")
+        previous_forward_index = sample["forward_index"]
+        timing = sample.get("timing")
+        if not isinstance(timing, dict) or timing.get("basis") not in {
+            "schedule_to_output",
+            "inter_output",
+        }:
+            raise invalid(f"raw sample {index} has no timing interval")
+        start, end = timing.get("start_monotonic"), timing.get("end_monotonic")
+        wall = sample_fpm.get("wall_time")
+        if (
+            end is None
+            or type(end) not in (int, float)
+            or not math.isfinite(end)
+            or wall is None
+            or type(wall) not in (int, float)
+            or not math.isfinite(wall)
+            or wall < 0
+            or (
+                start is not None
+                and (
+                    type(start) not in (int, float)
+                    or not math.isfinite(start)
+                    or start > end
+                    or not math.isclose(end - start, wall, rel_tol=1e-9, abs_tol=1e-9)
+                )
+            )
+        ):
+            raise invalid(f"raw sample {index} contradicts its timing interval")
+        graph = sample.get("cudagraph")
+        if not isinstance(graph, dict):
+            raise invalid(f"raw sample {index} has no graph observation status")
+        mode = graph.get("runtime_mode")
+        unpadded, padded = (
+            graph.get("num_unpadded_tokens"),
+            graph.get("num_padded_tokens"),
+        )
+        paddings = graph.get("num_paddings")
+        if graph.get("status") == "observed":
+            if (
+                not isinstance(mode, str)
+                or not mode
+                or type(unpadded) is not int
+                or type(padded) is not int
+                or unpadded < 0
+                or padded < unpadded
+                or type(paddings) is not int
+                or paddings != padded - unpadded
+            ):
+                raise invalid(f"raw sample {index} has invalid observed graph data")
+        elif graph.get("status") != "unavailable" or any(
+            value is not None for value in (mode, unpadded, padded, paddings)
+        ):
+            raise invalid(
+                f"raw sample {index} contradicts its graph observation status"
+            )
+    estimate = measurement.get("estimate")
+    if not isinstance(estimate, dict):
+        raise invalid("missing reduction inputs")
+    indices = estimate.get("raw_sample_indices")
+    if (
+        not isinstance(indices, list)
+        or not indices
+        or any(type(index) is not int or not 0 <= index < len(raw) for index in indices)
+        or indices != sorted(set(indices))
+    ):
+        raise invalid("invalid reduction sample indices")
+    method = estimate.get("method")
+    if (
+        (method == "single_step" and (len(raw) != 1 or indices != [0]))
+        or (method == "last_step" and indices != [len(raw) - 1])
+        or (method == "adjacent_upper_median" and indices != list(range(1, len(raw))))
+        or method not in {"single_step", "last_step", "adjacent_upper_median"}
+    ):
+        raise invalid("reduction inputs contradict the reduction method")
+    walls = sorted(raw[index]["wall_time"] for index in indices)
+    if not math.isclose(
+        fpm["wall_time"], walls[len(walls) // 2], rel_tol=1e-9, abs_tol=1e-12
+    ):
+        raise invalid("retained wall time contradicts the raw reduction inputs")
+    return previous_forward_index
+
+
+def _validate_warmup_evidence(data: dict, rank: int) -> dict:
+    """Require a ledger status; an unavailable history must remain unknown."""
+    ledger = data.get("warmup_evidence")
+    if (
+        not isinstance(ledger, dict)
+        or ledger.get("status") not in {"recorded", "unavailable"}
+        or not isinstance(ledger.get("records"), list)
+        or (ledger["status"] == "unavailable" and ledger["records"])
+    ):
+        raise RuntimeError(f"Self-benchmark warmup evidence is invalid: rank={rank}")
+    for record in ledger["records"]:
+        if (
+            not isinstance(record, dict)
+            or record.get("status") not in {"running", "completed", "failed"}
+            or not isinstance(record.get("validation"), dict)
+            or record["validation"].get("status")
+            not in {"passed", "failed", "not_performed"}
+            or (
+                record["validation"]["status"] == "passed"
+                and record["status"] != "completed"
+            )
+            or (
+                record["validation"]["status"] == "failed"
+                and record["status"] != "failed"
+            )
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup evidence is invalid: rank={rank}"
+            )
+        start, end = record.get("forward_index_start"), record.get("forward_index_end")
+        if (
+            (start is not None and (type(start) is not int or start < 0))
+            or (end is not None and (type(end) is not int or end < 0))
+            or (start is not None and end is not None and end < start)
+            or (record["status"] == "completed" and end is None)
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup forward range is invalid: rank={rank}"
+            )
+        count = record.get("observed_forward_count")
+        if count is not None and (
+            type(count) is not int
+            or count < 0
+            or (start is not None and end is not None and count != end - start)
+        ):
+            raise RuntimeError(
+                f"Self-benchmark warmup forward count is invalid: rank={rank}"
+            )
+    return ledger
 
 
 def _merge_benchmark_rank_results(
@@ -226,6 +406,32 @@ def _merge_benchmark_rank_results(
             raise RuntimeError(
                 f"Self-benchmark measurement protocol mismatch at {path}: "
                 "every contributing rank must record the same protocol"
+            )
+    execution_evidence = (
+        measurement_protocol.get("execution_evidence")
+        if isinstance(measurement_protocol, dict)
+        else None
+    )
+    has_execution_evidence = (
+        isinstance(measurement_protocol, dict)
+        and "execution_evidence" in measurement_protocol
+    )
+    if has_execution_evidence and (
+        not isinstance(execution_evidence, dict)
+        or execution_evidence.get("schema_version") != 1
+        or execution_evidence.get("sample_field") != "benchmark_sample"
+        or execution_evidence.get("warmup_field") != "warmup_evidence"
+    ):
+        raise RuntimeError(
+            "Self-benchmark results have invalid execution evidence contract"
+        )
+    warmup_ledgers = {}
+    for rank, _, data in rank_data:
+        if has_execution_evidence:
+            warmup_ledgers[rank] = _validate_warmup_evidence(data, rank)
+        elif "warmup_evidence" in data:
+            raise RuntimeError(
+                "Self-benchmark execution evidence has no declared contract"
             )
     # A rank is "degraded" when its engine capture failed or is missing while
     # at least one other rank has one: it cannot be trusted for an identity
@@ -285,6 +491,7 @@ def _merge_benchmark_rank_results(
         )
 
     groups_by_id: dict[int, dict] = {}
+    previous_forward_indices: dict[int, int] = {}
     for group in reference_groups:
         benchmark_id = group.get("benchmark_id")
         if not isinstance(benchmark_id, int) or benchmark_id < 1:
@@ -372,6 +579,55 @@ def _merge_benchmark_rank_results(
                     raise RuntimeError(
                         "Self-benchmark measurement identity mismatch: "
                         f"rank={dp_rank} benchmark_id={benchmark_id}"
+                    )
+                if has_execution_evidence:
+                    previous_forward_indices[dp_rank] = _validate_execution_measurement(
+                        fpm, measurement, previous_forward_indices.get(dp_rank, -1)
+                    )
+                    warmups_before = preparation.get("warmup_records_before")
+                    ledger = warmup_ledgers.get(dp_rank)
+                    if (
+                        (
+                            warmups_before is not None
+                            and (type(warmups_before) is not int or warmups_before < 0)
+                        )
+                        or (
+                            ledger is not None
+                            and ledger["status"] == "recorded"
+                            and (
+                                warmups_before is None
+                                or warmups_before > len(ledger["records"])
+                            )
+                        )
+                        or (
+                            ledger is not None
+                            and ledger["status"] == "unavailable"
+                            and warmups_before is not None
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"Self-benchmark warmup reference is invalid: rank={dp_rank} benchmark_id={benchmark_id}"
+                        )
+                    if ledger is not None and ledger["status"] == "recorded":
+                        first_forward = measurement["raw_fpms"][0]["benchmark_sample"][
+                            "forward_index"
+                        ]
+                        if any(
+                            record["status"] == "running"
+                            or (
+                                record.get("forward_index_end") is not None
+                                and record["forward_index_end"] > first_forward
+                            )
+                            for record in ledger["records"][:warmups_before]
+                        ):
+                            raise RuntimeError(
+                                f"Self-benchmark warmup reference overlaps measurement: rank={dp_rank} benchmark_id={benchmark_id}"
+                            )
+                elif any(
+                    "benchmark_sample" in raw for raw in measurement.get("raw_fpms", [])
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark execution evidence has no declared contract"
                     )
             elif "benchmark_measurement" in fpm:
                 raise RuntimeError(
@@ -607,6 +863,21 @@ def _merge_benchmark_rank_results(
     merged["merged_output_path"] = str(merged_path)
     merged["results"] = flattened_results
     merged["iteration_groups"] = copy.deepcopy(reference_groups)
+    if has_execution_evidence:
+        merged.pop("warmup_evidence", None)
+        merged["rank_warmup_evidence"] = {
+            str(rank): copy.deepcopy(
+                warmup_ledgers.get(
+                    rank,
+                    {
+                        "status": "unavailable",
+                        "records": [],
+                        "reason": "rank_artifact_not_loaded",
+                    },
+                )
+            )
+            for rank in global_ranks
+        }
     _, slowest_timing = max(
         rank_timings,
         key=lambda item: float(item[1]["benchmark_elapsed_seconds"]),
@@ -659,13 +930,17 @@ def _make_engine_probe() -> Callable[[Any], dict]:
         context = getattr(compilation_config, "static_forward_context", None) or {}
         backends = {}
         prefill_backends = []
+        capture_errors = {}
         for name, layer in context.items():
             get_backend = getattr(layer, "get_attn_backend", None)
             if not callable(get_backend):
                 continue
             try:
                 backends[str(name)] = get_backend().get_name()
-            except Exception:
+            except Exception as error:
+                # Provenance is best effort; retain the failed layer as
+                # evidence instead of claiming a complete observation.
+                capture_errors[str(name)] = f"{type(error).__name__}: {error}"
                 continue
             prefill = getattr(layer, "prefill_backend", None)
             if prefill is not None:
@@ -684,22 +959,43 @@ def _make_engine_probe() -> Callable[[Any], dict]:
         dp_rank = getattr(parallel_config, "data_parallel_index", None)
         if dp_rank is None:
             dp_rank = getattr(parallel_config, "data_parallel_rank", None)
-        # No live TP process group is guaranteed to be initialised wherever
-        # this callable runs, so the TP-local rank is derived from the
-        # worker's own global rank instead of queried from one; it must never
-        # simply be the global rank itself (that only happens to coincide
-        # without pipeline parallelism or multiple DP groups).
+        # No live process group is guaranteed wherever this callable runs.
+        # vLLM orders ranks as DP x PP x PCP x TP, so derive the model-parallel
+        # ranks from the worker rank while keeping the explicit DP identity.
         tensor_parallel_size = getattr(parallel_config, "tensor_parallel_size", None)
+        pipeline_parallel_size = getattr(
+            parallel_config, "pipeline_parallel_size", None
+        )
+        prefill_context_parallel_size = getattr(
+            parallel_config, "prefill_context_parallel_size", None
+        )
         tp_rank = None
+        pp_rank = None
+        pcp_rank = None
         if (
-            isinstance(worker_rank, int)
-            and isinstance(tensor_parallel_size, int)
-            and tensor_parallel_size
+            type(worker_rank) is int
+            and worker_rank >= 0
+            and type(tensor_parallel_size) is int
+            and tensor_parallel_size > 0
         ):
             tp_rank = worker_rank % tensor_parallel_size
+            if (
+                type(prefill_context_parallel_size) is int
+                and prefill_context_parallel_size > 0
+            ):
+                pcp_rank = (
+                    worker_rank // tensor_parallel_size
+                ) % prefill_context_parallel_size
+                if type(pipeline_parallel_size) is int and pipeline_parallel_size > 0:
+                    pp_rank = (
+                        worker_rank
+                        // (tensor_parallel_size * prefill_context_parallel_size)
+                    ) % pipeline_parallel_size
         cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
         return {
             "tp_rank": tp_rank,
+            "pp_rank": pp_rank,
+            "pcp_rank": pcp_rank,
             "worker_rank": worker_rank,
             "dp_rank": dp_rank,
             "attention_backends": backends,
@@ -713,28 +1009,209 @@ def _make_engine_probe() -> Callable[[Any], dict]:
                     getattr(compilation_config, "cudagraph_capture_sizes", None) or []
                 )
             ],
+            "capture_errors": capture_errors,
         }
 
     return probe
 
 
+def _worker_probe_responses(results: Any) -> list[dict]:
+    """Keep every reply, including malformed or duplicate worker evidence."""
+    responses = []
+    identities: dict[tuple[int, int], list[int]] = {}
+    # A malformed top-level result is itself evidence; it is not an empty RPC.
+    for index, result in enumerate(results if isinstance(results, list) else [results]):
+        issues = []
+        try:
+            response = json.loads(json.dumps(result, allow_nan=False))
+        except (TypeError, ValueError) as error:
+            response = {
+                "unserializable_type": type(result).__name__,
+                "repr": repr(result),
+            }
+            issues.append(f"non-JSON response: {type(error).__name__}")
+        if not isinstance(result, dict):
+            issues.append("response is not an object")
+        else:
+            for field in ("dp_rank", "worker_rank", "tp_rank"):
+                if type(result.get(field)) is not int or result[field] < 0:
+                    issues.append(f"missing or invalid {field}")
+            for field in ("pp_rank", "pcp_rank"):
+                local_rank = result.get(field)
+                if local_rank is not None and (
+                    type(local_rank) is not int or local_rank < 0
+                ):
+                    issues.append(f"invalid {field}")
+            backends = result.get("attention_backends")
+            if not isinstance(backends, dict) or any(
+                not isinstance(layer, str) or not isinstance(name, str) or not name
+                for layer, name in backends.items()
+            ):
+                issues.append("invalid attention_backends")
+            for field in ("mla_prefill_backend", "cudagraph_mode_resolved"):
+                if result.get(field) is not None and not isinstance(result[field], str):
+                    issues.append(f"invalid {field}")
+            sizes = result.get("cudagraph_capture_sizes_resolved")
+            if not isinstance(sizes, list) or any(
+                type(size) is not int or size < 1 for size in sizes
+            ):
+                issues.append("invalid cudagraph_capture_sizes_resolved")
+            if not issues:
+                identity = (result["dp_rank"], result["worker_rank"])
+                identities.setdefault(identity, []).append(index)
+        responses.append({"rpc_index": index, "response": response, "issues": issues})
+    for indices in identities.values():
+        if len(indices) > 1:
+            for index in indices:
+                responses[index]["issues"].append("duplicate (dp_rank, worker_rank)")
+    return responses
+
+
 def _apply_engine_resolved(
-    document: dict, resolved: Optional[dict], resolution: str
+    document: dict, responses: list[dict], failure: str | None
 ) -> None:
-    """Write one probe result into a benchmark document's ``engine`` block."""
+    """Attach labelled post-run evidence without extending the RPC's scope."""
     engine = document.get("engine")
     if not isinstance(engine, dict):
         return
-    engine["resolved"] = copy.deepcopy(resolved)
+    parallel = engine.get("parallel") or {}
+    dp = document.get("dp") or {}
+    rank = dp.get("rank", parallel.get("data_parallel_rank"))
+    expected_ranks = [rank] if type(rank) is int else dp.get("ranks")
+    if not isinstance(expected_ranks, list):
+        expected_ranks = None
+    tp_size = parallel.get("tensor_parallel_size")
+    pp_size = parallel.get("pipeline_parallel_size")
+    pcp_size = parallel.get("prefill_context_parallel_size")
+    topology: tuple[int, int, int] | None = None
+    if (
+        type(tp_size) is int
+        and tp_size > 0
+        and type(pp_size) is int
+        and pp_size > 0
+        and type(pcp_size) is int
+        and pcp_size > 0
+    ):
+        topology = (tp_size, pcp_size, pp_size)
+    expected_workers_per_dp = math.prod(topology) if topology is not None else None
+    scoped_responses = copy.deepcopy(responses)
+    workers = []
+    slots: dict[tuple[int, int, int, int], list[dict]] = {}
+    for entry in scoped_responses:
+        response = entry["response"]
+        if entry["issues"]:
+            continue
+        if expected_ranks is not None and response["dp_rank"] not in expected_ranks:
+            continue
+        if topology is not None:
+            tp_size, pcp_size, pp_size = topology
+            worker_rank = response["worker_rank"]
+            expected_tp = worker_rank % tp_size
+            expected_pcp = (worker_rank // tp_size) % pcp_size
+            expected_pp = (worker_rank // (tp_size * pcp_size)) % pp_size
+            if (
+                response["tp_rank"] != expected_tp
+                or response.get("pp_rank") != expected_pp
+                or response.get("pcp_rank") != expected_pcp
+            ):
+                entry["issues"].append("worker ranks disagree with TP/PCP/PP topology")
+                continue
+            slot = (response["dp_rank"], expected_tp, expected_pcp, expected_pp)
+            slots.setdefault(slot, []).append(entry)
+        workers.append(entry)
+    for entries in slots.values():
+        if len(entries) > 1:
+            for entry in entries:
+                entry["issues"].append(
+                    "duplicate (dp_rank, tp_rank, pcp_rank, pp_rank)"
+                )
+    workers = [entry for entry in workers if not entry["issues"]]
+    observed = [entry["response"] for entry in workers]
+    observed_ranks = sorted({response["dp_rank"] for response in observed})
+    complete = (
+        expected_ranks is not None
+        and expected_workers_per_dp is not None
+        and len(observed) == len(expected_ranks) * expected_workers_per_dp
+        and not any(entry["issues"] for entry in scoped_responses)
+        and not any(response.get("capture_errors") for response in observed)
+    )
+    disagreements = []
+    # PP stages own different layers. Only compare backend choices for a
+    # layer that more than one worker actually observed.
+    layer_backends: dict[str, set[str]] = {}
+    for response in observed:
+        for layer, name in response["attention_backends"].items():
+            layer_backends.setdefault(layer, set()).add(name)
+    if any(len(names) > 1 for names in layer_backends.values()):
+        disagreements.append("attention_backends")
+    for field in (
+        "mla_prefill_backend",
+        "cudagraph_mode_resolved",
+        "cudagraph_capture_sizes_resolved",
+    ):
+        values = [
+            response[field] for response in observed if response.get(field) is not None
+        ]
+        if values and any(value != values[0] for value in values[1:]):
+            disagreements.append(field)
+    if failure:
+        resolution = failure
+    elif not observed:
+        resolution = "worker_probe_unobserved"
+    elif disagreements:
+        resolution = "worker_probe_mixed"
+    else:
+        resolution = "worker_probe" if complete else "worker_probe_partial"
+    engine["worker_probe"] = {
+        "schema_version": 1,
+        "scope": "post_collection_collective_rpc",
+        "responses": scoped_responses,
+        "coverage": {
+            "scope": "artifact_workers",
+            "expected_dp_ranks": expected_ranks,
+            "expected_workers_per_dp": expected_workers_per_dp,
+            "observed_workers": [
+                {
+                    key: response.get(key)
+                    for key in (
+                        "dp_rank",
+                        "worker_rank",
+                        "tp_rank",
+                        "pp_rank",
+                        "pcp_rank",
+                    )
+                }
+                for response in observed
+            ],
+            "missing_dp_ranks": (
+                sorted(set(expected_ranks) - set(observed_ranks))
+                if expected_ranks is not None
+                else None
+            ),
+            "complete": complete,
+        },
+        "disagreements": disagreements,
+        "error": failure,
+    }
+    # Keep the legacy field as a representative, explicitly labelled with
+    # its actual worker identity. It never substitutes for an unobserved DP rank.
+    engine["resolved"] = copy.deepcopy(observed[0]) if observed else None
+    engine["resolved_scope"] = "representative_worker" if observed else None
     engine["resolution"] = resolution
     attention = engine.get("attention")
     if not isinstance(attention, dict):
         return
-    backends = (resolved or {}).get("attention_backends") or {}
-    names = sorted({name for name in backends.values() if name})
+    names = sorted(
+        {
+            name
+            for response in observed
+            for name in response["attention_backends"].values()
+        }
+    )
     attention["backend_resolved"] = names[0] if len(names) == 1 else None
-    attention["mla_prefill_backend_resolved"] = (resolved or {}).get(
-        "mla_prefill_backend"
+    prefill_names = {response.get("mla_prefill_backend") for response in observed}
+    attention["mla_prefill_backend_resolved"] = (
+        next(iter(prefill_names)) if len(prefill_names) == 1 else None
     )
     attention["resolution"] = "worker_probe_mixed" if len(names) > 1 else resolution
 
@@ -744,28 +1221,23 @@ def _warn_provenance_write_failed(path: object) -> None:
 
 
 async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None:
-    """Fill ``engine.resolved`` from a one-shot worker probe. Fail-soft.
+    """Keep all answers to one bounded, post-collection worker probe.
 
-    Every DP rank runs the same model with the same backends, so rank 0's
-    answer describes them all. Everything that happens after the RPC returns
-    -- validating its shape, applying it to the merged document and to every
-    rank file, and writing them back out -- runs inside the same ``try`` as
-    the RPC itself: a malformed-but-dict-shaped probe result can raise from
-    deep inside that application logic just as easily as the RPC call can
-    time out, and either way it must be recorded in the artifact, never
-    propagated. The measurements are already on disk.
+    The RPC may cover only one DP engine. Missing workers are unobserved,
+    never inferred from another worker's configuration. Probe/write errors
+    must not discard the valid measurements already on disk.
     """
     if not isinstance(merged.get("engine"), dict):
         return
 
-    def write_all(resolved: Optional[dict], resolution: str) -> None:
-        _apply_engine_resolved(merged, resolved, resolution)
+    def write_all(responses: list[dict], failure: str | None) -> None:
+        _apply_engine_resolved(merged, responses, failure)
         for rank_file in merged.get("rank_files") or []:
             try:
                 rank_path = Path(rank_file)
                 with open(rank_path) as f:
                     rank_document = json.load(f)
-                _apply_engine_resolved(rank_document, resolved, resolution)
+                _apply_engine_resolved(rank_document, responses, failure)
                 _write_json_atomic(rank_path, rank_document)
             except Exception:
                 _warn_provenance_write_failed(rank_file)
@@ -783,16 +1255,18 @@ async def _attach_engine_resolved(merged: dict, engine_client: AsyncLLM) -> None
             ),
             timeout=ENGINE_PROBE_TIMEOUT_SECONDS,
         )
-        if not results or not isinstance(results[0], dict):
-            raise RuntimeError("no worker returned an engine probe result")
-        write_all(results[0], "worker_probe")
+        responses = _worker_probe_responses(results)
+        failure = None
+        if not responses or all(entry["issues"] for entry in responses):
+            failure = "probe_failed: no valid worker probe responses"
+        write_all(responses, failure)
     except Exception as error:
         # A bare TimeoutError's str() is empty, and it is the single most
         # likely production failure (a dead or wedged engine) -- the
         # exception type name keeps the recorded reason from being useless.
         resolution = f"probe_failed: {type(error).__name__}: {error}"
         logger.warning("Engine provenance probe failed: %s", resolution, exc_info=True)
-        write_all(None, resolution)
+        write_all([], resolution)
 
 
 async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> dict:

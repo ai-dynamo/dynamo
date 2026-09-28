@@ -460,6 +460,9 @@ def _bench_capture_engine(
             "pipeline_parallel_size": _json_safe(
                 getattr(parallel_config, "pipeline_parallel_size", None)
             ),
+            "prefill_context_parallel_size": _json_safe(
+                getattr(parallel_config, "prefill_context_parallel_size", None)
+            ),
             "enable_expert_parallel": _json_safe(
                 getattr(parallel_config, "enable_expert_parallel", None)
             ),
@@ -672,6 +675,46 @@ class BenchmarkPointResult:
 class SkippedBenchmarkPoint:
     point: BenchmarkPoint
     reason: str
+
+
+@dataclass
+class _BenchmarkWarmupEvidence:
+    kind: str
+    requested_shape: dict
+    forward_index_start: int | None
+    completed_points_before: int
+    status: str = "running"
+    validation: dict = field(
+        default_factory=lambda: {"status": "not_performed", "reason": None}
+    )
+    forward_index_end: int | None = None
+    observed_forward_count: int = 0
+    first_scheduled_requests: ScheduledRequestMetrics | None = None
+    last_scheduled_requests: ScheduledRequestMetrics | None = None
+
+
+def _bench_observed_cudagraph(stats: Any | None) -> dict:
+    """Copy optional CPU dispatch metadata, never infer mode from a point."""
+    if stats is not None:
+        try:
+            return {
+                "status": "observed",
+                "runtime_mode": stats.runtime_mode,
+                "num_unpadded_tokens": stats.num_unpadded_tokens,
+                "num_padded_tokens": stats.num_padded_tokens,
+                "num_paddings": stats.num_paddings,
+            }
+        except AttributeError:
+            # A runtime exposing only part of the optional structure does not
+            # establish which graph executed. Keep the collection usable.
+            pass
+    return {
+        "status": "unavailable",
+        "runtime_mode": None,
+        "num_unpadded_tokens": None,
+        "num_padded_tokens": None,
+        "num_paddings": None,
+    }
 
 
 @dataclass
@@ -2393,11 +2436,26 @@ class InstrumentedScheduler(AsyncScheduler):
                 # iteration time (and is what the non-benchmark path reports
                 # for production steps).
                 wall_time = model_output_arrival - self._last_update_time
+                timing_basis = "inter_output"
+                timing_start: float | None = self._last_update_time
             else:
                 wall_time = self._iteration_wall_time(
                     model_output_arrival,
                     t_sched,
                     is_benchmark_point=is_benchmark_point,
+                )
+                use_previous_output = (
+                    not is_benchmark_point and self._last_update_time > 0
+                )
+                timing_basis = (
+                    "inter_output" if use_previous_output else "schedule_to_output"
+                )
+                timing_start = (
+                    self._last_update_time
+                    if use_previous_output
+                    else t_sched
+                    if t_sched > 0
+                    else None
                 )
             self._last_update_time = model_output_arrival
 
@@ -2407,14 +2465,34 @@ class InstrumentedScheduler(AsyncScheduler):
                 wall_time,
                 scheduled=scheduled,
             )
-            self._publish_or_record_metrics(metrics)
+            benchmark_sample = None
+            if self._bench_active:
+                forward_index = self._bench_forward_index
+                self._bench_forward_index += 1
+                self._bench_observe_warmup(scheduled)
+                if is_benchmark_point:
+                    # Older vLLM versions may not expose this optional output
+                    # field. Absence is unknown, never evidence of eager mode.
+                    stats = getattr(model_runner_output, "cudagraph_stats", None)
+                    benchmark_sample = {
+                        "forward_index": forward_index,
+                        "timing": {
+                            "basis": timing_basis,
+                            "start_monotonic": timing_start,
+                            "end_monotonic": model_output_arrival,
+                        },
+                        "cudagraph": _bench_observed_cudagraph(stats),
+                    }
+            self._publish_or_record_metrics(metrics, benchmark_sample)
         else:
             self._last_update_time = 0.0
 
         self._cleanup_finished(scheduler_output)
         return result
 
-    def _publish_or_record_metrics(self, metrics: ForwardPassMetrics) -> None:
+    def _publish_or_record_metrics(
+        self, metrics: ForwardPassMetrics, benchmark_sample: dict | None = None
+    ) -> None:
         """Keep benchmark FPMs local; publish only post-benchmark traffic."""
         if not self._bench_active:
             self._publisher.publish(metrics)
@@ -2428,9 +2506,13 @@ class InstrumentedScheduler(AsyncScheduler):
             metrics,
             counter_id=point.benchmark_id,
         )
-        self._bench_current_fpms.append(
-            json.loads(msgspec.json.encode(benchmark_metrics))
-        )
+        fpm = json.loads(msgspec.json.encode(benchmark_metrics))
+        if benchmark_sample is not None:
+            fpm["benchmark_sample"] = {
+                "sample_index": len(self._bench_current_fpms),
+                **benchmark_sample,
+            }
+        self._bench_current_fpms.append(fpm)
 
     # ------------------------------------------------------------------
     # Metric extraction (single-pass with WelfordAccumulator, no lists)
@@ -2631,6 +2713,10 @@ class InstrumentedScheduler(AsyncScheduler):
     _bench_random_kda: bool = False
     _bench_content_seed: str = "0"
     _bench_prompt_evidence: dict | None = None
+    _bench_forward_index: int = 0
+    _bench_warmup_evidence: list[_BenchmarkWarmupEvidence] | None = None
+    _bench_active_warmup: _BenchmarkWarmupEvidence | None = None
+    _bench_eager_warmup: _BenchmarkWarmupEvidence | None = None
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
@@ -2818,6 +2904,10 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_skipped_points: list[SkippedBenchmarkPoint] = []
         self._bench_missing_phases: list[str] = []
         self._bench_current_fpms: list[dict] = []
+        self._bench_forward_index = 0
+        self._bench_warmup_evidence = []
+        self._bench_active_warmup = None
+        self._bench_eager_warmup = None
         self._bench_active_req_ids: set[str] = set()
         self._bench_seq = 0
         self._bench_grid_built = False
@@ -4090,6 +4180,15 @@ class InstrumentedScheduler(AsyncScheduler):
             "prompt_hash_encoding": "uint32_le",
             "independent_repetitions": 1,
             "timing_metric": "scheduler_wall_time",
+            "execution_evidence": {
+                "schema_version": 1,
+                "sample_field": "benchmark_sample",
+                "warmup_field": "warmup_evidence",
+                "forward_index_scope": "rank_process",
+                "timing_clock": "process_local_monotonic",
+                "cudagraph_source": "ModelRunnerOutput.cudagraph_stats",
+                "warmup_scope": "request_completion_and_existing_shape_validation",
+            },
             "input_evidence_scope": "injected_prompt_token_ids",
             # Async decode may consume GPU-side prev_sampled_token_ids while
             # the CPU request still contains -1 placeholders. Reading those
@@ -4100,6 +4199,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 "kv_cache_tensors",
                 "recurrent_state_tensors",
                 "execution_history_equivalence",
+                "warmup_graph_kernel_and_cache_equivalence",
+                "decode_real_kv_chain_warmup_history",
             ],
             "preparation": {
                 "warmup_iterations": self._bench_config.warmup_iterations,
@@ -4705,6 +4806,12 @@ class InstrumentedScheduler(AsyncScheduler):
         _fpm_gc_policy.stop_gc_policy()
 
     def _bench_abort(self, error: Exception) -> None:
+        self._bench_finish_warmup(str(error))
+        if self._bench_eager_warmup is not None:
+            self._bench_eager_warmup.status = "failed"
+            self._bench_eager_warmup.forward_index_end = self._bench_forward_index
+            self._bench_eager_warmup.validation["reason"] = str(error)
+            self._bench_eager_warmup = None
         if self._bench_synchronizer is not None:
             try:
                 self._bench_synchronizer.abort(str(error))
@@ -4734,6 +4841,70 @@ class InstrumentedScheduler(AsyncScheduler):
             ) from cleanup_error
 
     # -- State machine --------------------------------------------------
+
+    def _bench_begin_warmup(
+        self, kind: str, requested_shape: dict, *, eager: bool = False
+    ) -> _BenchmarkWarmupEvidence:
+        if self._bench_warmup_evidence is None:
+            self._bench_warmup_evidence = []
+        record = _BenchmarkWarmupEvidence(
+            kind=kind,
+            requested_shape=requested_shape,
+            forward_index_start=self._bench_forward_index,
+            completed_points_before=len(self._bench_results),
+        )
+        self._bench_warmup_evidence.append(record)
+        if eager:
+            self._bench_eager_warmup = record
+        else:
+            self._bench_active_warmup = record
+        return record
+
+    def _bench_observe_warmup(self, scheduled: ScheduledRequestMetrics) -> None:
+        # Keep at most two shapes per attempt, even when a seed is chunked or
+        # the global warmup generates many decode steps. No token/GPU copies.
+        for record in (self._bench_active_warmup, self._bench_eager_warmup):
+            if record is None:
+                continue
+            record.observed_forward_count += 1
+            if record.first_scheduled_requests is None:
+                record.first_scheduled_requests = scheduled
+            record.last_scheduled_requests = scheduled
+
+    def _bench_finish_warmup(self, reason: str | None = None) -> None:
+        record = self._bench_active_warmup
+        if record is None:
+            return
+        record.status = "failed" if reason is not None else "completed"
+        record.forward_index_end = self._bench_forward_index
+        record.validation["reason"] = reason
+        self._bench_active_warmup = None
+
+    def _bench_finish_eager_warmup(
+        self,
+        point: BenchmarkPoint,
+        *,
+        reason: str | None,
+        validated: bool,
+        failed_dp_rank: int | None = None,
+    ) -> None:
+        record = self._bench_eager_warmup
+        if record is None:
+            # Failure before an observed attempt must not manufacture history.
+            record = self._bench_begin_warmup("eager_shape", asdict(point), eager=True)
+            record.forward_index_start = None
+        record.status = "failed" if reason is not None else "completed"
+        record.forward_index_end = self._bench_forward_index
+        record.validation = {
+            "status": ("failed" if reason is not None else "passed")
+            if validated
+            else "not_performed",
+            "reason": reason,
+        }
+        if validated:
+            record.validation["scope"] = "attention_dp_group"
+            record.validation["failed_dp_rank"] = failed_dp_rank
+        self._bench_eager_warmup = None
 
     def _bench_start_timing(self) -> None:
         if getattr(self, "_bench_start_monotonic", None) is not None:
@@ -4846,7 +5017,14 @@ class InstrumentedScheduler(AsyncScheduler):
         if not self._bench_active_req_ids:
             iters = self._bench_config.warmup_iterations
             if iters > 0:
-                self._bench_inject_prefill(prompt_lens=[256], max_tokens=iters)
+                self._bench_begin_warmup(
+                    "global", {"prompt_lengths": [256], "max_tokens": iters}
+                )
+                injected = self._bench_inject_prefill(
+                    prompt_lens=[256], max_tokens=iters
+                )
+                if injected != 1:
+                    self._bench_finish_warmup("warmup_injection_failed")
                 logger.info("Benchmark warmup: 1 prefill + %d decode steps", iters)
             else:
                 self._bench_transition_after_warmup()
@@ -4858,6 +5036,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return None
 
     def _bench_transition_after_warmup(self) -> None:
+        self._bench_finish_warmup()
         self._bench_cleanup_requests()
         self._bench_current_fpms.clear()
         mode = self._bench_config.mode
@@ -4916,12 +5095,20 @@ class InstrumentedScheduler(AsyncScheduler):
         if slots:
             self._bench_current_point = None
             self._bench_current_fpms = []
+            self._bench_begin_warmup(
+                "real_prefix_seed",
+                {
+                    "point": asdict(point),
+                    "prompt_lengths": [needs[slot] for slot in slots],
+                },
+            )
             injected = self._bench_inject_prefill(
                 prompt_lens=[needs[slot] for slot in slots],
                 max_tokens=1,
                 cache_salts=[chain["salts"][slot] for slot in slots],
             )
             if injected != len(slots):
+                self._bench_finish_warmup("real_seed_injection_failed")
                 self._bench_skip_point(point, "real_seed_injection_failed")
                 logger.warning(
                     "Skipping benchmark prefill point after real-seed staging "
@@ -4967,6 +5154,9 @@ class InstrumentedScheduler(AsyncScheduler):
         if pending is None:
             return False
         point, kv_read_lengths, new_token_lengths = pending
+        # The caller waits for the previous preparation requests to drain.
+        # Completion alone does not prove a cache hit or exact shape warming.
+        self._bench_finish_warmup()
         chain = self._bench_realseed_chain(point.batch_size)
         # Under EAGLE/MTP the prefix-cache lookup drops the last matched
         # block, so the chain holds ``seed_len = kv + drop`` tokens per slot
@@ -5023,6 +5213,10 @@ class InstrumentedScheduler(AsyncScheduler):
         if getattr(self, "_bench_realseed_stage", "warm") == "warm":
             self._bench_current_point = None
             self._bench_current_fpms = []
+            self._bench_begin_warmup(
+                "real_prefix_shape",
+                {"point": asdict(point), "prompt_lengths": prompt_lens},
+            )
             injected = self._bench_inject_prefill(
                 prompt_lens=prompt_lens,
                 max_tokens=1,
@@ -5030,6 +5224,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 prompt_token_ids_list=prompts("rswarm"),
             )
             if injected != point.batch_size:
+                self._bench_finish_warmup("real_seed_warm_injection_failed")
                 self._bench_realseed_ready = None
                 self._bench_realseed_retried = False
                 self._bench_skip_point(point, "real_seed_warm_injection_failed")
@@ -6606,7 +6801,10 @@ class InstrumentedScheduler(AsyncScheduler):
         while self._bench_grid:
             pt = self._bench_grid[0]
             if pt.point_type == point_type:
-                return self._bench_grid.popleft()
+                point = self._bench_grid.popleft()
+                if EAGER_WARMUP_REASON in point.sample_reasons:
+                    self._bench_begin_warmup("eager_shape", asdict(point), eager=True)
+                return point
             break
         return None
 
@@ -6650,6 +6848,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 reduction = "last_step"
                 sample_indices = [len(raw_fpms) - 1]
             if len(local_fpms) == 1:
+                # A median combines several raw samples; its copied shape is
+                # not the execution that supplied its wall time. Observations
+                # stay attached only to their raw sample identities.
+                local_fpms[0].pop("benchmark_sample", None)
                 local_fpms[0]["benchmark_measurement"] = {
                     "schema_version": 1,
                     "point_key": self._bench_point_content_key(point),
@@ -6660,6 +6862,9 @@ class InstrumentedScheduler(AsyncScheduler):
                         "grid_digest": self._bench_grid_digest,
                         "completed_points_before": len(self._bench_results),
                         "kv_seed_regime": self._kvwarm_seed_regime(point),
+                        "warmup_records_before": len(self._bench_warmup_evidence)
+                        if self._bench_warmup_evidence is not None
+                        else None,
                     },
                     "expected_internal_samples": expected_fpms,
                     "raw_fpms": raw_fpms,
@@ -6718,6 +6923,14 @@ class InstrumentedScheduler(AsyncScheduler):
                     validation_failure = (dp_rank, reason)
 
             if EAGER_WARMUP_REASON in point.sample_reasons:
+                self._bench_finish_eager_warmup(
+                    point,
+                    reason=validation_failure[1] if validation_failure else None,
+                    validated=True,
+                    failed_dp_rank=validation_failure[0]
+                    if validation_failure
+                    else None,
+                )
                 # Warmup replicas are best-effort scaffolding and must be
                 # discarded BEFORE the shape-validation skip: recording one
                 # as a skipped point would flip the published artifact to
@@ -6808,6 +7021,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 f"explicit benchmark point failed: {reason}"
             )
         if EAGER_WARMUP_REASON in point.sample_reasons:
+            self._bench_finish_eager_warmup(point, reason=reason, validated=False)
             # Warmup replicas are best-effort scaffolding on EVERY failure
             # path, not just shape validation: fake-prefix allocation,
             # injection shortfall, and validation failures all land here,
@@ -6924,6 +7138,15 @@ class InstrumentedScheduler(AsyncScheduler):
                 "uniform_bound": RANDOM_KDA_BOUND if self._bench_random_kda else None,
             },
             "measurement_protocol": self._bench_measurement_protocol(),
+            "warmup_evidence": {
+                "status": "recorded"
+                if self._bench_warmup_evidence is not None
+                else "unavailable",
+                "records": [
+                    msgspec.to_builtins(asdict(record))
+                    for record in self._bench_warmup_evidence or []
+                ],
+            },
             "measurement_policy": {
                 "decode": "steady_state_second_step",
                 "prefill": "single_step",

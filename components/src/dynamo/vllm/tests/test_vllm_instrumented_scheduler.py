@@ -333,6 +333,119 @@ def test_benchmark_timing_stops_before_vllm_state_update(monkeypatch):
     assert stub._last_update_time == 20.0
 
 
+@pytest.mark.parametrize(
+    ("phase", "steady", "expected_basis", "expected_start", "expected_wall"),
+    [
+        ("prefill", False, "schedule_to_output", 19.0, 1.0),
+        ("decode", False, "schedule_to_output", 19.0, 1.0),
+        ("decode", True, "inter_output", 18.0, 2.0),
+    ],
+)
+@pytest.mark.parametrize("graph_observation", ["observed", "absent", "incomplete"])
+def test_raw_benchmark_sample_observes_dispatch_and_actual_timing_branch(
+    monkeypatch,
+    phase,
+    steady,
+    expected_basis,
+    expected_start,
+    expected_wall,
+    graph_observation,
+):
+    point = BenchmarkPoint(
+        phase,
+        benchmark_id=7,
+        batch_size=4,
+        total_prefill_tokens=80,
+        expected_cudagraph_mode="FULL",
+        expected_capture_size=128,
+    )
+    stub = _benchmark_save_stub(point, [])
+    stub._bench_active = True
+    stub._bench_forward_index = 12
+    stub._bench_expected_fpms = 2 if steady else 1
+    if steady:
+        stub._bench_current_fpms.append({"wall_time": 0.5})
+    stub._schedule_times = deque([19.0])
+    stub._last_update_time = 18.0
+    scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+        num_prefill_requests=4 if phase == "prefill" else 0,
+        sum_prefill_tokens=80 if phase == "prefill" else 0,
+        num_decode_requests=4 if phase == "decode" else 0,
+    )
+    stub._extract_scheduled = MagicMock(return_value=scheduled)
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._cleanup_finished = MagicMock()
+    stub._fpm_worker_id = "worker"
+    model_output = SimpleNamespace()
+    if graph_observation == "observed":
+        model_output.cudagraph_stats = SimpleNamespace(
+            runtime_mode="NONE",
+            num_unpadded_tokens=80,
+            num_padded_tokens=80,
+            num_paddings=0,
+        )
+    elif graph_observation == "incomplete":
+        model_output.cudagraph_stats = SimpleNamespace(runtime_mode="FULL")
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: "parent-result",
+    )
+    monotonic = MagicMock(return_value=20.0)
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", monotonic)
+
+    result = stub.update_from_output(
+        SimpleNamespace(total_num_scheduled_tokens=80), model_output
+    )
+
+    assert result == "parent-result"
+    raw = stub._bench_current_fpms[-1]
+    assert raw["wall_time"] == expected_wall
+    sample = raw["benchmark_sample"]
+    assert sample["sample_index"] == int(steady)
+    assert sample["forward_index"] == 12
+    assert sample["timing"] == {
+        "basis": expected_basis,
+        "start_monotonic": expected_start,
+        "end_monotonic": 20.0,
+    }
+    assert sample["cudagraph"] == {
+        "status": "observed" if graph_observation == "observed" else "unavailable",
+        "runtime_mode": "NONE" if graph_observation == "observed" else None,
+        "num_unpadded_tokens": 80 if graph_observation == "observed" else None,
+        "num_padded_tokens": 80 if graph_observation == "observed" else None,
+        "num_paddings": 0 if graph_observation == "observed" else None,
+    }
+    # Actual eager execution does not become the grid's expected FULL graph.
+    assert point.expected_cudagraph_mode == "FULL"
+    monotonic.assert_called_once_with()
+
+
+def test_missing_schedule_timestamp_is_explicit_in_raw_sample(monkeypatch):
+    stub = _benchmark_save_stub(BenchmarkPoint("prefill", benchmark_id=1), [])
+    stub._bench_active = True
+    stub._schedule_times = deque()
+    stub._last_update_time = 0.0
+    stub._fpm_worker_id = "worker"
+    stub._extract_scheduled = MagicMock(
+        return_value=instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=4
+        )
+    )
+    stub._compute_queued = MagicMock(return_value=None)
+    stub._cleanup_finished = MagicMock()
+    monkeypatch.setattr(
+        instrumented_scheduler_module.AsyncScheduler,
+        "update_from_output",
+        lambda *_: None,
+    )
+    monkeypatch.setattr(instrumented_scheduler_module.time, "monotonic", lambda: 20.0)
+    stub.update_from_output(SimpleNamespace(total_num_scheduled_tokens=4), object())
+    raw = stub._bench_current_fpms[0]
+    assert raw["wall_time"] == 0.0
+    assert raw["benchmark_sample"]["timing"]["start_monotonic"] is None
+
+
 # ---------------------------------------------------------------------------
 # self.waiting classification (existing behaviour — regression coverage)
 # ---------------------------------------------------------------------------
@@ -2687,6 +2800,7 @@ def test_agg_eager_warmups_stay_contiguous_with_their_phase():
     stub._bench_grid_built = False
     stub._bench_missing_phases = []
     stub._bench_grid_error = None
+    stub._bench_results = []
     stub._bench_feasible_max_decode_batch_size = 0
     stub._bench_config.mode = "agg"
     stub._bench_explicit_points = None
@@ -3046,6 +3160,7 @@ def _realseed_prefill_stub(point, monkeypatch, seq=0, drop=0, points=None):
     stub._bench_hash_block_size = 8
     stub._schedule_times = deque()
     stub._bench_skipped_points = []
+    stub._bench_results = []
     stub._bench_sync_pending = False
     stub.requests = {}
     stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
@@ -4914,6 +5029,16 @@ def test_warmup_replica_with_failed_validation_is_discarded_not_skipped():
     assert stub._bench_results == []
     assert stub._bench_skipped_points == []
     assert stub._bench_current_point is None
+    record = stub._bench_warmup_evidence[0]
+    assert record.kind == "eager_shape"
+    assert record.status == "failed"
+    assert record.requested_shape["total_kv_read_tokens"] == 48
+    assert record.validation == {
+        "status": "failed",
+        "reason": "measured_decode_context_mismatch",
+        "scope": "attention_dp_group",
+        "failed_dp_rank": 0,
+    }
 
 
 def test_warmup_replica_injection_failure_is_discarded_not_skipped():
@@ -4934,6 +5059,7 @@ def test_warmup_replica_injection_failure_is_discarded_not_skipped():
     stub._bench_current_point = None
     stub._bench_current_fpms = []
     stub._bench_skipped_points = []
+    stub._bench_results = []
     stub.deferred_frees = deque()  # nothing fenced
     stub._bench_cleanup_requests = MagicMock()
     stub._bench_inject_fake_decode = MagicMock(
@@ -4946,6 +5072,12 @@ def test_warmup_replica_injection_failure_is_discarded_not_skipped():
     assert stub._bench_current_point is None
     assert stub._bench_skipped_points == []
     stub._bench_cleanup_requests.assert_called_once_with()
+    record = stub._bench_warmup_evidence[0]
+    assert record.status == "failed"
+    assert record.validation == {
+        "status": "not_performed",
+        "reason": "decode_injection_failed",
+    }
 
 
 def test_skip_point_exempts_warmup_replicas_on_every_path():
@@ -4967,6 +5099,7 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
     )
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_skipped_points = []
+    stub._bench_results = []
 
     for reason in (
         "fake_prefix_cache_allocation_failed",
@@ -4980,6 +5113,66 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=real, reason="prefill_injection_failed")
     ]
+
+
+@pytest.mark.parametrize("injected", [0, 1])
+def test_global_warmup_records_completion_without_claiming_configured_steps(injected):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_config = BenchmarkConfig(warmup_iterations=5)
+    stub._bench_results = []
+    stub._bench_active_req_ids = set()
+    stub._bench_current_fpms = []
+    stub._bench_cleanup_requests = MagicMock()
+    stub.requests = {}
+
+    def inject(**_kwargs):
+        if injected:
+            stub._bench_active_req_ids.add("warmup")
+        return injected
+
+    stub._bench_inject_prefill = inject
+    stub._bench_step_warmup()
+    record = stub._bench_warmup_evidence[0]
+    assert record.requested_shape == {"prompt_lengths": [256], "max_tokens": 5}
+    if injected:
+        # One completed prefill can terminate on EOS; configured max_tokens=5
+        # is not evidence of five decode forwards having run.
+        scheduled = instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=256
+        )
+        stub._bench_forward_index = 1
+        stub._bench_observe_warmup(scheduled)
+        stub._bench_step_warmup()
+        assert record.status == "completed"
+        assert record.observed_forward_count == 1
+        assert record.first_scheduled_requests.sum_prefill_tokens == 256
+        assert record.last_scheduled_requests.num_decode_requests == 0
+        assert record.forward_index_end == 1
+        assert record.validation == {"status": "not_performed", "reason": None}
+    else:
+        assert record.status == "failed"
+        assert record.observed_forward_count == 0
+        assert record.validation["reason"] == "warmup_injection_failed"
+
+
+def test_real_prefix_preparation_records_attempt_order(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    stub, _ = _realseed_prefill_stub(point, monkeypatch)
+    for _ in range(3):
+        stub._bench_step_prefill()
+        stub._bench_forward_index += 1
+    records = stub._bench_warmup_evidence
+    assert [record.kind for record in records] == [
+        "real_prefix_seed",
+        "real_prefix_shape",
+    ]
+    assert [
+        (record.forward_index_start, record.forward_index_end) for record in records
+    ] == [(0, 1), (1, 2)]
+    assert all(record.status == "completed" for record in records)
+    assert all(record.validation["status"] == "not_performed" for record in records)
 
 
 # ---------------------------------------------------------------------------
@@ -6644,6 +6837,7 @@ def _provenance_vllm_config(
             data_parallel_rank=3,
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
+            prefill_context_parallel_size=2,
             enable_expert_parallel=True,
             enable_eplb=False,
             all2all_backend="deepep_low_latency",
@@ -6760,6 +6954,7 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "data_parallel_rank": 7,
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
+        "prefill_context_parallel_size": 2,
         "enable_expert_parallel": True,
         "enable_eplb": False,
         "all2all_backend": "deepep_low_latency",
@@ -6877,7 +7072,7 @@ def test_bench_capture_engine_records_capture_error_instead_of_raising():
     assert engine == {"capture_error": "boom"}
 
 
-def test_benchmark_output_includes_engine_block(tmp_path):
+def test_benchmark_output_includes_engine_and_observed_warmup(tmp_path):
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_vocab_size = 0
@@ -6892,12 +7087,30 @@ def test_benchmark_output_includes_engine_block(tmp_path):
     stub.block_size = 8
     stub.cache_config = SimpleNamespace(num_gpu_blocks=64)
     stub._bench_engine = {"versions": {"vllm": "0.28.0"}, "resolved": None}
+    stub._bench_begin_warmup("global", {"prompt_lengths": [256], "max_tokens": 5})
+    stub._bench_observe_warmup(
+        instrumented_scheduler_module.ScheduledRequestMetrics(
+            num_prefill_requests=1, sum_prefill_tokens=256
+        )
+    )
+    stub._bench_forward_index += 1
+    stub._bench_finish_warmup()
 
     InstrumentedScheduler._bench_write_results(stub)
 
     output = json.loads(output_path.read_text())
     assert output["schema_version"] == 2
     assert output["engine"] == {"versions": {"vllm": "0.28.0"}, "resolved": None}
+    warmup = output["warmup_evidence"]
+    assert warmup["status"] == "recorded"
+    assert len(warmup["records"]) == 1
+    record = warmup["records"][0]
+    assert record["observed_forward_count"] == 1
+    assert record["first_scheduled_requests"]["sum_prefill_tokens"] == 256
+    assert record["last_scheduled_requests"]["num_decode_requests"] == 0
+    assert record["forward_index_start"] == 0
+    assert record["forward_index_end"] == 1
+    assert record["validation"]["status"] == "not_performed"
 
 
 def test_benchmark_output_omits_engine_block_when_not_captured(tmp_path):
@@ -7501,12 +7714,28 @@ def test_measurement_evidence_preserves_raw_steps_and_stalls(
     fpms = [
         {
             "wall_time": wall,
+            "benchmark_sample": {
+                "sample_index": index,
+                "forward_index": 10 + index,
+                "timing": {
+                    "basis": "inter_output" if index else "schedule_to_output",
+                    "start_monotonic": 100.0 + index,
+                    "end_monotonic": 100.0 + index + wall,
+                },
+                "cudagraph": {
+                    "status": "observed",
+                    "runtime_mode": f"mode-{index}",
+                    "num_unpadded_tokens": 3,
+                    "num_padded_tokens": 4,
+                    "num_paddings": 1,
+                },
+            },
             "scheduled_requests": {
                 "num_decode_requests": 3,
                 "sum_decode_kv_tokens": 48,
             },
         }
-        for wall in walls
+        for index, wall in enumerate(walls)
     ]
     stub = _benchmark_save_stub(point, fpms)
     stub._bench_grid_digest = "captured-grid"
@@ -7521,6 +7750,14 @@ def test_measurement_evidence_preserves_raw_steps_and_stalls(
     assert evidence["expected_internal_samples"] == expected
     assert evidence["preparation"]["grid_digest"] == "captured-grid"
     assert all("benchmark_measurement" not in sample for sample in evidence["raw_fpms"])
+    assert "benchmark_sample" not in retained
+    assert [
+        sample["benchmark_sample"]["sample_index"] for sample in evidence["raw_fpms"]
+    ] == list(range(len(walls)))
+    assert [
+        sample["benchmark_sample"]["cudagraph"]["runtime_mode"]
+        for sample in evidence["raw_fpms"]
+    ] == [f"mode-{index}" for index in range(len(walls))]
     # Serialization must not recurse when the estimate was a raw sample.
     assert json.loads(json.dumps(stub._bench_iteration_groups))[0]["complete"]
     if expected == 4:

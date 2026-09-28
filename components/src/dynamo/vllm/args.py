@@ -379,6 +379,9 @@ def update_engine_config_with_dynamo(
             )
 
     if dynamo_config.benchmark_mode is not None:
+        # vLLM attaches the observed dispatch to ModelRunnerOutput without GPU
+        # timing or synchronization. Enable it before model workers are created.
+        defaults["cudagraph_metrics"] = True
         if dynamo_config.enable_multimodal:
             logger.warning(
                 "--benchmark-mode is not supported for multimodal workers. "

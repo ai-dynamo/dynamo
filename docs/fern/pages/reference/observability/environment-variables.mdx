@@ -346,7 +346,7 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
 
 Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance. Decode rows carry `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), or `unstamped` (decode point that never reached injection). Prefill rows that read past KV carry `real_prefix` (real-KV seeding on) or `fake_prefix` (synthetic prefix blocks); other prefill rows are `not_applicable`.
 
-See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#measurement-protocol-in-the-self-benchmark-artifact) for input hashes, preparation evidence, and raw timing samples. See [Engine Provenance in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#engine-provenance-in-the-self-benchmark-artifact) for the optional `engine` block, including the difference between a requested and a resolved attention backend.
+See [Measurement Protocol in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#measurement-protocol-in-the-self-benchmark-artifact) for input hashes, warmup completion records, per-sample timing intervals, and observed CUDA graph dispatch. See [Engine Provenance in the Self-Benchmark Artifact](forward-pass-metrics-traces.mdx#engine-provenance-in-the-self-benchmark-artifact) for the optional `engine` block, including resolved worker configurations and probe coverage.
 
 ## Request tracing
 
