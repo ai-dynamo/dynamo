@@ -325,6 +325,17 @@ pub fn get_nixl_metadata(agent: &NixlAgent, _storage: &SystemStorage) -> Result<
     Ok(format!("b64:{}", b64_encoded))
 }
 
+// Readers send a notification with each read, and the agent keeps every notification until
+// someone takes it. The frontend frees buffers by reference count and never reads them, so
+// without this drain each read leaks about 100 bytes.
+pub fn drain_nixl_notifications(agent: &NixlAgent) {
+    let result = nixl::NotificationMap::new()
+        .and_then(|mut notifs| agent.get_notifications(&mut notifs, None));
+    if let Err(error) = result {
+        tracing::warn!(%error, "failed to drain media-loader NIXL notifications");
+    }
+}
+
 // NIXL's default progress-thread delay of 0 is the `poll()` timeout of the UCX progress
 // thread, so each idle agent spins a core. With a delay, the thread sleeps in `poll()` for
 // at most this long and wakes early on UCX events. Keep it short: with UCX over TCP, some
@@ -336,13 +347,13 @@ const DEFAULT_PROGRESS_THREAD_DELAY_US: u64 = 1_000;
 const MAX_PROGRESS_THREAD_DELAY_US: u64 = 1_000_000;
 
 static PROGRESS_THREAD_DELAY_US: LazyLock<u64> = LazyLock::new(|| {
-    progress_thread_delay_in_range(parse_or_default(
+    progress_thread_delay_or_default(parse_or_default(
         DYN_MM_NIXL_PROGRESS_DELAY_US,
         DEFAULT_PROGRESS_THREAD_DELAY_US,
     ))
 });
 
-fn progress_thread_delay_in_range(delay_us: u64) -> u64 {
+fn progress_thread_delay_or_default(delay_us: u64) -> u64 {
     if delay_us <= MAX_PROGRESS_THREAD_DELAY_US {
         return delay_us;
     }
@@ -372,18 +383,18 @@ pub fn get_nixl_agent() -> Result<NixlAgent> {
 mod tests {
     use super::{
         DEFAULT_PROGRESS_THREAD_DELAY_US, DataType, MAX_PROGRESS_THREAD_DELAY_US,
-        canonical_content_hash, progress_thread_delay_in_range,
+        canonical_content_hash, progress_thread_delay_or_default,
     };
 
     #[test]
     fn progress_thread_delay_out_of_range_uses_default() {
-        assert_eq!(progress_thread_delay_in_range(0), 0);
+        assert_eq!(progress_thread_delay_or_default(0), 0);
         assert_eq!(
-            progress_thread_delay_in_range(MAX_PROGRESS_THREAD_DELAY_US),
+            progress_thread_delay_or_default(MAX_PROGRESS_THREAD_DELAY_US),
             MAX_PROGRESS_THREAD_DELAY_US
         );
         assert_eq!(
-            progress_thread_delay_in_range(MAX_PROGRESS_THREAD_DELAY_US + 1),
+            progress_thread_delay_or_default(MAX_PROGRESS_THREAD_DELAY_US + 1),
             DEFAULT_PROGRESS_THREAD_DELAY_US
         );
     }

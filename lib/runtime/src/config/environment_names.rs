@@ -534,8 +534,9 @@ pub mod llm {
 
     /// Progress-thread delay, in microseconds, of the frontend media loader's NIXL
     /// agent (default 1000, range 0 to 1000000). NIXL rounds it up to whole
-    /// milliseconds; `0` makes the thread busy-poll one core. Values that do not
-    /// parse or are above 1000000 use the default.
+    /// milliseconds; `0` makes the thread busy-poll one core. Over TCP, a read can
+    /// wait up to the full delay, so larger values add longer stalls. Values that do
+    /// not parse or are above 1000000 use the default.
     pub const DYN_MM_NIXL_PROGRESS_DELAY_US: &str = "DYN_MM_NIXL_PROGRESS_DELAY_US";
 
     /// Metrics configuration
