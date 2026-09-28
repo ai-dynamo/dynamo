@@ -630,10 +630,12 @@ def _reject_connector_flag(dynamo_config: Config) -> None:
             "no connector. Simply remove the --connector flag."
         )
 
-    nixl_role = {
-        DisaggregationMode.PREFILL: "kv_producer",
-        DisaggregationMode.DECODE: "kv_consumer",
-    }.get(dynamo_config.disaggregation_mode, "kv_both")
+    if dynamo_config.disaggregation_mode == DisaggregationMode.PREFILL:
+        nixl_role = "kv_producer"
+    elif dynamo_config.disaggregation_mode == DisaggregationMode.DECODE:
+        nixl_role = "kv_consumer"
+    else:
+        nixl_role = "kv_both"
 
     # Active connectors: show migration path
     if normalized:
