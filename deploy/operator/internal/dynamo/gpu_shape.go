@@ -25,19 +25,19 @@ type GPUShape struct {
 	GPUsPerReplica int64
 }
 
-// ResolveGroveGPUShapes computes one GPU shape per supplied component.
+// ResolveGroveGPUShapes computes one GPU shape per rendered component.
 // Structural role multiplicities are used so checkpoint gating to zero does
 // not erase the future cost of one component replica.
 func ResolveGroveGPUShapes(
 	ctx context.Context,
 	reader client.Reader,
-	dgd *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	namespace string,
+	renderedComponents []v1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) (map[string]GPUShape, error) {
 	shapes := make(map[string]GPUShape)
-	for i := range components {
-		component := &components[i]
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		roleCounts := make(map[string]int32)
 		for _, role := range expandRolesForComponent(
 			component.ComponentName,
@@ -70,7 +70,7 @@ func ResolveGroveGPUShapes(
 			continue
 		}
 
-		shape, err := ResolveGPUShape(ctx, reader, dgd.Namespace, component, pods)
+		shape, err := ResolveGPUShape(ctx, reader, namespace, component, pods)
 		if err != nil {
 			return nil, fmt.Errorf("resolve Grove GPU shape for component %q: %w", component.ComponentName, err)
 		}

@@ -13,14 +13,14 @@ import (
 
 // mergeLPXChildStatus composes a current LGD observation into the ordinary
 // Grove result. The outer DGD controller remains the only status writer.
-// dgd selects LPX and child is the nonnil result of a successful handoff.
+// source selects LPX and child is the nonnil result of a successful handoff.
 // The result reuses the child's component status.
 func mergeLPXChildStatus(
-	dgd *v1beta1.DynamoGraphDeployment,
+	source *v1beta1.DynamoGraphDeployment,
 	child *v1alpha1.LPXGraphDeployment,
 	ordinary ReconcileResult,
 ) ReconcileResult {
-	components := lpx.Components(dgd)
+	components := lpx.Components(source)
 	if ordinary.ComponentStatus == nil {
 		ordinary.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
 	}

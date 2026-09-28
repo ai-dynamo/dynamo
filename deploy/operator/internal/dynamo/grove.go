@@ -43,18 +43,13 @@ type GroveMultinodeDeployer struct {
 	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
-// GroveComponentResourceName returns the Grove child resource name for a
-// component in the supplied PCS component selection. Grove currently creates
-// one PodClique or PodCliqueScalingGroup instance per component at PodCliqueSet
-// replica index zero.
-func GroveComponentResourceName(
-	dgd *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
-	componentName string,
-) string {
+// GroveComponentResourceName returns the Grove child resource name for a PCS
+// component. Grove currently creates one PodClique or PodCliqueScalingGroup
+// instance per component at PodCliqueSet replica index zero.
+func GroveComponentResourceName(pcsName, componentName string) string {
 	return fmt.Sprintf(
 		"%s-0-%s",
-		PCSNameForDGD(dgd.Name, components),
+		pcsName,
 		strings.ToLower(componentName),
 	)
 }
@@ -118,10 +113,10 @@ func EvaluateGroveReadiness(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []v1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) (GroveReadiness, error) {
-	allReady, classification, message, componentStatuses, err := evaluateGroveComponents(ctx, reader, dgd, components, pcs)
+	allReady, classification, message, componentStatuses, err := evaluateGroveComponents(ctx, reader, dgd, renderedComponents, pcs)
 	if err != nil {
 		return GroveReadiness{}, err
 	}
@@ -157,21 +152,22 @@ func evaluateGroveComponents(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []v1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) (allReady bool, classificationReason string, message string, componentStatuses map[string]v1beta1.ComponentReplicaStatus, err error) {
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 	aggregatedReason := ""
-	componentReadinesses := make(map[string]groveComponentReadiness, len(components))
+	componentReadinesses := make(map[string]groveComponentReadiness, len(renderedComponents))
+	pcsName := PCSNameForDGD(dgd.Name, renderedComponents)
 
-	for i := range components {
-		component := &components[i]
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		componentName := component.ComponentName
 
 		var componentReadiness groveComponentReadiness
 		var checkErr error
-		resourceName := GroveComponentResourceName(dgd, components, componentName)
+		resourceName := GroveComponentResourceName(pcsName, componentName)
 		if component.UsesPCSG() {
 			componentReadiness, checkErr = observePCSGReadiness(ctx, reader, resourceName, dgd.Namespace, logger)
 		} else {
@@ -199,14 +195,14 @@ func evaluateGroveComponents(
 		}
 	}
 
-	namespacePlan, err := newGroveRuntimeNamespacePlan(dgd, components, pcs, componentReadinesses)
+	namespacePlan, err := newGroveRuntimeNamespacePlan(renderedComponents, pcs, componentReadinesses)
 	if err != nil {
 		return false, "", "", nil, err
 	}
 
-	componentStatuses = make(map[string]v1beta1.ComponentReplicaStatus, len(components))
-	for i := range components {
-		component := &components[i]
+	componentStatuses = make(map[string]v1beta1.ComponentReplicaStatus, len(renderedComponents))
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		componentReadiness := componentReadinesses[component.ComponentName]
 		componentStatus := componentReadiness.status
 		componentStatus.RuntimeNamespace = namespacePlan.runtimeNamespace(dgd, component)
@@ -290,13 +286,12 @@ type groveRuntimeNamespacePlan struct {
 }
 
 func newGroveRuntimeNamespacePlan(
-	dgd *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []v1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 	componentReadinesses map[string]groveComponentReadiness,
 ) (groveRuntimeNamespacePlan, error) {
 	acceptedPCSRevisionHash := getAcceptedPCSRevisionHash(pcs)
-	workerHash, workersUseHashSuffix, err := acceptedGroveWorkerHash(components, pcs, acceptedPCSRevisionHash)
+	workerHash, workersUseHashSuffix, err := acceptedGroveWorkerHash(renderedComponents, pcs, acceptedPCSRevisionHash)
 	if err != nil {
 		return groveRuntimeNamespacePlan{}, err
 	}
@@ -305,7 +300,7 @@ func newGroveRuntimeNamespacePlan(
 		acceptedPCSRevisionHash: acceptedPCSRevisionHash,
 		workerHash:              workerHash,
 		workersUseHashSuffix:    workersUseHashSuffix,
-		workersCompleted:        groveWorkersCompletedAcceptedPCSRevision(components, componentReadinesses, acceptedPCSRevisionHash),
+		workersCompleted:        groveWorkersCompletedAcceptedPCSRevision(renderedComponents, componentReadinesses, acceptedPCSRevisionHash),
 	}, nil
 }
 
@@ -328,8 +323,8 @@ func (p groveRuntimeNamespacePlan) runtimeNamespace(
 	return ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), p.workerHash)
 }
 
-// groveWorkersCompletedAcceptedPCSRevision reports whether every worker child
-// completed the accepted PCS revision. dgd must contain at least one worker.
+// groveWorkersCompletedAcceptedPCSRevision reports whether every rendered
+// worker child completed the accepted PCS revision.
 func groveWorkersCompletedAcceptedPCSRevision(
 	components []v1beta1.DynamoComponentDeploymentSharedSpec,
 	componentReadinesses map[string]groveComponentReadiness,

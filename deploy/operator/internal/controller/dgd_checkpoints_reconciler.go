@@ -959,7 +959,7 @@ func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	if currentWorkerHashes(dgd).empty() {
 		return "", nil
 	}
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return "", err
 	}

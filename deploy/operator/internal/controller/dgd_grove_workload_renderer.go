@@ -49,10 +49,10 @@ type groveWorkloadRenderer struct {
 // grovePodCliqueSetRender couples the desired PCS and rendered components to the
 // exact observation used to decide compatibility and the worker hash suffix.
 type grovePodCliqueSetRender struct {
-	existing   *grovev1alpha1.PodCliqueSet
-	desired    *grovev1alpha1.PodCliqueSet
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
-	gpuShapes  map[string]dynamo.GPUShape
+	existing           *grovev1alpha1.PodCliqueSet
+	desired            *grovev1alpha1.PodCliqueSet
+	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	gpuShapes          map[string]dynamo.GPUShape
 }
 
 func newGroveWorkloadRenderer(
@@ -97,14 +97,14 @@ func (r *groveWorkloadRenderer) Render(
 	}
 
 	workerHashSuffixNeeded := shouldRenderGroveWorkerHashSuffix(req, existingPodCliqueSet, workerGenerationChanged)
-	renderComponents, err := groveRenderComponents(req, existingPodCliqueSet, workerHashSuffixNeeded)
+	renderedComponents, err := groveRenderComponents(req, existingPodCliqueSet, workerHashSuffixNeeded)
 	if err != nil {
 		return nil, err
 	}
 	// Render ordinary workloads and retain the observed server-owned fields.
 	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
 	desired, err := dynamo.GenerateGrovePodCliqueSet(
-		ctx, req.DGD, renderComponents, r.config, r.runtimeConfig, r.reader,
+		ctx, req.DGD, renderedComponents, r.config, r.runtimeConfig, r.reader,
 		r.dockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos,
 	)
 	if err != nil {
@@ -119,15 +119,15 @@ func (r *groveWorkloadRenderer) Render(
 	)
 
 	// Resolve capacity from the same rendered ordinary workload.
-	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD, renderComponents, desired)
+	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD.Namespace, renderedComponents, desired)
 	if err != nil {
 		return nil, err
 	}
 	return &grovePodCliqueSetRender{
-		existing:   existingPodCliqueSet,
-		desired:    desired,
-		components: renderComponents,
-		gpuShapes:  gpuShapes,
+		existing:           existingPodCliqueSet,
+		desired:            desired,
+		renderedComponents: renderedComponents,
+		gpuShapes:          gpuShapes,
 	}, nil
 }
 
@@ -137,32 +137,32 @@ func groveRenderComponents(
 	workerHashSuffix bool,
 ) ([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, error) {
 	managedComponents := req.ManagedComponents()
-	renderComponents := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(managedComponents))
+	renderedComponents := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(managedComponents))
 	for i := range managedComponents {
-		renderComponents[i] = *managedComponents[i].DeepCopy()
+		renderedComponents[i] = *managedComponents[i].DeepCopy()
 	}
 
 	// Compatibility and worker labels mutate only the independently owned copy.
-	applyGroveCompatibility(renderComponents, pcs)
+	applyGroveCompatibility(renderedComponents, pcs)
 	if !workerHashSuffix {
-		return renderComponents, nil
+		return renderedComponents, nil
 	}
-	if err := applyGroveWorkerHashSuffix(req.DGD, renderComponents); err != nil {
+	if err := applyGroveWorkerHashSuffix(req.DGD, renderedComponents); err != nil {
 		return nil, err
 	}
-	return renderComponents, nil
+	return renderedComponents, nil
 }
 
 func applyGroveWorkerHashSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
-	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, components)
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
 	}
-	for i := range components {
-		component := &components[i]
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
@@ -182,11 +182,11 @@ func shouldRenderGroveWorkerHashSuffix(
 	existing *grovev1alpha1.PodCliqueSet,
 	hashChanged bool,
 ) bool {
-	components := req.ManagedComponents()
-	if !hasWorkerComponents(components) {
+	managedComponents := req.ManagedComponents()
+	if !hasWorkerComponents(managedComponents) {
 		return false
 	}
-	if existing == nil || podCliqueSetUsesGroveWorkerHashSuffix(components, existing) {
+	if existing == nil || podCliqueSetUsesGroveWorkerHashSuffix(managedComponents, existing) {
 		return true
 	}
 
@@ -203,11 +203,11 @@ func hasWorkerComponents(components []nvidiacomv1beta1.DynamoComponentDeployment
 }
 
 func podCliqueSetUsesGroveWorkerHashSuffix(
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	managedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) bool {
-	for i := range components {
-		component := &components[i]
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
@@ -226,18 +226,18 @@ func podCliqueSetObservesWorkerHash(
 	pcs *grovev1alpha1.PodCliqueSet,
 	acceptAllUnstamped bool,
 ) (bool, error) {
-	components := req.ManagedComponents()
-	if !hasWorkerComponents(components) {
+	managedComponents := req.ManagedComponents()
+	if !hasWorkerComponents(managedComponents) {
 		return true, nil
 	}
-	want, err := dynamo.ComputeDGDWorkersSpecHash(req.DGD, components)
+	want, err := dynamo.ComputeDGDWorkersSpecHash(req.DGD)
 	if err != nil {
 		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
 	}
 	allCanonical := true
 	allUnstamped := acceptAllUnstamped
-	for i := range components {
-		component := &components[i]
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
@@ -268,11 +268,11 @@ func podCliqueSetCliqueForComponent(
 }
 
 func applyGroveCompatibility(
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) {
-	for i := range components {
-		component := &components[i]
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		componentType := string(component.ComponentType)
 		if !groveComponentTypeCanUseLegacyWorkerSelector(componentType) {
 			continue

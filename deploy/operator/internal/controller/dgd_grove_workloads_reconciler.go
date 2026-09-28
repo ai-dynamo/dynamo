@@ -88,7 +88,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	logger := log.FromContext(ctx)
 
-	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(req.DGD, managedComponents)
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(req.DGD)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
@@ -133,20 +133,20 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		}
 	}
 
-	if err := r.scaler.Reconcile(ctx, req.DGD, renderedPodCliqueSet.components, checkpointInfos); err != nil {
+	if err := r.scaler.Reconcile(ctx, req, checkpointInfos); err != nil {
 		logger.Error(err, "failed to reconcile Grove scaling")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, req, renderedPodCliqueSet.components)
+	stableResources, err := r.stableResources.Reconcile(ctx, req, renderedPodCliqueSet.renderedComponents)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
 
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
-		req.DGD,
-		renderedPodCliqueSet.components,
+		req,
+		renderedPodCliqueSet.renderedComponents,
 		syncedPodCliqueSet,
 	)
 	if err != nil {
@@ -208,11 +208,11 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 // readiness interface without further Kubernetes reads.
 func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	req groveReconcileRequest,
+	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd, components, podCliqueSet)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, req.DGD, renderedComponents, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}

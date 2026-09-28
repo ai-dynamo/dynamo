@@ -25,10 +25,10 @@ func newLPXRestartProgressResolver(reader client.Reader) *lpxRestartProgressReso
 // Resolve returns LPX components whose current child has not completed the selected restart.
 func (r *lpxRestartProgressResolver) Resolve(
 	ctx context.Context,
-	dgd *v1beta1.DynamoGraphDeployment,
+	source *v1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
-	if r.observeRestart(ctx, dgd) == nil {
+	if r.observeRestart(ctx, source) == nil {
 		return inProgress
 	}
 	return nil
@@ -87,13 +87,13 @@ func resolveCompositeGroveRestartProgress(
 // A failed read or incomplete child leaves every requested member pending.
 func (r *lpxRestartProgressResolver) observeRestart(
 	ctx context.Context,
-	dgd *v1beta1.DynamoGraphDeployment,
+	source *v1beta1.DynamoGraphDeployment,
 ) *v1alpha1.LPXGraphDeployment {
 	child := &v1alpha1.LPXGraphDeployment{}
-	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(dgd), child); err != nil ||
+	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
 		child.Status.ObservedGeneration != child.Generation || !child.DeletionTimestamp.IsZero() ||
-		!metav1.IsControlledBy(child, dgd) || dgd.Spec.Restart == nil ||
-		child.Annotations[dynamo.LPXRestartAnnotation] != dgd.Spec.Restart.ID {
+		!metav1.IsControlledBy(child, source) || source.Spec.Restart == nil ||
+		child.Annotations[dynamo.LPXRestartAnnotation] != source.Spec.Restart.ID {
 		return nil
 	}
 
@@ -104,7 +104,7 @@ func (r *lpxRestartProgressResolver) observeRestart(
 	}
 
 	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
-	revision, err := dynamo.LPXInputRevision(dgd, dgd.Spec.Restart.ID)
+	revision, err := dynamo.LPXInputRevision(source, source.Spec.Restart.ID)
 	if err != nil || child.Spec.InputRevision != revision {
 		return nil
 	}

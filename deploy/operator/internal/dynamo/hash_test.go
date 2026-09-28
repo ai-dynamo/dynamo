@@ -54,7 +54,7 @@ func rawBetaDGD(t testing.TB, src *v1alpha1.DynamoGraphDeployment) *v1beta1.Dyna
 
 func mustComputeBetaDGDWorkersSpecHash(t testing.TB, dgd *v1beta1.DynamoGraphDeployment) string {
 	t.Helper()
-	hash, err := ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	hash, err := ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		t.Fatalf("compute v1beta1 DGD worker hash: %v", err)
 	}

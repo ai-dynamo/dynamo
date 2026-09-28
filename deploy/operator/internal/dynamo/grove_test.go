@@ -1472,7 +1472,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				},
 			}
 			component := dgd.GetComponentByName(componentName)
-			desiredHash, err := ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+			desiredHash, err := ComputeDGDWorkersSpecHash(dgd)
 			if err != nil {
 				t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 			}
@@ -1517,7 +1517,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 			replicas := ptr.Deref(tt.childReplicas, int32(1))
 			podClique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, componentName), Namespace: dgd.Namespace, Generation: childGeneration},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), componentName), Namespace: dgd.Namespace, Generation: childGeneration},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: replicas},
 				Status: grovev1alpha1.PodCliqueStatus{
 					Replicas:                          replicas,
@@ -1608,7 +1608,7 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 			}
 			completedAt := metav1.Now()
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, "prefill"), Namespace: dgd.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), "prefill"), Namespace: dgd.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
@@ -1617,7 +1617,7 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 				decodeRevision = acceptedRevision
 			}
 			decode := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, "decode"), Namespace: dgd.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), "decode"), Namespace: dgd.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(decodeRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
@@ -1666,7 +1666,7 @@ func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueS
 	}
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
+			Name:       GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), componentName),
 			Namespace:  dgd.Namespace,
 			Generation: 1,
 		},
@@ -1773,7 +1773,7 @@ func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testi
 				component := &dgd.Spec.Components[i]
 				children = append(children, &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, component.ComponentName),
+						Name:       GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), component.ComponentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1854,7 +1854,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 			if tt.multinode {
 				child = &grovev1alpha1.PodCliqueScalingGroup{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
+						Name:       GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), componentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1869,7 +1869,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 			} else {
 				child = &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
+						Name:       GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), componentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1943,7 +1943,7 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 	}
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, component.ComponentName),
+			Name:       GroveComponentResourceName(PCSNameForDGD(dgd.Name, dgd.Spec.Components), component.ComponentName),
 			Namespace:  dgd.Namespace,
 			Generation: 1,
 		},

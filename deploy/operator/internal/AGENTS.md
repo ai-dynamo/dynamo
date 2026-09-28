@@ -44,8 +44,9 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
 - When a composite program divides components between managed and delegated paths, set
   the ownership predicate once at the program composition root and pass it with the
   complete DGD to nested reconcilers. Nested reconcilers must not reclassify component
-  ownership. Materialize component slices or maps only as focused renderer or lookup
-  inputs, and never wrap them in a synthetic DGD.
+  ownership or accept a redundant component slice they can derive from the request.
+  Carry a component slice separately only when it is a transformed renderer output,
+  name that distinction explicitly, and never wrap the slice in a synthetic DGD.
 - The program result contains `ctrl.Result`, the complete desired DGD status, and queued
   status-transition events.
 - Do not add speculative `Facts`, `Inputs`, `ComputedState`, `WorkloadModel`, render

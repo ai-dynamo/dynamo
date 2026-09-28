@@ -51,7 +51,7 @@ func TestGroveWorkerHashSuffixForNewDGD(t *testing.T) {
 	require.NoError(t, env.Client().Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: env.Namespace()}, createdDGD))
 
 	t.Log("Wait for the rendered Grove workers to carry the canonical suffix")
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD, createdDGD.Spec.Components)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(createdDGD)
 	require.NoError(t, err)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, createdDGD, wantHash)
 
@@ -80,7 +80,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 
 	t.Log("Read the baseline DGD and wait for its worker hash commit")
 	require.NoError(t, env.Client().Get(ctx, key, current))
-	initialWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(current, current.Spec.Components)
+	initialWorkerHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
 	waitForGroveWorkerHash(t, ctx, env, current, initialWorkerHash)
 
@@ -114,7 +114,7 @@ func TestGroveWorkerHashSuffixForExistingDGD(t *testing.T) {
 	}))
 	t.Log("Read the updated DGD and wait for its PCS suffix and hash commit")
 	require.NoError(t, env.Client().Get(ctx, key, current))
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current, current.Spec.Components)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(current)
 	require.NoError(t, err)
 	require.NotEqual(t, initialWorkerHash, wantHash)
 	waitForGroveWorkerHashSuffixes(t, ctx, env, current, wantHash)

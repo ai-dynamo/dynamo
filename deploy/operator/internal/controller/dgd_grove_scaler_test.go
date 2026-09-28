@@ -73,8 +73,7 @@ func TestGroveScaler_ReconcileTargetsExpectedGroveChildren(t *testing.T) {
 
 	err := newGroveScaler(kubeClient).Reconcile(
 		t.Context(),
-		dgd,
-		dgd.Spec.Components,
+		groveReconcileRequest{DGD: dgd},
 		map[string]*checkpoint.CheckpointInfo{
 			"gated": {
 				Enabled:       true,
@@ -173,7 +172,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 			WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 			WithRESTMapper(groveScaleRESTMapper()).
 			Build()
-		require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, dgd.Spec.Components, nil))
+		require.NoError(t, newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil))
 	})
 
 	t.Run("other errors are propagated", func(t *testing.T) {
@@ -186,7 +185,7 @@ func TestGroveScaler_ReconcileHandlesScaleReadErrors(t *testing.T) {
 				},
 			}).
 			Build()
-		err := newGroveScaler(kubeClient).Reconcile(t.Context(), dgd, dgd.Spec.Components, nil)
+		err := newGroveScaler(kubeClient).Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, nil)
 		require.ErrorContains(t, err, "scale read failed")
 	})
 }

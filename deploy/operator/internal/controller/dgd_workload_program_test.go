@@ -568,7 +568,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd, dgd.Spec.Components)
+			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
 			require.NoError(t, err)
 			commitErr := reconciler.commitUnsupportedWorkerHashTransition(
 				context.Background(),
@@ -663,7 +663,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
 		assert.Nil(t, status.RollingUpdate)
-		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
 		assert.False(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
@@ -680,7 +680,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
-		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
 
 		t.Log("Seed the fake cache with a worker DCD carrying the target hash")
@@ -720,7 +720,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
 			},
 		})
-		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHash: "pre-v2-hash",

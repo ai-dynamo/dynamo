@@ -224,11 +224,11 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 					Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "old"}},
 				},
 			})
-			currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+			currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 			dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
 			dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = updatedWorkerVersion
-			wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+			wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 			require.NoError(t, err)
 			require.NotEqual(t, currentHash, wantHash)
 
@@ -329,12 +329,12 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	})
 	lpxSource := newLPXHandoffSource(t, "node-local-v2-hybrid")
 	dgd.Spec.Components = append(dgd.Spec.Components, lpxSource.Spec.Components[0])
-	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
 	dgd.GetComponentByName("prefill").PodTemplate.Spec.Containers[0].Env[0].Value = updatedWorkerVersion
 	wantSpec := dgd.Spec.DeepCopy()
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -608,7 +608,7 @@ func TestPodCliqueSetObservesWorkerHash(t *testing.T) {
 			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
 		},
 	})
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 
 	unstampedPCS := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
@@ -670,7 +670,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
 		},
 	})
-	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
 
@@ -732,7 +732,7 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
 		},
 	})
-	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 
 	tests := []struct {

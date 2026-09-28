@@ -22,23 +22,23 @@ type dgdLPXHandoff struct {
 	client client.Client
 }
 
-// Reconcile requires a DGD that selects LPX.
-func (r *dgdLPXHandoff) Reconcile(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment) (*v1alpha1.LPXGraphDeployment, error) {
+// Reconcile requires a source that selects LPX.
+func (r *dgdLPXHandoff) Reconcile(ctx context.Context, source *v1beta1.DynamoGraphDeployment) (*v1alpha1.LPXGraphDeployment, error) {
 	child := &v1alpha1.LPXGraphDeployment{}
-	err := r.client.Get(ctx, client.ObjectKeyFromObject(dgd), child)
+	err := r.client.Get(ctx, client.ObjectKeyFromObject(source), child)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return nil, err
 	}
 	exists := err == nil
-	if exists && !metav1.IsControlledBy(child, dgd) {
-		return nil, fmt.Errorf("LPXGraphDeployment %q belongs to a different DGD; adoption is not supported", child.Name)
+	if exists && !metav1.IsControlledBy(child, source) {
+		return nil, fmt.Errorf("LPXGraphDeployment %q belongs to a different source; adoption is not supported", child.Name)
 	}
 	if exists && !child.DeletionTimestamp.IsZero() {
 		return child, nil
 	}
 
-	restart := dynamo.LPXRestartToken(dgd, child.Annotations[dynamo.LPXRestartAnnotation])
-	revision, err := dynamo.LPXInputRevision(dgd, restart)
+	restart := dynamo.LPXRestartToken(source, child.Annotations[dynamo.LPXRestartAnnotation])
+	revision, err := dynamo.LPXInputRevision(source, restart)
 	if err != nil {
 		return nil, err
 	}
@@ -48,9 +48,9 @@ func (r *dgdLPXHandoff) Reconcile(ctx context.Context, dgd *v1beta1.DynamoGraphD
 	}
 	if !exists {
 		child = &v1alpha1.LPXGraphDeployment{
-			ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
+			ObjectMeta: metav1.ObjectMeta{Name: source.Name, Namespace: source.Namespace},
 		}
-		if err := ctrl.SetControllerReference(dgd, child, r.client.Scheme()); err != nil {
+		if err := ctrl.SetControllerReference(source, child, r.client.Scheme()); err != nil {
 			return nil, err
 		}
 	}

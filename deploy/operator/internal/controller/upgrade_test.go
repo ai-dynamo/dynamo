@@ -812,11 +812,11 @@ spec:
 					pcs := renderedPCS.desired
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+					decodeIndex := slices.IndexFunc(renderedPCS.renderedComponents, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 						return component.ComponentName == "VllmDecodeWorker"
 					})
 					require.NotEqual(t, -1, decodeIndex)
-					decodeComponent := &renderedPCS.components[decodeIndex]
+					decodeComponent := &renderedPCS.renderedComponents[decodeIndex]
 					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 						ServiceName:     dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
 						Namespace:       dgd.Namespace,
@@ -940,11 +940,11 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 	desired := renderedPCS.desired
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
-	prefillIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	prefillIndex := slices.IndexFunc(renderedPCS.renderedComponents, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 		return component.ComponentName == "prefill"
 	})
 	require.NotEqual(t, -1, prefillIndex)
-	prefillComponent := &renderedPCS.components[prefillIndex]
+	prefillComponent := &renderedPCS.renderedComponents[prefillIndex]
 	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")
 	require.Equal(t, commonconsts.ComponentTypePrefill, prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType])

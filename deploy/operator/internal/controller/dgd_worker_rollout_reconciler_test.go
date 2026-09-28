@@ -201,14 +201,14 @@ func TestPlanUnsupportedWorkerHashTransitionIgnoresScaling(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
 	})
-	activeHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	activeHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: activeHash}
 	dgd.GetComponentByName("worker").Replicas = ptr.To(int32(2))
 	reconciler := createTestReconcilerWithStatus(dgd)
 
 	t.Log("Plan the unsupported pathway transition")
-	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd, dgd.Spec.Components)
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
 	require.NoError(t, err)
 
 	t.Log("Verify scaling does not arm a worker generation migration")
@@ -224,7 +224,7 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "old"}},
 		},
 	})
-	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
+	currentHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: currentHash}
 	worker := dgd.GetComponentByName("worker")
@@ -235,7 +235,7 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 	reconciler := createTestReconcilerWithStatus(dgd)
 
 	t.Log("Plan the unsupported worker hash transition")
-	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd, dgd.Spec.Components)
+	transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
 	require.NoError(t, err)
 
 	t.Log("Verify planning detects the transition without mutating the DGD")
@@ -289,7 +289,7 @@ func TestGroveRenderComponentsWorkerHashSuffix(t *testing.T) {
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
-				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, req.ManagedComponents())
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
 				require.NotNil(t, worker.PodTemplate)
 				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
@@ -419,7 +419,7 @@ func TestShouldTriggerRollingUpdate_IgnoresReplicaChanges(t *testing.T) {
 	dgd.Spec.Components[0].Replicas = ptr.To(int32(10))
 
 	r := createTestReconcilerWithStatus(dgd)
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	assert.Equal(t, legacyHash, desired.v1)
 	assert.Equal(t, v2Hash, desired.v2)
@@ -630,7 +630,7 @@ func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
 			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
 			assert.Equal(t, activeV1, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 			assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
-			desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+			desired, err := desiredWorkerHashes(dgd)
 			require.NoError(t, err)
 			assert.Equal(t, desiredV2, activeWorkerHashForDCDGeneration(dgd, desired))
 			require.NoError(t, r.Get(
@@ -746,7 +746,7 @@ func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t 
 	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
 	require.False(t, rollingCtx.InProgress())
 
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, nil, nil, rollingCtx)
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
 	require.NoError(t, err)
 	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
 	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)
@@ -784,7 +784,7 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	require.NotEqual(t, v2Hash, newV2Hash)
 	require.NotEqual(t, legacyHash, newLegacyHash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, dgd.Spec.Components))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
@@ -819,7 +819,7 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.Equal(t, legacyHash, newLegacyHash)
 	require.NotEqual(t, v2Hash, newV2Hash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, dgd.Spec.Components))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -855,7 +855,7 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	r := createTestReconcilerWithStatus(dgd)
 	require.False(t, supportsManagedRollingUpdate(dgd))
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, dgd.Spec.Components))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
@@ -870,11 +870,11 @@ func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) 
 	require.Equal(t, legacyHash, newLegacyHash)
 	require.NotEqual(t, v2Hash, newV2Hash)
 
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd, dgd.Spec.Components))
+	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	require.NoError(t, err)
 	completed := r.workerHashesForUnsupportedPathway(dgd, desired)
 	require.Empty(t, completed.v1)

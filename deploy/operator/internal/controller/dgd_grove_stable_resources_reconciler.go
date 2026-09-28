@@ -58,7 +58,7 @@ func newGroveStableResourcesReconciler(
 func (r *groveStableResourcesReconciler) Reconcile(
 	ctx context.Context,
 	req groveReconcileRequest,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) ([]Resource, error) {
 	logger := log.FromContext(ctx)
 
@@ -79,8 +79,8 @@ func (r *groveStableResourcesReconciler) Reconcile(
 		r.config.Discovery.Backend,
 		req.DGD.Annotations,
 	)
-	for i := range components {
-		component := &components[i]
+	for i := range renderedComponents {
+		component := &renderedComponents[i]
 		if isK8sDiscoveryEnabled || string(component.ComponentType) == commonconsts.ComponentTypeFrontend {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,

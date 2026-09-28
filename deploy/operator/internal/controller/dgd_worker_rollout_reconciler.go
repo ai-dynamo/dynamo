@@ -76,9 +76,8 @@ func newDGDWorkerRolloutReconciler(
 
 func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (unsupportedWorkerHashTransition, error) {
-	desired, err := desiredWorkerHashes(dgd, components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return unsupportedWorkerHashTransition{}, err
 	}
@@ -156,9 +155,8 @@ func (h workerGenerationHashes) contains(hash string) bool {
 
 func desiredWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) (workerGenerationHashes, error) {
-	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, components)
+	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
 	}
@@ -242,7 +240,7 @@ func (r *dgdWorkerRolloutReconciler) workerHashesForUnsupportedPathway(
 func (r *dgdWorkerRolloutReconciler) shouldTriggerRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, error) {
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return false, err
 	}
@@ -263,7 +261,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	logger := log.FromContext(ctx)
 
 	if !r.currentWorkerHashes(dgd).empty() {
-		return r.migrateCurrentWorkerHashIfNeeded(ctx, dgd, dgd.Spec.Components)
+		return r.migrateCurrentWorkerHashIfNeeded(ctx, dgd)
 	}
 
 	// Check for legacy (pre-rolling-update) worker DCDs
@@ -305,7 +303,7 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 	}
 
 	// Normal first deploy — set the canonical v2 hash.
-	hashes, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -325,7 +323,6 @@ func (r *dgdWorkerRolloutReconciler) initializeWorkerHashIfNeeded(
 func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
 	logger := log.FromContext(ctx)
 
@@ -339,7 +336,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		return nil
 	}
 
-	desired, err := desiredWorkerHashes(dgd, components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -522,7 +519,7 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 
 	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(status)
 
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -737,7 +734,7 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 		return nil
 	}
 
-	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
 	}
@@ -1433,7 +1430,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 ) (dynamo.RollingUpdateContext, error) {
 	logger := log.FromContext(ctx)
 
-	desiredHashes, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
+	desiredHashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return dynamo.RollingUpdateContext{}, err
 	}

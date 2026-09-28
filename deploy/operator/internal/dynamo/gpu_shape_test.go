@@ -154,7 +154,7 @@ func TestResolveGroveGPUShapesIncludesUntypedAndMultinodeComponents(t *testing.T
 				}},
 			}}
 
-			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, dgd.Spec.Components, pcs)
+			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd.Namespace, dgd.Spec.Components, pcs)
 			require.NoError(t, err)
 			assert.Equal(t, GPUShape{GPUsPerEngine: 2, GPUsPerReplica: 2}, shapes["custom"])
 			wantReplica := int64(8)
@@ -218,7 +218,7 @@ func TestResolveGroveGPUShapesPublishesExplicitZero(t *testing.T) {
 	require.NoError(t, resourcev1.AddToScheme(scheme))
 	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(template, deviceClass).Build()
 
-	shapes, err := ResolveGroveGPUShapes(t.Context(), reader, dgd, dgd.Spec.Components, pcs)
+	shapes, err := ResolveGroveGPUShapes(t.Context(), reader, dgd.Namespace, dgd.Spec.Components, pcs)
 	require.NoError(t, err)
 	assert.Equal(t, GPUShape{}, shapes["frontend"])
 }
@@ -319,7 +319,7 @@ func TestResolveGroveGPUShapesCountsInterPodSharedGPUsOnce(t *testing.T) {
 			)
 			require.NoError(t, err)
 
-			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd, dgd.Spec.Components, pcs)
+			shapes, err := ResolveGroveGPUShapes(t.Context(), nil, dgd.Namespace, dgd.Spec.Components, pcs)
 			require.NoError(t, err)
 			assert.Equal(t, GPUShape{GPUsPerEngine: 8, GPUsPerReplica: tt.wantReplica}, shapes["decode"])
 		})

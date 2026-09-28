@@ -250,20 +250,19 @@ type RollingUpdateContext struct {
 // The map key is the component name.
 func GenerateDynamoComponentsDeployments(
 	parentDGD *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
-	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD, components)
+	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
 	if err != nil {
 		return nil, err
 	}
 
 	// Generate DCDs for each component.
-	for i := range components {
-		component := &components[i]
+	for i := range parentDGD.Spec.Components {
+		component := &parentDGD.Spec.Components[i]
 		componentName := component.ComponentName
 
 		// Reject invalid GMS client references before synchronizing any DCDs.
@@ -332,17 +331,14 @@ func gmsExtraClientContainersError(
 	return fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
 }
 
-func backendFrameworkForGeneratedDCDs(
-	parentDGD *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
-) (string, error) {
+func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
 	if parentDGD.Spec.BackendFramework != "" {
 		return parentDGD.Spec.BackendFramework, nil
 	}
 
 	var detected BackendFramework
-	for i := range components {
-		component := &components[i]
+	for i := range parentDGD.Spec.Components {
+		component := &parentDGD.Spec.Components[i]
 		if !IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
@@ -2560,13 +2556,13 @@ func resolveGroveSchedulerQueue(
 }
 
 // GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
-// desired PodCliqueSet for the supplied component selection while retaining
-// the complete DGD for graph-wide configuration. Resolved domain values stay
-// local and are passed to the leaf rendering helpers that consume them.
+// desired PodCliqueSet for the rendered components while retaining the complete
+// DGD for graph-wide configuration. Resolved domain values stay local and are
+// passed to the leaf rendering helpers that consume them.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
-	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	renderedComponents []v1beta1.DynamoComponentDeploymentSharedSpec,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *controller_common.RuntimeConfig,
 	reader ctrlclient.Reader,
@@ -2580,7 +2576,7 @@ func GenerateGrovePodCliqueSet(
 	if err != nil {
 		return nil, err
 	}
-	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, components)
+	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, renderedComponents)
 
 	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
 	if err != nil {
@@ -2605,8 +2601,8 @@ func GenerateGrovePodCliqueSet(
 		resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
 	)
 
-	for i := range components {
-		component := components[i].DeepCopy()
+	for i := range renderedComponents {
+		component := renderedComponents[i].DeepCopy()
 		componentName := component.ComponentName
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)

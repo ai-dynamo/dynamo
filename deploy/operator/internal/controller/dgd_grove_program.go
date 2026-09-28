@@ -150,7 +150,7 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD, req.ManagedComponents()); err != nil {
+	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
@@ -166,10 +166,10 @@ func (p *groveProgram) Reconcile(
 		ctx,
 		req.DGD,
 		&programResult.Status,
-		func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		func(ctx context.Context, _ *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 			return resolveCompositeGroveRestartProgress(
 				ctx,
-				groveReconcileRequest{DGD: dgd, IsDelegated: req.IsDelegated},
+				req,
 				inProgress,
 				p.restartProgress,
 				p.lpxRestartProgress,
@@ -212,7 +212,7 @@ func (p *groveProgram) Reconcile(
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
-		if err := p.scalingAdapters.Reconcile(ctx, req.DGD, req.ManagedComponents()); err != nil {
+		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
