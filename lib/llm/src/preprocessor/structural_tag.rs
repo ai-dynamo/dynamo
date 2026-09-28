@@ -1042,9 +1042,17 @@ mod tests {
             .as_ref()
             .and_then(|guided| guided.structural_tag.as_ref())
             .expect("tool-call ban should be installed");
-        assert_eq!(
-            structural_tag["format"]["content"]["exclude_tokens"],
-            serde_json::json!(["<tool_call>"])
-        );
+        let expected_content = if v2::enabled() {
+            serde_json::json!({
+                "type": "any_text",
+                "excludes": ["<tool_call>", "<function="]
+            })
+        } else {
+            serde_json::json!({
+                "type": "any_tokens",
+                "exclude_tokens": ["<tool_call>"]
+            })
+        };
+        assert_eq!(structural_tag["format"]["content"], expected_content);
     }
 }
