@@ -38,12 +38,11 @@ def create_config() -> DynamoVllmConfig:
     so we need to create a config with default values manually if not using
     from_cli_args() method.
 
-    Multimodal is disabled and disaggregation mode is unset.
+    Multimodal is disabled and disaggregation mode defaults to aggregated.
     Returns:
         DynamoVllmConfig: A config with default values.
     """
     config = DynamoVllmConfig()
-    config.disaggregation_mode = None
     config.enable_multimodal = False
     config.embedding_worker = False
     config.embedding_frontend_tokenization = False
@@ -166,13 +165,27 @@ def test_removed_multimodal_env_var_falsy_value_is_ignored(monkeypatch):
 
 
 class TestResolveDisaggregationMode:
-    def test_pd_alias_resolves_to_aggregated(self):
-        config = create_config()
-        config.disaggregation_mode = "pd"
+    @pytest.mark.parametrize(
+        "mode, expected",
+        [(None, DisaggregationMode.AGGREGATED), ("pd", DisaggregationMode.AGGREGATED)]
+        + [(mode.value, mode) for mode in DisaggregationMode]
+        + [(mode, mode) for mode in DisaggregationMode],
+    )
+    def test_cli_mode_is_normalized_before_validation(self, mode, expected):
+        args = argparse.Namespace(disaggregation_mode=mode)
+        config = DynamoVllmConfig.from_cli_args(args)
 
-        config._resolve_disaggregation_mode()
+        assert config.disaggregation_mode is expected
+        assert args.disaggregation_mode is mode
 
-        assert config.disaggregation_mode == DisaggregationMode.AGGREGATED
+    def test_default_is_aggregated(self):
+        assert DynamoVllmConfig().disaggregation_mode is DisaggregationMode.AGGREGATED
+        config = DynamoVllmConfig.from_cli_args(argparse.Namespace())
+        assert config.disaggregation_mode is DisaggregationMode.AGGREGATED
+
+    def test_invalid_mode_is_rejected_at_construction(self):
+        with pytest.raises(ValueError):
+            DynamoVllmConfig.from_cli_args(argparse.Namespace(disaggregation_mode="bad"))
 
 
 class TestEmbeddingWorkerExclusivity:

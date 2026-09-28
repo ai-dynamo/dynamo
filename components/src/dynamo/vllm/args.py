@@ -137,8 +137,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
     # Validate arguments
     dynamo_config.validate()
 
-    # These run after validate() because they consume what it resolves --
-    # notably the DisaggregationMode enum and the benchmark sampling fields.
+    # These run after validate() because they consume the resolved benchmark
+    # sampling fields and embedding transfer mode.
     cross_validate_config(dynamo_config, engine_config)
     update_dynamo_config_with_engine(dynamo_config, engine_config)
     update_engine_config_with_dynamo(dynamo_config, engine_config)

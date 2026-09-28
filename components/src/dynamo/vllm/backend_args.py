@@ -9,6 +9,8 @@ import os
 import warnings
 from typing import List, Optional, Union
 
+from typing_extensions import Self
+
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 from dynamo.common.configuration.groups.frontend_decoding_args import (
@@ -530,9 +532,7 @@ class DynamoVllmArgGroup(ArgGroup):
 class DynamoVllmConfig(ConfigBase):
     """Configuration for Dynamo vLLM wrapper (vLLM-specific only). All fields optional."""
 
-    disaggregation_mode: Union[
-        None, str, DisaggregationMode
-    ]  # None when not provided; resolved to enum in validate()
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
     use_vllm_tokenizer: bool
 
     # Multimodal
@@ -600,10 +600,20 @@ class DynamoVllmConfig(ConfigBase):
     benchmark_decode_batch_granularity: Optional[int] = None
     _benchmark_points: Optional[BenchmarkPoints] = None
 
+    @classmethod
+    def from_cli_args(cls, args: argparse.Namespace) -> Self:
+        config = super().from_cli_args(args)
+        mode = vars(args).get("disaggregation_mode")
+        config.disaggregation_mode = (
+            DisaggregationMode.AGGREGATED
+            if mode is None or mode == PREFILL_DECODE_DISAGGREGATION_MODE
+            else DisaggregationMode(mode)
+        )
+        return config
+
     def validate(self) -> None:
         """Validate vLLM wrapper configuration."""
         _reject_removed_multimodal_env_vars()
-        self._resolve_disaggregation_mode()
         self._resolve_embedding_transfer_mode()
         self._validate_embedding_frontend_tokenization()
         self._validate_embedding_worker_exclusivity()
@@ -729,17 +739,6 @@ class DynamoVllmConfig(ConfigBase):
                 self.embedding_transfer_mode
             )
 
-    def _resolve_disaggregation_mode(self) -> None:
-        """Resolve disaggregation_mode from its CLI value."""
-        if isinstance(self.disaggregation_mode, str):
-            if self.disaggregation_mode == PREFILL_DECODE_DISAGGREGATION_MODE:
-                self.disaggregation_mode = DisaggregationMode.AGGREGATED
-            else:
-                self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
-
-        if self.disaggregation_mode is None:
-            self.disaggregation_mode = DisaggregationMode.AGGREGATED
-
     def _validate_custom_encoder(self) -> None:
         """Validate the aggregated CustomEncoder configuration.
 
@@ -772,15 +771,10 @@ class DynamoVllmConfig(ConfigBase):
                 "pre-decodes images to tensors the encoder cannot accept."
             )
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
-            mode = (
-                self.disaggregation_mode.value
-                if isinstance(self.disaggregation_mode, DisaggregationMode)
-                else self.disaggregation_mode
-            )
             raise ValueError(
-                f"--custom-encoder-class is only supported with "
-                f"--disaggregation-mode=agg (got {mode}). The custom encoder "
-                "runs in-process in a single aggregated worker."
+                "--custom-encoder-class is only supported with "
+                f"--disaggregation-mode=agg (got {self.disaggregation_mode.value}). "
+                "The custom encoder runs in-process in a single aggregated worker."
             )
 
     def _validate_embedding_worker_exclusivity(self) -> None:
@@ -790,7 +784,7 @@ class DynamoVllmConfig(ConfigBase):
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             raise ValueError(
                 "--embedding-worker is only valid with --disaggregation-mode=agg "
-                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                f"(got {self.disaggregation_mode.value}). "
                 "Pooling models do not have prefill/decode phases."
             )
         if self.enable_multimodal:
@@ -931,13 +925,9 @@ class DynamoVllmConfig(ConfigBase):
         if not self.realtime:
             return
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
-            mode = (
-                self.disaggregation_mode.value
-                if isinstance(self.disaggregation_mode, DisaggregationMode)
-                else self.disaggregation_mode
-            )
             raise ValueError(
-                f"--realtime is only valid with --disaggregation-mode=agg (got {mode})."
+                "--realtime is only valid with --disaggregation-mode=agg "
+                f"(got {self.disaggregation_mode.value})."
             )
         if self.embedding_worker:
             raise ValueError("--realtime cannot be combined with --embedding-worker.")
@@ -974,7 +964,7 @@ class DynamoVllmConfig(ConfigBase):
         if self.disaggregation_mode != DisaggregationMode.AGGREGATED:
             raise ValueError(
                 "--classify-worker is only valid with --disaggregation-mode=agg "
-                f"(got {self.disaggregation_mode.value if isinstance(self.disaggregation_mode, DisaggregationMode) else self.disaggregation_mode}). "
+                f"(got {self.disaggregation_mode.value}). "
                 "Pooling models do not have prefill/decode phases."
             )
         if self.enable_multimodal:
