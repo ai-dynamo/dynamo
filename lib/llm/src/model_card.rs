@@ -3200,6 +3200,56 @@ mod ownership_tests {
         assert_eq!(missing.mdcsum(), disabled.mdcsum());
         assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
+
+    #[test]
+    fn qwen_video_processor_contract_stays_out_of_the_checksum() {
+        use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
+
+        // `mdcsum()` caches via `OnceLock`, so each case uses a fresh card.
+
+        fn card_with_contract(contract: serde_json::Value) -> ModelDeploymentCard {
+            let mut card = ModelDeploymentCard::with_name_only("model");
+            card.runtime_config.runtime_data.insert(
+                VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY.to_string(),
+                contract,
+            );
+            card
+        }
+
+        fn legacy_ceil() -> serde_json::Value {
+            serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "legacy_ceil",
+            })
+        }
+
+        let withheld = ModelDeploymentCard::with_name_only("model");
+        assert_eq!(
+            withheld.mdcsum(),
+            card_with_contract(legacy_ceil()).mdcsum(),
+            "a worker that predates the contract must still join the WorkerSet of one that publishes it"
+        );
+
+        assert_eq!(
+            card_with_contract(legacy_ceil()).mdcsum(),
+            card_with_contract(serde_json::json!({
+                "placeholder_target": "bare_video_token",
+                "resize_mode": "round_ties_even",
+            }))
+            .mdcsum(),
+            "two workers publishing different contracts must still serve as one group"
+        );
+
+        // Negative control: a deployment that never carries this key is
+        // unaffected, so its cache directory and reported checksum do not move.
+        let bare = ModelDeploymentCard::with_name_only("model");
+        let mut unrelated = ModelDeploymentCard::with_name_only("model");
+        unrelated
+            .runtime_config
+            .runtime_data
+            .insert("some_unrelated_runtime_key".to_string(), true.into());
+        assert_eq!(bare.mdcsum(), unrelated.mdcsum());
+    }
 }
 
 #[cfg(test)]
