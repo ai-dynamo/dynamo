@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: DeepSeek V4 Pro Aggregated Smoke
+name: DeepSeek V4 Pro Aggregated Perf
 
 on:
   workflow_call:
@@ -31,9 +31,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  smoke:
+  perf:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 210
+    timeout-minutes: 300
     defaults:
       run:
         shell: bash
@@ -80,8 +80,7 @@ jobs:
           kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
           yq 'select(.kind != "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
-          yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "TRACE_FILE").value) = "/model-cache/perf/" + strenv(RUN_KEY) + "/smoke.jsonl" |
-            (.spec.template.spec.containers[0].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
+          yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
           git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
       - name: Preflight and create run credentials
         timeout-minutes: 10
@@ -112,15 +111,11 @@ jobs:
           done
           frontend=$("${k[@]}" get pods -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o jsonpath='{.items[0].metadata.name}')
           echo "FRONTEND=$frontend" >> "$GITHUB_ENV"
-          "${k[@]}" exec "$frontend" -c main -- mkdir -p "/opt/models/perf/$RUN_KEY"
-          printf '%s\n' '{"input_length":128,"output_length":16}' '{"input_length":128,"output_length":16}' '{"input_length":128,"output_length":16}' |
-            "${k[@]}" exec -i "$frontend" -c main -- sh -c 'cat > "$1"' sh "/opt/models/perf/$RUN_KEY/smoke.jsonl"
-      - name: Run upstream AIPerf smoke
+      - name: Run upstream AIPerf benchmark
         if: ${{ !inputs.preflight_only }}
-        timeout-minutes: 17
+        timeout-minutes: 125
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
-          # The upstream Job checks model discovery before its three inference requests.
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
           until "${k[@]}" wait job/dsv4-bench --for=condition=Complete --timeout=60s; do
             "${k[@]}" get job dsv4-bench -o json |
@@ -148,7 +143,7 @@ jobs:
         timeout-minutes: 5
         run: |
           result=$(find "$ARTIFACTS/perf" -name profile_export_aiperf.json -print -quit)
-          jq -e '.request_count.avg == 3 and (.error_request_count.avg // 0) == 0 and
+          jq -e '.request_count.avg == .input_config.phases[0].requests and (.error_request_count.avg // 0) == 0 and
             .output_sequence_length.avg > 0' "$result"
       - name: Clean up recipe resources
         if: always()
