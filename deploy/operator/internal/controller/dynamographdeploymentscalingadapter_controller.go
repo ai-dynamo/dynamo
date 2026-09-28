@@ -120,16 +120,23 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		// This avoids racing with the DGD controller's Status().Update and provides
 		// field-level ownership semantics. The field manager name identifies this
 		// controller as the owner of the specific component's replicas field.
-		component.Replicas = &adapter.Spec.Replicas
-
-		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dgd)
-		if err != nil {
-			logger.Error(err, "Unable to generate unstructured object", "dgd", dgdKey)
-			return ctrl.Result{}, err
+		apply := &unstructured.Unstructured{
+			Object: map[string]any{
+				"metadata": map[string]any{
+					"name":      dgd.GetName(),
+					"namespace": dgd.GetNamespace(),
+				},
+				"spec": map[string]any{
+					"components": []any{
+						map[string]any{
+							"name":     componentName,
+							"replicas": adapter.Spec.Replicas,
+						},
+					},
+				},
+			},
 		}
-		apply := &unstructured.Unstructured{Object: obj}
 		apply.SetGroupVersionKind(dgd.GroupVersionKind())
-		apply.SetManagedFields(nil)
 
 		if err := r.Apply(
 			ctx,
