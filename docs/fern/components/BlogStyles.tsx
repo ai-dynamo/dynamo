@@ -594,6 +594,9 @@ article:has(.dynamo-blog-article) pre {
 }
 
 /* Date-first archive labels, inspired by editorial blog indexes. */
+body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/load-aware-lora-routing"]::before,
+body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/load-aware-lora-routing"]::before { content: "SEP 08"; }
+
 body:has(.dynamo-blog-home) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar .fern-sidebar-group-level-1 a[href$="/agent-optimization-skills"]::before { content: "AUG 21"; }
 
@@ -971,6 +974,9 @@ body:has(.dynamo-blog-home) #fern-sidebar a[href*="/digest/"]::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href*="/digest/"]::before {
   content: "" !important;
 }
+
+body:has(.dynamo-blog-home) #fern-sidebar a[href$="/load-aware-lora-routing"] .fern-sidebar-link-title-inner::before,
+body:has(.dynamo-blog-article) #fern-sidebar a[href$="/load-aware-lora-routing"] .fern-sidebar-link-title-inner::before { content: "SEP 08"; }
 
 body:has(.dynamo-blog-home) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before,
 body:has(.dynamo-blog-article) #fern-sidebar a[href$="/agent-optimization-skills"] .fern-sidebar-link-title-inner::before { content: "AUG 21"; }
