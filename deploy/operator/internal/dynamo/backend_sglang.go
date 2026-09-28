@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	sglangmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/sglang"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
