@@ -6838,6 +6838,7 @@ def _provenance_vllm_config(
             tensor_parallel_size=1,
             pipeline_parallel_size=1,
             prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
             enable_expert_parallel=True,
             enable_eplb=False,
             all2all_backend="deepep_low_latency",
@@ -6955,6 +6956,7 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "tensor_parallel_size": 1,
         "pipeline_parallel_size": 1,
         "prefill_context_parallel_size": 2,
+        "decode_context_parallel_size": 1,
         "enable_expert_parallel": True,
         "enable_eplb": False,
         "all2all_backend": "deepep_low_latency",
@@ -6975,8 +6977,24 @@ def test_bench_capture_engine_records_requested_engine_facts():
         "python",
     }
     assert isinstance(engine["versions"]["python"], str)
-    # Whatever the engine hands us, the artifact writer must never raise.
     json.dumps(engine)
+
+
+@pytest.mark.parametrize("size", [None, 1, 2])
+def test_bench_capture_engine_preserves_observed_decode_context_parallel_size(size):
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    if size is None:
+        del vllm_config.parallel_config.decode_context_parallel_size
+    else:
+        vllm_config.parallel_config.decode_context_parallel_size = size
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        cudagraph_capture_sizes=[1, 2, 8],
+        dp_rank=7,
+    )
+    assert engine["parallel"]["decode_context_parallel_size"] == size
 
 
 def test_bench_capture_engine_omits_absent_optional_blocks():
@@ -7057,6 +7075,87 @@ def test_bench_capture_engine_fans_out_uniform_type_kv_cache_specs_wrapper():
             ],
         }
     ]
+    json.dumps(engine)
+
+
+@pytest.mark.parametrize(
+    "window,chunk,non_causal",
+    [(None, None, False), (512, None, False), (None, 128, False), (None, None, True)],
+)
+def test_bench_capture_engine_records_full_attention_retention(
+    window, chunk, non_causal
+):
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=32,
+        dtype=torch.bfloat16,
+        sliding_window=window,
+        attention_chunk_size=chunk,
+        non_causal=non_causal,
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=spec)]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    observed = engine["kv_cache"]["groups"][0]
+    assert "capture_error" not in engine
+    assert observed["type"] == "FullAttentionSpec"
+    assert observed["sliding_window"] == window
+    assert observed["attention_chunk_size"] == chunk
+    assert observed["non_causal"] is non_causal
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_preserves_absent_and_wrapped_retention():
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    full = FullAttentionSpec(
+        block_size=16, num_kv_heads=2, head_size=32, dtype=torch.bfloat16
+    )
+    older = SimpleNamespace(block_size=16)
+    wrapper = UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs={"full": full, "older": older}
+    )
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=wrapper)]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    observed = engine["kv_cache"]["groups"][0]
+    assert "capture_error" not in engine
+    assert observed["specs"][0]["sliding_window"] is None
+    assert observed["specs"][0]["attention_chunk_size"] is None
+    assert observed["specs"][0]["non_causal"] is False
+    for key in ("sliding_window", "attention_chunk_size", "non_causal"):
+        assert key not in observed
+        assert key not in observed["specs"][1]
+    json.dumps(engine)
+
+
+def test_bench_capture_engine_reports_failed_retention_observation():
+    class UnreadableSpec:
+        @property
+        def sliding_window(self):
+            raise RuntimeError("retention unavailable")
+
+    vllm_config, kv_cache_config = _provenance_vllm_config()
+    kv_cache_config.kv_cache_groups = [SimpleNamespace(kv_cache_spec=UnreadableSpec())]
+    engine = instrumented_scheduler_module._bench_capture_engine(
+        vllm_config,
+        kv_cache_config,
+        cudagraph_mode="NONE",
+        cudagraph_capture_sizes=[],
+        dp_rank=0,
+    )
+    assert engine["capture_error"] == "retention unavailable"
     json.dumps(engine)
 
 

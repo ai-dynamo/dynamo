@@ -274,7 +274,7 @@ def _bench_engine_attention(attention_config: Any, hf_config: Any) -> dict[str, 
 
 
 def _bench_engine_kv_cache_spec(spec: Any) -> dict[str, Any]:
-    """One kv_cache_spec's identity: its class name plus dtype/head facts."""
+    """One kv_cache_spec's identity, geometry and observed attention retention."""
     entry: dict[str, Any] = {
         "type": type(spec).__name__,
         "dtype": _json_safe(getattr(spec, "dtype", None)),
@@ -285,6 +285,13 @@ def _bench_engine_kv_cache_spec(spec: Any) -> dict[str, Any]:
     kv_quant_mode = getattr(spec, "kv_quant_mode", None)
     if kv_quant_mode is not None:
         entry["kv_quant_mode"] = _json_safe(kv_quant_mode)
+    # FullAttentionSpec can retain a sliding/chunked window when the hybrid
+    # allocator is disabled. Missing attributes must stay distinct from None.
+    missing = object()
+    for name in ("sliding_window", "attention_chunk_size", "non_causal"):
+        value = getattr(spec, name, missing)
+        if value is not missing:
+            entry[name] = _json_safe(value)
     return entry
 
 
@@ -463,6 +470,9 @@ def _bench_capture_engine(
             "prefill_context_parallel_size": _json_safe(
                 getattr(parallel_config, "prefill_context_parallel_size", None)
             ),
+            "decode_context_parallel_size": _json_safe(
+                getattr(parallel_config, "decode_context_parallel_size", None)
+            ),
             "enable_expert_parallel": _json_safe(
                 getattr(parallel_config, "enable_expert_parallel", None)
             ),
@@ -481,8 +491,6 @@ def _bench_capture_engine(
             else None
         )
         engine["graph"] = {
-            # Same normalisation _bench_init already applied to the same
-            # fields; passed in as keyword args rather than re-derived here.
             "cudagraph_mode": cudagraph_mode,
             "cudagraph_capture_sizes": cudagraph_capture_sizes,
             # The worker calls resolve_cudagraph_mode_and_sizes() and rewrites
