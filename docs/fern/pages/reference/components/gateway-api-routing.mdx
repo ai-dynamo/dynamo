@@ -21,7 +21,7 @@ pinned to 1.4, does not read `DYN_EPP_MODE` and has no standalone mode.
 | Dynamo runtime | Required. It uses whichever discovery and event planes the platform is configured for; etcd and NATS are needed only when selected | Not used |
 | Worker discovery | Dynamo runtime discovery | Kubernetes pod watch driven by `InferencePool.spec.selector` |
 | EPP ServiceAccount and RBAC | Cluster-wide mode: the operator creates the ServiceAccount and binds it to the `dynamo-platform` chart's EPP ClusterRole. Namespace-restricted mode: the chart creates the ServiceAccount, Role, and RoleBinding | Supplied with the deployment manifests |
-| EPP replication | Available. When `DYN_ROUTER_REPLICA_SYNC` is set, replicas exchange active-sequence state through the Dynamo event plane, which the runtime addresses and discovers. It is ZMQ-backed by default and NATS when the runtime is configured for it | Available. Replicas exchange active-sequence state over ZMQ sockets the EPP binds itself, discovering peers from the Service named by `DYN_EPP_PEER_SERVICE` |
+| EPP replication | Available. With `DYN_ROUTER_REPLICA_SYNC=true`, replicas share active-sequence state over the Dynamo event plane (ZMQ by default, NATS if configured) | Available. Replicas share active-sequence state over ZMQ, discovering peers through the Service named by `DYN_EPP_PEER_SERVICE` |
 
 A standalone EPP is not managed by the Dynamo operator, so the operator generates no resources for
 it. It uses neither the EPP ServiceAccount nor the `dynamo-platform` chart's EPP RBAC. Standalone
