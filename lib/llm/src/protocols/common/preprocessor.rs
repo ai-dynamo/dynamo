@@ -530,11 +530,8 @@ pub struct PreprocessedRequest {
 /// Python worker then receives `bytes` and never allocates one Python int per
 /// token; the TRT-LLM handler turns it into an int32 array. Human-readable codecs
 /// (JSON) keep the sequence form. Deserialization accepts both forms.
-static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
-    std::env::var("DYN_TOKEN_IDS_AS_BYTES")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-});
+static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| dynamo_runtime::config::env_is_truthy("DYN_TOKEN_IDS_AS_BYTES"));
 
 fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
 where
@@ -578,7 +575,7 @@ where
         where
             E: serde::de::Error,
         {
-            if v.len() % 4 != 0 {
+            if !v.len().is_multiple_of(4) {
                 return Err(E::custom(
                     "packed token_ids byte length is not a multiple of 4",
                 ));
