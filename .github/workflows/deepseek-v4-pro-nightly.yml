@@ -104,10 +104,15 @@ jobs:
         timeout-minutes: 105
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          selector=nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg
           "${k[@]}" create -f "$ARTIFACTS/deploy.yaml"
-          # Fresh clients reload tbot certificates during the long model startup.
-          until "${k[@]}" wait dgd/dsv4-pro-agg --for=condition=Ready --timeout=60s; do
-            "${k[@]}" get dgd dsv4-pro-agg -o name
+          # Reconnect logs each minute to discover new pods and reload tbot certificates.
+          until "${k[@]}" wait dgd/dsv4-pro-agg --for=condition=Ready --timeout=5s; do
+            "${k[@]}" get dgd dsv4-pro-agg
+            "${k[@]}" get pods -l "$selector" -o wide
+            timeout 60s "${k[@]}" logs -f -l "$selector" -c main \
+              --prefix --timestamps --since=1m --tail=20 --ignore-errors || true
+            sleep 5
           done
           frontend=$("${k[@]}" get pods -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o jsonpath='{.items[0].metadata.name}')
           echo "FRONTEND=$frontend" >> "$GITHUB_ENV"
