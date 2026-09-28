@@ -45,24 +45,36 @@ The DCD spec is `backendFramework` plus the [shared component spec](#shared-comp
 
 ### Shared component spec
 
-These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list. In a DGD, prefix them with `spec.components[*]`.
+These fields are shared between a standalone DCD and each entry of a DGD `spec.components` list, except where a field is marked DGD-only. In a DGD, prefix them with `spec.components[*]`.
+
+<ParamField path="providerOverride" type="ProviderOverride">
+  Customizes the primary Grove unit for a component embedded in a DGD. Standalone DCD OpenAPI omits this field. Use `apiVersion: grove.io/v1alpha1`; the target is `PodCliqueTemplateSpec` for a component backed by a PodClique or `PodCliqueScalingGroupConfig` for one backed by a scaling group. The `value` may set only `topologyConstraint`. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
+</ParamField>
 
 <ParamField path="name" type="string" required={true}>
   Stable logical identifier for the component, unique within its parent DGD's `spec.components` list. Must match `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`, 1–63 characters. For a standalone DCD the defaulting webhook populates `name` from `metadata.name`, so you rarely set it explicitly. The name is decoupled from the underlying workload name so the operator can rename child workloads (for example, hash-suffixing worker DCDs during a rolling update) without losing the identity that labels, status maps, scaling adapters, planner RBAC, and EPP filters depend on.
 </ParamField>
 
 <ParamField path="type" type="string">
-  Role of the component within the graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. `prefill` and `decode` are first-class values for disaggregated serving and can be set directly. At most one component per graph may be `epp`.
+  Role of the component within the graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. `prefill` and `decode` are first-class values for disaggregated serving and can be set directly. At most one component per graph may be `epp`. Immutable after it is set.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>worker</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>planner</Badge> <Badge intent="note" minimal>epp</Badge></span>
+</ParamField>
+
+<ParamField path="runtimeVersionOverride" type="string">
+  Declares the Dynamo runtime version in the component's `main` image, taking precedence over the image tag. Use canonical `MAJOR.MINOR.PATCH`, for example `"1.4.0"`, with each part between `0` and `9999` and no leading zeros, `v` prefix, prerelease suffix, or build metadata. This field does not change the image. See [Runtime Version Compatibility](#runtime-version-compatibility) for admission requirements and rollout behavior.
 </ParamField>
 
 <ParamField path="replicas" type="integer">
   Desired number of complete component instances. For a single-node component, each instance is one pod. For a multinode component, each instance contains all of its roles. Minimum `0`. When `scalingAdapter` is set, this field is owned by the [DynamoGraphDeploymentScalingAdapter](full-api-reference.mdx#dynamographdeploymentscalingadapter) and should not be modified directly.
 </ParamField>
 
+<ParamField path="minAvailable" type="integer">
+  Minimum complete component replicas guaranteed to be gang-scheduled before a shortfall triggers gang termination. Supported only for Grove-backed DGD components, where it defaults to `1`; rejected for non-Grove deployments. Minimum `1` and immutable after creation. Positive `replicas` must be at least this value. Scaling to `0` is allowed and retains `minAvailable` for the next scale-up.
+</ParamField>
+
 <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
-  Pod template for the component's pods. The operator injects its defaults (image, command, env, ports, probes, resources, volume mounts) into the container named `main`, merging your overrides by name. If no `main` container is present, the operator generates one. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
+  Pod template for the component's pods. New components must include a container named `main` with a non-empty `image`; the operator injects command, environment, port, probe, resource, and volume-mount defaults into that container, merging your overrides by name. Existing components created without a main image may retain that omission on unrelated updates. For DGD components whose image has no parseable semantic-version tag, set `runtimeVersionOverride`. Every other container is treated as a user-managed sidecar and receives no injected defaults — sidecars must specify their own required fields such as `image`. Replaces the ten separate per-component fields (`resources`, `envs`, `livenessProbe`, and so on) that existed in `v1alpha1`.
 
   <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
 </ParamField>
@@ -89,7 +101,12 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
     Logical cardinality of the role in one complete component instance. For multinode, admission defaults and persists an omitted value as `leader: 1` or `worker: multinode.nodeCount - 1`; an explicit value must match that fixed shape.
   </ParamField>
   <ParamField path="providerOverride" type="ProviderOverride">
-    Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field.
+    Provider configuration for the workload unit generated for this role. Available only on components embedded in a DGD; standalone DCD OpenAPI omits this field. For Grove multinode leader and worker roles, use target `PodCliqueTemplateSpec`; only `topologyConstraint` is allowed in `value`. Role overrides are not supported for inter-pod GMS components. See [ProviderOverride](dynamo-graph-deployment.mdx#provideroverride).
+  </ParamField>
+  <ParamField path="podTemplate" type="core/v1.PodTemplateSpec">
+    Reserved for role-specific pod configuration. No component type supports this field in this release; admission rejects it. Use the component-level `podTemplate` instead.
+
+    <a href="https://pkg.go.dev/k8s.io/api/core/v1#PodTemplateSpec" target="_blank">core/v1.PodTemplateSpec</a>
   </ParamField>
 </Indent>
 
@@ -170,6 +187,14 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   See: [ExperimentalSpec](#experimentalspec)
 </ParamField>
 
+## Runtime Version Compatibility
+
+DGD admission requires `runtimeVersionOverride` when the `main` image has no parseable semantic-version tag. Also set it when a parseable tag does not represent the Dynamo runtime version in the image. The override must describe the Dynamo runtime actually contained in the image.
+
+When updating an image to a different Dynamo runtime version, update any configured `runtimeVersionOverride` in the same change, or remove it if the new image tag correctly identifies the runtime version. The operator uses the resolved runtime version to select feature gates that control how it renders the component's PodSpec, including flags, environment variables, and probes. For Dynamo 1.5.0 and later, changing the override alone may change the rendered PodSpec or worker revision and trigger a rollout, even when the image reference is unchanged. Keep the override aligned with the Dynamo runtime actually contained in the image.
+
+For components generated by a DGDR, an explicit component override takes precedence over the DGDR-level default. See [Profiler image version compatibility](dynamo-graph-deployment-request.mdx#profiler-image-version-compatibility).
+
 ## Status
 
 The operator maintains observed state under `status`.
@@ -243,6 +268,16 @@ Groups opt-in preview features for a component. Referenced by `experimental`. Ne
   </ParamField>
   <ParamField path="numShadows" type="integer" default="1">
     Number of shadow (standby) engine containers per rank. Reserved for future use; the operator currently creates exactly one shadow. Minimum `1`, maximum `1`.
+  </ParamField>
+</Indent>
+
+<ParamField path="grove" type="GroveSpec">
+  Configures experimental Grove workload rendering for a component in a DGD. Requires the Grove pathway.
+</ParamField>
+
+<Indent>
+  <ParamField path="forceScalingGroup" type="boolean">
+    When `true`, renders a single-node component as a `PodCliqueScalingGroup` with one single-pod PodClique per replica. The first `minAvailable` replicas join the deployment's base PodGang; each additional replica gets a separate PodGang. `false` or omission retains automatic selection: multinode and inter-pod GMS components use scaling groups, while other single-node components use a PodClique. Immutable after creation.
   </ParamField>
 </Indent>
 

@@ -36,11 +36,25 @@ _UNMANAGED_ROOTS = frozenset({"examples", "skills", ".agents"})
 _REPO_ROOT = Path(__file__).resolve().parent
 
 # Seed sys.modules with the venv copies before pytest collection runs.
+# Best-effort: an engine that is present but not importable (an editable install
+# with an unreadable source tree raises PermissionError) must not abort collection.
 for _name in ("vllm", "sglang", "triton"):
     try:
         importlib.import_module(_name)
-    except ImportError:
-        pass
+    # ImportError is a missing engine; OSError is one whose sources are present
+    # but unreadable. A failure of any other kind comes from inside an engine
+    # that did start importing, and swallowing it here would run the suite
+    # against a half-initialized engine, so it propagates.
+    except (ImportError, OSError) as _exc:
+        if isinstance(_exc, ModuleNotFoundError) and _exc.name == _name:
+            continue  # the engine is simply not installed; nothing to report
+        # Anything else means the install is broken, and one line here names
+        # the cause rather than leaving a bare collection error downstream.
+        print(
+            f"conftest: {_name} is installed but could not be imported, so "
+            f"tests that import it will fail: {type(_exc).__name__}: {_exc}",
+            file=sys.stderr,
+        )
 
 # Suppress ImportPathMismatchError when pytest later loads dynamo.vllm
 # under the bare name "vllm".

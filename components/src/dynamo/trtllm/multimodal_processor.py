@@ -39,7 +39,10 @@ from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -100,6 +103,41 @@ def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, A
     return mm_kwargs
 
 
+def _is_safetensors_url(url: str) -> bool:
+    """True when the URL path (not query) ends with ``.safetensors``."""
+    return urlparse(url).path.lower().endswith(".safetensors")
+
+
+def _urls_from_multi_modal_items(
+    items: Any,
+) -> Tuple[List[str], List[str]]:
+    """Split ``multi_modal_data`` image items into image URLs and embedding paths."""
+    image_urls: List[str] = []
+    embedding_paths: List[str] = []
+    if not isinstance(items, list):
+        return image_urls, embedding_paths
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("Url"), str):
+            url = item["Url"]
+        elif isinstance(item, str):
+            url = item
+        else:
+            continue
+        if not url:
+            continue
+        if _is_safetensors_url(url):
+            embedding_paths.append(url)
+        else:
+            image_urls.append(url)
+    return image_urls, embedding_paths
+
+
+def request_messages(request: Dict[str, Any]) -> List[Dict]:
+    extra_args = request.get("extra_args") or {}
+    messages = extra_args.get("messages") or request.get("messages") or []
+    return messages if isinstance(messages, list) else []
+
+
 class MultimodalRequestProcessor:
     """Simple processor for OpenAI format multimodal requests."""
 
@@ -128,7 +166,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -327,12 +366,34 @@ class MultimodalRequestProcessor:
                         if not url:
                             continue
                         self.modality = "image"
-                        if url.endswith(".safetensors"):
+                        if _is_safetensors_url(url):
                             embedding_paths.append(url)
                         else:
                             image_urls.append(url)
 
         return "".join(text_parts), image_urls, embedding_paths
+
+    def extract_prompt_and_media_from_request(
+        self, request: Dict[str, Any]
+    ) -> Tuple[str, List[str], List[str]]:
+        """Extract text and media URLs, preferring ``multi_modal_data``.
+
+        The frontend strips inline ``data:`` payloads from
+        ``extra_args.messages`` so the request plane carries a single copy of
+        the media in ``multi_modal_data``. Chat-template structure still lives
+        in ``extra_args.messages``.
+        """
+        text, image_urls, embedding_paths = self.extract_prompt_and_media(
+            request_messages(request)
+        )
+        mm_data = request.get("multi_modal_data")
+        if isinstance(mm_data, dict):
+            mm_urls, mm_emb = _urls_from_multi_modal_items(mm_data.get("image_url"))
+            if mm_urls:
+                image_urls = mm_urls
+            if mm_emb:
+                embedding_paths = mm_emb
+        return text, image_urls, embedding_paths
 
     async def process_openai_request(
         self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
@@ -446,7 +507,7 @@ class MultimodalRequestProcessor:
                         )
                         continue
 
-                    if url.endswith(".safetensors"):
+                    if _is_safetensors_url(url):
                         embedding_paths.append(url)
                     else:
                         # Keep original item format for load_image_batch
@@ -459,7 +520,8 @@ class MultimodalRequestProcessor:
                 if image_urls:
                     try:
                         pil_images = await self.image_loader.load_image_batch(
-                            image_urls
+                            image_urls,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
@@ -531,7 +593,10 @@ class MultimodalRequestProcessor:
                     normalized_url = await validate_media_url(url, self._url_policy)
                     if urlparse(normalized_url).scheme in ("http", "https"):
                         content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
+                            normalized_url,
+                            30.0,
+                            policy=self._url_policy,
+                            max_bytes=self.max_file_size_bytes,
                         )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.

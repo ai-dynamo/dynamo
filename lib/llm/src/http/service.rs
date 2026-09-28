@@ -61,8 +61,8 @@ fn apply_request_tool_call_parsing_options(
         .as_ref()
         .unwrap_or(&ChatCompletionToolChoiceOption::Auto);
     let converted_tool_choice = crate::preprocessor::tool_choice::convert_tool_choice(tool_choice);
-    let tools = request.inner.tools.as_deref().unwrap_or(&[]);
-    let converted_tools = crate::preprocessor::tool_choice::convert_tools(tools);
+    let effective_tools = crate::preprocessor::tool_choice::effective_tools(&request.inner)?;
+    let converted_tools = crate::preprocessor::tool_choice::convert_tools(effective_tools.as_ref());
     let uses_structural_tag = crate::preprocessor::structural_tag::structural_tag_decision(
         parsing_options.tool_call_parser.as_deref(),
         &converted_tool_choice,
@@ -73,12 +73,14 @@ fn apply_request_tool_call_parsing_options(
         parsing_options.exclude_tools_when_tool_choice_none,
     )?
     .is_required();
-    let guided_tool_constraint = crate::preprocessor::tool_choice::guided_tool_constraint(
-        request,
-        parsing_options.tool_call_parser.as_deref(),
-        parsing_options.reasoning_parser.as_deref(),
-        uses_structural_tag,
-    )?;
+    let guided_tool_constraint =
+        crate::preprocessor::tool_choice::guided_tool_constraint_with_effective_tools(
+            request,
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+            uses_structural_tag,
+            effective_tools.as_ref(),
+        )?;
     Ok(parsing_options
         .with_guided_tool_constraint(guided_tool_constraint)
         .with_tool_call_parsing_enabled(tool_call_parsing_enabled)
@@ -109,6 +111,91 @@ mod tests {
             }]
         });
         serde_json::from_value(value).expect("request must deserialize")
+    }
+
+    fn dynamic_request(tool_choice: Option<Value>) -> NvCreateChatCompletionRequest {
+        let mut value = json!({
+            "model": "test-model",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}}
+                        },
+                        "strict": true
+                    }]
+                },
+                {"role": "user", "content": "test"}
+            ]
+        });
+        if let Some(tool_choice) = tool_choice {
+            value["tool_choice"] = tool_choice;
+        }
+        serde_json::from_value(value).expect("dynamic request must deserialize")
+    }
+
+    #[test]
+    fn kimi_k3_dynamic_tools_enable_response_parsing_without_a_top_level_sentinel() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result =
+            apply_request_tool_call_parsing_options(parsing_options, &dynamic_request(None))
+                .expect("dynamic tools must configure parsing");
+
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
+        assert_eq!(result.tools[0].strict, Some(true));
+    }
+
+    #[test]
+    fn kimi_k3_named_dynamic_tool_uses_structural_tag_policy() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(
+                json!({"type": "function", "function": {"name": "lookup"}}),
+            )),
+        )
+        .expect("named dynamic tool choice must configure parsing");
+
+        assert!(!result.suppress_tool_calls);
+        assert_eq!(
+            result.guided_tool_constraint,
+            GuidedToolConstraint::StructuralTag
+        );
+        assert_eq!(result.tools.len(), 1);
+        assert_eq!(result.tools[0].name, "lookup");
+    }
+
+    #[test]
+    fn dynamic_tools_with_tool_choice_none_still_suppress_calls() {
+        let parsing_options = ParsingOptions {
+            tool_call_parser: Some("kimi_k3".to_string()),
+            ..Default::default()
+        };
+        let result = apply_request_tool_call_parsing_options(
+            parsing_options,
+            &dynamic_request(Some(json!("none"))),
+        )
+        .expect("tool_choice none must remain valid");
+
+        assert!(result.suppress_tool_calls);
+        assert_eq!(result.guided_tool_constraint, GuidedToolConstraint::None);
+        assert_eq!(
+            result.tools.len(),
+            1,
+            "declarations remain available to parsers"
+        );
     }
 
     // A Kimi K2 pair with a forced/named tool_choice must resolve to the real

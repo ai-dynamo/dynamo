@@ -379,6 +379,8 @@ pub struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
 
     pub routed_experts: Option<String>,
+
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 /// Token-in/token-out generation response.
@@ -407,6 +409,7 @@ struct GenerateChoiceAcc {
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
     routed_experts: Option<String>,
+    sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 impl GenerateChoiceAcc {
@@ -461,6 +464,7 @@ impl GenerateChoiceAcc {
             logprobs,
             finish_reason,
             routed_experts,
+            sampling_mask,
         } = self;
         let logprobs = if options.include_logprobs {
             let content = logprobs.ok_or_else(|| {
@@ -479,12 +483,22 @@ impl GenerateChoiceAcc {
             None
         };
 
+        if let Some(rows) = sampling_mask.as_ref() {
+            anyhow::ensure!(
+                rows.len() == token_ids.len(),
+                "generate choice {index} returned {} sampling-mask positions for {} tokens",
+                rows.len(),
+                token_ids.len()
+            );
+        }
+
         Ok(GenerateResponseChoice {
             index,
             token_ids: Some(token_ids),
             logprobs,
             finish_reason,
             routed_experts,
+            sampling_mask,
         })
     }
 }
@@ -627,12 +641,20 @@ impl GenerateAggregator {
             logprobs: None,
             finish_reason: None,
             routed_experts: None,
+            sampling_mask: None,
         });
         if let Some(engine_data) = output.engine_data.as_ref() {
             if let Some(routed_experts) = engine_data.get("routed_experts") {
                 choice.routed_experts = Some(
                     serde_json::from_value(routed_experts.clone()).map_err(|error| {
                         anyhow::anyhow!("invalid generate routed_experts payload: {error}")
+                    })?,
+                );
+            }
+            if let Some(sampling_mask) = engine_data.get("sampling_mask") {
+                choice.sampling_mask = Some(
+                    serde_json::from_value(sampling_mask.clone()).map_err(|error| {
+                        anyhow::anyhow!("invalid generate sampling_mask payload: {error}")
                     })?,
                 );
             }
@@ -962,6 +984,7 @@ mod tests {
                 logprobs: None,
                 finish_reason: None,
                 routed_experts: None,
+                sampling_mask: None,
             }],
             prompt_logprobs: None,
             kv_transfer_params: None,
@@ -976,6 +999,7 @@ mod tests {
         assert_eq!(value["kv_transfer_params"], Value::Null);
         assert_eq!(value["choices"][0]["token_ids"], Value::Null);
         assert_eq!(value["choices"][0]["logprobs"], Value::Null);
+        assert_eq!(value["choices"][0]["sampling_mask"], Value::Null);
         assert_eq!(value["choices"][0]["finish_reason"], Value::Null);
         assert_eq!(value["choices"][0]["routed_experts"], Value::Null);
 
@@ -1148,6 +1172,7 @@ mod tests {
                 finish_reason: Some(crate::protocols::common::FinishReason::Length),
                 engine_data: Some(json!({
                     "routed_experts": "encoded-experts",
+                    "sampling_mask": [[7, 11], [13, 17, 19]],
                     "kv_transfer_params": {"connector": "x"}
                 })),
                 ..Default::default()
@@ -1172,6 +1197,10 @@ mod tests {
         assert_eq!(
             response.choices[0].routed_experts.as_deref(),
             Some("encoded-experts")
+        );
+        assert_eq!(
+            response.choices[0].sampling_mask,
+            Some(vec![vec![7, 11], vec![13, 17, 19]])
         );
         let logprobs = response.choices[0]
             .logprobs
@@ -1264,6 +1293,44 @@ mod tests {
                 .to_string()
                 .contains("invalid generate routed_experts payload")
         );
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_malformed_sampling_mask() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({"sampling_mask": "invalid"})),
+            ..Default::default()
+        })]);
+
+        let error = GenerateResponse::from_annotated_stream(stream, "req-mask".to_string())
+            .await
+            .expect_err("malformed sampling mask must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid generate sampling_mask payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_sampling_mask_length_mismatch() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({"sampling_mask": [[1], [2]]})),
+            ..Default::default()
+        })]);
+
+        let error = GenerateResponse::from_annotated_stream(stream, "req-mask".to_string())
+            .await
+            .expect_err("misaligned sampling mask must fail");
+
+        assert!(error.to_string().contains("sampling-mask positions"));
     }
 
     #[tokio::test]

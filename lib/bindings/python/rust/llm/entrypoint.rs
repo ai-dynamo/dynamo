@@ -242,7 +242,7 @@ impl AicPerfConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
+    #[pyo3(signature = (overlap_score_weight=None, host_cache_hit_weight=0.75, disk_cache_hit_weight=0.25, router_temperature=0.0, use_kv_events=true, *, router_replica_sync=false, router_track_active_blocks=true, router_track_output_blocks=false, router_assume_kv_reuse=true, router_track_prefill_tokens=true, router_prefill_load_model="none", router_ttl_secs=120.0, router_approximate_cache_policy="ttl", router_queue_threshold=None, router_event_threads=4, router_queue_policy="fcfs", use_remote_indexer=false, serve_indexer=false, enable_session_prefix_index=false, shared_cache_multiplier=0.0, shared_cache_type="none", router_predicted_ttl_secs=None, conditional_disagg_enabled=false, conditional_disagg_policy="isl_bounding", conditional_disagg_eff_isl_threshold=2048, conditional_disagg_eff_isl_ratio_threshold=0.7, conditional_disagg_prefill_busy_threshold=None, conditional_disagg_decode_busy_threshold=None, overlap_score_credit=1.0, overlap_score_credit_decay=0.0, prefill_load_scale=1.0, decode_active_request_weight=0.0, router_policy_config=None, router_prefill_policy=None, router_decode_policy=None, router_tracking_hash="public-xxh3-v1", router_tracking_key_file=None, router_tracking_key_id=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         overlap_score_weight: Option<f64>,
@@ -263,6 +263,7 @@ impl KvRouterConfig {
         router_queue_policy: &str,
         use_remote_indexer: bool,
         serve_indexer: bool,
+        enable_session_prefix_index: bool,
         shared_cache_multiplier: f64,
         shared_cache_type: &str,
         router_predicted_ttl_secs: Option<f64>,
@@ -328,6 +329,7 @@ impl KvRouterConfig {
             router_queue_policy: router_queue_policy.parse().map_err(PyValueError::new_err)?,
             use_remote_indexer,
             serve_indexer,
+            enable_session_prefix_index,
             shared_cache_multiplier,
             shared_cache_type: shared_cache_type.parse().map_err(PyValueError::new_err)?,
             conditional_disagg_enabled,
@@ -507,11 +509,7 @@ impl RouterConfig {
                 );
             });
         }
-        if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
-            return Err(PyValueError::new_err(
-                "session_affinity_ttl_secs must be between 1 and 31536000",
-            ));
-        }
+        super::kv::check_session_affinity_ttl_secs(session_affinity_ttl_secs)?;
         RsLoadThresholdConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
@@ -778,7 +776,7 @@ pub fn make_engine<'p>(
         .runtime_config(args.runtime_config.clone().inner)
         .namespace(args.namespace.clone())
         .namespace_prefix(args.namespace_prefix.clone());
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    crate::future_into_py(py, async move {
         if let Some(model_path) = args.model_path.clone() {
             let local_path = if model_path.exists() {
                 model_path
@@ -1020,7 +1018,7 @@ pub fn run_input<'p>(
     let input_enum: Input = input.parse().map_err(to_pyerr)?;
     let frontend_route_extensions =
         super::frontend_routes::frontend_route_extensions_from_py(py, frontend_route_extensions)?;
-    let worker_selection_policy_factory = crate::worker_selection_policy_factory(
+    let plugins = crate::router_plugins(
         &engine_config
             .inner
             .local_model()
@@ -1028,30 +1026,22 @@ pub fn run_input<'p>(
             .kv_router_config,
     )
     .map_err(to_pyerr)?;
-    if worker_selection_policy_factory.is_some()
-        && !engine_config
+    validate_router_plugin_input(
+        &plugins,
+        &input_enum,
+        engine_config
             .inner
             .local_model()
             .router_config()
             .router_mode
-            .is_kv_routing()
-    {
-        return Err(PyValueError::new_err(
-            "linked worker-selection policies require --router-mode kv",
-        ));
-    }
-    if worker_selection_policy_factory.is_some() && !matches!(&input_enum, Input::Http) {
-        return Err(PyValueError::new_err(
-            "linked worker-selection policies require HTTP frontend input",
-        ));
-    }
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        if let Some(factory) = worker_selection_policy_factory {
+            .is_kv_routing(),
+    )
+    .map_err(PyValueError::new_err)?;
+    crate::future_into_py(py, async move {
+        if matches!(&input_enum, Input::Http) {
             HttpFrontend::default()
                 .frontend_route_extensions(frontend_route_extensions)
-                .worker_selection_policy_factory(move |config, worker_type, partition| {
-                    factory(config, worker_type, partition)
-                })
+                .plugins(plugins)
                 .run(distributed_runtime.inner.clone(), engine_config.inner)
                 .await
                 .map_err(to_pyerr)?;
@@ -1069,9 +1059,57 @@ pub fn run_input<'p>(
     })
 }
 
+fn validate_router_plugin_input(
+    plugins: &dynamo_kv_router::plugins::RouterPlugins,
+    input: &Input,
+    is_kv_routing: bool,
+) -> Result<(), &'static str> {
+    if plugins.has_custom_plugins() {
+        if !is_kv_routing {
+            return Err("linked router plugins require --router-mode kv");
+        }
+        if !matches!(input, Input::Http) {
+            return Err("linked router plugins require HTTP frontend input");
+        }
+    }
+    Ok(())
+}
+
 pub fn to_pyerr<E>(err: E) -> PyErr
 where
     E: Display,
 {
     PyException::new_err(format!("{}", err))
+}
+
+#[cfg(test)]
+mod plugin_input_tests {
+    use super::*;
+    use dynamo_kv_router::plugins::RouterPlugins;
+
+    #[test]
+    fn resolved_builtin_supports_stock_inputs_and_routing_modes() {
+        let plugins = crate::router_plugins(&RsKvRouterConfig::default()).unwrap();
+        assert!(plugins.worker_selection().is_some());
+        for input in [Input::Http, Input::Grpc, Input::Stdin, Input::Text] {
+            for is_kv in [false, true] {
+                assert!(validate_router_plugin_input(&plugins, &input, is_kv).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_policy_retains_frontend_restrictions() {
+        let plugins = RouterPlugins::default()
+            .with_worker_selection(dynamo_custom_policy_builtin::default_factory());
+        assert!(validate_router_plugin_input(&plugins, &Input::Http, true).is_ok());
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Http, false),
+            Err("linked router plugins require --router-mode kv")
+        );
+        assert_eq!(
+            validate_router_plugin_input(&plugins, &Input::Grpc, true),
+            Err("linked router plugins require HTTP frontend input")
+        );
+    }
 }

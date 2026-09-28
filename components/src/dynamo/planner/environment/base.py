@@ -50,7 +50,7 @@ class NoopTrafficMetricsProvider:
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return None
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
         del interval_str
         return None
 
@@ -162,8 +162,8 @@ class PlannerEnvironmentImpl(PlannerEnvironment):
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         return await self.traffic_provider.collect_traffic()
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        return self.traffic_provider.collect_accept_length(interval_str)
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        return await self.traffic_provider.collect_accept_length(interval_str)
 
     async def collect_kv_hit_rate_observation(
         self, duration_s: float

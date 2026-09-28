@@ -4,11 +4,15 @@
 """Unit tests for resolve_model_path() and the rapid.py / thorough.py call
 sites that feed its result into aiconfigurator."""
 
+import asyncio
 import copy
+import errno
+import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
+import yaml
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -18,6 +22,7 @@ pytestmark = [
 ]
 
 try:
+    from dynamo.profiler.profile_sla import run_profile
     from dynamo.profiler.rapid import (
         _generate_dgd_from_pick,
         _run_autoscale_sim,
@@ -28,7 +33,10 @@ try:
         run_thorough,
     )
     from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
-    from dynamo.profiler.utils.dgd_materialization import DGDMaterializationPurpose
+    from dynamo.profiler.utils.dgd_materialization import (
+        DGDMaterializationPurpose,
+        materialize_dgd,
+    )
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -166,6 +174,85 @@ class TestResolveModelPath:
         local_dir.mkdir()  # directory only, no config.json
         dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
         assert resolve_model_path(dgdr) == _HF_ID
+
+    def test_inaccessible_pvc_config_during_materialization(
+        self, tmp_path, monkeypatch
+    ):
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        config_path = local_dir / "config.json"
+        dgdr = _make_dgdr(
+            backend="vllm", modelCache=_pvc_model_cache(str(tmp_path), "model")
+        )
+        error = PermissionError(errno.EACCES, "Permission denied", str(config_path))
+        original_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if os.fspath(path) == str(config_path):
+                raise error
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        blueprint = {
+            "spec": {
+                "components": [
+                    {
+                        "name": "worker",
+                        "type": "worker",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
+                    }
+                ]
+            }
+        }
+        with (
+            patch("dynamo.profiler.utils.model_info.hf_hub_download") as download,
+            pytest.raises(RuntimeError, match="Cannot inspect PVC model config") as exc,
+        ):
+            materialize_dgd(
+                blueprint,
+                purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+                runtime_backend=dgdr.backend,
+                model_name_or_path=resolve_model_path(dgdr),
+            )
+        assert exc.value.__cause__ is error
+        assert str(config_path) in str(exc.value)
+        assert "symlink ownership" in str(exc.value)
+        assert "modelCache.pvcModelPath" in str(exc.value)
+        download.assert_not_called()
+
+    def test_run_profile_records_pvc_inspection_failure(self, tmp_path, monkeypatch):
+        local_dir = tmp_path / "model"
+        _make_model_dir(local_dir)
+        config_path = local_dir / "config.json"
+        dgdr = _make_dgdr(modelCache=_pvc_model_cache(str(tmp_path), "model"))
+        error = PermissionError(errno.EACCES, "Permission denied", str(config_path))
+        original_stat = os.stat
+
+        def stat(path, *args, **kwargs):
+            if os.fspath(path) == str(config_path):
+                raise error
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "stat", stat)
+        output_dir = tmp_path / "output"
+        with (
+            patch(
+                "dynamo.profiler.profile_sla.check_model_hardware_support",
+                side_effect=AssertionError("Must not fall back to the Hub model"),
+            ),
+            pytest.raises(RuntimeError, match="Cannot inspect PVC model config") as exc,
+        ):
+            asyncio.run(
+                run_profile(dgdr, ProfilerOperationalConfig(output_dir=str(output_dir)))
+            )
+        status = yaml.safe_load((output_dir / "profiler_status.yaml").read_text())
+        assert status["status"] == "failed"
+        assert status["error"] == str(exc.value)
+        assert str(config_path) in status["error"]
+        assert "modelCache.pvcModelPath" in status["error"]
+        assert exc.value.__cause__ is error
 
 
 # ---------------------------------------------------------------------------

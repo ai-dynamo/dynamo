@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Schema for explicit vLLM self-benchmark points."""
+"""Point schema and shared constants for vLLM self-benchmarking."""
 
 from __future__ import annotations
 
@@ -12,6 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 BenchmarkMode = Literal["prefill", "decode", "agg"]
 BENCHMARK_MODES: tuple[BenchmarkMode, ...] = ("prefill", "decode", "agg")
+
+RANDOM_KDA_REQUEST_PREFIX = "__bench_random_kda_"
+RANDOM_KDA_WORKER = "dynamo.vllm.benchmark_worker.BenchmarkWorker"
+RANDOM_KDA_BOUND = 0.01
+RANDOM_KDA_POLICY = "uniform-request-layer-rank-v1"
 
 
 class _PointCandidate(BaseModel):
@@ -66,7 +71,7 @@ class PrefillPointCandidate(_PointCandidate):
     def validate_totals(self) -> PrefillPointCandidate:
         if self.total_prefill_tokens < self.batch_size:
             raise ValueError("total_prefill_tokens must be at least batch_size")
-        if 0 < self.total_kv_read_tokens < self.batch_size:
+        if self.rows is None and 0 < self.total_kv_read_tokens < self.batch_size:
             raise ValueError("total_kv_read_tokens must be zero or at least batch_size")
         if self.rows is not None:
             if self.partition is not None:
