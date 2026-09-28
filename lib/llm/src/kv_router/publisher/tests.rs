@@ -2158,6 +2158,35 @@ mod worker_metrics_tests {
         }
     }
 
+    async fn next_load(rx: &mut tokio::sync::mpsc::UnboundedReceiver<ActiveLoad>) -> ActiveLoad {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("timed out waiting for worker metrics")
+            .expect("worker metrics publishing task stopped")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn replays_unchanged_worker_metrics_for_each_rank() {
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        publisher.start_metrics_publishing_with(ChannelSink(tx), 42);
+        publisher.publish(Some(0), None, Some(10)).unwrap();
+        publisher.publish(Some(1), None, Some(20)).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(2)).await;
+
+        let mut initial = vec![next_load(&mut rx).await, next_load(&mut rx).await];
+        initial.sort_unstable_by_key(|load| load.dp_rank);
+        assert_eq!(initial[0].kv_used_blocks, Some(10));
+        assert_eq!(initial[1].kv_used_blocks, Some(20));
+        assert!(rx.try_recv().is_err());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut replay = vec![next_load(&mut rx).await, next_load(&mut rx).await];
+        replay.sort_unstable_by_key(|load| load.dp_rank);
+        assert_eq!(replay, initial);
+    }
+
     #[tokio::test]
     async fn publish_debounces_updates_independently_per_rank() {
         let publisher = WorkerMetricsPublisher::new().unwrap();

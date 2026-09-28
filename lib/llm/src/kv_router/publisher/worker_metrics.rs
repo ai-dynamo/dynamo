@@ -14,6 +14,7 @@ use dynamo_runtime::transports::event_plane::EventPublisher;
 use crate::kv_router::KV_METRICS_SUBJECT;
 
 const PUBLISH_DEBOUNCE: Duration = Duration::from_millis(1);
+const METRICS_REPLAY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
@@ -159,6 +160,11 @@ impl WorkerMetricsPublisher {
             let mut debouncer = WorkerMetricsDebouncer::new(PUBLISH_DEBOUNCE);
             let publish_timer = tokio::time::sleep(tokio::time::Duration::ZERO);
             tokio::pin!(publish_timer);
+            let mut replay = tokio::time::interval_at(
+                tokio::time::Instant::now() + METRICS_REPLAY_INTERVAL,
+                METRICS_REPLAY_INTERVAL,
+            );
+            replay.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
                 tokio::select! {
@@ -178,17 +184,8 @@ impl WorkerMetricsPublisher {
                     }
                     _ = &mut publish_timer, if debouncer.next_deadline().is_some() => {
                         for metrics in debouncer.take_due(tokio::time::Instant::now()) {
-                            let active_load = ActiveLoad {
-                                worker_id,
-                                dp_rank: metrics.dp_rank,
-                                active_decode_blocks: metrics.active_decode_blocks,
-                                active_prefill_tokens: None,
-                                scheduler_load_scope: None,
-                                kv_used_blocks: metrics.kv_used_blocks,
-                            };
-
-                            if let Err(e) = sink.publish(active_load).await {
-                                tracing::warn!("Failed to publish metrics: {}", e);
+                            if let Err(error) = sink.publish(active_load(worker_id, &metrics)).await {
+                                tracing::warn!(%error, "Failed to publish worker metrics");
                             }
                         }
 
@@ -196,8 +193,26 @@ impl WorkerMetricsPublisher {
                             publish_timer.as_mut().reset(deadline);
                         }
                     }
+                    _ = replay.tick() => {
+                        for metrics in debouncer.last_metrics.values() {
+                            if let Err(error) = sink.publish(active_load(worker_id, metrics)).await {
+                                tracing::debug!(%error, "Failed to replay worker metrics");
+                            }
+                        }
+                    }
                 }
             }
         });
+    }
+}
+
+fn active_load(worker_id: u64, metrics: &WorkerMetrics) -> ActiveLoad {
+    ActiveLoad {
+        worker_id,
+        dp_rank: metrics.dp_rank,
+        active_decode_blocks: metrics.active_decode_blocks,
+        active_prefill_tokens: None,
+        scheduler_load_scope: None,
+        kv_used_blocks: metrics.kv_used_blocks,
     }
 }
