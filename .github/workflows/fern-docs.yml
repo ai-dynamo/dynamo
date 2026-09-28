@@ -756,7 +756,17 @@ jobs:
     steps:
       - name: Determine version tag
         id: version
+        env:
+          SOURCE_REF: ${{ github.event.inputs.source_ref }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
+          # A snapshot built from anything but the tag must never publish as
+          # that tag.
+          if [ -n "$SOURCE_REF" ] && [ "$DRY_RUN" != "true" ]; then
+            echo "::error::source_ref ($SOURCE_REF) requires dry_run=true."
+            exit 1
+          fi
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
           else
@@ -1215,11 +1225,12 @@ jobs:
       - name: Open an issue if the version release failed
         # A tag push has no pull request to report on, so without this a failed
         # snapshot leaves the site on the previous version with nothing flagging
-        # it. One open issue per title; later failures comment on it.
-        if: failure()
+        # it. One open issue per title; later failures comment on it. Rejected
+        # dispatch inputs fail the version step and report only in that run.
+        if: failure() && steps.version.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag || github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ steps.version.outputs.tag }}
           SOURCE_REF: ${{ github.event.inputs.source_ref }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
