@@ -2469,6 +2469,7 @@ mod tests {
     use super::*;
     use crate::common::protocols::{EngineType, SglangArgs, WorkerType};
     use crate::loadgen::{SessionTrace, TurnTrace};
+    use crate::replay::ReplayRuntimeObservers;
     use aisimulate_core::replay::{
         ForwardPassSnapshot, ReplayRequestPool, ReplayScalingDecision, ReplayScalingPolicy,
         ReplayScalingSnapshot,
@@ -2718,7 +2719,7 @@ mod tests {
     #[case::kv_router(ReplayRouterMode::KvRouter)]
     #[ignore = "requires an AISimulate release with rank-aware disaggregated handoff"]
     fn disagg_attention_dp_resolves_ranks_without_aliasing(#[case] router_mode: ReplayRouterMode) {
-        let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
             attention_dp_disagg_config(),
             None,
             None,
@@ -2727,7 +2728,7 @@ mod tests {
             router_mode,
             true,
             SlaThresholds::default(),
-            None,
+            ReplayRuntimeObservers::default(),
         )
         .unwrap();
 
@@ -2783,7 +2784,7 @@ mod tests {
         let ticks = Rc::new(RefCell::new(Vec::new()));
         // Arrivals span 0..1125 ms: most route after the scale-up, and the replay
         // outlives the recheck tick.
-        let report = simulate_trace_requests_disagg_with_router_mode_and_scaling_policy(
+        let report = simulate_trace_requests_disagg_with_router_mode_and_runtime_observers(
             attention_dp_disagg_config(),
             None,
             None,
@@ -2792,9 +2793,12 @@ mod tests {
             router_mode,
             true,
             SlaThresholds::default(),
-            Some(Box::new(ScaleUpOnce {
-                ticks: Rc::clone(&ticks),
-            })),
+            ReplayRuntimeObservers {
+                scaling_policy: Some(Box::new(ScaleUpOnce {
+                    ticks: Rc::clone(&ticks),
+                })),
+                ..Default::default()
+            },
         )
         .unwrap();
 
