@@ -363,7 +363,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
       artifact_retention_days: '7'
@@ -391,7 +391,7 @@ jobs:
       framework: vllm
       target: dev
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
       build_timeout_minutes: 60
@@ -406,7 +406,7 @@ jobs:
       framework: vllm
       target: local-dev
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       push_image: false
       build_timeout_minutes: 60
@@ -567,7 +567,7 @@ jobs:
       framework: vllm
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       make_efa: true
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       inline_compliance: true
@@ -760,10 +760,10 @@ jobs:
     with:
       test_suite_name: vllm
       test_type: Test
-      amd_runner: prod-tester-amd-gpu-v2 # This runner is overridden for ARM platform
+      amd_runner: prod-tester-amd-gpu-v2
       target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
-      platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
+      platform: '["amd64"]'
       run_cpu_only_tests: true
       cpu_only_test_markers: pre_merge and vllm and gpu_0
       gpu_test_markers: pre_merge and vllm and gpu_1

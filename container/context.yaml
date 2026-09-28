@@ -64,17 +64,11 @@ dynamo:
 vllm:
   cuda13.0:
     base_image: nvcr.io/nvidia/cuda-dl-base
-    runtime_image: vllm/vllm-openai
+    runtime_image: ghcr.io/motiftechnologies/vllm
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.26.0-ubuntu2404
-    # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
-    # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
-    # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
-    # adds over the clean NVIDIA CUDA floor (uv/rust stack, framework, codecs)
-    # rather than hiding it. Per-arch stem; the licenses stage appends
-    # -${TARGETARCH}.cdx.json. (GPL media codecs from vllm-openai are purged in
-    # the runtime image — see the codec-purge follow-up.)
-    baseline_sbom: cuda@2ab6381d
+    runtime_image_tag: v0.26.0-motif3@sha256:c90d471174ec29a0f6c5ecba718a6905a4180be72f2c6d37ce9dad4d799fa836
+    enable_vllm_omni: "false"
+    # No baseline subtraction: compliance scans the full Motif-derived image.
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu

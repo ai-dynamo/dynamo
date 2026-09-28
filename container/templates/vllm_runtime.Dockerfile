@@ -29,6 +29,8 @@ WORKDIR /workspace
 
 ENV DYNAMO_HOME=/opt/dynamo
 ENV HOME=/home/dynamo
+COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
+ENV PATH=/opt/uv/bin:${PATH}
 {% if device != "cuda" %}
 ENV PATH=/usr/local/ucx/bin:/usr/local/bin/etcd:${PATH}
 {% else %}
@@ -56,6 +58,13 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:/usr/local/ucx/lib:/usr/l
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 {% else %}
+# Motif's base has externally managed system Python and does not include NIXL.
+# Keep Dynamo and vLLM in that interpreter; --no-deps preserves the base stack.
+ENV UV_BREAK_SYSTEM_PACKAGES=1
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    uv pip install --system --break-system-packages --no-deps \
+        "nixl-cu13==1.3.2" "nixl==1.3.2"
+
 # Expose libnixl.so from the upstream nixl-cu${CUDA_MAJOR} PyPI wheel through a
 # stable prefix so non-Python consumers use the same NIXL copy that Python imports.
 # This keeps Rust nixl-sys dlopen("libnixl.so") from falling into stub mode in
@@ -76,8 +85,6 @@ ENV LD_LIBRARY_PATH=${NIXL_LIB_DIR}:${NIXL_PLUGIN_DIR}:${LD_LIBRARY_PATH:-}
 # Install NATS and ETCD
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /opt/uv/bin/uv /opt/uv/bin/uvx /opt/uv/bin/
-ENV PATH=/opt/uv/bin:${PATH}
 
 {% if device == "cuda" %}
 # Bring base-image OS packages up to the current patch releases published in
@@ -237,6 +244,7 @@ RUN set -eux; \
         jq; \
     rm -rf /var/lib/apt/lists/*
 
+{% if context.vllm[device_key].get("enable_vllm_omni", "true") == "true" %}
 # Layer the released vLLM-Omni package matching the pinned upstream ref while
 # constraining packages already solved in the upstream vLLM image.
 RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target=/tmp/vllm_omni_protected_packages.txt \
@@ -246,6 +254,7 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export UV_CACHE_DIR=/root/.cache/uv; \
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
+{% endif %}
 
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
@@ -407,7 +416,7 @@ RUN rm -rf /workspace/vllm
 # no H.264 is built. Direct rm makes the removal robust regardless of how the
 # base image's pip is configured; the guards fail the build if any of them survive.
 RUN set -eux; \
-    python3 -m pip uninstall --yes \
+    python3 -m pip uninstall --yes --break-system-packages \
         av decord decord2 opencv-python opencv-python-headless torchcodec \
         || true; \
     SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
