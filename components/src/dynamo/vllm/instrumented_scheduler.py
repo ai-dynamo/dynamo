@@ -88,11 +88,14 @@ import platform
 import queue
 import random
 import shutil
+import sys
 import threading
 import time
 import uuid
+from array import array
 from collections import deque
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from itertools import count
@@ -144,6 +147,7 @@ ENV_FPM_PORT = "DYN_FORWARDPASS_METRIC_PORT"
 ENV_FPM_WORKER_ID = "DYN_FPM_WORKER_ID"
 ENV_FPM_BENCHMARK_OUTPUT_PATH = "DYN_FPM_BENCHMARK_OUTPUT_PATH"
 ENV_FPM_BENCH_COLLECT_IMBALANCED = "DYN_FPM_BENCH_COLLECT_IMBALANCED"
+ENV_BENCH_CONTENT_SEED = "DYN_BENCH_CONTENT_SEED"
 EPHEMERAL_PORT_RANGE_PATH = "/proc/sys/net/ipv4/ip_local_port_range"
 
 
@@ -647,6 +651,21 @@ class BenchmarkPoint:
     # its rows from an inequality on every request and no shape parameter can
     # reproduce them.
     rows: list[list[int]] | None = None
+
+
+def benchmark_content_point_key(point: dict) -> str:
+    """Content coordinates, independent of grid numbering and provenance labels."""
+    payload = {
+        "point_type": point["point_type"],
+        "batch_size": point["batch_size"],
+        "total_prefill_tokens": point.get("total_prefill_tokens", 0),
+        "total_kv_read_tokens": point.get("total_kv_read_tokens", 0),
+        "partition": point.get("partition"),
+        "rows": point.get("rows"),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 @dataclass
@@ -2616,6 +2635,8 @@ class InstrumentedScheduler(AsyncScheduler):
     # ------------------------------------------------------------------
 
     _bench_random_kda: bool = False
+    _bench_content_seed: str = "0"
+    _bench_prompt_evidence: dict | None = None
 
     def _bench_init(self, vllm_config: "VllmConfig") -> None:
         """Parse benchmark config and initialise state machine."""
@@ -2663,6 +2684,7 @@ class InstrumentedScheduler(AsyncScheduler):
         config_values = {k: v for k, v in cfg.items() if k in known}
         config_values["mode"] = mode
         self._bench_config = BenchmarkConfig(**config_values)
+        self._bench_content_seed = os.environ.get(ENV_BENCH_CONTENT_SEED, "0")
         if not isinstance(self._bench_config.randomize_kda_state, bool):
             raise ValueError("benchmark randomize_kda_state must be a boolean")
         self._bench_random_kda = self._bench_config.randomize_kda_state
@@ -2956,6 +2978,7 @@ class InstrumentedScheduler(AsyncScheduler):
         scheduler_config = getattr(self, "scheduler_config", None)
         payload = {
             "benchmark_config": benchmark_config,
+            "measurement_protocol": self._bench_measurement_protocol(),
             "block_size": self.block_size,
             "hash_block_size": self._bench_hash_block_size,
             "cache_block_size": getattr(self.cache_config, "block_size", None),
@@ -4053,17 +4076,86 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Request injection / cleanup ------------------------------------
 
+    @staticmethod
+    def _bench_point_content_key(point: BenchmarkPoint) -> str:
+        return benchmark_content_point_key(asdict(point))
+
+    def _bench_measurement_protocol(self) -> dict:
+        """Shared benchmark policy; input hashes never establish cache equality."""
+        content_mode = os.environ.get("DYN_BENCH_PREFILL_CONTENT", "")
+        if content_mode not in ("sharegpt", "sharegpt_chain"):
+            content_mode = "random"
+        return {
+            "schema_version": 1,
+            "content_identity": "coordinate_rank_slot_v1",
+            "content_seed": self._bench_content_seed,
+            "synthetic_content": content_mode
+            if self._bench_vocab_size > 1
+            else "zeros",
+            "synthetic_pool_tag": os.environ.get("DYN_BENCH_POOL_TAG", ""),
+            "prompt_hash_encoding": "uint32_le",
+            "independent_repetitions": 1,
+            "timing_metric": "scheduler_wall_time",
+            "input_evidence_scope": "injected_prompt_token_ids",
+            # Async decode may consume GPU-side prev_sampled_token_ids while
+            # the CPU request still contains -1 placeholders. Reading those
+            # placeholders is not an observation of the model's actual input;
+            # synchronizing to copy the device tokens would alter timing.
+            "unobserved": [
+                "sampled_continuation_token_ids",
+                "kv_cache_tensors",
+                "recurrent_state_tensors",
+                "execution_history_equivalence",
+            ],
+            "preparation": {
+                "warmup_iterations": self._bench_config.warmup_iterations,
+                "prefill_real_seed": self._bench_realseed_on(),
+                "decode_real_kv_warmup": self._kvwarm_flag_on(),
+                "giant_kv_threshold": self._kvwarm_giant_threshold(),
+                "giant_kv_repeats": self._kvwarm_giant_repeats(),
+            },
+        }
+
+    def _bench_record_prompt_evidence(self, prompts: Sequence[Sequence[int]]) -> None:
+        """Hash actual admission prompts outside forward-pass timing.
+
+        Request IDs/cache salts isolate allocations and are deliberately not
+        part of input identity. No output placeholders or sampled continuations
+        are hashed, and no worker synchronization is added.
+        """
+        requests = []
+        for slot, tokens in enumerate(prompts):
+            encoded = array("I", tokens)
+            if sys.byteorder != "little":
+                encoded.byteswap()
+            requests.append(
+                {
+                    "slot": slot,
+                    "num_tokens": len(tokens),
+                    "sha256": hashlib.sha256(encoded.tobytes()).hexdigest(),
+                }
+            )
+        self._bench_prompt_evidence = {
+            "status": "recorded",
+            "requests": requests,
+            "sha256": hashlib.sha256(
+                json.dumps(requests, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+        }
+
     def _bench_synthetic_token_ids(self, salt: str, length: int) -> list[int]:
-        """Salt-seeded random token ids for synthetic benchmark prompts.
+        """Deterministic token ids for synthetic benchmark prompts.
 
         All-zero prompts are not measurement-neutral: an MoE router collapses
         constant input onto a few experts, which skews expert-parallel load
         balance and biases measured latency in both phases.
 
-        Determinism contract: ``random.Random(salt)`` seeds from a stable
-        hash of the string, and ``choices`` consumes the stream one draw per
-        element, so the same salt yields the same sequence across processes
-        AND a shorter draw is a strict prefix of a longer one. The fake
+        Determinism contract: the content seed, data-parallel rank, and stable
+        content salt select the token stream. In random mode,
+        ``random.Random(seed)`` seeds from a stable hash of that combination,
+        and ``choices`` consumes the stream one draw per element, so the same
+        inputs yield the same sequence across processes and a shorter draw is
+        a strict prefix of a longer one. The fake
         prefix-cache pairing depends on that prefix property: the seed
         request (length = prefix_tokens) and the measuring request
         (length = full prompt) share a salt, so their first prefix_tokens
@@ -4072,13 +4164,13 @@ class InstrumentedScheduler(AsyncScheduler):
         vocab_size = getattr(self, "_bench_vocab_size", 0)
         if vocab_size <= 1:
             return [0] * length
-        # Mix the attention-DP rank into the seed: salts are derived from
-        # rank-local counters that lockstep keeps identical across ranks, so
+        # Mix the attention-DP rank into the seed: stable content salts are
+        # otherwise identical across ranks, so
         # without this every rank would inject byte-identical token streams
         # and expert routing would be correlated across the whole DP group --
         # a milder cousin of the constant-input collapse this method removes.
         dp_rank = getattr(self, "_fpm_dp_rank", 0)
-        seed = f"dp{dp_rank}:{salt}"
+        seed = f"content-v1:{self._bench_content_seed}:dp{dp_rank}:{salt}"
         mode = os.environ.get("DYN_BENCH_PREFILL_CONTENT", "")
         if mode == "sharegpt":
             return self._bench_content_pool_ids(seed, length)
@@ -4148,10 +4240,13 @@ class InstrumentedScheduler(AsyncScheduler):
         self,
         prefix_lengths: Sequence[int],
         cache_salts: Sequence[str],
+        content_salts: Sequence[str] | None = None,
     ) -> bool:
         """Register block-aligned synthetic prefixes without running a model."""
         if len(prefix_lengths) != len(cache_salts):
             raise ValueError("cache_salts must match prefix_lengths")
+        if content_salts is not None and len(content_salts) != len(prefix_lengths):
+            raise ValueError("content_salts must match prefix_lengths")
 
         seed_requests: list[Request] = []
 
@@ -4190,11 +4285,13 @@ class InstrumentedScheduler(AsyncScheduler):
                     continue
                 req = Request(
                     request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
-                    # Salted by cache_salt: the measuring request draws its
-                    # prompt from the same salt, so the seeded prefix matches
-                    # token-for-token and the block hashes line up.
+                    # Content salt matches the measuring request; cache_salt
+                    # still isolates this allocation from other points.
                     prompt_token_ids=self._bench_synthetic_token_ids(
-                        cache_salt, prefix_tokens
+                        content_salts[index]
+                        if content_salts is not None
+                        else cache_salt,
+                        prefix_tokens,
                     ),
                     sampling_params=SamplingParams(max_tokens=1),
                     pooling_params=None,
@@ -4239,6 +4336,7 @@ class InstrumentedScheduler(AsyncScheduler):
         cache_salts: Sequence[str] | None = None,
         expected_kv_read_tokens: Sequence[int] | None = None,
         prompt_token_ids_list: Sequence[Sequence[int]] | None = None,
+        content_salts: Sequence[str] | None = None,
     ) -> int:
         """Build and atomically enqueue a possibly heterogeneous prefill batch.
 
@@ -4249,6 +4347,8 @@ class InstrumentedScheduler(AsyncScheduler):
         batch_size = len(prompt_lens)
         if cache_salts is not None and len(cache_salts) != batch_size:
             raise ValueError("cache_salts must match prompt_lens")
+        if content_salts is not None and len(content_salts) != batch_size:
+            raise ValueError("content_salts must match prompt_lens")
         if prompt_token_ids_list is not None:
             if len(prompt_token_ids_list) != batch_size:
                 raise ValueError("prompt_token_ids_list must match prompt_lens")
@@ -4265,18 +4365,26 @@ class InstrumentedScheduler(AsyncScheduler):
             raise ValueError("expected_kv_read_tokens must match prompt_lens")
 
         requests: list[Request] = []
+        prompts: list[list[int]] = []
+        shape = json.dumps(list(prompt_lens), separators=(",", ":"))
         for index, prompt_len in enumerate(prompt_lens):
             req_id = f"__bench_{self._bench_seq + index}"
             salt = cache_salts[index] if cache_salts is not None else req_id
+            content_salt = (
+                content_salts[index]
+                if content_salts is not None
+                else cache_salts[index]
+                if cache_salts is not None
+                else f"prefill:{shape}:slot{index}"
+            )
+            prompt = (
+                list(prompt_token_ids_list[index])
+                if prompt_token_ids_list is not None
+                else self._bench_synthetic_token_ids(content_salt, prompt_len)
+            )
             req = Request(
                 request_id=req_id,
-                # Same salt as the fake-prefix seed for this slot: the first
-                # expected_kv_read_tokens ids reproduce the seeded prefix.
-                prompt_token_ids=(
-                    list(prompt_token_ids_list[index])
-                    if prompt_token_ids_list is not None
-                    else self._bench_synthetic_token_ids(salt, prompt_len)
-                ),
+                prompt_token_ids=prompt,
                 sampling_params=SamplingParams(max_tokens=max_tokens),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
@@ -4297,7 +4405,9 @@ class InstrumentedScheduler(AsyncScheduler):
                     return 0
 
             requests.append(req)
+            prompts.append(prompt)
 
+        self._bench_record_prompt_evidence(prompts)
         self._bench_seq += len(requests)
         for req in requests:
             self.add_request(req)
@@ -4339,10 +4449,13 @@ class InstrumentedScheduler(AsyncScheduler):
         new_reqs_data: list[NewRequestData] = []
         num_scheduled_tokens: dict[str, int] = {}
 
-        for ctx_len in context_lengths:
+        shape = json.dumps(list(context_lengths), separators=(",", ":"))
+        for index, ctx_len in enumerate(context_lengths):
             req_id = f"{RANDOM_KDA_REQUEST_PREFIX if self._bench_random_kda else '__bench_'}{self._bench_seq}"
             padded_len = ctx_len + 1
-            prompt = self._bench_synthetic_token_ids(req_id, padded_len)
+            prompt = self._bench_synthetic_token_ids(
+                f"decode:{shape}:slot{index}", padded_len
+            )
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
@@ -4405,6 +4518,9 @@ class InstrumentedScheduler(AsyncScheduler):
             else None
         )
 
+        self._bench_record_prompt_evidence(
+            [request.prompt_token_ids for request in new_reqs_data]
+        )
         output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -4876,7 +4992,13 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         ]
 
+        point_key = self._bench_point_content_key(point)
+
         def prompts(tail_tag: str) -> list[list[int]]:
+            # Eager warmup must not leave the measured tail in the prefix
+            # cache: only the intentionally shared seed prefix may hit.
+            if EAGER_WARMUP_REASON in point.sample_reasons:
+                tail_tag = f"{tail_tag}_eager_warmup"
             out: list[list[int]] = []
             for slot, (prompt_len, seed_len) in enumerate(
                 zip(prompt_lens, seed_lens, strict=True)
@@ -4890,7 +5012,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 tail = list(
                     self._bench_synthetic_token_ids(
-                        f"__bench_{tail_tag}_{self._bench_seq}_{slot}",
+                        f"point:{point_key}:{tail_tag}:slot{slot}",
                         prompt_len - len(prefix),
                     )
                 )
@@ -5012,6 +5134,7 @@ class InstrumentedScheduler(AsyncScheduler):
         point = next_point
 
         self._bench_current_fpms = []
+        self._bench_prompt_evidence = None
         new_token_lengths = self._bench_prefill_new_token_lengths(
             point.total_prefill_tokens, point.batch_size, point.partition, point.rows
         )
@@ -5031,12 +5154,18 @@ class InstrumentedScheduler(AsyncScheduler):
                 f"__bench_kv_seed_{self._bench_seq}_{index}"
                 for index in range(point.batch_size)
             ]
+            point_key = self._bench_point_content_key(point)
+            content_salts = [
+                f"point:{point_key}:fake_prefix:slot{index}"
+                for index in range(point.batch_size)
+            ]
             if not self._bench_cache_fake_prefixes(
                 prefix_lengths=[
                     self._bench_seed_prompt_len(kv_read_tokens)
                     for kv_read_tokens in kv_read_lengths
                 ],
                 cache_salts=cache_salts,
+                content_salts=content_salts,
             ):
                 self._bench_skip_point(point, "fake_prefix_cache_allocation_failed")
                 logger.warning(
@@ -5064,6 +5193,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 max_tokens=1,
                 cache_salts=cache_salts,
                 expected_kv_read_tokens=kv_read_lengths,
+                content_salts=content_salts,
             )
             if injected != point.batch_size:
                 self._bench_current_point = None
@@ -5479,7 +5609,7 @@ class InstrumentedScheduler(AsyncScheduler):
         return tok
 
     def _kvwarm_chain_token_ids(self, chain_index: int, depth: int) -> list:
-        """Deterministic chain assembly: seed = (grid digest, dp_rank, chain);
+        """Deterministic chain assembly: seed = (content seed, dp_rank, chain);
         conversation-level shuffle and packing. Per-chain caches grow
         monotonically -- across generations a chain only extends, never
         recomputes (prefix-cache hits also require the chain prefix to be
@@ -5491,8 +5621,8 @@ class InstrumentedScheduler(AsyncScheduler):
         tokens, cursor, order = cache.get(chain_index, ([], 0, None))
         if order is None:
             texts = self._kvwarm_load_texts()
-            seed = f"{self._bench_grid_digest}:{self._fpm_dp_rank}:{chain_index}"
-            rng = __import__("random").Random(seed)
+            seed = f"content-v1:{self._bench_content_seed}:{self._fpm_dp_rank}:{chain_index}"
+            rng = random.Random(seed)
             order = list(range(len(texts)))
             rng.shuffle(order)
         if len(tokens) < depth:
@@ -6222,6 +6352,9 @@ class InstrumentedScheduler(AsyncScheduler):
             # block left referenced fails the prefix-cache reset).
             self._kvwarm_take_cow_copies()
             raise
+        self._bench_record_prompt_evidence(
+            [request.prompt_token_ids for request in new_reqs_data]
+        )
         output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=CachedRequestData.make_empty(),
@@ -6411,6 +6544,7 @@ class InstrumentedScheduler(AsyncScheduler):
             )
         self._bench_current_point = point
         self._bench_current_fpms = []
+        self._bench_prompt_evidence = None
         self._bench_extra_steps_left = 1
         self._bench_expected_fpms = 2
         if self._kvwarm_flag_on() and (
@@ -6485,6 +6619,9 @@ class InstrumentedScheduler(AsyncScheduler):
         if self._bench_current_point is not None:
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
+            raw_fpms = deepcopy(local_fpms)
+            reduction = "single_step"
+            sample_indices = list(range(len(local_fpms)))
             expected_fpms = getattr(self, "_bench_expected_fpms", 1)
             if expected_fpms > 2 and len(local_fpms) >= 2:
                 # Giant-KV median: several adjacent steady steps, counting however
@@ -6499,6 +6636,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 chosen["wall_time"] = walls[len(walls) // 2]
                 chosen["kvwarm_giant_median_of"] = len(steadies)
                 local_fpms = [chosen]
+                reduction = "adjacent_upper_median"
+                sample_indices = list(range(1, 1 + len(steadies)))
             elif expected_fpms > 1 and len(local_fpms) >= expected_fpms:
                 # Keep only the steady-state sample; the admission step is
                 # scaffolding. A rank that reached the deadline with the
@@ -6507,6 +6646,27 @@ class InstrumentedScheduler(AsyncScheduler):
                 # (sum_decode_kv_tokens mismatch) and every rank skips the
                 # point together -- no rank ever bypasses the barrier.
                 local_fpms = local_fpms[-1:]
+                reduction = "last_step"
+                sample_indices = [len(raw_fpms) - 1]
+            if len(local_fpms) == 1:
+                local_fpms[0]["benchmark_measurement"] = {
+                    "schema_version": 1,
+                    "point_key": self._bench_point_content_key(point),
+                    "dp_rank": self._fpm_dp_rank,
+                    "prompts": self._bench_prompt_evidence
+                    or {"status": "unavailable", "sha256": None, "requests": []},
+                    "preparation": {
+                        "grid_digest": self._bench_grid_digest,
+                        "completed_points_before": len(self._bench_results),
+                        "kv_seed_regime": self._kvwarm_seed_regime(point),
+                    },
+                    "expected_internal_samples": expected_fpms,
+                    "raw_fpms": raw_fpms,
+                    "estimate": {
+                        "method": reduction,
+                        "raw_sample_indices": sample_indices,
+                    },
+                }
             if self._bench_synchronizer is not None:
                 group_result = self._bench_synchronizer.collect_result(
                     point,
@@ -6762,6 +6922,7 @@ class InstrumentedScheduler(AsyncScheduler):
                 "policy": RANDOM_KDA_POLICY if self._bench_random_kda else None,
                 "uniform_bound": RANDOM_KDA_BOUND if self._bench_random_kda else None,
             },
+            "measurement_protocol": self._bench_measurement_protocol(),
             "measurement_policy": {
                 "decode": "steady_state_second_step",
                 "prefill": "single_step",

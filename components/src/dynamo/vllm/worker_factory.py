@@ -47,7 +47,11 @@ from .health_check import (
     VllmHealthCheckPayload,
     VllmPrefillHealthCheckPayload,
 )
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+    benchmark_content_point_key,
+)
 from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
@@ -208,6 +212,21 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("Self-benchmark rank results are missing run_id")
     if not isinstance(grid_digest, str) or not grid_digest:
         raise RuntimeError("Self-benchmark rank results are missing grid_digest")
+    has_measurement_protocol = "measurement_protocol" in reference
+    measurement_protocol = reference.get("measurement_protocol")
+    if has_measurement_protocol and (
+        not isinstance(measurement_protocol, dict)
+        or measurement_protocol.get("schema_version") != 1
+    ):
+        raise RuntimeError("Self-benchmark results have invalid measurement protocol")
+    for _, path, data in rank_data:
+        if ("measurement_protocol" in data) != has_measurement_protocol or data.get(
+            "measurement_protocol"
+        ) != measurement_protocol:
+            raise RuntimeError(
+                f"Self-benchmark measurement protocol mismatch at {path}: "
+                "every contributing rank must record the same protocol"
+            )
     # A rank is "degraded" when its engine capture failed or is missing while
     # at least one other rank has one: it cannot be trusted for an identity
     # comparison, so it is excluded below and carried into the merged
@@ -305,6 +324,11 @@ def _merge_benchmark_rank_results(
             )
 
         wall_times: list[float] = []
+        measurement_point_key = (
+            benchmark_content_point_key(group["point"])
+            if has_measurement_protocol
+            else None
+        )
         for rank_result in rank_results:
             dp_rank = rank_result["dp_rank"]
             fpms = rank_result.get("fpms")
@@ -324,6 +348,35 @@ def _merge_benchmark_rank_results(
                 raise RuntimeError(
                     "Self-benchmark FPM rank mismatch: "
                     f"result_rank={dp_rank} fpm_rank={fpm.get('dp_rank')}"
+                )
+            measurement = fpm.get("benchmark_measurement")
+            if has_measurement_protocol:
+                if (
+                    not isinstance(measurement, dict)
+                    or measurement.get("schema_version") != 1
+                    or measurement.get("dp_rank") != dp_rank
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark measurement evidence missing or invalid: "
+                        f"rank={dp_rank} benchmark_id={benchmark_id}"
+                    )
+                point_key = measurement.get("point_key")
+                preparation = measurement.get("preparation")
+                if (
+                    not isinstance(point_key, str)
+                    or not point_key
+                    or not isinstance(preparation, dict)
+                    or preparation.get("grid_digest") != grid_digest
+                    or point_key != measurement_point_key
+                ):
+                    raise RuntimeError(
+                        "Self-benchmark measurement identity mismatch: "
+                        f"rank={dp_rank} benchmark_id={benchmark_id}"
+                    )
+            elif "benchmark_measurement" in fpm:
+                raise RuntimeError(
+                    "Self-benchmark measurement evidence has no shared protocol: "
+                    f"rank={dp_rank} benchmark_id={benchmark_id}"
                 )
             wall_times.append(float(fpm.get("wall_time", 0.0)))
         expected_wall_time = max(wall_times, default=0.0)

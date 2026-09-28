@@ -4,6 +4,7 @@
 """Unit tests for worker_factory.py"""
 
 import asyncio
+import copy
 import json
 import logging
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import pytest
 
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
+from dynamo.vllm.instrumented_scheduler import benchmark_content_point_key
 from dynamo.vllm.worker_factory import (
     ENGINE_PROBE_TIMEOUT_SECONDS,
     EngineSetupResult,
@@ -1925,65 +1927,12 @@ def _engine_block(dp_rank: int, backend: str | None = None) -> dict:
 
 
 def _engine_rank_payload(dp_rank: int, engine: dict | None) -> dict:
-    """A two-rank-group rank artifact whose only variable is ``engine``."""
-    point = {"benchmark_id": 1, "point_type": "prefill"}
-    rank_results = [
-        {"dp_rank": 0, "fpms": [{"counter_id": 1, "dp_rank": 0, "wall_time": 0.01}]},
-        {"dp_rank": 1, "fpms": [{"counter_id": 1, "dp_rank": 1, "wall_time": 0.02}]},
-    ]
-    payload: dict = {
-        "schema_version": 2,
-        "artifact_type": "rank",
-        "valid": True,
-        "run_id": "run-1",
-        "grid_digest": "grid-1",
-        "timing": {
-            "started_at": "2026-09-19T12:00:00Z",
-            "completed_at": "2026-09-19T12:00:10Z",
-            "benchmark_elapsed_seconds": 10.0,
-            "measured_iteration_seconds": 0.02,
-        },
-        "dp": {"rank": dp_rank, "size": 2},
-        "coverage": {
-            "expected_points": 1,
-            "completed_points": 1,
-            "skipped_points": 0,
-        },
-        "results": [
-            {
-                "point": point,
-                "fpms": [
-                    {
-                        "counter_id": 1,
-                        "dp_rank": dp_rank,
-                        "wall_time": 0.01 * (dp_rank + 1),
-                    }
-                ],
-            }
-        ],
-        "iteration_groups": [
-            {
-                "benchmark_id": 1,
-                "point": point,
-                "expected_dp_ranks": [0, 1],
-                "complete": True,
-                "wall_time": 0.02,
-                "rank_results": rank_results,
-            }
-        ],
-        "skipped_points": [],
-    }
-    if engine is not None:
-        payload["engine"] = engine
-    return payload
+    """A two-rank-group rank artifact with optional engine provenance."""
+    return _engine_rank_payload_group(dp_rank, engine, size=2)
 
 
 def _engine_rank_payload_group(dp_rank: int, engine: dict | None, size: int) -> dict:
-    """An N-rank-group rank artifact whose only variable is ``engine``.
-
-    ``_engine_rank_payload``'s fixed 2-rank group cannot exercise a third,
-    unrelated degraded rank alongside two ranks that genuinely disagree.
-    """
+    """An N-rank-group rank artifact with optional engine provenance."""
     point = {"benchmark_id": 1, "point_type": "prefill"}
     # Scaled the same way as results[0].fpms[0] below, so a rank's own local
     # result matches its own copy of the synchronized group at every rank,
@@ -2251,7 +2200,245 @@ def test_merge_without_engine_provenance_is_unchanged(tmp_path, caplog):
     )
 
     assert "engine" not in merged
+    assert "measurement_protocol" not in merged
     assert "engine provenance" not in caplog.text
+
+
+def _measurement_rank_payloads() -> list[dict]:
+    """Two ranks retain distinct prompt hashes and their unreduced samples."""
+    payloads = [_engine_rank_payload(rank, None) for rank in range(2)]
+    for rank, payload in enumerate(payloads):
+        payload["measurement_protocol"] = {
+            "schema_version": 1,
+            "content_identity": "coordinate_rank_slot_v1",
+            "content_seed": "0",
+            "synthetic_content": "random",
+            "synthetic_pool_tag": "",
+            "prompt_hash_encoding": "uint32_le",
+            "independent_repetitions": 1,
+            "timing_metric": "scheduler_wall_time",
+            "input_evidence_scope": "injected_prompt_token_ids",
+            "unobserved": [
+                "sampled_continuation_token_ids",
+                "kv_cache_tensors",
+                "recurrent_state_tensors",
+                "execution_history_equivalence",
+            ],
+            "preparation": {
+                "warmup_iterations": 5,
+                "prefill_real_seed": False,
+                "decode_real_kv_warmup": True,
+                "giant_kv_threshold": 1000000,
+                "giant_kv_repeats": 3,
+            },
+        }
+        group = payload["iteration_groups"][0]
+        group["point"].update(
+            point_type="decode", batch_size=2, total_kv_read_tokens=512
+        )
+        for rank_result in group["rank_results"]:
+            result_rank = rank_result["dp_rank"]
+            fpm = rank_result["fpms"][0]
+            fpm["benchmark_measurement"] = {
+                "schema_version": 1,
+                "point_key": benchmark_content_point_key(group["point"]),
+                "dp_rank": result_rank,
+                "prompts": {
+                    "status": "recorded",
+                    "sha256": str(result_rank) * 64,
+                    "requests": [
+                        {
+                            "slot": 0,
+                            "num_tokens": 256,
+                            "sha256": str(result_rank + 2) * 64,
+                        }
+                    ],
+                },
+                "preparation": {
+                    "grid_digest": "grid-1",
+                    "completed_points_before": 0,
+                    "kv_seed_regime": "real_kv",
+                },
+                "expected_internal_samples": 4,
+                "raw_fpms": [
+                    {**fpm, "wall_time": wall_time}
+                    for wall_time in (
+                        0.05,
+                        fpm["wall_time"] - 0.002,
+                        fpm["wall_time"],
+                        0.5,
+                    )
+                ],
+                "estimate": {
+                    "method": "adjacent_upper_median",
+                    "raw_sample_indices": [1, 2, 3],
+                },
+            }
+        payload["results"][0]["fpms"] = copy.deepcopy(
+            group["rank_results"][rank]["fpms"]
+        )
+    return payloads
+
+
+def test_merge_preserves_rank_specific_inputs_and_all_raw_samples(tmp_path):
+    payloads = _measurement_rank_payloads()
+    merged = _merge_benchmark_rank_results(
+        [
+            (rank, tmp_path / f"rank{rank}.json", data)
+            for rank, data in enumerate(payloads)
+        ],
+        tmp_path / "merged.json",
+    )
+    # Serialization and merging must preserve all internal timing samples.
+    on_disk = json.loads(json.dumps(merged))
+    assert on_disk["measurement_protocol"] == payloads[0]["measurement_protocol"]
+    assert on_disk["iteration_groups"] == payloads[0]["iteration_groups"]
+    for rank, source in enumerate(payloads):
+        expected = source["results"][0]["fpms"][0]["benchmark_measurement"]
+        actual = on_disk["results"][rank]["fpms"][0]["benchmark_measurement"]
+        assert actual == expected
+        assert actual["prompts"]["sha256"] == str(rank) * 64
+        assert [sample["wall_time"] for sample in actual["raw_fpms"]][-1] == 0.5
+    merged["results"][0]["fpms"][0]["benchmark_measurement"]["raw_fpms"].clear()
+    assert (
+        len(payloads[0]["results"][0]["fpms"][0]["benchmark_measurement"]["raw_fpms"])
+        == 4
+    )
+
+
+def test_merge_preserves_unavailable_prompt_evidence(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    evidence["prompts"] = {"status": "unavailable", "sha256": None, "requests": []}
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+    )
+    assert merged["results"][1]["fpms"][0]["benchmark_measurement"] == evidence
+    assert (
+        merged["measurement_protocol"]["unobserved"]
+        == payload["measurement_protocol"]["unobserved"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [("content_seed", "1"), ("timing_metric", "cuda_event"), ("schema_version", 2)],
+)
+def test_merge_rejects_different_measurement_protocols(tmp_path, field, changed):
+    payloads = _measurement_rank_payloads()
+    payloads[1]["measurement_protocol"][field] = changed
+    with pytest.raises(RuntimeError, match="measurement protocol mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+@pytest.mark.parametrize("missing_rank", [0, 1])
+def test_merge_rejects_mixed_legacy_and_protocol_artifacts(tmp_path, missing_rank):
+    payloads = _measurement_rank_payloads()
+    del payloads[missing_rank]["measurement_protocol"]
+    with pytest.raises(RuntimeError, match="measurement protocol mismatch"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+@pytest.mark.parametrize("protocol", [None, {}, {"schema_version": 2}])
+def test_merge_rejects_invalid_measurement_protocol(tmp_path, protocol):
+    payloads = _measurement_rank_payloads()
+    for payload in payloads:
+        payload["measurement_protocol"] = protocol
+    with pytest.raises(RuntimeError, match="invalid measurement protocol"):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_measurement_evidence_without_protocol(tmp_path):
+    payloads = _measurement_rank_payloads()
+    for payload in payloads:
+        del payload["measurement_protocol"]
+    with pytest.raises(
+        RuntimeError, match="measurement evidence has no shared protocol"
+    ):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_missing_measurement_evidence_from_remote_rank(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    # A node-local merge still sees every global rank through its synchronized group.
+    del payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    with pytest.raises(RuntimeError, match="measurement evidence missing or invalid"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+@pytest.mark.parametrize("field", ["point_key", "dp_rank", "grid_digest"])
+def test_merge_rejects_measurement_identity_mismatch(tmp_path, field):
+    payload = _measurement_rank_payloads()[0]
+    evidence = payload["iteration_groups"][0]["rank_results"][1]["fpms"][0][
+        "benchmark_measurement"
+    ]
+    if field == "grid_digest":
+        evidence["preparation"][field] = "another-grid"
+    else:
+        evidence[field] = "another-point" if field == "point_key" else 0
+    with pytest.raises(
+        RuntimeError,
+        match="measurement (identity mismatch|evidence missing or invalid)",
+    ):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
+
+
+def test_merge_rejects_changed_local_raw_measurements(tmp_path):
+    payloads = _measurement_rank_payloads()
+    evidence = payloads[1]["results"][0]["fpms"][0]["benchmark_measurement"]
+    evidence["raw_fpms"][-1]["wall_time"] = 0.02
+    with pytest.raises(
+        RuntimeError, match="local result differs from synchronized group"
+    ):
+        _merge_benchmark_rank_results(
+            [
+                (rank, tmp_path / f"rank{rank}.json", data)
+                for rank, data in enumerate(payloads)
+            ],
+            tmp_path / "merged.json",
+        )
+
+
+def test_merge_rejects_stale_evidence_shared_by_every_rank(tmp_path):
+    payload = _measurement_rank_payloads()[0]
+    # Both ranks still agree on their old key, but it describes another point.
+    payload["iteration_groups"][0]["point"]["total_kv_read_tokens"] = 1024
+    with pytest.raises(RuntimeError, match="measurement identity mismatch"):
+        _merge_benchmark_rank_results(
+            [(0, tmp_path / "rank0.json", payload)], tmp_path / "merged.json"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2542,6 +2729,7 @@ def test_attach_engine_resolved_survives_a_malformed_dict_shaped_result(tmp_path
     assert rank_doc["engine"]["resolution"] == merged["engine"]["resolution"]
 
 
+@pytest.mark.timeout(5)
 def test_attach_engine_resolved_records_the_exception_type_on_a_timeout(
     monkeypatch, tmp_path
 ):

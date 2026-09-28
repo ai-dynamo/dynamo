@@ -36,6 +36,7 @@ def _isolate_synthetic_content_env(monkeypatch):
     explicitly."""
     monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
     monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+    monkeypatch.delenv("DYN_BENCH_CONTENT_SEED", raising=False)
     monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_THRESHOLD", raising=False)
     monkeypatch.delenv("DYN_BENCH_GIANT_KV_REPEATS", raising=False)
@@ -66,6 +67,7 @@ from dynamo.vllm.instrumented_scheduler import (  # noqa: E402
 pytestmark = [
     pytest.mark.unit,
     pytest.mark.vllm,
+    pytest.mark.core,
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
 ]
@@ -751,6 +753,7 @@ def _digest_stub(max_num_running_reqs: int):
     mirroring the activation-time filtering of the decode capture sizes."""
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_config = BenchmarkConfig()
+    stub._bench_vocab_size = 0
     stub.block_size = 16
     stub._bench_hash_block_size = 16
     stub.cache_config = SimpleNamespace(block_size=16, enable_prefix_caching=True)
@@ -3004,6 +3007,7 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
     stub._bench_cache_fake_prefixes.assert_called_once_with(
         prefix_lengths=[16, 16, 8],
         cache_salts=seed_salts,
+        content_salts=stub._bench_cache_fake_prefixes.call_args.kwargs["content_salts"],
     )
     stub.kv_cache_manager.new_step_starts.assert_called_once_with()
     assert calls == [
@@ -3012,6 +3016,9 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
             "max_tokens": 1,
             "cache_salts": seed_salts,
             "expected_kv_read_tokens": [16, 16, 8],
+            "content_salts": stub._bench_cache_fake_prefixes.call_args.kwargs[
+                "content_salts"
+            ],
         }
     ]
     assert stub._bench_sync_pending is True
@@ -3111,7 +3118,7 @@ def test_prefill_real_seed_stages_warms_then_measures(monkeypatch):
         p[:8] for p in warm["prompt_token_ids_list"]
     ]
     assert any("rswarm" in s for s in stub._salts_requested)
-    assert any("__bench_rsm_" in s for s in stub._salts_requested)
+    assert any(":rsm:" in s for s in stub._salts_requested)
     assert (
         measured["prompt_token_ids_list"][0][16:]
         != warm["prompt_token_ids_list"][0][16:]
@@ -3414,8 +3421,8 @@ def test_prefill_real_seed_staging_content_is_measured_prefix(monkeypatch):
         stub._fpm_dp_rank = dp_rank
         stub._bench_block_hasher = None
         stub.add_request = MagicMock()
-        stub._bench_cached_kv_read_tokens = (
-            lambda req: 16 if len(req.prompt_token_ids) > 16 else 8
+        stub._bench_cached_kv_read_tokens = lambda req: (
+            16 if len(req.prompt_token_ids) > 16 else 8
         )
 
         InstrumentedScheduler._bench_step_prefill(stub)  # staging
@@ -3536,6 +3543,7 @@ def test_prefill_fake_cache_validation_miss_skips_measured_point():
         max_tokens=1,
         cache_salts=seed_salts,
         expected_kv_read_tokens=[16, 16, 8],
+        content_salts=stub._bench_cache_fake_prefixes.call_args.kwargs["content_salts"],
     )
 
 
@@ -3766,6 +3774,7 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
     )
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_expected_points = 1
     stub._bench_results = []
@@ -3815,6 +3824,7 @@ def test_benchmark_timing_excludes_engine_startup_and_sums_measured_groups(
 
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_start_monotonic = None
     stub._bench_started_at = None
@@ -3941,6 +3951,7 @@ def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
     fpm = {"counter_id": 1, "dp_rank": 0, "wall_time": 0.25}
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path), timeout=1)
     stub._bench_expected_points = 2
     stub._bench_results = [
@@ -3998,6 +4009,7 @@ def test_benchmark_output_marks_timeout_result_partial_and_usable(tmp_path):
 def test_benchmark_output_marks_requested_empty_phase_invalid(tmp_path):
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(mode="decode", output_path=str(output_path))
     stub._bench_expected_points = 0
     stub._bench_results = []
@@ -4027,6 +4039,7 @@ def _benchmark_save_stub(point: BenchmarkPoint, fpms: list[dict]):
         fpm.setdefault("dp_rank", 0)
         fpm.setdefault("wall_time", 0.01)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid_digest = None
     stub._bench_current_point = point
     stub._bench_current_fpms = fpms
     stub._bench_expected_fpms = 1
@@ -4736,6 +4749,7 @@ def test_kvwarm_chain_tokens_are_deterministic_and_extend_monotonically():
 def test_synthetic_content_pool_windows_share_prefix_across_lengths(monkeypatch):
     monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
     monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+    monkeypatch.delenv("DYN_BENCH_CONTENT_SEED", raising=False)
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._bench_vocab_size = 1_000
     stub._fpm_dp_rank = 0
@@ -4756,8 +4770,8 @@ def test_synthetic_content_chain_mode_routes_through_kvwarm_chains(monkeypatch):
     stub._bench_vocab_size = 1_000
     stub._fpm_dp_rank = 0
     seen = []
-    stub._kvwarm_chain_token_ids = (
-        lambda idx, depth: seen.append((idx, depth)) or [7] * depth
+    stub._kvwarm_chain_token_ids = lambda idx, depth: (
+        seen.append((idx, depth)) or [7] * depth
     )
     out = InstrumentedScheduler._bench_synthetic_token_ids(stub, "salt", 9)
     assert out == [7] * 9
@@ -6857,6 +6871,7 @@ def test_bench_capture_engine_records_capture_error_instead_of_raising():
 def test_benchmark_output_includes_engine_block(tmp_path):
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_expected_points = 0
     stub._bench_results = []
@@ -6879,6 +6894,7 @@ def test_benchmark_output_includes_engine_block(tmp_path):
 def test_benchmark_output_omits_engine_block_when_not_captured(tmp_path):
     output_path = tmp_path / "benchmark.json"
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_vocab_size = 0
     stub._bench_config = BenchmarkConfig(output_path=str(output_path))
     stub._bench_expected_points = 0
     stub._bench_results = []
@@ -6895,12 +6911,13 @@ def test_benchmark_output_omits_engine_block_when_not_captured(tmp_path):
     assert "engine" not in json.loads(output_path.read_text())
 
 
-def test_bench_init_wires_engine_capture_into_written_results(tmp_path):
+def test_bench_init_wires_engine_capture_into_written_results(tmp_path, monkeypatch):
     """Drives the real ``_bench_init`` (not ``_bench_capture_engine`` called
     directly) end to end into a real ``_bench_write_results``. The other
     engine-provenance tests all call ``_bench_capture_engine`` directly or
     hand-set ``stub._bench_engine``, so none of them would notice if the
     ``_bench_init`` call site were ever deleted; this one would."""
+    monkeypatch.setenv("DYN_BENCH_CONTENT_SEED", "accepted-campaign-seed")
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._fpm_dp_rank = 7
     stub.max_num_running_reqs = 8
@@ -6955,6 +6972,11 @@ def test_bench_init_wires_engine_capture_into_written_results(tmp_path):
         output = json.load(f)
     assert output["engine"]["parallel"]["data_parallel_rank"] == 7
     assert output["engine"]["parallel"]["data_parallel_rank"] == output["dp"]["rank"]
+    assert output["measurement_protocol"]["content_seed"] == "accepted-campaign-seed"
+    monkeypatch.setenv("DYN_BENCH_CONTENT_SEED", "changed-after-startup")
+    assert (
+        stub._bench_measurement_protocol()["content_seed"] == "accepted-campaign-seed"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -7088,3 +7110,250 @@ def test_ephemeral_port_range_reads_the_kernel_pair(tmp_path):
         instrumented_scheduler_module._ephemeral_port_range(str(tmp_path / "absent"))
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Benchmark measurement protocol and reproducible subset content
+# ---------------------------------------------------------------------------
+
+
+def _measurement_injection_stub(seq: int, dp_rank: int = 0):
+    stub = _vocab_stub(4096, dp_rank=dp_rank)
+    stub._bench_seq = seq
+    stub._bench_grid_digest = f"grid-{seq}"
+    stub._bench_block_hasher = None
+    stub._bench_active_req_ids = set()
+    stub._bench_config = BenchmarkConfig()
+    stub.requests = {}
+    stub.running = []
+    stub.finished_req_ids = set()
+    stub.connector = None
+    stub.ec_connector = None
+    stub.add_request = MagicMock()
+    stub.kv_cache_manager = MagicMock()
+    stub.kv_cache_manager.num_kv_cache_groups = 1
+    stub.kv_cache_manager.use_eagle = False
+    stub.kv_cache_manager.take_new_block_ids.return_value = None
+    stub.kv_cache_manager.allocate_slots.return_value.get_block_ids.return_value = (
+        [0, 1],
+    )
+    return stub
+
+
+def _inject_measurement_prompts(stub, phase):
+    if phase == "prefill":
+        stub._bench_inject_prefill(prompt_lens=[32, 31], max_tokens=1)
+        return [
+            args.args[0].prompt_token_ids for args in stub.add_request.call_args_list
+        ]
+    output = stub._bench_inject_fake_decode(context_lengths=[16, 17])
+    return [request.prompt_token_ids for request in output.scheduled_new_reqs]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_measured_prompt_content_is_independent_of_grid_and_request_history(phase):
+    full_grid = _measurement_injection_stub(seq=500)
+    subset = _measurement_injection_stub(seq=1)
+    full_grid._bench_current_point = BenchmarkPoint(phase, benchmark_id=100)
+    subset._bench_current_point = BenchmarkPoint(phase, benchmark_id=1)
+
+    actual_full = _inject_measurement_prompts(full_grid, phase)
+    actual_subset = _inject_measurement_prompts(subset, phase)
+
+    # This checks real Request/NewRequestData content, not a proposed seed.
+    assert actual_full == actual_subset
+    assert full_grid._bench_prompt_evidence == subset._bench_prompt_evidence
+    assert actual_full[0] != actual_full[1]
+
+
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_measured_prompt_content_changes_with_rank_or_explicit_seed(phase):
+    original = _measurement_injection_stub(seq=0)
+    other_rank = _measurement_injection_stub(seq=0, dp_rank=1)
+    other_seed = _measurement_injection_stub(seq=0)
+    other_seed._bench_content_seed = "campaign-second-draw"
+
+    actual = _inject_measurement_prompts(original, phase)
+    assert actual != _inject_measurement_prompts(other_rank, phase)
+    assert actual != _inject_measurement_prompts(other_seed, phase)
+
+
+def test_real_kv_chain_content_does_not_depend_on_grid_selection():
+    full_grid = _kvwarm_text_stub()
+    subset = _kvwarm_text_stub()
+    full_grid._bench_grid_digest = "full-grid"
+    subset._bench_grid_digest = "subset"
+
+    assert full_grid._kvwarm_chain_token_ids(1, 20) == subset._kvwarm_chain_token_ids(
+        1, 20
+    )
+    prefix = subset._kvwarm_chain_token_ids(1, 7)
+    assert prefix == full_grid._kvwarm_chain_token_ids(1, 20)[:7]
+    subset._fpm_dp_rank = 1
+    subset._kvwarm_token_cache = None
+    assert full_grid._kvwarm_chain_token_ids(1, 20) != subset._kvwarm_chain_token_ids(
+        1, 20
+    )
+
+
+def test_real_seed_measured_tail_is_independent_of_request_history(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    measured = []
+    for seq in (0, 500):
+        stub, calls = _realseed_prefill_stub(point, monkeypatch, seq=seq)
+        del stub._bench_synthetic_token_ids
+        stub._bench_vocab_size = 4096
+        stub._fpm_dp_rank = 0
+        stub._bench_step_prefill()  # stage
+        stub._bench_step_prefill()  # same-shape warmup
+        stub._bench_step_prefill()  # measurement
+        measured.append(calls[-1]["prompt_token_ids_list"])
+    assert measured[0] == measured[1]
+
+
+def test_real_seed_eager_warmup_does_not_reuse_measured_tail(monkeypatch):
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    measured = []
+    for reasons in ([], [EAGER_WARMUP_REASON]):
+        stub, calls = _realseed_prefill_stub(
+            replace(point, sample_reasons=reasons), monkeypatch
+        )
+        del stub._bench_synthetic_token_ids
+        stub._bench_vocab_size = 4096
+        stub._fpm_dp_rank = 0
+        stub._bench_step_prefill()
+        stub._bench_step_prefill()
+        stub._bench_step_prefill()
+        measured.append(calls[-1]["prompt_token_ids_list"])
+    for normal, warmup, kv in zip(*measured, [16, 16, 8], strict=True):
+        assert normal[:kv] == warmup[:kv]
+        assert normal[kv:] != warmup[kv:]
+
+
+@pytest.mark.parametrize(
+    "walls,expected,method,indices",
+    [
+        ([0.01], 1, "single_step", [0]),
+        ([0.1, 0.03], 2, "last_step", [1]),
+        ([0.1, 0.03, 0.5, 0.02], 4, "adjacent_upper_median", [1, 2, 3]),
+    ],
+)
+def test_measurement_evidence_preserves_raw_steps_and_stalls(
+    walls, expected, method, indices
+):
+    point = BenchmarkPoint(
+        "decode", benchmark_id=7, total_kv_read_tokens=48, batch_size=3
+    )
+    fpms = [
+        {
+            "wall_time": wall,
+            "scheduled_requests": {
+                "num_decode_requests": 3,
+                "sum_decode_kv_tokens": 48,
+            },
+        }
+        for wall in walls
+    ]
+    stub = _benchmark_save_stub(point, fpms)
+    stub._bench_grid_digest = "captured-grid"
+    stub._bench_expected_fpms = expected
+    stub._bench_record_prompt_evidence([[3, 4], [5, 6], [7, 8]])
+    stub._bench_save_current_point()
+
+    retained = stub._bench_results[0].fpms[0]
+    evidence = retained["benchmark_measurement"]
+    assert [sample["wall_time"] for sample in evidence["raw_fpms"]] == walls
+    assert evidence["estimate"] == {"method": method, "raw_sample_indices": indices}
+    assert evidence["expected_internal_samples"] == expected
+    assert evidence["preparation"]["grid_digest"] == "captured-grid"
+    assert all("benchmark_measurement" not in sample for sample in evidence["raw_fpms"])
+    # Serialization must not recurse when the estimate was a raw sample.
+    assert json.loads(json.dumps(stub._bench_iteration_groups))[0]["complete"]
+    if expected == 4:
+        assert retained["wall_time"] == 0.03
+        assert 0.5 in [sample["wall_time"] for sample in evidence["raw_fpms"]]
+    # The raw snapshot must not alias later mutations of the retained sample.
+    retained["scheduled_requests"]["sum_decode_kv_tokens"] = 999
+    assert evidence["raw_fpms"][0]["scheduled_requests"]["sum_decode_kv_tokens"] == 48
+
+
+def test_prompt_evidence_does_not_claim_observed_decode_continuations():
+    stub = _measurement_injection_stub(seq=0)
+    output = stub._bench_inject_fake_decode(context_lengths=[16, 17])
+    # vLLM's async CPU placeholders are not actual consumed GPU token IDs.
+    for request in stub.requests.values():
+        request._all_token_ids.append(-1)
+    protocol = stub._bench_measurement_protocol()
+    assert protocol["input_evidence_scope"] == "injected_prompt_token_ids"
+    assert "sampled_continuation_token_ids" in protocol["unobserved"]
+    assert "kv_cache_tensors" in protocol["unobserved"]
+    assert stub._bench_prompt_evidence["status"] == "recorded"
+    assert [row["num_tokens"] for row in stub._bench_prompt_evidence["requests"]] == [
+        17,
+        18,
+    ]
+    assert [len(row.prompt_token_ids) for row in output.scheduled_new_reqs] == [17, 18]
+
+
+@pytest.mark.parametrize("different", ["seed", "content", "pool_tag"])
+def test_grid_invariants_include_measurement_content_policy(different, monkeypatch):
+    first = _digest_stub(max_num_running_reqs=8)
+    first._bench_vocab_size = 4096
+    original = first._bench_grid_invariants_digest()
+    if different == "seed":
+        first._bench_content_seed = "second-content-draw"
+    elif different == "content":
+        monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", "sharegpt")
+    else:
+        monkeypatch.setenv("DYN_BENCH_POOL_TAG", "different-pool")
+    assert first._bench_grid_invariants_digest() != original
+
+
+def test_benchmark_content_key_ignores_grid_annotations_but_keeps_shape():
+    point = BenchmarkPoint(
+        "prefill", benchmark_id=9, total_prefill_tokens=32, batch_size=2
+    )
+    subset = replace(point, benchmark_id=1, sample_reasons=["explicit"])
+    key = instrumented_scheduler_module.benchmark_content_point_key
+    assert key(dataclasses.asdict(point)) == key(dataclasses.asdict(subset))
+    assert key(dataclasses.asdict(point)) != key(
+        dataclasses.asdict(replace(point, batch_size=4))
+    )
+    assert key(dataclasses.asdict(point)) != key(
+        dataclasses.asdict(replace(point, rows=[[1, 0], [31, 0]]))
+    )
+
+
+def test_fake_prefix_content_is_stable_and_matches_measured_request():
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=25, total_kv_read_tokens=40, batch_size=3
+    )
+    prompts = []
+    cache_salts = []
+    for seq in (0, 500):
+        stub = _measurement_injection_stub(seq)
+        stub._bench_grid = deque([point])
+        stub._bench_drain_pending = False
+        stub._bench_current_point = None
+        stub._bench_current_fpms = []
+        stub._bench_hash_block_size = 8
+        stub._bench_skipped_points = []
+        stub._schedule_times = deque()
+        stub._bench_cached_kv_read_tokens = MagicMock(side_effect=[16, 16, 8])
+        stub._bench_step_prefill()
+        seeds = [
+            args.args[0] for args in stub.kv_cache_manager.allocate_slots.call_args_list
+        ]
+        measured = [args.args[0] for args in stub.add_request.call_args_list]
+        assert len(seeds) == len(measured) == 3
+        for seed, request, kv in zip(seeds, measured, [16, 16, 8], strict=True):
+            assert seed.prompt_token_ids == request.prompt_token_ids[:kv]
+            assert seed.cache_salt == request.cache_salt
+        prompts.append([request.prompt_token_ids for request in measured])
+        cache_salts.append([request.cache_salt for request in measured])
+    assert prompts[0] == prompts[1]
+    assert cache_salts[0] != cache_salts[1], "allocation identities stay independent"
