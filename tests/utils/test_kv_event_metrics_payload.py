@@ -11,11 +11,15 @@ an ``event_id`` gap is detected, so it sits at zero on a healthy worker — whic
 means a value-based assertion cannot tell "registered, never incremented" apart
 from "never registered at all". These tests pin down that distinction and prove
 the payload's presence check fires on the broken shape.
+
+The last tests cover ``CachedTokensChatPayload`` waiting for the router to apply
+R1's stored KV events before it lets R2 go.
 """
 
 import pytest
 
-from tests.utils.payloads import KvEventMetricsPayload
+from tests.utils import payloads
+from tests.utils.payloads import CachedTokensChatPayload, KvEventMetricsPayload
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 
 pytestmark = [
@@ -126,3 +130,82 @@ def test_validate_still_fails_on_missing_zmq_events():
     content = _dropped_event_lines(value=0)
     with pytest.raises(AssertionError, match="received KV events"):
         _payload().validate(None, content)
+
+
+# ── CachedTokensChatPayload: wait for R1's stored KV events ────────────────
+
+APPLIED = "dynamo_component_kv_cache_events_applied"
+
+
+def _applied_lines(*, stored_ok: int, stored_not_found: int = 0) -> str:
+    labels = 'dynamo_namespace="dynamo",dynamo_component="backend",worker_id="7f3a1c"'
+    return (
+        f"# TYPE {APPLIED} counter\n"
+        f'{APPLIED}{{{labels},event_type="stored",status="ok"}} {stored_ok}\n'
+        f'{APPLIED}{{{labels},event_type="stored",status="block_not_found"}} '
+        f"{stored_not_found}\n"
+        f'{APPLIED}{{{labels},event_type="removed",status="ok"}} 0\n'
+    )
+
+
+def _serve_metrics(monkeypatch, pages: list[str]) -> list[str]:
+    """Answer each /metrics GET with the next page; repeat the last one."""
+    served: list[str] = []
+
+    class _Response:
+        def __init__(self, text: str):
+            self.text = text
+
+    def fake_get(url, timeout):
+        page = pages[min(len(served), len(pages) - 1)]
+        served.append(page)
+        return _Response(page)
+
+    monkeypatch.setattr(payloads.requests, "get", fake_get)
+    return served
+
+
+def _hit_rate_payload(wait_s: float) -> CachedTokensChatPayload:
+    payload = CachedTokensChatPayload(body={}, repeat_count=2, min_avg_kv_hit_rate=0.5)
+    payload.stored_events_wait_s = wait_s
+    payload.stored_events_poll_s = 0.0
+    return payload
+
+
+def test_wait_returns_once_router_applies_a_stored_event(monkeypatch):
+    served = _serve_metrics(
+        monkeypatch,
+        [
+            _applied_lines(stored_ok=2),  # snapshot before R1
+            _applied_lines(stored_ok=2),
+            # A rejected store must not count as R1's blocks being indexed.
+            _applied_lines(stored_ok=2, stored_not_found=1),
+            _applied_lines(stored_ok=3, stored_not_found=1),
+            _applied_lines(stored_ok=9),  # never reached
+        ],
+    )
+    payload = _hit_rate_payload(wait_s=30.0)
+
+    payload.body_for_iteration(0)
+    payload._wait_for_r1_stored_events()
+
+    assert len(served) == 4
+
+
+def test_wait_gives_up_after_bound_without_failing(monkeypatch, caplog):
+    served = _serve_metrics(monkeypatch, [_applied_lines(stored_ok=2)])
+    payload = _hit_rate_payload(wait_s=0.05)
+
+    payload.body_for_iteration(0)
+    payload._wait_for_r1_stored_events()
+
+    assert len(served) >= 2
+    assert "no new stored KV events" in caplog.text
+
+
+def test_no_scrape_when_hit_rate_gate_is_off(monkeypatch):
+    served = _serve_metrics(monkeypatch, [_applied_lines(stored_ok=2)])
+    payload = CachedTokensChatPayload(body={}, repeat_count=2)
+
+    assert payload.body_for_iteration(0) == {}
+    assert served == []
