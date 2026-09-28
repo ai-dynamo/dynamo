@@ -110,6 +110,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// port mapping, frontend detection, planner RBAC, and the pod label
 	// `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
 	// first-class values, users can set them directly.
+	//
 	// The DGD-only "lpx" type is experimental, requires the operator's
 	// lpx.enabled setting, and may change incompatibly.
 	// +optional
@@ -222,6 +223,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// lpx holds LPX integration configuration. Only meaningful when
 	// `type` is `lpx`.
+	//
 	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
 	// +optional
 	LPX *LPXConfig `json:"lpx,omitempty"`
