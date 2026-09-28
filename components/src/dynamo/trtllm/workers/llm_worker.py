@@ -44,6 +44,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
+    get_extra_metric_prefixes,
     register_embedding_cache_metrics,
     register_engine_metrics_callback,
 )
@@ -841,8 +842,9 @@ async def init_llm_worker(
                 )
                 logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix,
+                # plus any extra prefixes from DYN_EXTRA_METRIC_PREFIXES
+                _metric_prefixes = ["trtllm_", *get_extra_metric_prefixes()]
 
                 # Additional metrics (abort tracking, request types, KV transfer perf).
                 # Wrapped in try/except because AdditionalMetricsCollector depends on
