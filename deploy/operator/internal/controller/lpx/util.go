@@ -57,11 +57,6 @@ func getDynamoGraphDeployment(ctx context.Context, reader client.Reader, deploym
 		return nil, nil
 	}
 
-	if actualRestartToken := deployment.Annotations[dynamo.LPXRestartAnnotation]; actualRestartToken != restartToken {
-		logger.V(4).Info("LPXDynamoGraphDeployment is restarting", "expectedRestartToken", restartToken, "restartToken", actualRestartToken)
-		return nil, nil
-	}
-
 	return dgd, nil
 }
 
