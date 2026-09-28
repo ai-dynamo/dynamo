@@ -36,6 +36,23 @@ pytestmark = [
 # sequential GPU stage so TensorRT-LLM initialization is shared.
 
 
+def test_image_loader_uses_trtllm_configured_limit(monkeypatch) -> None:
+    image_loader = MagicMock()
+    monkeypatch.setattr(mmp, "ImageLoader", image_loader)
+
+    MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=200,
+        tokenizer=MagicMock(),
+    )
+
+    image_loader.assert_called_once_with(
+        enable_frontend_decoding=False,
+        max_bytes=200 * 1024 * 1024,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "error",
@@ -62,10 +79,11 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
     monkeypatch.setattr(mmp, "fetch_bytes", video_fetch)
 
     request = {
+        "image_cache_scope": "session-42",
         "multi_modal_data": {
             "image_url": [{"Url": "https://example.com/x.png"}],
             "video_url": [{"Url": "https://example.com/x.mp4"}],
-        }
+        },
     }
     with pytest.raises(type(error)) as exc_info:
         await processor.process_openai_request(
@@ -73,6 +91,9 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
         )
 
     assert exc_info.value is error
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        [{"Url": "https://example.com/x.png"}], cache_scope="session-42"
+    )
     video_validate.assert_not_awaited()
     video_fetch.assert_not_awaited()
 
@@ -101,7 +122,12 @@ async def test_internal_video_uses_dynamo_fetcher_when_allowed(monkeypatch) -> N
         ep_disaggregated_params=None,
     )
 
-    fetch.assert_awaited_once_with(url, 30.0, policy=processor._url_policy)
+    fetch.assert_awaited_once_with(
+        url,
+        30.0,
+        policy=processor._url_policy,
+        max_bytes=processor.max_file_size_bytes,
+    )
     assert load_video.await_args.args[0] != url
 
 

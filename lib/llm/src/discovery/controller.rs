@@ -281,6 +281,9 @@ pub(crate) struct ModelDiscoveryController<H: ControllerHost> {
     groups: HashMap<GroupKey, DesiredGroup>,
     revision: u64,
     instance_revisions: HashMap<String, u64>,
+    /// The revision at the last `DiscoveryEvent::Resync`. A periodic list that started before
+    /// it can carry an instance the resync removed, so its result is discarded.
+    resync_revision: u64,
     builds: JoinSet<BuildResult<H::Prepared>>,
     reconciliations: JoinSet<ReconciliationResult>,
     active_builds: usize,
@@ -300,6 +303,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             groups: HashMap::new(),
             revision: 0,
             instance_revisions: HashMap::new(),
+            resync_revision: 0,
             builds: JoinSet::new(),
             reconciliations: JoinSet::new(),
             active_builds: 0,
@@ -389,6 +393,21 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             }
             DiscoveryEvent::Removed(_) => {
                 tracing::error!("Unexpected non-model removal in model discovery stream");
+                false
+            }
+            DiscoveryEvent::Resync(instances) => {
+                // A resync supersedes every list that started before it, including one that
+                // started at the current revision: the events it missed never reached the
+                // controller, so nothing advanced the revision on their behalf.
+                self.revision = self.revision.wrapping_add(1);
+                self.resync_revision = self.revision;
+                self.apply_reconciliation(
+                    ReconciliationResult {
+                        revision: self.revision,
+                        instances: Ok(instances),
+                    },
+                    namespace_filter,
+                );
                 false
             }
         };
@@ -1045,6 +1064,12 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
         result: ReconciliationResult,
         namespace_filter: &NamespaceFilter,
     ) {
+        if result.revision < self.resync_revision {
+            tracing::debug!(
+                "Discarding a model reconciliation snapshot that predates a discovery resync"
+            );
+            return;
+        }
         let instances = match result.instances {
             Ok(instances) => instances,
             Err(error) => {
@@ -2156,6 +2181,72 @@ mod tests {
             assert!(!admissions.has_changed().unwrap());
             assert!(host.adapters(&group_key()).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn a_resync_replaces_the_desired_instances() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        let first = instance(1, "spec");
+        let second = instance(2, "spec");
+
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([first.key.clone()])
+        );
+
+        controller.apply_event(
+            DiscoveryEvent::Resync(vec![discovery_instance(&second)]),
+            &NamespaceFilter::Global,
+        );
+        assert_eq!(host.members(&group_key()), BTreeSet::from([second.key]));
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_cannot_revive_a_removed_instance() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        controller.apply_added(first.clone());
+        // The periodic list starts here and captures `first` before its removal.
+        let list_revision = controller.revision;
+        controller.apply_removed(&first.key);
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_that_predates_a_resync_is_discarded_when_no_event_advanced_the_revision() {
+        let (host, _starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host);
+        let first = instance(1, "spec");
+
+        // The periodic list starts here and captures `first`. Its registration and its
+        // removal are then both lost to a backend buffer overflow, so no event reaches
+        // the controller to advance the revision before the resync that follows.
+        let list_revision = controller.revision;
+        controller.apply_event(DiscoveryEvent::Resync(Vec::new()), &NamespaceFilter::Global);
+        controller.apply_reconciliation(
+            ReconciliationResult {
+                revision: list_revision,
+                instances: Ok(vec![discovery_instance(&first)]),
+            },
+            &NamespaceFilter::Global,
+        );
+        assert!(controller.desired.is_empty());
     }
 
     #[tokio::test]

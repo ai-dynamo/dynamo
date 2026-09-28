@@ -278,7 +278,7 @@ impl InnerConnector {
             ));
         };
         // Read etcd directly: the cache's initial watch snapshot is applied asynchronously.
-        let decision = read_decision(&self.etcd_client, &kv_cache.prefix)
+        let (decision, _) = read_scaling_state(&self.etcd_client, &kv_cache.prefix)
             .await
             .map_err(to_pyerr)?;
         *self.decision.lock() = decision;
@@ -366,7 +366,7 @@ impl VirtualConnectorClient {
         )
     }
 
-    /// Wait until a new PlannerDecision appears. Will block until there is one to fetch.
+    /// Wait for an unacknowledged PlannerDecision, including one already published.
     /// Use `get` to fetch the decision.
     #[pyo3(signature = ())]
     pub fn wait<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
@@ -397,7 +397,9 @@ struct InnerClient {
 impl InnerClient {
     /// Fetch the latest scaling decision
     async fn get(&self) -> anyhow::Result<PlannerDecision> {
-        read_decision(&self.etcd_client, &self.key).await
+        read_scaling_state(&self.etcd_client, &self.key)
+            .await
+            .map(|(decision, _)| decision)
     }
 
     /// Mark this decision as having been handled.
@@ -411,28 +413,42 @@ impl InnerClient {
             .await
     }
 
-    /// Wait for a new scaling decision. Use `get` when this returns to fetch the values.
     async fn wait(&self) -> anyhow::Result<()> {
-        let watcher = self.etcd_client.kv_watch_prefix(&self.key).await?;
-        let (_prefix, mut receiver) = watcher.dissolve();
         tokio::select! {
-            _ = receiver.recv() => {
-                Ok(())
-            }
             _ = self.cancellation_token.cancelled() => {
                 anyhow::bail!("VirtualConnectorClient.wait: Runtime shutdown");
             },
+            result = async {
+                // Subscribe before reading so a decision published during the read is not lost.
+                let watcher = self.etcd_client.kv_watch_prefix(&self.key).await?;
+                let (_, mut receiver) = watcher.dissolve();
+                loop {
+                    let (decision, scaled_decision_id) =
+                        read_scaling_state(&self.etcd_client, &self.key).await?;
+                    if !scaling_decision_is_ready(decision.decision_id, scaled_decision_id) {
+                        return Ok(());
+                    }
+                    // ACKs, deletions and resyncs also wake the watch; recheck persisted state.
+                    if receiver.recv().await.is_none() {
+                        anyhow::bail!("VirtualConnectorClient.wait: Watch closed");
+                    }
+                }
+            } => result,
         }
     }
 }
 
-async fn read_decision(client: &Client, prefix: &str) -> anyhow::Result<PlannerDecision> {
+async fn read_scaling_state(
+    client: &Client,
+    prefix: &str,
+) -> anyhow::Result<(PlannerDecision, Option<usize>)> {
     let mut decision = PlannerDecision {
         num_prefill_workers: -1,
         num_decode_workers: -1,
         decision_id: -1,
     };
-    // One prefix read observes all fields at the same etcd revision.
+    let mut scaled_decision_id = None;
+    // One prefix read observes the decision and its acknowledgement at the same revision.
     for kv in client.kv_get_prefix(prefix).await? {
         let key = kv.key_str()?;
         match key.strip_prefix(prefix) {
@@ -441,7 +457,9 @@ async fn read_decision(client: &Client, prefix: &str) -> anyhow::Result<PlannerD
             }
             Some("num_decode_workers") => decision.num_decode_workers = kv.value_str()?.parse()?,
             Some("decision_id") => decision.decision_id = kv.value_str()?.parse()?,
-            Some("scaled_decision_id") => {}
+            Some("scaled_decision_id") => {
+                scaled_decision_id = String::from_utf8_lossy(kv.value()).parse().ok();
+            }
             _ => tracing::warn!(
                 unexpected_key = key,
                 root = prefix,
@@ -449,7 +467,7 @@ async fn read_decision(client: &Client, prefix: &str) -> anyhow::Result<PlannerD
             ),
         }
     }
-    Ok(decision)
+    Ok((decision, scaled_decision_id))
 }
 
 // This compiles to a `mov`, it's basically free

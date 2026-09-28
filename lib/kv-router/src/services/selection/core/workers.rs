@@ -316,9 +316,10 @@ impl SelectionCore {
                         block_size,
                     ))
                 });
-                let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
-                    || WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label),
-                    |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
+                let selector = (self.worker_selection_policy_factory)(
+                    &self.kv_router_config,
+                    self.worker_type,
+                    key.as_ref(),
                 );
                 let profile = self
                     .kv_router_config

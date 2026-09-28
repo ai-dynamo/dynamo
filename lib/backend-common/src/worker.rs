@@ -27,6 +27,7 @@ use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::system_health::ReadinessHold;
+use dynamo_runtime::telemetry::LifecycleOperationRole;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -160,10 +161,10 @@ pub struct WorkerConfig {
     /// `endpoint_types`. `Prefill` registers with the legacy `ModelType::Prefill`
     /// marker bit (no OpenAI surface — dual-emitted for cross-version compat)
     /// and `WorkerType::Prefill`, so the frontend's prefill router targets it
-    /// via `worker_type`. `Decode` keeps `endpoint_types` but force-disables the
-    /// local KV indexer because decode workers do not host the indexer
-    /// endpoint. `Encode` registers as `WorkerType::Encode` with topology needs
-    /// `[[Prefill, Decode], [Aggregated]]`; it also force-disables the local KV
+    /// via `worker_type`. `Decode` keeps `endpoint_types` and honors
+    /// `enable_local_indexer` for its KV event sources. `Encode` registers as
+    /// `WorkerType::Encode` with topology needs
+    /// `[[Prefill, Decode], [Aggregated]]`; it force-disables the local KV
     /// indexer.
     pub disaggregation_mode: DisaggregationMode,
     /// Operator override. `Worker` resolves precedence: this field >
@@ -199,12 +200,10 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     /// Effective `enable_local_indexer`, accounting for disaggregation
-    /// mode. Decode and Encode workers force this off because they don't
+    /// mode. Encode workers force this off because they don't
     /// host the in-process KV indexer endpoint and must not advertise it.
     pub(crate) fn effective_enable_local_indexer(&self) -> bool {
-        self.enable_local_indexer
-            && !self.disaggregation_mode.is_decode()
-            && !self.disaggregation_mode.is_encode()
+        self.enable_local_indexer && !self.disaggregation_mode.is_encode()
     }
 }
 
@@ -1023,12 +1022,20 @@ impl Worker {
                     engine_adapter = engine_adapter.with_first_token_source(source);
                 }
                 let engine_adapter = Arc::new(engine_adapter);
-                let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
+                let lifecycle_role = match self.config.disaggregation_mode {
+                    DisaggregationMode::Prefill => LifecycleOperationRole::Prefill,
+                    DisaggregationMode::Decode => LifecycleOperationRole::Decode,
+                    DisaggregationMode::Encode => LifecycleOperationRole::Encode,
+                    DisaggregationMode::Aggregated => LifecycleOperationRole::Worker,
+                };
+                let ingress =
+                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
+                        .map_err(|e| {
+                            err(
+                                ErrorType::Backend(BackendError::Unknown),
+                                format!("ingress: {e}"),
+                            )
+                        })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
@@ -2080,9 +2087,7 @@ async fn build_local_model(
         .or_else(|| Some(engine_config.model.clone()))
         .filter(|s| !s.is_empty());
 
-    // Decode workers don't host the WorkerKvQuery endpoint, so they must not
-    // advertise the local indexer regardless of the operator-supplied flag.
-    // Mirrors the vLLM worker-factory path.
+    // Use the same effective setting for publisher setup and model metadata.
     let enable_local_indexer = config.effective_enable_local_indexer();
 
     // None for raw engines → all-`None` fields → no KV/DP/bootstrap hints.
@@ -2123,11 +2128,12 @@ async fn build_local_model(
         );
     }
 
-    let rt_cfg = ModelRuntimeConfig {
+    let mut rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
         max_num_batched_tokens: llm.max_num_batched_tokens,
+        max_gpu_lora_count: llm.max_gpu_lora_count,
         data_parallel_size: llm.data_parallel_size.unwrap_or(1),
         data_parallel_start_rank: llm.data_parallel_start_rank.unwrap_or(0),
         enable_eagle: llm.enable_eagle,
@@ -2143,6 +2149,8 @@ async fn build_local_model(
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
+
+    crate::topology::apply_topology_config(&mut rt_cfg).await?;
 
     let mut builder = LocalModelBuilder::default();
     builder
@@ -2485,6 +2493,7 @@ mod tests {
                 total_kv_blocks: Some(100),
                 max_num_seqs: Some(16),
                 max_num_batched_tokens: Some(8192),
+                max_gpu_lora_count: Some(8),
                 enable_eagle: true,
                 ..Default::default()
             }),
@@ -2500,6 +2509,7 @@ mod tests {
         assert_eq!(runtime_config.total_kv_blocks, Some(100));
         assert_eq!(runtime_config.max_num_seqs, Some(16));
         assert_eq!(runtime_config.max_num_batched_tokens, Some(8192));
+        assert_eq!(runtime_config.max_gpu_lora_count, Some(8));
         assert!(runtime_config.enable_eagle);
         assert_eq!(runtime_config.tool_call_parser.as_deref(), Some("kimi_k2"));
         assert_eq!(runtime_config.reasoning_parser.as_deref(), Some("kimi_k25"));
@@ -2813,7 +2823,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_local_model_decode_disables_local_indexer() {
+    async fn build_local_model_decode_keeps_local_indexer() {
         let config = WorkerConfig {
             enable_local_indexer: true,
             disaggregation_mode: DisaggregationMode::Decode,
@@ -2827,9 +2837,7 @@ mod tests {
         let local_model = build_local_model(&config, &engine_config, false)
             .await
             .unwrap();
-        // Decode workers cannot host the local indexer endpoint, so the
-        // worker forces it off even when the operator-supplied flag is true.
-        assert!(!local_model.runtime_config().enable_local_indexer);
+        assert!(local_model.runtime_config().enable_local_indexer);
     }
 
     #[tokio::test]

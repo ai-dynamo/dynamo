@@ -443,7 +443,9 @@ fn spawn_instance_removal_watcher<T, U>(
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
                                 dispatch.on_instance_added(&eid).await;
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(e)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,
@@ -534,7 +536,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                             Some(Ok(DiscoveryEvent::Removed(DiscoveryInstanceId::Endpoint(eid)))) => {
                                 indexer.remove_worker(eid.instance_id);
                             }
-                            Some(Ok(_)) => {}
+                            Some(Ok(DiscoveryEvent::Added(_)))
+                            | Some(Ok(DiscoveryEvent::ModelTaintsUpdated(_)))
+                            | Some(Ok(DiscoveryEvent::Removed(_)))
+                            | Some(Ok(DiscoveryEvent::Resync(_))) => {}
                             Some(Err(error)) => {
                                 tracing::warn!(
                                     endpoint = %endpoint_name,

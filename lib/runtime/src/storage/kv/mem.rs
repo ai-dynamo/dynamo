@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 
 use super::{Bucket, Key, KeyValue, Store, StoreError, StoreOutcome, WatchEvent};
 
-const MEMORY_EVENT_BUFFER_CAPACITY: usize = 16_384;
+pub(crate) const MEMORY_EVENT_BUFFER_CAPACITY: usize = 16_384;
 
 #[derive(Clone, Debug)]
 enum MemoryEvent {
