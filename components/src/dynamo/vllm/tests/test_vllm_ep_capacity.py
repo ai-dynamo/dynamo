@@ -42,6 +42,8 @@ def _install_ray_stub(
     raises=None,
     delay=0.0,
     thread_log=None,
+    gate=None,
+    gate_entered=None,
 ):
     """Register a fake ``ray`` package tree covering everything the handler imports.
 
@@ -49,13 +51,25 @@ def _install_ray_stub(
                     path never touches Ray, or assert how a failure is reported.
     ``delay``    -- seconds each query blocks for, to model a slow GCS.
     ``thread_log`` -- list that each query appends its thread ident to.
+    ``gate``     -- threading.Event each query blocks on instead of sleeping, so a
+                    test can hold a GCS query outstanding for exactly as long as it
+                    needs rather than betting on a wall-clock margin.
+    ``gate_entered`` -- threading.Event set immediately before the gate is waited on,
+                    so a test can tell "the query is blocked in Ray" apart from "the
+                    worker thread has not been scheduled yet".
     """
     idle = dict(idle_by_node_id or {})
 
     def _enter():
         if thread_log is not None:
             thread_log.append(threading.get_ident())
-        if delay:
+        if gate is not None:
+            if gate_entered is not None:
+                gate_entered.set()
+            # Capped so a test that never opens its gate fails on its own bound
+            # instead of stranding this thread for the life of the interpreter.
+            gate.wait(30.0)
+        elif delay:
             time.sleep(delay)
         if raises is not None:
             raise raises
@@ -257,11 +271,16 @@ def test_repeated_timeouts_do_not_pile_up_gcs_queries(monkeypatch):
     """
     monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.02)
     started: list[int] = []
+    # The gate stays shut through every poll, so the first snapshot is still stuck
+    # in its first Ray call and cannot finish or reach its next call on its own.
+    gate = threading.Event()
+    entered = threading.Event()
     _install_ray_stub(
         monkeypatch,
         nodes=[_node("n1", "10.0.0.1", 4.0)],
         idle_by_node_id={"n1": {"GPU": 4.0}},
-        delay=0.5,
+        gate=gate,
+        gate_entered=entered,
         thread_log=started,
     )
     handler = _make_self(dp=2, tp=1, backend="ray")
@@ -274,16 +293,25 @@ def test_repeated_timeouts_do_not_pile_up_gcs_queries(monkeypatch):
 
     try:
         results = asyncio.run(_poll_repeatedly())
-    finally:
-        _shutdown(handler)
 
-    assert all(r["status"] == "error" for r in results)
-    assert all("timed out" in r["message"].lower() for r in results)
-    # Six polls, one outstanding GCS query: later polls joined the in-flight
-    # snapshot instead of launching their own.
-    assert len(started) == 1, f"expected 1 in-flight query, got {len(started)}"
-    # And it never touched asyncio's shared default executor.
-    assert started[0] != threading.get_ident()
+        assert all(r["status"] == "error" for r in results)
+        assert all("timed out" in r["message"].lower() for r in results)
+        assert entered.wait(10.0), "the stubbed GCS query never started"
+        # One Ray call entered and parked on the shut gate, off the event loop
+        # thread (so not on asyncio's shared default executor either).
+        assert len(started) == 1, f"expected 1 in-flight query, got {len(started)}"
+        assert started[0] != threading.get_ident()
+
+        # The single-worker executor would only queue extra snapshots behind the
+        # stuck one, so count after draining it: open the gate and let every queued
+        # snapshot run. Later polls must have joined the in-flight snapshot instead
+        # of launching their own, so exactly one snapshot (three Ray calls) ran.
+        gate.set()
+        handler._ep_capacity_executor.shutdown(wait=True)
+        assert len(started) == 3, f"expected one snapshot (3 calls), got {len(started)}"
+    finally:
+        gate.set()
+        _shutdown(handler)
 
 
 def test_concurrent_callers_share_one_snapshot(monkeypatch):
