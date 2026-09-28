@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 import uvloop
 
+from dynamo.common.utils.token_ids import token_ids_to_list
 from dynamo.llm import (
     KvRouter,
     ModelInput,
@@ -98,7 +99,7 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "model": request.get("model", "unknown"),
-        "token_ids": request["token_ids"],
+        "token_ids": token_ids_to_list(request["token_ids"]),
         "stop_conditions": request.get("stop_conditions", {}),
         "sampling_options": request.get("sampling_options", {}),
         "output_options": request.get("output_options", {}),
@@ -240,7 +241,7 @@ class ThunderAgentRouterHandler:
 
         # Path B: program lifecycle.
         self._stat_program_requests += 1
-        token_ids = request["token_ids"]
+        token_ids = token_ids_to_list(request["token_ids"])
         estimated_prompt_tokens = len(token_ids) if isinstance(token_ids, list) else 0
 
         decision = await self._scheduler.before_request(
