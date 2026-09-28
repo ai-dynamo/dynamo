@@ -586,8 +586,10 @@ Build the CPU-only Rust router from this source revision:
 docker build -f container/Dockerfile.global-router-poc -t global-router-poc:local .
 ```
 
-Run it with a mounted JSON configuration file as its only argument. Set `listen` to
-`0.0.0.0:8080` in that file; the serving endpoint and `/readyz` share port 8080.
+Run it with a mounted JSON configuration file as its only argument. The image runs
+as UID 10001, so the mounted file must be readable by that user (a Kubernetes
+ConfigMap with default mode 0644 works). Set `listen` to `0.0.0.0:8080` in the
+file; the serving endpoint and `/readyz` share port 8080.
 Each configured pool has a private local Frontend base URL, Relay gRPC URL, and
 Relay stats proxy gRPC URL. A regional public API endpoint points at this router;
 the router forwards directly to the chosen pool's private Frontend, including
