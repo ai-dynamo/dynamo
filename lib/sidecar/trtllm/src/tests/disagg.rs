@@ -372,3 +372,30 @@ fn a_prefill_ready_without_attributes_is_rejected() {
         "the error must name the missing field: {error}"
     );
 }
+
+/// The same rolling-upgrade rule one level down: a newer peer may add fields
+/// inside `endpoints[]`. `deny_unknown_fields` there reversed the module's
+/// stated policy and would fail that request as a non-migratable 400.
+#[test]
+fn an_unknown_field_inside_an_endpoint_still_decodes() {
+    let encoded = crate::disagg::session_to_json(fake_session()).expect("encode");
+    let mut newer = encoded.clone();
+    newer
+        .as_object_mut()
+        .expect("handoff object")
+        .get_mut("endpoints")
+        .expect("endpoints")
+        .as_array_mut()
+        .expect("endpoints array")
+        .first_mut()
+        .expect("at least one endpoint")
+        .as_object_mut()
+        .expect("endpoint object")
+        .insert(
+            "future_field".to_string(),
+            serde_json::json!("from a newer peer"),
+        );
+
+    crate::disagg::session_from_json(&newer)
+        .expect("an endpoint from a newer peer must still decode");
+}
