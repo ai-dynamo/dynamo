@@ -133,6 +133,9 @@ ignore:
   - '.github/allurerc.mjs'
   - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
+  # Standalone router POC image has no CI image-build workflow yet; validated by
+  # a local full build and runtime smoke check in its draft PR.
+  - 'container/Dockerfile.global-router-poc'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
