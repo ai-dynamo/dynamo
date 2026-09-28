@@ -72,7 +72,18 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 
 		// Remove the adapter when component-level scaling is no longer enabled.
 		if component.ScalingAdapter == nil {
-			if err := r.Delete(ctx, adapter); err != nil {
+			if err := r.Get(ctx, client.ObjectKeyFromObject(adapter), adapter); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("get scaling adapter %s: %w", adapterName, err)
+			}
+			if !metav1.IsControlledBy(adapter, dgd) {
+				continue
+			}
+
+			// Bind deletion to the observed ownership, including concurrent owner changes.
+			if err := r.Delete(ctx, adapter, client.Preconditions{UID: &adapter.UID, ResourceVersion: &adapter.ResourceVersion}); err != nil {
 				if apierrors.IsNotFound(err) {
 					continue
 				}
@@ -169,8 +180,8 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		adapter := &adapterList.Items[i]
 		componentName := adapter.Spec.DGDRef.ServiceName
 
-		// Retain adapters whose component still exists.
-		if dgd.GetComponentByName(componentName) != nil {
+		// Labels alone do not establish ownership, even for a removed component.
+		if !metav1.IsControlledBy(adapter, dgd) || dgd.GetComponentByName(componentName) != nil {
 			continue
 		}
 
@@ -179,7 +190,7 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			"adapter", adapter.Name,
 			"component", componentName,
 		)
-		if err := r.Delete(ctx, adapter); err != nil {
+		if err := r.Delete(ctx, adapter, client.Preconditions{UID: &adapter.UID, ResourceVersion: &adapter.ResourceVersion}); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}

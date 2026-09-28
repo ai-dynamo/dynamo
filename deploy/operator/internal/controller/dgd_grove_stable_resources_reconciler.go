@@ -105,6 +105,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 			ctx,
 			req.DGD,
 			component,
+			podCliqueSet,
 			!isSinglePodElasticEPLeader(component),
 		)
 		if err != nil {
@@ -131,14 +132,15 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	return resources, nil
 }
 
-func (r *groveStableResourcesReconciler) reconcileComponentService(
-	ctx context.Context,
+// groveComponentServiceParams derives service identity from the rendered workload,
+// preserving legacy component labels. dgd and component must be non-nil; a nil
+// podCliqueSet uses the component's labels when no rendered workload is available.
+func groveComponentServiceParams(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
-	isK8sDiscoveryEnabled bool,
-) (Resource, error) {
-	logger := log.FromContext(ctx)
+) dynamo.ComponentServiceParams {
+	// Reuse compatibility labels from the rendered clique for every component Service.
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -155,7 +157,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 			}
 		}
 	}
-	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
+	return dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		ComponentType:   componentType,
@@ -163,8 +165,22 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		ComponentName:   componentName,
 		Labels:          labels,
 		Annotations:     dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component),
-		IsK8sDiscovery:  isK8sDiscoveryEnabled,
-	})
+	}
+}
+
+func (r *groveStableResourcesReconciler) reconcileComponentService(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podCliqueSet *grovev1alpha1.PodCliqueSet,
+	isK8sDiscoveryEnabled bool,
+) (Resource, error) {
+	// Render the discovery Service with the labels selected by the Grove workload.
+	logger := log.FromContext(ctx)
+	componentName := component.ComponentName
+	params := groveComponentServiceParams(dgd, component, podCliqueSet)
+	params.IsK8sDiscovery = isK8sDiscoveryEnabled
+	service, err := dynamo.GenerateComponentService(params)
 	if err != nil {
 		logger.Error(err, "failed to generate the main component service")
 		return nil, fmt.Errorf("failed to generate the main component service: %w", err)
@@ -186,12 +202,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		return nil, nil
 	}
 
-	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(
-		dgd,
-		componentName,
-		component,
-	)
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, desiredAnnotations, componentName); err != nil {
+	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
 		logger.Error(err, "Failed to update main component service", "component", componentName)
 		return nil, fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 	}
@@ -278,19 +289,13 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podCliqueSet *grovev1alpha1.PodCliqueSet,
 	toDelete bool,
 ) (Resource, error) {
+	// Use the same rendered identity as discovery Services so followers find the leader.
 	componentName := component.ComponentName
-	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
-	service := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
-		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
-		Namespace:       dgd.Namespace,
-		ComponentType:   string(component.ComponentType),
-		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
-		ComponentName:   componentName,
-		Labels:          dynamo.GetDGDComponentResourceLabels(dgd, componentName, component),
-		Annotations:     desiredAnnotations,
-	})
+	params := groveComponentServiceParams(dgd, component, podCliqueSet)
+	service := dynamo.GenerateElasticEPHeadlessService(params)
 
 	// Handle removal here rather than through SyncResource, which resolves the live object
 	// by name alone and would delete a Service this DGD never created.
@@ -314,7 +319,7 @@ func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 		return nil, nil
 	}
 
-	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, desiredAnnotations, componentName); err != nil {
+	if err := r.syncServiceAnnotations(ctx, dgd, syncedService, params.Annotations, componentName); err != nil {
 		return nil, fmt.Errorf("failed to update the elastic-EP leader service %s: %w", componentName, err)
 	}
 

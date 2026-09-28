@@ -802,22 +802,24 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true, Checkpoint: true}},
 	}
 	program := parent.newGroveProgram()
-	var adapterDeletes []string
-	program.scalingAdapters.Client = interceptor.NewClient(kube.(client.WithWatch), interceptor.Funcs{
-		Delete: func(ctx context.Context, delegated client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-			adapterDeletes = append(adapterDeletes, obj.GetName())
-			return delegated.Delete(ctx, obj, opts...)
+
+	t.Log("Leave a graph-owned adapter behind after ordinary component scaling was disabled")
+	disabledAdapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: generateAdapterName(source.Name, "prefill"), Namespace: source.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(source, v1beta1.DynamoGraphDeploymentGVK)},
 		},
-	})
+		Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+			DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: source.Name, ServiceName: "prefill"},
+		},
+	}
+	require.NoError(t, kube.Create(t.Context(), disabledAdapter))
 
 	t.Log("Publish ordinary resources independently of the child's pending download")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
-	require.Equal(t, []string{
-		generateAdapterName(source.Name, "lpx"),
-		generateAdapterName(source.Name, "prefill"),
-	}, adapterDeletes)
+	require.True(t, apierrors.IsNotFound(kube.Get(t.Context(), client.ObjectKeyFromObject(disabledAdapter), disabledAdapter)))
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
 	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated)}
@@ -890,4 +892,47 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	require.Equal(t, v1alpha1.LPXReadyReasonFailed, failed.Reason)
 	require.Contains(t, failed.Message, "storage volume mount is missing")
 	require.Equal(t, v1beta1.ComponentCheckpointStatus{CheckpointName: friendlyCheckpointName}, result.Status.Checkpoints["prefill"])
+}
+
+func TestGroveProgramPreservesAnotherGraphsScalingAdapter(t *testing.T) {
+	t.Log("Store two graphs whose component names produce the same adapter name")
+	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
+	source.Name = "graph"
+	source.Spec.Components[0].ComponentName = "foo-bar"
+	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
+	ordinary := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph-foo", Namespace: source.Namespace, UID: "ordinary-uid"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+			ComponentName: "bar", ComponentType: v1beta1.ComponentTypeWorker,
+			Replicas: ptr.To(int32(3)), ScalingAdapter: &v1beta1.ScalingAdapter{},
+		}}},
+	}
+	kube := fake.NewClientBuilder().WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(source, ordinary).Build()
+	require.NoError(t, rbacv1.AddToScheme(kube.Scheme()))
+
+	t.Log("Create the ordinary graph's adapter through the production reconciler")
+	require.NoError(t, newDGDScalingAdaptersReconciler(kube, nil).Reconcile(t.Context(), ordinary))
+	key := client.ObjectKey{Namespace: source.Namespace, Name: generateAdapterName(ordinary.Name, "bar")}
+	require.Equal(t, key.Name, generateAdapterName(source.Name, source.Spec.Components[0].ComponentName))
+	adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{}
+	require.NoError(t, kube.Get(t.Context(), key, adapter))
+	before := adapter.DeepCopy()
+
+	t.Log("Reconcile the complete Grove program with the LPX graph")
+	config := &configv1alpha1.OperatorConfiguration{}
+	config.Namespace.Restricted = source.Namespace
+	program := (&DynamoGraphDeploymentReconciler{
+		Client: kube, Config: config, Recorder: events.NewFakeRecorder(100),
+		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
+	}).newGroveProgram()
+	_, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
+	require.NoError(t, err)
+	child := &v1alpha1.LPXGraphDeployment{}
+	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), child))
+	require.True(t, metav1.IsControlledBy(child, source))
+
+	t.Log("Preserve the colliding adapter and its original ownership and replicas")
+	require.NoError(t, kube.Get(t.Context(), key, adapter))
+	require.Equal(t, before, adapter)
 }

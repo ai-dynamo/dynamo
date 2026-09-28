@@ -52,7 +52,6 @@ type groveReconcileRequest struct {
 	IsDelegated func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool
 }
 
-// ManagedComponents returns the components reconciled by the Grove program.
 func (r groveReconcileRequest) ManagedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	components := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, 0, len(r.DGD.Spec.Components))
 	for i := range r.DGD.Spec.Components {
@@ -64,7 +63,6 @@ func (r groveReconcileRequest) ManagedComponents() []nvidiacomv1beta1.DynamoComp
 	return components
 }
 
-// DelegatedComponents returns the components reconciled by another controller.
 func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	if r.IsDelegated == nil {
 		return nil

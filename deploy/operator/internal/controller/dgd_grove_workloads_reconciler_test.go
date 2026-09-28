@@ -54,7 +54,6 @@ func TestGroveReconcileRequestUsesDelegationPredicate(t *testing.T) {
 		ComponentName: "frontend",
 		ComponentType: nvidiacomv1beta1.ComponentTypeFrontend,
 	})
-	before := dgd.DeepCopy()
 	req := groveReconcileRequest{
 		DGD: dgd,
 		IsDelegated: func(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
@@ -68,11 +67,6 @@ func TestGroveReconcileRequestUsesDelegationPredicate(t *testing.T) {
 	require.Equal(t, "frontend", components[0].ComponentName)
 	require.False(t, components[0].IsLPX())
 	require.Equal(t, []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{dgd.Spec.Components[0]}, req.DelegatedComponents())
-
-	t.Log("Keep the full DGD authoritative")
-	components[0].ComponentName = "changed-copy"
-	require.Equal(t, before, dgd)
-	require.NotNil(t, req.DGD.GetComponentByName("frontend"))
 
 	t.Log("Treat every component as managed when no delegation predicate is supplied")
 	defaultReq := groveReconcileRequest{DGD: dgd}

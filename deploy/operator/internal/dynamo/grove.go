@@ -329,8 +329,6 @@ func (p groveRuntimeNamespacePlan) runtimeNamespace(
 	return ComponentRuntimeNamespace(baseNamespace, string(component.ComponentType), p.workerHash)
 }
 
-// groveWorkersCompletedAcceptedPCSRevision reports whether every Grove-managed
-// worker child completed the accepted PCS revision.
 func groveWorkersCompletedAcceptedPCSRevision(
 	dgd *v1beta1.DynamoGraphDeployment,
 	isDelegated func(*v1beta1.DynamoComponentDeploymentSharedSpec) bool,

@@ -504,6 +504,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -528,6 +529,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -577,6 +579,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 								Kind:       "DynamoGraphDeployment",
 								Name:       "test-dgd",
 								UID:        "test-uid",
+								Controller: ptr.To(true),
 							},
 						},
 					},
@@ -712,80 +715,103 @@ func TestGenerateAdapterName(t *testing.T) {
 	})
 }
 
-func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(t *testing.T) {
-	notFound := apierrors.NewNotFound(
-		schema.GroupResource{
-			Group:    v1alpha1.GroupVersion.Group,
-			Resource: "dynamographdeploymentscalingadapters",
-		},
-		"test-dgd-removed",
-	)
-
+func TestDGDScalingAdaptersReconciler_DeletesOnlyObservedOwnedAdapters(t *testing.T) {
 	tests := []struct {
-		name      string
-		deleteErr error
-		wantEvent bool
+		name        string
+		ownerUID    types.UID
+		deleteErr   error
+		changeOwner bool
+		wantDelete  bool
+		wantEvent   bool
 	}{
+		{name: "owned adapter", ownerUID: "test-uid", wantDelete: true, wantEvent: true},
+		{name: "unowned adapter"},
+		{name: "another graph owns the adapter", ownerUID: "other-uid"},
 		{
-			name:      "successful delete emits event",
-			wantEvent: true,
+			name: "adapter disappeared before delete", ownerUID: "test-uid", wantDelete: true,
+			deleteErr: apierrors.NewNotFound(schema.GroupResource{
+				Group: v1alpha1.GroupVersion.Group, Resource: "dynamographdeploymentscalingadapters",
+			}, "test-dgd-worker"),
 		},
-		{
-			name:      "already absent adapter emits no event",
-			deleteErr: notFound,
-		},
+		{name: "ownership changed before delete", ownerUID: "test-uid", changeOwner: true, wantDelete: true},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := &v1beta1.DynamoGraphDeployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
-			}
-			adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-removed",
-					Namespace: "default",
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	for _, disabled := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("disabled=%t/%s", disabled, tt.name), func(t *testing.T) {
+				t.Log("Store an adapter selected either by component name or by graph label")
+				dgd := &v1beta1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: "test-uid"},
+				}
+				if disabled {
+					dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{{ComponentName: "worker"}}
+				}
+				adapter := &v1alpha1.DynamoGraphDeploymentScalingAdapter{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-dgd-worker", Namespace: dgd.Namespace, UID: "adapter-uid",
+						Labels: map[string]string{commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
 					},
-				},
-				Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
-					DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{
-						Name:        dgd.Name,
-						ServiceName: "removed",
+					Spec: v1alpha1.DynamoGraphDeploymentScalingAdapterSpec{
+						DGDRef: v1alpha1.DynamoGraphDeploymentServiceRef{Name: dgd.Name, ServiceName: "worker"},
 					},
-				},
-			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithObjects(dgd, adapter).
-				WithInterceptorFuncs(interceptor.Funcs{
-					Delete: func(
-						ctx context.Context,
-						writer client.WithWatch,
-						obj client.Object,
-						opts ...client.DeleteOption,
-					) error {
-						if tt.deleteErr != nil {
-							return tt.deleteErr
-						}
-						return writer.Delete(ctx, obj, opts...)
-					},
-				}).
-				Build()
-			recorder := events.NewFakeRecorder(10)
-			reconciler := &DynamoGraphDeploymentReconciler{
-				Client:   kubeClient,
-				Recorder: recorder,
-			}
+				}
+				if tt.ownerUID != "" {
+					adapter.OwnerReferences = []metav1.OwnerReference{{
+						APIVersion: v1beta1.GroupVersion.String(), Kind: "DynamoGraphDeployment",
+						Name: dgd.Name, UID: tt.ownerUID, Controller: ptr.To(true),
+					}}
+				}
 
-			require.NoError(t, newDGDScalingAdaptersReconciler(reconciler.Client, reconciler.Recorder).Reconcile(context.Background(), dgd))
-			if tt.wantEvent {
-				assert.Len(t, recorder.Events, 1)
-				return
-			}
-			assert.Empty(t, recorder.Events)
-		})
+				t.Log("Observe delete preconditions and simulate changes after the ownership read")
+				deleteCalled := false
+				kubeClient := fake.NewClientBuilder().
+					WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+					WithObjects(dgd, adapter).
+					WithInterceptorFuncs(interceptor.Funcs{
+						Delete: func(ctx context.Context, writer client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+							deleteCalled = true
+							options := (&client.DeleteOptions{}).ApplyOptions(opts)
+							require.NotNil(t, options.Preconditions)
+							require.Equal(t, ptr.To(obj.GetUID()), options.Preconditions.UID)
+							require.NotEmpty(t, obj.GetResourceVersion())
+							require.Equal(t, ptr.To(obj.GetResourceVersion()), options.Preconditions.ResourceVersion)
+							if tt.deleteErr != nil {
+								return tt.deleteErr
+							}
+							if tt.changeOwner {
+								replacement := obj.DeepCopyObject().(client.Object)
+								replacement.SetOwnerReferences(nil)
+								require.NoError(t, writer.Update(ctx, replacement))
+							}
+							return writer.Delete(ctx, obj, opts...)
+						},
+					}).Build()
+				recorder := events.NewFakeRecorder(10)
+
+				t.Log("Reconcile and publish an event only for a successful owned deletion")
+				err := newDGDScalingAdaptersReconciler(kubeClient, recorder).Reconcile(t.Context(), dgd)
+				if tt.changeOwner {
+					require.True(t, apierrors.IsConflict(err), "expected conflict, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+				require.Equal(t, tt.wantDelete, deleteCalled)
+				if tt.wantEvent {
+					require.Len(t, recorder.Events, 1)
+					require.Contains(t, <-recorder.Events, "AdapterDeleted")
+				} else {
+					require.Empty(t, recorder.Events)
+				}
+
+				t.Log("Preserve unrelated adapters and objects whose ownership changed concurrently")
+				err = kubeClient.Get(t.Context(), client.ObjectKeyFromObject(adapter), adapter)
+				if tt.wantEvent {
+					require.True(t, apierrors.IsNotFound(err), "expected deletion, got %v", err)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
 	}
 }
 

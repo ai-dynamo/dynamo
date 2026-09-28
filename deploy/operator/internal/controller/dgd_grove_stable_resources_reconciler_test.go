@@ -24,10 +24,14 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
@@ -220,6 +224,69 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 				t.Fatalf("expected the leader Service to be absent, got service %q with error %v", service.Name, err)
 			}
 		})
+	}
+}
+
+func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *testing.T) {
+	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeDecode, v1beta1.ComponentTypePrefill} {
+		for _, legacy := range []bool{false, true} {
+			mode := "native"
+			if legacy {
+				mode = "legacy"
+			}
+			t.Run(string(componentType)+"/"+mode, func(t *testing.T) {
+				t.Log("Build an elastic-EP leader and its existing workload labels")
+				component := newElasticEPComponent(elasticEPArgs)
+				component.ComponentType = componentType
+				component.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0"
+				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+				component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
+				dgd := newElasticEPTestDGD(component)
+				reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
+				original := dgd.DeepCopy()
+				var previous *grovev1alpha1.PodCliqueSet
+				if legacy {
+					previous = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
+						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent:        component.ComponentName,
+								commonconsts.KubeLabelDynamoComponentType:    commonconsts.ComponentTypeWorker,
+								commonconsts.KubeLabelDynamoSubComponentType: string(componentType),
+							}}},
+						},
+					}}
+				}
+
+				t.Log("Render the actual Grove workload and reconcile its discovery and Ray Services")
+				config := &configv1alpha1.OperatorConfiguration{
+					Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+				}
+				pcs, err := dynamo.GenerateGrovePodCliqueSet(t.Context(), dgd, nil, config, &commoncontroller.RuntimeConfig{}, nil, nil, nil, previous, false, nil)
+				require.NoError(t, err)
+				reconciler.config = config
+				_, err = reconciler.Reconcile(t.Context(), groveReconcileRequest{DGD: dgd}, pcs)
+				require.NoError(t, err)
+
+				t.Log("Verify both Services select the rendered leader without changing the source DGD")
+				podLabels := pcs.Spec.Template.Cliques[0].Labels
+				wantType := string(componentType)
+				if legacy {
+					wantType = commonconsts.ComponentTypeWorker
+				}
+				require.Equal(t, wantType, podLabels[commonconsts.KubeLabelDynamoComponentType])
+				componentServiceName := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+				for _, name := range []string{componentServiceName, dynamo.ElasticEPLeaderServiceName(componentServiceName)} {
+					service := &corev1.Service{}
+					require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
+					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
+						"Service %s selector %v does not match rendered pod labels %v", name, service.Spec.Selector, podLabels)
+					for _, key := range []string{commonconsts.KubeLabelDynamoSubComponentType, commonconsts.KubeLabelDynamoWorkerHash} {
+						require.Equal(t, podLabels[key], service.Labels[key], "Service %s label %s", name, key)
+					}
+				}
+				require.Equal(t, original, dgd)
+			})
+		}
 	}
 }
 
