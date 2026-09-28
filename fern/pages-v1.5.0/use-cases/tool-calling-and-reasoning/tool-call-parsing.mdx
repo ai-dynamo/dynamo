@@ -1,0 +1,355 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Tool Call Parsing (Dynamo)
+subtitle: Connect Dynamo to external tools and services using Dynamo's built-in tool call parsers
+---
+
+Tool calling lets Dynamo connect models to external tools and services by returning function arguments for your application to execute. Requests use the `tool_choice` and `tools` parameters. This page covers Dynamo-native parsing; if your model is not listed, use [engine fallback](chat-processors.mdx), which also explains valid combinations of `--dyn-tool-call-parser`, `--dyn-chat-processor`, and `--dyn-reasoning-parser`.
+
+## Configure Tool Calling
+
+<Steps>
+  <Step title="Launch Dynamo Backend">
+    Select a `--dyn-tool-call-parser` that matches your model based on the list below. The backend can be SGLang, TensorRT-LLM, vLLM, or another installed backend.
+
+    To inspect the available worker flags, run:
+
+    ```bash
+    python -m dynamo.<backend> --help
+    ```
+
+    The following example starts an SGLang worker for Qwen3.5:
+
+    ```bash
+    python -m dynamo.sglang \
+      --model Qwen/Qwen3.5-4B \
+      --dyn-tool-call-parser qwen3_coder \
+      --reasoning-parser qwen3 \
+      --dyn-reasoning-parser qwen3
+    ```
+
+    <Info>
+    If the model supports tool calling but its default chat template does not, add `--custom-jinja-template /path/to/template.jinja` to the worker command. The template must be readable inside the container.
+    </Info>
+
+    <Tip>
+    If the model emits reasoning content that should be separated from normal output, see [Reasoning Parsing (Dynamo)](reasoning-parsing.md) for supported `--dyn-reasoning-parser` values.
+    </Tip>
+  </Step>
+
+  <Step title="Start the Frontend">
+    Start the Dynamo frontend in another terminal:
+
+    ```bash
+    python -m dynamo.frontend
+    ```
+  </Step>
+
+  <Step title="Wait for Readiness">
+    Wait for the frontend health endpoint to return a successful response:
+
+    ```bash
+    curl --fail http://localhost:8000/health
+    ```
+  </Step>
+
+  <Step title="Send a Tool-Calling Request">
+    Send an OpenAI-compatible chat completion request with the available tools:
+
+    ```bash
+    curl -s http://localhost:8000/v1/chat/completions \
+      -H 'Content-Type: application/json' \
+      -d '{
+        "model": "Qwen/Qwen3.5-4B",
+        "messages": [
+          {"role": "user", "content": "What is the weather in San Francisco and New York?"}
+        ],
+        "tools": [{
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a location.",
+            "parameters": {
+              "type": "object",
+              "properties": {"location": {"type": "string"}},
+              "required": ["location"]
+            }
+          }
+        }],
+        "tool_choice": "auto"
+      }'
+    ```
+
+    Dynamo parses the model output and returns OpenAI-compatible `tool_calls`.
+
+    <Accordion title="View an example response">
+      ```json
+      {
+        "id": "chatcmpl-b415caad-9be0-4d9e-ac6d-9d23bfe57703",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "reasoning_content": "The user is asking about the weather in two cities: San Francisco and New York. I need to call the get_weather function for each city. I'll make two separate function calls to get the weather information for both locations.\n",
+              "tool_calls": [
+                {
+                  "id": "call-56223a95-3d14-4433-a94e-011f106c0e40",
+                  "type": "function",
+                  "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"San Francisco\"}"
+                  }
+                },
+                {
+                  "id": "call-d5b5772b-6b0c-4120-ad01-623278a937fe",
+                  "type": "function",
+                  "function": {
+                    "name": "get_weather",
+                    "arguments": "{\"location\":\"New York\"}"
+                  }
+                }
+              ]
+            },
+            "finish_reason": "tool_calls",
+            "logprobs": null
+          }
+        ],
+        "created": 1778653281,
+        "model": "Qwen/Qwen3.5-4B",
+        "object": "chat.completion"
+      }
+      ```
+    </Accordion>
+
+    <Info>
+    If a tool call is parsed incorrectly, add `"logprobs": true` to one reproduction request and share the response. See [Troubleshooting Tool Calls](troubleshooting-tool-calls.md) for what to capture when reporting an issue.
+    </Info>
+  </Step>
+</Steps>
+
+## Supported Tool Call Parsers
+
+Choose a model family, then expand the matching model option to see its parser name and configuration details.
+
+The **Upstream name** column shows where the vLLM or SGLang parser name differs from Dynamo’s — relevant when using `--dyn-chat-processor vllm` or `sglang` (see [Parser Engine Fallback](chat-processors.mdx)). A blank upstream column means the same name works everywhere. `Dynamo-only` means no upstream parser exists for this format.
+
+<AccordionGroup>
+  <Accordion title="Kimi">
+    <AccordionGroup>
+      <Accordion title="Kimi K2 Instruct/Thinking and Kimi K2.5">
+        **Parser:** `kimi_k2`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** Pair with `--dyn-reasoning-parser kimi` or `kimi_k25`. For Kimi K2.5 thinking models, use `kimi_k25` so `<think>` blocks and tool calls are parsed from the same response. See [Reasoning Parsing (Dynamo)](reasoning-parsing.md).
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="MiniMax">
+    <AccordionGroup>
+      <Accordion title="MiniMax M2 and M2.1">
+        **Parser:** `minimax_m2`
+
+        **Upstream name:** vLLM: `minimax_m2`
+
+        **Notes:** XML `<minimax:tool_call>`
+      </Accordion>
+
+      <Accordion title="MiniMax M3">
+        **Parser:** `minimax_m3`
+
+        **Upstream name:** vLLM: `minimax_m3`
+
+        **Notes:** MiniMax namespace-token XML
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="DeepSeek">
+    <AccordionGroup>
+      <Accordion title="DeepSeek V4 Pro / Flash">
+        **Parser:** `deepseek_v4`
+
+        **Upstream name:** vLLM: `deepseek_v4`; SGLang: `deepseekv4`
+
+        **Notes:** DSML tags (`<｜DSML｜tool_calls>...`). Aliases: `deepseek-v4`, `deepseekv4`
+      </Accordion>
+
+      <Accordion title="DeepSeek V3 and DeepSeek R1-0528+">
+        **Parser:** `deepseek_v3`
+
+        **Upstream name:** SGLang: `deepseekv3`
+
+        **Notes:** Special Unicode markers
+      </Accordion>
+
+      <Accordion title="DeepSeek V3.1">
+        **Parser:** `deepseek_v3_1`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** JSON separators
+      </Accordion>
+
+      <Accordion title="DeepSeek V3.2+">
+        **Parser:** `deepseek_v3_2`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** DSML tags (`<｜DSML｜function_calls>...`)
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Qwen, QwQ, and NousHermes">
+    <AccordionGroup>
+      <Accordion title="Qwen3.5 and Qwen3-Coder">
+        **Parser:** `qwen3_coder`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** XML `<tool_call><function=...>`
+      </Accordion>
+
+      <Accordion title="Qwen2.5-*, QwQ-32B, Qwen3-Instruct, Qwen3-Think, and NousHermes-2/3">
+        **Parser:** `hermes`
+
+        **Upstream name:** vLLM: `qwen2_5`; SGLang: `qwen25` (for Qwen models)
+
+        **Notes:** `<tool_call>` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="GLM">
+    <AccordionGroup>
+      <Accordion title="GLM-4.5 and GLM-4.7">
+        **Parser:** `glm47`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** XML `<arg_key>/<arg_value>`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Nemotron">
+    <AccordionGroup>
+      <Accordion title="Nemotron-Super / -Ultra / -Deci and Llama-Nemotron-Ultra / -Super">
+        **Parser:** `nemotron_deci`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** `<TOOLCALL>` JSON
+      </Accordion>
+
+      <Accordion title="Nemotron-Nano">
+        **Parser:** `nemotron_nano`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** Alias for `qwen3_coder`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Gemma">
+    <AccordionGroup>
+      <Accordion title="Google Gemma 4 thinking models">
+        **Parser:** `gemma4`
+
+        **Upstream name:** vLLM: `gemma4`
+
+        **Notes:** Custom non-JSON grammar with `<\|"\|>` string delimiters and `<\|tool_call>...<tool_call\|>` markers. Aliases: `gemma-4`. Pair with `--dyn-reasoning-parser gemma4` and `--custom-jinja-template examples/chat_templates/gemma4_tool.jinja`.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="gpt-oss">
+    <AccordionGroup>
+      <Accordion title="gpt-oss-20b and gpt-oss-120b">
+        **Parser:** `harmony`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** Harmony channel format
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Phi">
+    <AccordionGroup>
+      <Accordion title="Phi-4, Phi-4-mini, and Phi-4-mini-reasoning">
+        **Parser:** `phi4`
+
+        **Upstream name:** vLLM: `phi4_mini_json`
+
+        **Notes:** `functools[...]` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Llama">
+    <AccordionGroup>
+      <Accordion title="Llama 4 Scout / Maverick">
+        **Parser:** `pythonic`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** Python-list tool syntax
+      </Accordion>
+
+      <Accordion title="Llama 3 / 3.1 / 3.2 / 3.3 Instruct">
+        **Parser:** `llama3_json`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `<\|python_tag\|>` tool syntax
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Mistral">
+    <AccordionGroup>
+      <Accordion title="Mistral, Mixtral, Mistral-Nemo, and Magistral">
+        **Parser:** `mistral`
+
+        **Upstream name:** Same name across Dynamo, vLLM, and SGLang
+
+        **Notes:** `[TOOL_CALLS]...[/TOOL_CALLS]`
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Jamba">
+    <AccordionGroup>
+      <Accordion title="Jamba 1.5 / 1.6 / 1.7">
+        **Parser:** `jamba`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** `<tool_calls>` JSON
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+
+  <Accordion title="Fallback">
+    <AccordionGroup>
+      <Accordion title="Default parser">
+        **Parser:** `default`
+
+        **Upstream name:** <Badge intent="note" minimal>Dynamo-only</Badge>
+
+        **Notes:** Empty JSON config (no start/end tokens). Prefer a model-specific parser for production use.
+      </Accordion>
+    </AccordionGroup>
+  </Accordion>
+</AccordionGroup>
+
+<Info title="Optional: structural tags">
+You can enable **xgrammar structural tags** so guided decoding matches the parser's tool-call format at token granularity. See [Structural Tag (Guided Decoding for Tool Calls)](structural-tag.md).
+</Info>
