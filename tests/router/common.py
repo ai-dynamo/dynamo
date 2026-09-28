@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import aiohttp
 import requests
 
-from dynamo.llm import AicPerfConfig, KvRouter, KvRouterConfig
+from dynamo.llm import (
+    AicPerfConfig,
+    KvRouter,
+    KvRouterConfig,
+    compute_block_hash_for_seq,
+)
 from dynamo.prometheus_names import frontend_service, name_prefix
 from tests.router.helper import (
     assert_event_dumps_equal,
@@ -1801,8 +1806,16 @@ def _test_router_threshold_none_disables_rejection(
 # Reveal rounds allowed per ZMQ replay phase. Each extra round only re-triggers
 # gap detection + replay, so a real replay bug still fails every round.
 MAX_REVEAL_ROUNDS = 3
-# About 3 s of 0.2 s polls per reveal round.
 REVEAL_ROUND_POLL_ATTEMPTS = 15
+
+
+def _stored_block_keys(events):
+    """Identify stored token blocks by worker and DP stream, ignoring dump event IDs."""
+    return {
+        (event["worker_id"], event["event"]["dp_rank"], block["tokens_hash"])
+        for event in events
+        for block in event["event"]["data"]["stored"]["blocks"]
+    }
 
 
 async def _zmq_replay_cycle(
@@ -1814,6 +1827,7 @@ async def _zmq_replay_cycle(
     engine_workers,
     send_requests_to_router,
     model_name: str,
+    block_size: int,
     assert_standalone_matches,
 ):
     """Pause indexer listeners, create gaps, then force each stream to reveal them.
@@ -1863,6 +1877,8 @@ async def _zmq_replay_cycle(
     ]
     last_error: Exception | None = None
     for reveal_round in range(1, MAX_REVEAL_ROUNDS + 1):
+        pre_round_blocks = _stored_block_keys(json.loads(await router.dump_events()))
+        reveal_blocks = set()
         logger.info(
             "Sending %s targeted requests after resume (triggers gap detection + replay), round %s",
             len(replay_targets),
@@ -1870,7 +1886,15 @@ async def _zmq_replay_cycle(
         )
         post_resume_tasks = []
         for wid, dp_rank in replay_targets:
-            request_tokens = [random.randint(1, 10000) for _ in range(30)]
+            request_tokens = [
+                random.randint(1, 10000) for _ in range(max(30, block_size))
+            ]
+            first_block_hash = compute_block_hash_for_seq(request_tokens, block_size)[0]
+            reveal_block = (wid, dp_rank, first_block_hash)
+            assert (
+                reveal_block not in pre_round_blocks
+            ), f"Reveal request reuses a pre-round block: {reveal_block}"
+            reveal_blocks.add(reveal_block)
             post_resume_tasks.append(
                 asyncio.create_task(
                     send_request_via_python_kv_router(
@@ -1896,7 +1920,7 @@ async def _zmq_replay_cycle(
 
         for _ in range(REVEAL_ROUND_POLL_ATTEMPTS):
             try:
-                await assert_standalone_matches(router, router_name)
+                await assert_standalone_matches(router, router_name, reveal_blocks)
                 return
             except (AssertionError, aiohttp.ClientError) as exc:
                 last_error = exc
@@ -2006,10 +2030,15 @@ def _test_router_indexers_sync(
                 ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
             return sorted(dump[expected_standalone_key]["events"], key=sort_key)
 
-        async def assert_standalone_matches(router, router_label):
+        async def assert_standalone_matches(router, router_label, reveal_blocks):
+            """Require this round's targeted blocks before accepting matching dumps."""
             expected_events = sorted(
                 json.loads(await router.dump_events()), key=sort_key
             )
+            missing_blocks = reveal_blocks - _stored_block_keys(expected_events)
+            assert (
+                not missing_blocks
+            ), f"{router_label} has not ingested reveal blocks: {sorted(missing_blocks)}"
             async with aiohttp.ClientSession() as session:
                 actual_events = await fetch_standalone_events(
                     session, standalone_indexer_url, "Standalone A"
@@ -2144,6 +2173,7 @@ def _test_router_indexers_sync(
                 engine_workers,
                 send_requests_to_router,
                 model_name,
+                block_size,
                 assert_standalone_matches,
             )
 
@@ -2244,6 +2274,7 @@ def _test_router_indexers_sync(
                 engine_workers,
                 send_requests_to_router,
                 model_name,
+                block_size,
                 assert_standalone_matches,
             )
 
