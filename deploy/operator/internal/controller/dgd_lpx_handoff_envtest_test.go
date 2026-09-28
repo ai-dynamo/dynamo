@@ -64,7 +64,7 @@ func TestSetupDynamoGraphDeploymentWithoutLPXCRDs(t *testing.T) {
 		}})
 	})
 
-	t.Log("Verify an ordinary DGD still creates its component workloads")
+	t.Log("Verify a DGD without external components still creates its managed workloads")
 	golden.ApplyManifests(t, "testdata/dgd/components/input.yaml", env.Client(), env.Namespace())
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		components := &v1beta1.DynamoComponentDeploymentList{}
