@@ -394,6 +394,7 @@ def test_sidecar_kv_routing(
                 engine_env.update(
                     SGLANG_HTTP_PORT=str(engine_ports[0]),
                     SGLANG_GRPC_PORT=str(engine_ports[1]),
+                    # Remove after pinning https://github.com/sgl-project/sglang/pull/35347 and DEP passes on SM86 without it.
                     SGLANG_OPT_USE_JIT_KERNEL_GROUPED_TOPK="1",
                 )
                 config.script_args += [
