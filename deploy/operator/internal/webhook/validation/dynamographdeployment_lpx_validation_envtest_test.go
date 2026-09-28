@@ -17,8 +17,6 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
 	const conductorRoleErr = "spec.components: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
-	const alphaConductorRoleErr = "spec.services: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
-	const alphaConductorTemplateErr = "spec.services[lpx].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
@@ -256,7 +254,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			},
 		},
 		{
-			name: "v1alpha1 LPX image and conductor template errors aggregate at the authored role indices",
+			name: "v1alpha1 LPX image and conductor template errors use beta paths",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				component := dgd.Spec.Services["lpx"]
 				component.Roles[0], component.Roles[1] = component.Roles[1], component.Roles[0]
@@ -268,7 +266,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantWebhookErrs: []string{
 				"spec.components[0].roles[1].podTemplate.spec.containers[1].image: Required value: must specify a non-empty image",
 				"spec.components[0].roles[1].podTemplate.spec.initContainers[0].image: Required value: must specify a non-empty image",
-				"spec.services[lpx].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate",
+				"spec.components[0].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate",
 			},
 		},
 		{
@@ -408,24 +406,24 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component := dgd.Spec.Services["lpx"]
 				component.Roles = component.Roles[:1]
 			}),
-			wantWebhookErrs: []string{alphaConductorRoleErr},
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
 			name: "v1alpha1 LPX rejects a missing conductor template on CREATE",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
 			}),
-			wantWebhookErrs: []string{alphaConductorTemplateErr},
+			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
-			name: "v1alpha1 LPX conductor template error identifies the service key and authored role index",
+			name: "v1alpha1 LPX conductor template error identifies the converted component and authored role indices",
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				setAlphaLPXSpecDec(dgd, k8sptr.To(int32(1)))
 				target := dgd.Spec.Services["target"]
 				target.Roles[0], target.Roles[1] = target.Roles[1], target.Roles[0]
 				target.Roles[0].PodTemplate = nil
 			}),
-			wantWebhookErrs: []string{"spec.services[target].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate"},
+			wantWebhookErrs: []string{"spec.components[1].roles[0].podTemplate: Required value: LPX conductor requires an explicit podTemplate"},
 		},
 		{
 			name:          "LPX rejects removing the conductor template on UPDATE",
@@ -442,7 +440,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				component := dgd.Spec.Services["lpx"]
 				component.Roles = component.Roles[:1]
 			}),
-			wantWebhookErrs: []string{alphaConductorRoleErr},
+			wantWebhookErrs: []string{conductorRoleErr},
 		},
 		{
 			name:          "v1alpha1 LPX rejects removing the conductor template on UPDATE",
@@ -450,7 +448,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
 				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
 			}),
-			wantWebhookErrs: []string{alphaConductorTemplateErr},
+			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
 			name:               "LPX rejects retaining an absent conductor template on an unrelated UPDATE",
@@ -474,7 +472,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				dgd.Spec.Services["lpx"].Roles[1].PodTemplate = nil
 				dgd.Spec.Services["lpx"].Replicas = k8sptr.To(int32(3))
 			}),
-			wantWebhookErrs: []string{alphaConductorTemplateErr},
+			wantWebhookErrs: []string{conductorTemplateErr},
 		},
 		{
 			name: "LPX admits SpecDecode UPDATE with one conductor and Agent-only draft",
@@ -732,7 +730,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 			wantWebhookErrs: []string{
 				`spec.components[0].roles: Required value: must contain the "agent" role`,
-				alphaConductorRoleErr,
+				conductorRoleErr,
 			},
 		},
 		{

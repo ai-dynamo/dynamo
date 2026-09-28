@@ -425,15 +425,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		)...)
 	}
 
-	// Conversion preserves alpha service keys in ComponentName; report conductor errors at their source paths.
-	conductorComponentsPath := componentsPath
-	componentPath := componentsPath.Index
-	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
-		conductorComponentsPath = fldPath.Child("services")
-		componentPath = func(index int) *field.Path {
-			return conductorComponentsPath.Key(spec.Components[index].ComponentName)
-		}
-	}
+	// Validate conductor requirements on the converted graph.
 	for index := range spec.Components {
 		component := &spec.Components[index]
 		if !component.IsLPX() {
@@ -444,12 +436,12 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				continue
 			}
 			if role.PodTemplate == nil {
-				allErrs = append(allErrs, field.Required(componentPath(index).Child("roles").Index(roleIndex).Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
+				allErrs = append(allErrs, field.Required(componentsPath.Index(index).Child("roles").Index(roleIndex).Child("podTemplate"), "LPX conductor requires an explicit podTemplate"))
 			}
 		}
 	}
 	if hasLPXComponent && independentEngineCount != lpxComponentCount && !(lpxComponentCount == 2 && independentEngineCount == 1) {
-		allErrs = append(allErrs, field.Forbidden(conductorComponentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
+		allErrs = append(allErrs, field.Forbidden(componentsPath, "LPX components must each declare a conductor role or form a shared draft and target pair"))
 	}
 
 	if spec.Restart != nil {
