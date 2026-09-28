@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: DeepSeek V4 Pro Aggregated Smoke
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        type: string
+        required: true
+      image_tag:
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Published ACR vLLM nightly tag (<version>-ci-<sha>-vllm-runtime-nightly)'
+        type: string
+        required: true
+      preflight_only:
+        description: 'Render and server-side dry-run without deploying'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deepseek-v4-pro-nightly
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 210
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Read tbot's renewed credentials; every kubectl command selects its context.
+      KUBECONFIG: /teleport/kubeconfig.yaml
+      KUBE_CONTEXT: nv-prd-dgxc.teleport.sh-dynamo-gcp-dev-02
+      NAMESPACE: dynamo-nightly-dsv4
+      RUN_KEY: ci-${{ github.run_id }}-${{ github.run_attempt }}
+      OVERLAY: .github/ci/deepseek-v4-pro-agg
+    steps:
+      - timeout-minutes: 5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - name: Prepare artifacts
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/dsv4-artifacts"
+          echo "ARTIFACTS=$RUNNER_TEMP/dsv4-artifacts" >> "$GITHUB_ENV"
+          echo "REGISTRY_AUTH_FILE=$RUNNER_TEMP/dsv4-registry-auth.json" >> "$GITHUB_ENV"
+      - timeout-minutes: 5
+        uses: ./.github/actions/skopeo-login
+        with:
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Render deployment and upstream perf recipe
+        timeout-minutes: 5
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+        run: |
+          image="${ACR_HOST}/${ACR_REPOSITORY}:${IMAGE_TAG}"
+          digest=$(skopeo inspect --raw "docker://$image" | jq -er '
+            .manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest')
+          export RUNTIME_IMAGE="$image@$digest"
+          yq -i '.spec.services[].extraPodSpec.mainContainer.image = strenv(RUNTIME_IMAGE) |
+            .spec.services[].extraPodSpec.imagePullSecrets = [{"name": "acr-" + strenv(RUN_KEY)}] |
+            .spec.services.worker.envFromSecret = "hf-" + strenv(RUN_KEY)' "$OVERLAY/patch-deploy.yaml"
+          yq -i '.commonLabels.ci-run = strenv(RUN_KEY)' "$OVERLAY/kustomization.yaml"
+          kubectl kustomize "$OVERLAY" --load-restrictor LoadRestrictionsNone > "$ARTIFACTS/rendered.yaml"
+          yq 'select(.kind != "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
+          yq 'select(.kind == "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
+          yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "TRACE_FILE").value) = "/model-cache/perf/" + strenv(RUN_KEY) + "/smoke.jsonl" |
+            (.spec.template.spec.containers[0].env[] | select(.name == "ROOT_ARTIFACT_DIR").value) = "/model-cache/perf/" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
+          git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
+      - name: Preflight and create run credentials
+        timeout-minutes: 10
+        env:
+          DRY_RUN: ${{ inputs.preflight_only && 'server' || 'none' }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+          ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          [[ "$("${k[@]}" get pvc shared-model-cache -o jsonpath='{.status.phase}')" == Bound ]]
+          "${k[@]}" create --dry-run=server -f "$ARTIFACTS/deploy.yaml" > "$ARTIFACTS/deploy-dry-run.txt"
+          "${k[@]}" create --dry-run=server -f "$ARTIFACTS/perf.yaml" > "$ARTIFACTS/perf-dry-run.txt"
+          "${k[@]}" create secret generic "hf-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
+            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}"
+          "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
+            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD"
+      - name: Deploy and wait for readiness
+        if: ${{ !inputs.preflight_only }}
+        timeout-minutes: 105
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          "${k[@]}" create -f "$ARTIFACTS/deploy.yaml"
+          # Fresh clients reload tbot certificates during the long model startup.
+          until "${k[@]}" wait dgd/dsv4-pro-agg --for=condition=Ready --timeout=60s; do
+            "${k[@]}" get dgd dsv4-pro-agg -o name
+          done
+          frontend=$("${k[@]}" get pods -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o jsonpath='{.items[0].metadata.name}')
+          echo "FRONTEND=$frontend" >> "$GITHUB_ENV"
+          "${k[@]}" exec "$frontend" -c main -- mkdir -p "/opt/models/perf/$RUN_KEY"
+          printf '%s\n' '{"input_length":128,"output_length":16}' '{"input_length":128,"output_length":16}' '{"input_length":128,"output_length":16}' |
+            "${k[@]}" exec -i "$frontend" -c main -- sh -c 'cat > "$1"' sh "/opt/models/perf/$RUN_KEY/smoke.jsonl"
+      - name: Run upstream AIPerf smoke
+        if: ${{ !inputs.preflight_only }}
+        timeout-minutes: 17
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          # The upstream Job checks model discovery before its three inference requests.
+          "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
+          until "${k[@]}" wait job/dsv4-bench --for=condition=Complete --timeout=60s; do
+            "${k[@]}" get job dsv4-bench -o json |
+              jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
+          done
+      - name: Collect logs and perf artifacts
+        if: always()
+        timeout-minutes: 5
+        run: |
+          k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
+          "${k[@]}" get dgd,job,computedomain -l "ci-run=$RUN_KEY" -o yaml > "$ARTIFACTS/resources.yaml" || true
+          "${k[@]}" get events --sort-by=.lastTimestamp > "$ARTIFACTS/events.txt" || true
+          if [[ -n "$("${k[@]}" get dgd -l "ci-run=$RUN_KEY" -o name)" ]]; then
+            "${k[@]}" logs -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg \
+              --all-containers --prefix --tail=1000 > "$ARTIFACTS/deployment.log" 2>&1 || true
+          fi
+          if [[ -n "$("${k[@]}" get job -l "ci-run=$RUN_KEY" -o name)" ]]; then
+            "${k[@]}" logs job/dsv4-bench --all-containers > "$ARTIFACTS/perf.log" 2>&1 || true
+          fi
+          if [[ -n "$FRONTEND" ]]; then
+            "${k[@]}" cp -c main "$FRONTEND:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
+          fi
+      - name: Verify AIPerf results
+        if: ${{ success() && !inputs.preflight_only }}
+        timeout-minutes: 5
+        run: |
+          result=$(find "$ARTIFACTS/perf" -name profile_export_aiperf.json -print -quit)
+          jq -e '.request_count.avg == 3 and (.error_request_count.avg // 0) == 0 and
+            .output_sequence_length.avg > 0' "$result"
+      - name: Clean up recipe resources
+        if: always()
+        timeout-minutes: 20
+        run: |
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          failed=0
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=0 \
+            delete job,dgd,computedomain -l "ci-run=$RUN_KEY" --cascade=foreground --wait=true --timeout=15m || failed=1
+          kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s \
+            delete secret "hf-$RUN_KEY" "acr-$RUN_KEY" --ignore-not-found --wait=false || failed=1
+          exit "$failed"
+      - timeout-minutes: 5
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
+        if: always()
+        with:
+          name: deepseek-v4-pro-agg-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ARTIFACTS }}
+          retention-days: 14
+          if-no-files-found: error
