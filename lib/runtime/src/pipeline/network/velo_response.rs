@@ -337,8 +337,9 @@ impl VeloResponseService {
         let peer_id = address.peer.instance_id();
         self.velo.register_peer(address.peer)?;
         if peer_id != self.velo.instance_id() {
-            // The cached Velo hello exchange also installs the reverse UCX
-            // address. Stream slot opens do not perform that peer handshake.
+            // Velo checks cached lifecycle support for this peer instance first.
+            // Its initial hello also installs the reverse UCX address; stream
+            // slot opens do not perform that peer handshake.
             tokio::time::timeout(
                 Duration::from_secs(10),
                 self.velo.wait_for_handler(peer_id, "_stream_stop"),
