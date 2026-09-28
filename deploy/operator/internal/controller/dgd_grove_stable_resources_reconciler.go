@@ -140,7 +140,6 @@ func groveComponentServiceParams(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) dynamo.ComponentServiceParams {
-	// Reuse compatibility labels from the rendered clique for every component Service.
 	componentName := component.ComponentName
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
@@ -175,7 +174,6 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 	isK8sDiscoveryEnabled bool,
 ) (Resource, error) {
-	// Render the discovery Service with the labels selected by the Grove workload.
 	logger := log.FromContext(ctx)
 	componentName := component.ComponentName
 	params := groveComponentServiceParams(dgd, component, podCliqueSet)
