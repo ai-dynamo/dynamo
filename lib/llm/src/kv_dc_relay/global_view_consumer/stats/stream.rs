@@ -66,10 +66,10 @@ impl StatsPlanes {
             _ => bail!("invalid stats plane"),
         };
         *slot = lease;
-        if let Some(observation) = observation {
-            if !self.assembler.apply(lease, observation)? {
-                bail!("stats observation was superseded");
-            }
+        if let Some(observation) = observation
+            && !self.assembler.apply(lease, observation)?
+        {
+            bail!("stats observation was superseded");
         }
         Ok(())
     }

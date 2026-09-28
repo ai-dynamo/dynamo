@@ -80,6 +80,8 @@ impl Drop for Epoch {
 /// Keep the DGD view connected across stream failures. Each retry starts a
 /// fresh catalog/readiness epoch and can only score a newly validated CKF
 /// producer. The delay uses bounded equal jitter across router replicas.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 async fn run_relay_view_publishing(
     channel: Channel,
     scope: RelayPoolScope,
@@ -139,6 +141,8 @@ async fn run_relay_view_publishing(
 
 /// Consume the catalog/CKF Relay and the separate PR #13187 stats listener
 /// against one DGD assembler. Deployment supplies the stats proxy channel.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_relay_view_with_stats(
     relay_channel: Channel,
     stats_channel: Channel,
@@ -193,6 +197,8 @@ pub async fn run_relay_view(
 /// A failed/closed CKF stream also ends this connection epoch so the caller can
 /// reconnect and fetch a new catalog before subscribing to another generation.
 /// All three observations are invalidated on exit, including task cancellation.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 async fn run_relay_view_epoch_publishing(
     channel: Channel,
     scope: RelayPoolScope,
