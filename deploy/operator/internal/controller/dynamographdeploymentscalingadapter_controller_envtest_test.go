@@ -30,9 +30,14 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+const (
+	adapterNameFrontend   = "test-dgd-frontend"
+	dgdName               = "test-dgd"
+	componentNameFrontend = "Frontend"
 )
 
 var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
@@ -113,10 +118,6 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 	Context("when reconciling a scaling adapter", func() {
 		It("updates DGD replicas when DGDSA spec differs", func() {
-			adapterName := "test-dgd-frontend"
-			dgdName := "test-dgd"
-			componentName := "Frontend"
-
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
@@ -125,8 +126,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName:  componentName,
-							Replicas:       ptr.To(int32(2)),
+							ComponentName:  componentNameFrontend,
+							Replicas:       new(int32(2)),
 							ScalingAdapter: &nvidiacomv1beta1.ScalingAdapter{},
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
@@ -147,14 +148,14 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
+					Name:      adapterNameFrontend,
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 5,
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          dgdName,
-						ComponentName: componentName,
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -162,7 +163,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			By("Reconciling the adapter")
 			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{Name: adapterName, Namespace: namespace},
+				NamespacedName: client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace},
 			}
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -171,7 +172,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			Eventually(func(g Gomega) {
 				updatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dgdName, Namespace: namespace}, updatedDGD)).Should(Succeed())
-				component := updatedDGD.GetComponentByName(componentName)
+				component := updatedDGD.GetComponentByName(componentNameFrontend)
 				g.Expect(component).NotTo(BeNil())
 				g.Expect(component.Replicas).NotTo(BeNil())
 				g.Expect(*component.Replicas).To(Equal(int32(5)))
@@ -180,18 +181,14 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			By("Verifying adapter status was updated")
 			Eventually(func(g Gomega) {
 				updatedAdapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}
-				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: adapterName, Namespace: namespace}, updatedAdapter)).Should(Succeed())
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace}, updatedAdapter)).Should(Succeed())
 				g.Expect(updatedAdapter.Status.Replicas).To(Equal(int32(5)))
-				expectedSelector := "nvidia.com/dynamo-component=" + componentName + ",nvidia.com/dynamo-graph-deployment-name=" + dgdName
+				expectedSelector := "nvidia.com/dynamo-component=" + componentNameFrontend + ",nvidia.com/dynamo-graph-deployment-name=" + dgdName
 				g.Expect(updatedAdapter.Status.Selector).To(Equal(expectedSelector))
 			}, timeout, interval).Should(Succeed())
 		})
 
 		It("does not update when replicas already match", func() {
-			adapterName := "test-dgd-frontend"
-			dgdName := "test-dgd"
-			componentName := "Frontend"
-
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
@@ -200,8 +197,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName:  componentName,
-							Replicas:       ptr.To(int32(3)),
+							ComponentName:  componentNameFrontend,
+							Replicas:       new(int32(3)),
 							ScalingAdapter: &nvidiacomv1beta1.ScalingAdapter{},
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
@@ -222,14 +219,14 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
+					Name:      adapterNameFrontend,
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 3,
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          dgdName,
-						ComponentName: componentName,
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -237,7 +234,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			By("Reconciling the adapter")
 			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{Name: adapterName, Namespace: namespace},
+				NamespacedName: client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace},
 			}
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -246,7 +243,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			Eventually(func(g Gomega) {
 				updatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dgdName, Namespace: namespace}, updatedDGD)).Should(Succeed())
-				component := updatedDGD.GetComponentByName(componentName)
+				component := updatedDGD.GetComponentByName(componentNameFrontend)
 				g.Expect(component).NotTo(BeNil())
 				g.Expect(component.Replicas).NotTo(BeNil())
 				g.Expect(*component.Replicas).To(Equal(int32(3)))
@@ -255,7 +252,6 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 		It("uses default replicas when DGD component has no replicas set", func() {
 			adapterName := "test-dgd-worker"
-			dgdName := "test-dgd"
 			componentName := "worker"
 
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -319,10 +315,6 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 		})
 
 		It("does not propagate replicas after component opts out", func() {
-			adapterName := "test-dgd-frontend"
-			dgdName := "test-dgd"
-			componentName := "Frontend"
-
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
@@ -331,8 +323,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: componentName,
-							Replicas:      ptr.To(int32(2)),
+							ComponentName: componentNameFrontend,
+							Replicas:      new(int32(2)),
 							// No ScalingAdapter - component has opted out
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
@@ -353,14 +345,14 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
+					Name:      adapterNameFrontend,
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 5,
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          dgdName,
-						ComponentName: componentName,
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -368,7 +360,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			By("Reconciling the adapter")
 			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{Name: adapterName, Namespace: namespace},
+				NamespacedName: client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace},
 			}
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -377,7 +369,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			Eventually(func(g Gomega) {
 				updatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dgdName, Namespace: namespace}, updatedDGD)).Should(Succeed())
-				component := updatedDGD.GetComponentByName(componentName)
+				component := updatedDGD.GetComponentByName(componentNameFrontend)
 				g.Expect(component).NotTo(BeNil())
 				g.Expect(*component.Replicas).To(Equal(int32(2)))
 			}, timeout, interval).Should(Succeed())
@@ -385,7 +377,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			By("Verifying adapter status was not updated")
 			Eventually(func(g Gomega) {
 				updatedAdapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{}
-				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: adapterName, Namespace: namespace}, updatedAdapter)).Should(Succeed())
+				g.Expect(k8sClient.Get(ctx, client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace}, updatedAdapter)).Should(Succeed())
 				g.Expect(updatedAdapter.Status.Selector).To(BeEmpty())
 				g.Expect(updatedAdapter.Status.Replicas).To(BeZero())
 			}, timeout, interval).Should(Succeed())
@@ -393,7 +385,6 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 		It("returns without retry when component not found in DGD", func() {
 			adapterName := "test-dgd-missing"
-			dgdName := "test-dgd"
 
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -403,8 +394,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(1)),
+							ComponentName: componentNameFrontend,
+							Replicas:      new(int32(1)),
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{
@@ -462,18 +453,16 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 		})
 
 		It("returns error when referenced DGD not found", func() {
-			adapterName := "test-dgd-frontend"
-
 			adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      adapterName,
+					Name:      adapterNameFrontend,
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					Replicas: 5,
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          "nonexistent-dgd",
-						ComponentName: "Frontend",
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -481,17 +470,13 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			By("Reconciling the adapter with missing DGD")
 			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{Name: adapterName, Namespace: namespace},
+				NamespacedName: client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace},
 			}
 			_, err := reconciler.Reconcile(ctx, req)
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("skips reconciliation when adapter is being deleted", func() {
-			adapterName := "test-dgd-frontend"
-			dgdName := "test-dgd"
-			componentName := "Frontend"
-
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
@@ -500,8 +485,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: componentName,
-							Replicas:      ptr.To(int32(2)),
+							ComponentName: componentNameFrontend,
+							Replicas:      new(int32(2)),
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{
@@ -522,7 +507,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			now := metav1.Now()
 			adapter := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:              adapterName,
+					Name:              adapterNameFrontend,
 					Namespace:         namespace,
 					DeletionTimestamp: &now,
 					Finalizers:        []string{"test-finalizer"},
@@ -531,7 +516,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 					Replicas: 5,
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          dgdName,
-						ComponentName: componentName,
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -539,7 +524,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			By("Reconciling the deleting adapter")
 			req := ctrl.Request{
-				NamespacedName: client.ObjectKey{Name: adapterName, Namespace: namespace},
+				NamespacedName: client.ObjectKey{Name: adapterNameFrontend, Namespace: namespace},
 			}
 			result, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
@@ -548,7 +533,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			By("Verifying DGD replicas remain unchanged")
 			updatedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 			Expect(k8sClient.Get(ctx, client.ObjectKey{Name: dgdName, Namespace: namespace}, updatedDGD)).Should(Succeed())
-			component := updatedDGD.GetComponentByName(componentName)
+			component := updatedDGD.GetComponentByName(componentNameFrontend)
 			Expect(component).NotTo(BeNil())
 			Expect(*component.Replicas).To(Equal(int32(2)))
 		})
@@ -556,8 +541,6 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 	Context("when mapping DGD changes to adapters", func() {
 		It("finds all adapters referencing the DGD", func() {
-			dgdName := "test-dgd"
-
 			// Create DGD
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
@@ -567,8 +550,8 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 						{
-							ComponentName: "Frontend",
-							Replicas:      ptr.To(int32(1)),
+							ComponentName: componentNameFrontend,
+							Replicas:      new(int32(1)),
 							PodTemplate: &corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
 									Containers: []corev1.Container{
@@ -589,13 +572,13 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 			// Adapters belonging to test-dgd
 			adapter1 := &nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-frontend",
+					Name:      adapterNameFrontend,
 					Namespace: namespace,
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          dgdName,
-						ComponentName: "Frontend",
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -622,7 +605,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapterSpec{
 					DGDRef: nvidiacomv1beta1.DynamoGraphDeploymentComponentRef{
 						Name:          "other-dgd",
-						ComponentName: "Frontend",
+						ComponentName: componentNameFrontend,
 					},
 				},
 			}
@@ -639,7 +622,7 @@ var _ = Describe("DynamoGraphDeploymentScalingAdapter Controller", func() {
 
 			// Verify correct adapters are returned
 			expectedNames := map[string]bool{
-				"test-dgd-frontend": true,
+				adapterNameFrontend: true,
 				"test-dgd-decode":   true,
 			}
 
