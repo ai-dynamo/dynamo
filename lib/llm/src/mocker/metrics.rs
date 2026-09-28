@@ -450,7 +450,6 @@ impl VllmFamilyCollectors {
                 Opts::new(format!("{prefix}:num_preemptions_total"), preemptions_help),
                 VLLM_LABELS,
             )?,
-            // These counters follow the vLLM cache-metrics contract only.
             prefix_cache_queries_total: (prefix == "vllm")
                 .then(|| {
                     IntCounterVec::new(
