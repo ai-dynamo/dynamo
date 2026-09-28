@@ -514,6 +514,22 @@ fn percent_encoded_image_data_uris_are_decoded() {
 }
 
 #[test]
+fn image_data_uris_with_media_type_parameters_are_decoded() {
+    let req = with_images(
+        request(),
+        &["data:image/png;charset=utf-8;base64,aW1hZ2UtYQ=="],
+    );
+    let proto = build_generate_request(&req, "req", None).expect("image request must build");
+    assert_eq!(
+        proto
+            .multimodal_input
+            .expect("multimodal_input must be set")
+            .image_data,
+        [b"image-a".to_vec()]
+    );
+}
+
+#[test]
 fn omitted_max_tokens_for_an_image_is_an_upper_bound() {
     let mut req = with_routing_info(
         with_images(request(), &["data:image/jpeg;base64,aW1hZ2UtYQ=="]),
