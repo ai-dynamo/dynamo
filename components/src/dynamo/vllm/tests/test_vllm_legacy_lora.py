@@ -41,7 +41,9 @@ def _make_prefill_handler():
         model="/models/base",
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
-        engine_args=SimpleNamespace(block_size=16, max_loras=4, model="/models/base"),
+        engine_args=SimpleNamespace(
+            block_size=16, max_loras=4, model="/models/base", revision=None
+        ),
         use_kv_events=True,
     )
     handler.engine_client = SimpleNamespace(
