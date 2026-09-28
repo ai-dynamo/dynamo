@@ -8,6 +8,7 @@
 //! from site ID, Kubernetes namespace, and DGD name in dynamo-kv-router.
 
 pub mod http_forward;
+pub mod poc_config;
 pub mod service;
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
