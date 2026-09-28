@@ -102,11 +102,9 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-# Per-worker DYN_SYSTEM_PORT{i} is set by xdist for parallel test runs; fall
-# back to script defaults otherwise. KV-event ports always come from the
-# script's own KV_EVENTS_PORT_BASE block (29090+) — xdist only reserves one
-# DYN_VLLM_KV_EVENT_PORT so deriving `base + (i-1)` from it would collide
-# with adjacent test slots.
+# Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} are reserved by
+# the test harness for parallel runs; fall back to script defaults (the
+# KV_EVENTS_PORT_BASE block for KV events) when run standalone.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
@@ -114,7 +112,7 @@ for i in $(seq 1 "${NUM_WORKERS}"); do
     HARNESS_VAR="DYN_SYSTEM_PORT${i}"
     WORKER_PORT="${!HARNESS_VAR:-${DEFAULT_WORKER_PORT}}"
     WORKER_PORTS+=("${WORKER_PORT}")
-    KV_EVENTS_PORT=$((KV_EVENTS_PORT_BASE + (i - 1)))
+    KV_EVENTS_PORT=$(dyn_port DYN_VLLM_KV_EVENT_PORT "$i" $((KV_EVENTS_PORT_BASE + (i - 1))))
     KV_EVENTS_PORTS+=("${KV_EVENTS_PORT}")
     if [[ "${SINGLE_GPU}" == "true" ]]; then GPU_ID=0; else GPU_ID=$((i - 1)); fi
 
