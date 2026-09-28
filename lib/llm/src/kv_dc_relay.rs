@@ -14,6 +14,7 @@ mod namespace_source;
 mod pool_registry;
 mod publication;
 mod resolution;
+mod stats;
 mod topology;
 pub mod wan;
 
