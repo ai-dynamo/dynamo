@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -806,13 +807,16 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 					require.NoError(t, err)
 					pcs := renderedPCS.desired
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeComponent := testComponentByName(renderedPCS.components, "VllmDecodeWorker")
-					require.NotNil(t, decodeComponent)
+					decodeIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+						return component.ComponentName == "VllmDecodeWorker"
+					})
+					require.NotEqual(t, -1, decodeIndex)
+					decodeComponent := &renderedPCS.components[decodeIndex]
 					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 						ServiceName:     dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
 						Namespace:       dgd.Namespace,
@@ -931,13 +935,16 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.NoError(t, err)
 	desired := renderedPCS.desired
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
-	prefillComponent := testComponentByName(renderedPCS.components, "prefill")
-	require.NotNil(t, prefillComponent)
+	prefillIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return component.ComponentName == "prefill"
+	})
+	require.NotEqual(t, -1, prefillIndex)
+	prefillComponent := &renderedPCS.components[prefillIndex]
 	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")
 	require.Equal(t, commonconsts.ComponentTypePrefill, prefillClique.Labels[commonconsts.KubeLabelDynamoComponentType])

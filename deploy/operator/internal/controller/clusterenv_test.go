@@ -315,7 +315,7 @@ func getOnlyClusterDGD(t *testing.T, ctx context.Context, c client.Client, names
 func workerHashGoldenVariables(t *testing.T, dgd *nvidiacomv1beta1.DynamoGraphDeployment) golden.Variables {
 	t.Helper()
 
-	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
 	require.NoError(t, err)
 	return golden.Variables{"worker-hash": workerHash}
 }

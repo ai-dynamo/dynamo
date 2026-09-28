@@ -41,7 +41,7 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
   that uses them.
 - A `DynamoGraphDeployment` value always represents the complete API object. Never
   construct or pass a copy with `spec.components` filtered.
-- When a composite program divides components between managed and external paths, set
+- When a composite program divides components between managed and delegated paths, set
   the ownership predicate once at the program composition root and pass it with the
   complete DGD to nested reconcilers. Nested reconcilers must not reclassify component
   ownership. Materialize component slices or maps only as focused renderer or lookup

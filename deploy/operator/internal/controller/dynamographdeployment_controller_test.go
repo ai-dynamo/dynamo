@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -652,7 +653,7 @@ func TestDGDScalingAdaptersReconciler_Reconcile(t *testing.T) {
 
 			t.Log("Reconcile scaling adapters")
 			ctx := context.Background()
-			err := newDGDScalingAdaptersReconciler(r.Client, r.Recorder).Reconcile(ctx, tt.dgd)
+			err := newDGDScalingAdaptersReconciler(r.Client, r.Recorder).Reconcile(ctx, tt.dgd, tt.dgd.Spec.Components)
 			if err != nil {
 				t.Fatalf("dgdScalingAdaptersReconciler.Reconcile() error = %v", err)
 			}
@@ -779,7 +780,7 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 				Recorder: recorder,
 			}
 
-			require.NoError(t, newDGDScalingAdaptersReconciler(reconciler.Client, reconciler.Recorder).Reconcile(context.Background(), dgd))
+			require.NoError(t, newDGDScalingAdaptersReconciler(reconciler.Client, reconciler.Recorder).Reconcile(context.Background(), dgd, dgd.Spec.Components))
 			if tt.wantEvent {
 				assert.Len(t, recorder.Events, 1)
 				return
@@ -1203,7 +1204,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			result, err := reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
-				testGroveReconcileRequest(dgd),
+				groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
 				nil,
 				nil,
 			)
@@ -1244,7 +1245,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			result, err = reconciler.newGroveProgram().workloads.Reconcile(
 				ctx,
-				testGroveReconcileRequest(dgd),
+				groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
 				nil,
 				nil,
 			)
@@ -1258,7 +1259,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				componentStatus.GPUsPerReplica = ptr.To(int64(0))
 				wantFinal.ComponentStatus[componentName] = componentStatus
 			}
-			workerHash, hashErr := dynamo.ComputeDGDWorkersSpecHash(dgd)
+			workerHash, hashErr := dynamo.ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
 			g.Expect(hashErr).NotTo(gomega.HaveOccurred())
 			for i := range dgd.Spec.Components {
 				component := &dgd.Spec.Components[i]
@@ -1340,7 +1341,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	_, err := reconciler.newGroveProgram().workloads.Reconcile(
 		ctx,
-		testGroveReconcileRequest(dgd),
+		groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController},
 		nil,
 		nil,
 	)
@@ -1427,22 +1428,24 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	generatedPCS := renderedPCS.desired
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
-	prefill := testComponentByName(renderedPCS.components, "VllmPrefillWorker")
-	if prefill == nil {
-		t.Fatal("expected rendered prefill component")
-	}
+	prefillIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return component.ComponentName == "VllmPrefillWorker"
+	})
+	g.Expect(prefillIndex).NotTo(gomega.Equal(-1))
+	prefill := &renderedPCS.components[prefillIndex]
 	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
 	g.Expect(prefill.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 
-	decode := testComponentByName(renderedPCS.components, "VllmDecodeWorker")
-	if decode == nil {
-		t.Fatal("expected rendered decode component")
-	}
+	decodeIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return component.ComponentName == "VllmDecodeWorker"
+	})
+	g.Expect(decodeIndex).NotTo(gomega.Equal(-1))
+	decode := &renderedPCS.components[decodeIndex]
 	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
 	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
 
@@ -1724,12 +1727,13 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	prefill := testComponentByName(renderedPCS.components, "prefill")
-	if prefill == nil {
-		t.Fatal("expected rendered prefill component")
-	}
+	prefillIndex := slices.IndexFunc(renderedPCS.components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+		return component.ComponentName == "prefill"
+	})
+	g.Expect(prefillIndex).NotTo(gomega.Equal(-1))
+	prefill := &renderedPCS.components[prefillIndex]
 	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypePrefill))
 }
 
@@ -2703,7 +2707,7 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 			if tt.groveEnabled {
 				resolver := newGroveRestartProgressResolver(reconciler.Client)
 				resolveProgress = func(ctx context.Context, dgd *v1beta1.DynamoGraphDeployment, inProgress []string) []string {
-					return resolver.Resolve(ctx, testGroveReconcileRequest(dgd), inProgress)
+					return resolver.Resolve(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, inProgress)
 				}
 			}
 			result := restartReconciler.computeRestartStatusWithProgressResolver(ctx, dgd, resolveProgress)
@@ -3591,7 +3595,7 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 			programResult := newWorkloadProgramResult(tt.dgd)
 			if tt.groveEnabled {
 				newDGDGroveTopologyConditionReconciler(reconciler.Client).
-					Reconcile(ctx, testGroveReconcileRequest(tt.dgd), &programResult)
+					Reconcile(ctx, groveReconcileRequest{DGD: tt.dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, &programResult)
 			}
 			g.Expect(tt.dgd.Status).To(gomega.Equal(originalStatus), "status projection must not mutate request.DGD.Status")
 

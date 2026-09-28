@@ -46,15 +46,33 @@ type groveProgram struct {
 // ownership boundary selected by the outer Grove program.
 type groveReconcileRequest struct {
 	DGD *nvidiacomv1beta1.DynamoGraphDeployment
-	// Managed is defined once by groveProgram and is authoritative for nested reconcilers.
-	Managed func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool
+
+	// IsDelegated reports whether another controller reconciles this component's
+	// workloads. A nil predicate delegates no components.
+	IsDelegated func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool
 }
 
-func (r groveReconcileRequest) managedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+// ManagedComponents returns the components reconciled by the Grove program.
+func (r groveReconcileRequest) ManagedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	components := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, 0, len(r.DGD.Spec.Components))
 	for i := range r.DGD.Spec.Components {
 		component := &r.DGD.Spec.Components[i]
-		if r.Managed(component) {
+		if r.IsDelegated == nil || !r.IsDelegated(component) {
+			components = append(components, *component)
+		}
+	}
+	return components
+}
+
+// DelegatedComponents returns the components reconciled by another controller.
+func (r groveReconcileRequest) DelegatedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	if r.IsDelegated == nil {
+		return nil
+	}
+	components := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, 0, len(r.DGD.Spec.Components))
+	for i := range r.DGD.Spec.Components {
+		component := &r.DGD.Spec.Components[i]
+		if r.IsDelegated(component) {
 			components = append(components, *component)
 		}
 	}
@@ -102,10 +120,8 @@ func (p *groveProgram) Reconcile(
 	programReq workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
 	req := groveReconcileRequest{
-		DGD: programReq.DGD,
-		Managed: func(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-			return !component.ManagedByExternalController()
-		},
+		DGD:         programReq.DGD,
+		IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
 	}
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
@@ -134,7 +150,7 @@ func (p *groveProgram) Reconcile(
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
-	if err := p.rollout.migrateCurrentWorkerHashIfNeededForComponents(ctx, req.DGD, req.managedComponents()); err != nil {
+	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD, req.ManagedComponents()); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
@@ -153,7 +169,7 @@ func (p *groveProgram) Reconcile(
 		func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 			return resolveCompositeGroveRestartProgress(
 				ctx,
-				groveReconcileRequest{DGD: dgd, Managed: req.Managed},
+				groveReconcileRequest{DGD: dgd, IsDelegated: req.IsDelegated},
 				inProgress,
 				p.restartProgress,
 				p.lpxRestartProgress,
@@ -196,7 +212,7 @@ func (p *groveProgram) Reconcile(
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
-		if err := p.scalingAdapters.ReconcileManaged(ctx, req); err != nil {
+		if err := p.scalingAdapters.Reconcile(ctx, req.DGD, req.ManagedComponents()); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}

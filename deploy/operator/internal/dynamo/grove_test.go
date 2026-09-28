@@ -1001,7 +1001,7 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 				}
 			}
 			reader := newFakeGroveClient(g)
-			pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, &configv1alpha1.OperatorConfiguration{},
+			pcs, err := GenerateGrovePodCliqueSet(t.Context(), dgd, dgd.Spec.Components, &configv1alpha1.OperatorConfiguration{},
 				&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, reader, &mockSecretsRetriever{}, nil, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1023,7 +1023,7 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 				}
 				pcs.Spec.Template.PodCliqueScalingGroupConfigs = []grovev1alpha1.PodCliqueScalingGroupConfig{{Name: "undeclared", CliqueNames: names}}
 			}
-			readiness, err := EvaluateGroveReadiness(t.Context(), reader, dgd, pcs)
+			readiness, err := EvaluateGroveReadiness(t.Context(), reader, dgd, dgd.Spec.Components, pcs)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(readiness.Ready).To(gomega.BeFalse())
 			g.Expect(readiness.ComponentStatuses).To(gomega.HaveLen(1))
@@ -1039,7 +1039,7 @@ func TestEvaluateGroveReadinessUsesDeclaredLayout(t *testing.T) {
 						Replicas: 2, AvailableReplicas: 2, UpdatedReplicas: 2, ObservedGeneration: ptr.To(int64(1)),
 					},
 				})).To(gomega.Succeed())
-				readiness, err = EvaluateGroveReadiness(t.Context(), reader, dgd, pcs)
+				readiness, err = EvaluateGroveReadiness(t.Context(), reader, dgd, dgd.Spec.Components, pcs)
 				g.Expect(err).NotTo(gomega.HaveOccurred())
 				g.Expect(readiness.Ready).To(gomega.BeTrue())
 			}
@@ -1388,7 +1388,7 @@ func TestEvaluateGroveReadiness(t *testing.T) {
 				WithStatusSubresource(objects...).
 				Build()
 
-			readiness, err := EvaluateGroveReadiness(ctx, fakeKubeClient, betaDGD, nil)
+			readiness, err := EvaluateGroveReadiness(ctx, fakeKubeClient, betaDGD, betaDGD.Spec.Components, nil)
 
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 			g.Expect(readiness.Ready).To(gomega.Equal(tt.wantReady))
@@ -1472,7 +1472,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 				},
 			}
 			component := dgd.GetComponentByName(componentName)
-			desiredHash, err := ComputeDGDWorkersSpecHash(dgd)
+			desiredHash, err := ComputeDGDWorkersSpecHash(dgd, dgd.Spec.Components)
 			if err != nil {
 				t.Fatalf("ComputeDGDWorkersSpecHash() error = %v", err)
 			}
@@ -1517,7 +1517,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 			replicas := ptr.Deref(tt.childReplicas, int32(1))
 			podClique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, componentName), Namespace: dgd.Namespace, Generation: childGeneration},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, componentName), Namespace: dgd.Namespace, Generation: childGeneration},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: replicas},
 				Status: grovev1alpha1.PodCliqueStatus{
 					Replicas:                          replicas,
@@ -1539,7 +1539,7 @@ func TestEvaluateGroveReadinessPublishesWorkerRuntimeNamespaceAfterCutover(t *te
 			}
 
 			t.Log("Evaluate runtime namespace selection from the accepted PCS snapshot")
-			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, podCliqueSet)
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, dgd.Spec.Components, podCliqueSet)
 			if err != nil {
 				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
 			}
@@ -1608,7 +1608,7 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 			}
 			completedAt := metav1.Now()
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, "prefill"), Namespace: dgd.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, "prefill"), Namespace: dgd.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(acceptedRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
@@ -1617,13 +1617,13 @@ func TestEvaluateGroveReadinessSwitchesWorkersAtomically(t *testing.T) {
 				decodeRevision = acceptedRevision
 			}
 			decode := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, "decode"), Namespace: dgd.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: GroveComponentResourceName(dgd, dgd.Spec.Components, "decode"), Namespace: dgd.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{Replicas: 1, ReadyReplicas: 1, UpdatedReplicas: 1, ObservedGeneration: ptr.To(int64(1)), CurrentPodCliqueSetGenerationHash: ptr.To(decodeRevision), UpdateProgress: &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &completedAt}},
 			}
 
 			t.Log("Evaluate the worker group against the single accepted PCS snapshot")
-			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), prefill, decode), dgd, podCliqueSet)
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), prefill, decode), dgd, dgd.Spec.Components, podCliqueSet)
 			if err != nil {
 				t.Fatalf("EvaluateGroveReadiness() error = %v", err)
 			}
@@ -1666,7 +1666,7 @@ func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueS
 	}
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(dgd, componentName),
+			Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
 			Namespace:  dgd.Namespace,
 			Generation: 1,
 		},
@@ -1681,7 +1681,7 @@ func TestEvaluateGroveReadinessPreservesPreviousWorkerNamespaceWithoutPodCliqueS
 	}
 
 	t.Log("Evaluate readiness from an observed missing PodCliqueSet")
-	readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, nil)
+	readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), podClique), dgd, dgd.Spec.Components, nil)
 
 	t.Log("Verify the missing PCS cannot replace the previously published namespace")
 	if err != nil {
@@ -1773,7 +1773,7 @@ func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testi
 				component := &dgd.Spec.Components[i]
 				children = append(children, &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, component.ComponentName),
+						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, component.ComponentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1791,7 +1791,7 @@ func TestEvaluateGroveReadinessRejectsInvalidAcceptedWorkerPodCliqueSet(t *testi
 			}
 
 			t.Log("Evaluate runtime namespace selection from the invalid accepted snapshot")
-			_, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), children...), dgd, podCliqueSet)
+			_, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), children...), dgd, dgd.Spec.Components, podCliqueSet)
 
 			t.Log("Verify the invalid accepted layout is rejected rather than publishing a namespace")
 			if err == nil || !strings.Contains(err.Error(), tt.wantMessage) {
@@ -1854,7 +1854,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 			if tt.multinode {
 				child = &grovev1alpha1.PodCliqueScalingGroup{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, componentName),
+						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1869,7 +1869,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 			} else {
 				child = &grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:       GroveComponentResourceName(dgd, componentName),
+						Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, componentName),
 						Namespace:  dgd.Namespace,
 						Generation: 1,
 					},
@@ -1882,7 +1882,7 @@ func TestEvaluateGroveReadinessPublishesAcceptedNamespaceForZeroReplicaWorkers(t
 			}
 
 			t.Log("Evaluate the accepted zero-replica revision")
-			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), child), dgd, podCliqueSet)
+			readiness, err := EvaluateGroveReadiness(ctx, newFakeGroveClient(gomega.NewWithT(t), child), dgd, dgd.Spec.Components, podCliqueSet)
 
 			t.Log("Verify both child kinds publish the accepted worker namespace")
 			if err != nil {
@@ -1943,7 +1943,7 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 	}
 	podClique := &grovev1alpha1.PodClique{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       GroveComponentResourceName(dgd, component.ComponentName),
+			Name:       GroveComponentResourceName(dgd, dgd.Spec.Components, component.ComponentName),
 			Namespace:  dgd.Namespace,
 			Generation: 1,
 		},
@@ -1975,7 +1975,7 @@ func TestEvaluateGroveReadinessReadsEachGroveChildOnce(t *testing.T) {
 		Build()
 
 	t.Log("Evaluate readiness and assert that namespace cutover reuses the child read.")
-	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd, podCliqueSet)
+	readiness, err := EvaluateGroveReadiness(ctx, reader, dgd, dgd.Spec.Components, podCliqueSet)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(readiness.Ready).To(gomega.BeTrue())
 	g.Expect(childReads).To(gomega.Equal(1))
@@ -2391,7 +2391,7 @@ func TestGroveReadinessTransientErrorsPropagate(t *testing.T) {
 			},
 		})
 		c := newClient(g)
-		readiness, err := EvaluateGroveReadiness(ctx, c, dgd, nil)
+		readiness, err := EvaluateGroveReadiness(ctx, c, dgd, dgd.Spec.Components, nil)
 		g.Expect(err).To(gomega.HaveOccurred())
 		g.Expect(err.Error()).To(gomega.ContainSubstring("transient API error"))
 		// A transient error is not a normal not-ready result: Ready is false and

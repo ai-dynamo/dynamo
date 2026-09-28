@@ -75,7 +75,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) (ReconcileResult, error) {
-	managedComponents := req.managedComponents()
+	managedComponents := req.ManagedComponents()
 
 	// A graph with only external components still reconciles graph-wide stable resources.
 	if len(managedComponents) == 0 {
@@ -88,7 +88,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	logger := log.FromContext(ctx)
 
-	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransitionForComponents(req.DGD, managedComponents)
+	workerHashTransition, err := r.rollout.planUnsupportedWorkerHashTransition(req.DGD, managedComponents)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
@@ -212,7 +212,7 @@ func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadinessForComponents(ctx, r.reader, dgd, components, podCliqueSet)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, dgd, components, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}

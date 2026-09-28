@@ -69,7 +69,7 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
 	}
 
-	hashes, err := desiredWorkerHashes(dgd)
+	hashes, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 	if err != nil {
 		return false, err.Error()
 	}

@@ -43,16 +43,11 @@ type GroveMultinodeDeployer struct {
 	Rank          int32 // explicit node rank (used when IsInterPodGMS is true)
 }
 
-// GroveComponentResourceName returns the Grove child resource name for a DGD
-// component. Grove currently creates one PodClique or PodCliqueScalingGroup
-// instance per component at PodCliqueSet replica index zero.
-func GroveComponentResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string) string {
-	return GroveComponentResourceNameForComponents(dgd, dgd.Spec.Components, componentName)
-}
-
-// GroveComponentResourceNameForComponents returns the child resource name for
-// a component in the explicitly rendered PCS component selection.
-func GroveComponentResourceNameForComponents(
+// GroveComponentResourceName returns the Grove child resource name for a
+// component in the supplied PCS component selection. Grove currently creates
+// one PodClique or PodCliqueScalingGroup instance per component at PodCliqueSet
+// replica index zero.
+func GroveComponentResourceName(
 	dgd *v1beta1.DynamoGraphDeployment,
 	components []v1beta1.DynamoComponentDeploymentSharedSpec,
 	componentName string,
@@ -116,21 +111,10 @@ type GroveReadiness struct {
 	ComponentStatuses map[string]v1beta1.ComponentReplicaStatus
 }
 
-// EvaluateGroveReadiness resolves one Grove readiness snapshot from the
-// supplied PCS observation. A nil PCS represents an observed missing PCS.
-// The deployment must contain only components owned by this PCS.
+// EvaluateGroveReadiness observes readiness for the supplied PCS component
+// selection while retaining the complete DGD for graph state. A nil PCS
+// represents an observed missing PCS.
 func EvaluateGroveReadiness(
-	ctx context.Context,
-	reader client.Reader,
-	dgd *v1beta1.DynamoGraphDeployment,
-	pcs *grovev1alpha1.PodCliqueSet,
-) (GroveReadiness, error) {
-	return EvaluateGroveReadinessForComponents(ctx, reader, dgd, dgd.Spec.Components, pcs)
-}
-
-// EvaluateGroveReadinessForComponents observes readiness for an explicit PCS
-// component selection while retaining the complete DGD for graph state.
-func EvaluateGroveReadinessForComponents(
 	ctx context.Context,
 	reader client.Reader,
 	dgd *v1beta1.DynamoGraphDeployment,
@@ -187,7 +171,7 @@ func evaluateGroveComponents(
 
 		var componentReadiness groveComponentReadiness
 		var checkErr error
-		resourceName := GroveComponentResourceNameForComponents(dgd, components, componentName)
+		resourceName := GroveComponentResourceName(dgd, components, componentName)
 		if component.UsesPCSG() {
 			componentReadiness, checkErr = observePCSGReadiness(ctx, reader, resourceName, dgd.Namespace, logger)
 		} else {

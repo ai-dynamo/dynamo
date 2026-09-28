@@ -80,7 +80,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(
-		dgd,
+		dgd, dgd.Spec.Components,
 		restartState,
 		existingRestartAnnotations,
 		rollingUpdateCtx,
@@ -139,7 +139,7 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (map[string]string, error) {
 	logger := log.FromContext(ctx)
-	hashes, err := desiredWorkerHashes(dgd)
+	hashes, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 	if err != nil {
 		return nil, err
 	}

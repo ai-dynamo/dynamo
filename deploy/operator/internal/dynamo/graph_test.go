@@ -729,7 +729,8 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(betaDGD(t, tt.args.parentDynamoGraphDeployment), nil, nil, RollingUpdateContext{})
+			converted := betaDGD(t, tt.args.parentDynamoGraphDeployment)
+			got, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, nil, nil, RollingUpdateContext{})
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -765,7 +766,8 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
+	converted := betaDGD(t, dgd)
+	got, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, nil, nil, RollingUpdateContext{})
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -827,7 +829,7 @@ func TestGenerateDynamoComponentsDeployments_UsesDynDeploymentWorkers(t *testing
 				},
 			}
 
-			dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+			dcds, err := GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, nil, nil, RollingUpdateContext{})
 			require.NoError(t, err)
 			dcd, ok := dcds[componentName]
 			require.True(t, ok, "expected generated DCD for component %q", componentName)
@@ -904,7 +906,7 @@ func TestGenerateDynamoComponentsDeployments_PropagatesPreservedAlphaServiceAnno
 	beta := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, alpha.ConvertTo(beta))
 
-	got, err := GenerateDynamoComponentsDeployments(beta, nil, nil, RollingUpdateContext{})
+	got, err := GenerateDynamoComponentsDeployments(beta, beta.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 	dcd := got["frontend"]
 	require.NotNil(t, dcd)
@@ -943,7 +945,7 @@ func TestGenerateDynamoComponentsDeployments_AddsTopologyLabelAnnotationToWorker
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	worker := dcds["worker"]
@@ -979,7 +981,7 @@ func TestGenerateDynamoComponentsDeployments_AddsClusterTopologyAnnotationToWork
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	worker := dcds["worker"]
@@ -1048,7 +1050,7 @@ func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
 	beta := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, alpha.ConvertTo(beta))
 
-	dcds, err := GenerateDynamoComponentsDeployments(beta, nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(beta, beta.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 	prefillDCD := dcds["prefill"]
 	require.NotNil(t, prefillDCD)
@@ -1065,7 +1067,7 @@ func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
 
 	pcs, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		beta,
+		beta, beta.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
@@ -1106,7 +1108,7 @@ func TestGenerateDynamoComponentsDeployments_SkipsTopologyLabelAnnotationWithout
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(dgd, nil, nil, RollingUpdateContext{})
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	worker := dcds["worker"]
@@ -1140,7 +1142,7 @@ func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t 
 
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		dgd, dgd.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
@@ -1201,7 +1203,7 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	runtimeConfig := &controller_common.RuntimeConfig{}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		dgd, dgd.Spec.Components,
 		operatorConfig,
 		runtimeConfig,
 		kubeClient,
@@ -4406,7 +4408,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, betaDGD(t, tt.args.dynamoDeployment), tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			converted := betaDGD(t, tt.args.dynamoDeployment)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, converted, converted.Spec.Components, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -4508,7 +4511,7 @@ func TestGenerateGrovePodCliqueSet_DoesNotResolveUnusedContainerGPUCount(t *test
 
 			got, err := GenerateGrovePodCliqueSet(
 				t.Context(),
-				dgd,
+				dgd, dgd.Spec.Components,
 				&configv1alpha1.OperatorConfiguration{},
 				&controller_common.RuntimeConfig{},
 				nil,
@@ -4567,7 +4570,7 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 	}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd,
+		dgd, dgd.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		kubeClient,
@@ -4640,7 +4643,7 @@ func TestGenerateGrovePodCliqueSet_TRTLLMMultinodeDRA(t *testing.T) {
 
 	got, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		dgd,
+		dgd, dgd.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		kubeClient,
@@ -4686,7 +4689,8 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dynamoDeployment), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	converted := betaDGD(t, dynamoDeployment)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -6005,7 +6009,8 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dynamoDeployment), controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
+			converted := betaDGD(t, dynamoDeployment)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -7766,9 +7771,10 @@ func TestGenerateGrovePodCliqueSet_ConvertedCompilationCacheMountIsNotDuplicated
 	}
 
 	t.Log("Render the reported v1alpha1 compilation-cache fixture as a Grove PodCliqueSet")
+	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		betaDGD(t, dgd),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
@@ -8704,7 +8710,8 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				},
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
+			converted := betaDGD(t, dgd)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -8859,7 +8866,8 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
+	converted := betaDGD(t, dgd)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8943,7 +8951,8 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
+	converted := betaDGD(t, dgd)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -9042,7 +9051,8 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
+	converted := betaDGD(t, dgd)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -9095,9 +9105,10 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 		},
 	}
 
+	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		betaDGD(t, dgd),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
 		nil,
@@ -9204,9 +9215,10 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 				},
 			}
 
+			converted := betaDGD(t, dgd)
 			got, err := GenerateGrovePodCliqueSet(
 				context.Background(),
-				betaDGD(t, dgd),
+				converted, converted.Spec.Components,
 				&configv1alpha1.OperatorConfiguration{},
 				&controller_common.RuntimeConfig{},
 				nil, nil, nil, nil, nil,
@@ -9259,7 +9271,7 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 
 	got, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		beta,
+		beta, beta.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil, nil, nil, nil, nil,
@@ -9314,9 +9326,10 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 		},
 	}
 
+	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		betaDGD(t, dgd),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
@@ -9466,7 +9479,8 @@ func TestGenerateSingleDCD_RollingUpdateContext(t *testing.T) {
 		NewWorkerReplicaTargetsByComponent: map[string]int32{"prefill": 2},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
+	converted := betaDGD(t, dgd)
+	dcds, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	// Worker DCD: hash suffix in name, hash label, replica override
@@ -9520,7 +9534,7 @@ func TestGenerateDynamoComponentsDeploymentsDoesNotMutateParentDGD(t *testing.T)
 	original := dgd.DeepCopy()
 
 	dcds, err := GenerateDynamoComponentsDeployments(
-		dgd,
+		dgd, dgd.Spec.Components,
 		&RestartState{},
 		map[string]string{"prefill": "2026-05-12T13:00:00Z"},
 		RollingUpdateContext{
@@ -9548,7 +9562,7 @@ func TestGenerateDynamoComponentsDeploymentsAddsWorkerClassForEPP(t *testing.T) 
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(dgd, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
+	dcds, err := GenerateDynamoComponentsDeployments(dgd, dgd.Spec.Components, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "aabb1122"})
 	require.NoError(t, err)
 
 	prefillDCD := dcds["prefill"]
@@ -9584,7 +9598,8 @@ func TestGenerateDynamoComponentsDeployments_InferBackendFrameworkForGeneratedDC
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
+	converted := betaDGD(t, dgd)
+	dcds, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, &RestartState{}, nil, RollingUpdateContext{NewWorkerHash: "2dad72b9"})
 	require.NoError(t, err)
 
 	assert.Equal(t, string(BackendFrameworkVLLM), dcds["decode"].Spec.BackendFramework)
@@ -9601,7 +9616,8 @@ func TestGenerateSingleDCD_NoRollingUpdate(t *testing.T) {
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, RollingUpdateContext{})
+	converted := betaDGD(t, dgd)
+	dcds, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, &RestartState{}, nil, RollingUpdateContext{})
 	assert.NoError(t, err)
 
 	dcd := dcds["worker"]
@@ -9629,7 +9645,8 @@ func TestGenerateSingleDCD_RollingUpdateZeroReplicas(t *testing.T) {
 		NewWorkerReplicaTargetsByComponent: map[string]int32{"decode": 0},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), &RestartState{}, nil, ruCtx)
+	converted := betaDGD(t, dgd)
+	dcds, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, &RestartState{}, nil, ruCtx)
 	assert.NoError(t, err)
 
 	decodeDCD := dcds["decode"]
@@ -10377,7 +10394,8 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 		},
 	}
 
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	converted := betaDGD(t, dgd)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 
 	// PCS object-level metadata
@@ -10491,7 +10509,8 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 				},
 			}
 
-			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
+			converted := betaDGD(t, dgd)
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
 			require.NoError(t, err)
 			require.NotNil(t, pcs)
 			if tt.expectQueue {
@@ -10523,9 +10542,10 @@ func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
 		},
 	}
 
+	converted := betaDGD(t, dgd)
 	pcs, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		betaDGD(t, dgd),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, VolcanoScheduler: true}},
 		nil,
@@ -10556,9 +10576,10 @@ func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testin
 		},
 	}
 
+	converted := betaDGD(t, dgd)
 	_, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		betaDGD(t, dgd),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true, VolcanoScheduler: true}},
 		nil,
@@ -10588,7 +10609,8 @@ func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 		},
 	}
 
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	converted := betaDGD(t, dgd)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "high-priority", pcs.Spec.Template.PriorityClassName)
@@ -10659,7 +10681,8 @@ func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
 				}
 			}
 
-			pcs, err := GenerateGrovePodCliqueSet(context.Background(), betaDGD(t, dgd), &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			converted := betaDGD(t, dgd)
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
@@ -10696,7 +10719,8 @@ func TestGenerateDynamoComponentsDeployments_SpecMetadataPropagation(t *testing.
 		},
 	}
 
-	dcds, err := GenerateDynamoComponentsDeployments(betaDGD(t, dgd), nil, nil, RollingUpdateContext{})
+	converted := betaDGD(t, dgd)
+	dcds, err := GenerateDynamoComponentsDeployments(converted, converted.Spec.Components, nil, nil, RollingUpdateContext{})
 	require.NoError(t, err)
 
 	dcd := dcds["frontend"]
@@ -10914,9 +10938,10 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			converted := betaDGD(t, tt.deployment)
 			pcs, err := GenerateGrovePodCliqueSet(
 				context.Background(),
-				betaDGD(t, tt.deployment),
+				converted, converted.Spec.Components,
 				operatorConfig,
 				&controller_common.RuntimeConfig{},
 				nil,

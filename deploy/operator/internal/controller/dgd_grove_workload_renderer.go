@@ -83,7 +83,7 @@ func (r *groveWorkloadRenderer) Render(
 		return nil, fmt.Errorf("cannot render Grove PodCliqueSet without a Kubernetes reader")
 	}
 
-	managedComponents := req.managedComponents()
+	managedComponents := req.ManagedComponents()
 	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	key := types.NamespacedName{
 		Name:      dynamo.PCSNameForDGD(req.DGD.Name, managedComponents),
@@ -103,7 +103,7 @@ func (r *groveWorkloadRenderer) Render(
 	}
 	// Render ordinary workloads and retain the observed server-owned fields.
 	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
-	desired, err := dynamo.GenerateGrovePodCliqueSetForComponents(
+	desired, err := dynamo.GenerateGrovePodCliqueSet(
 		ctx, req.DGD, renderComponents, r.config, r.runtimeConfig, r.reader,
 		r.dockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos,
 	)
@@ -119,7 +119,7 @@ func (r *groveWorkloadRenderer) Render(
 	)
 
 	// Resolve capacity from the same rendered ordinary workload.
-	gpuShapes, err := dynamo.ResolveGroveGPUShapesForComponents(ctx, r.reader, req.DGD, renderComponents, desired)
+	gpuShapes, err := dynamo.ResolveGroveGPUShapes(ctx, r.reader, req.DGD, renderComponents, desired)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func groveRenderComponents(
 	pcs *grovev1alpha1.PodCliqueSet,
 	workerHashSuffix bool,
 ) ([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, error) {
-	managedComponents := req.managedComponents()
+	managedComponents := req.ManagedComponents()
 	renderComponents := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, len(managedComponents))
 	for i := range managedComponents {
 		renderComponents[i] = *managedComponents[i].DeepCopy()
@@ -157,7 +157,7 @@ func applyGroveWorkerHashSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) error {
-	workerHash, err := dynamo.ComputeDGDWorkersSpecHashForComponents(dgd, components)
+	workerHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd, components)
 	if err != nil {
 		return fmt.Errorf("compute Grove worker hash suffix: %w", err)
 	}
@@ -182,7 +182,7 @@ func shouldRenderGroveWorkerHashSuffix(
 	existing *grovev1alpha1.PodCliqueSet,
 	hashChanged bool,
 ) bool {
-	components := req.managedComponents()
+	components := req.ManagedComponents()
 	if !hasWorkerComponents(components) {
 		return false
 	}
@@ -226,11 +226,11 @@ func podCliqueSetObservesWorkerHash(
 	pcs *grovev1alpha1.PodCliqueSet,
 	acceptAllUnstamped bool,
 ) (bool, error) {
-	components := req.managedComponents()
+	components := req.ManagedComponents()
 	if !hasWorkerComponents(components) {
 		return true, nil
 	}
-	want, err := dynamo.ComputeDGDWorkersSpecHashForComponents(req.DGD, components)
+	want, err := dynamo.ComputeDGDWorkersSpecHash(req.DGD, components)
 	if err != nil {
 		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
 	}

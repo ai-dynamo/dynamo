@@ -152,7 +152,7 @@ func (p *componentProgram) Reconcile(
 	}
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
-		if err := p.scalingAdapters.Reconcile(ctx, req.DGD); err != nil {
+		if err := p.scalingAdapters.Reconcile(ctx, req.DGD, req.DGD.Spec.Components); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
@@ -167,7 +167,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
+	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd, dgd.Spec.Components); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
@@ -182,7 +182,7 @@ func (p *componentProgram) reconcileMultinodeWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
-	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd)
+	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd, dgd.Spec.Components)
 	if err != nil {
 		return failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
@@ -252,7 +252,7 @@ func (p *componentProgram) recordRollingUpdateTransition(
 	current := rollingUpdatePhase(result.Status.RollingUpdate)
 	switch {
 	case current == nvidiacomv1beta1.RollingUpdatePhasePending && previous != current:
-		desired, err := desiredWorkerHashes(dgd)
+		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 		if err != nil {
 			return
 		}

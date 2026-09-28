@@ -111,9 +111,10 @@ func generateTopologyTestPodCliqueSet(t *testing.T, deploymentPack v1alpha1.Topo
 		},
 	}
 
+	converted := betaDGD(t, deployment)
 	pcs, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		betaDGD(t, deployment),
+		converted, converted.Spec.Components,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,

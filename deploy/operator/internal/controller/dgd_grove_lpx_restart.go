@@ -43,24 +43,28 @@ func resolveCompositeGroveRestartProgress(
 	lpxResolver *lpxRestartProgressResolver,
 ) []string {
 	managed := make([]string, 0, len(inProgress))
-	external := make([]string, 0, len(inProgress))
+	delegated := make([]string, 0, len(inProgress))
 	pending := make(map[string]bool, len(inProgress))
+	delegatedNames := make(map[string]struct{})
+	for _, component := range req.DelegatedComponents() {
+		delegatedNames[component.ComponentName] = struct{}{}
+	}
 
 	for _, name := range inProgress {
 		component := req.DGD.GetComponentByName(name)
 		if component == nil {
 			continue
 		}
-		if req.Managed(component) {
-			managed = append(managed, name)
+		if _, found := delegatedNames[name]; found {
+			delegated = append(delegated, name)
 		} else {
-			external = append(external, name)
+			managed = append(managed, name)
 		}
 	}
 
 	// Observe the shared LPX child before ordinary Grove restart progress.
-	if len(external) > 0 {
-		for _, name := range lpxResolver.Resolve(ctx, req.DGD, external) {
+	if len(delegated) > 0 {
+		for _, name := range lpxResolver.Resolve(ctx, req.DGD, delegated) {
 			pending[name] = true
 		}
 	}

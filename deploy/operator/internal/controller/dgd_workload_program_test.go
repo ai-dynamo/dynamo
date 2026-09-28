@@ -485,14 +485,14 @@ func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
 	)
 
 	t.Log("Verify the renderer initially publishes the full multinode shape")
-	rendered, err := renderer.Render(t.Context(), testGroveReconcileRequest(dgd), nil, nil, false)
+	rendered, err := renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerEngine)
 	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerReplica)
 
 	t.Log("Delete the dependency without changing DGD generation and render again")
 	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
-	_, err = renderer.Render(t.Context(), testGroveReconcileRequest(dgd), nil, nil, false)
+	_, err = renderer.Render(t.Context(), groveReconcileRequest{DGD: dgd}, nil, nil, false)
 	require.ErrorContains(t, err, "ResourceClaimTemplate default/gpu-template")
 }
 
@@ -568,7 +568,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
+			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd, dgd.Spec.Components)
 			require.NoError(t, err)
 			commitErr := reconciler.commitUnsupportedWorkerHashTransition(
 				context.Background(),
@@ -663,7 +663,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
 		assert.Nil(t, status.RollingUpdate)
-		desired, err := desiredWorkerHashes(dgd)
+		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 		require.NoError(t, err)
 		assert.False(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
@@ -680,7 +680,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
-		desired, err := desiredWorkerHashes(dgd)
+		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 		require.NoError(t, err)
 
 		t.Log("Seed the fake cache with a worker DCD carrying the target hash")
@@ -720,7 +720,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
 			},
 		})
-		desired, err := desiredWorkerHashes(dgd)
+		desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 		require.NoError(t, err)
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHash: "pre-v2-hash",

@@ -101,23 +101,23 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				require.True(t, component.IsLPX())
 			}
 
-			t.Log("Render conventional components independently from their explicit selection")
-			conventionalComponents := slices.DeleteFunc(slices.Clone(dynamoDeployment.Spec.Components), func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+			t.Log("Render ordinary components independently from their explicit selection")
+			components := slices.DeleteFunc(slices.Clone(dynamoDeployment.Spec.Components), func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 				return component.IsLPX()
 			})
-			conventionalPCS, err := dynamo.GenerateGrovePodCliqueSetForComponents(
-				t.Context(), &dynamoDeployment, conventionalComponents, controllerConfig, runtimeConfig,
+			normal, err := dynamo.GenerateGrovePodCliqueSet(
+				t.Context(), &dynamoDeployment, components, controllerConfig, runtimeConfig,
 				kubeClient, nil, nil, nil, nil,
 			)
 			require.NoError(t, err)
-			require.NotEqual(t, conventionalPCS.Name, got.Name)
-			for _, clique := range conventionalPCS.Spec.Template.Cliques {
+			require.NotEqual(t, normal.Name, got.Name)
+			for _, clique := range normal.Spec.Template.Cliques {
 				require.NotEqual(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				require.False(t, dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent]).IsLPX())
 			}
 			podCliqueSets := []*grovev1alpha1.PodCliqueSet{got}
-			if len(conventionalPCS.Spec.Template.Cliques) > 0 {
-				podCliqueSets = append(podCliqueSets, conventionalPCS)
+			if len(normal.Spec.Template.Cliques) > 0 {
+				podCliqueSets = append(podCliqueSets, normal)
 			}
 
 			for _, pcs := range podCliqueSets {

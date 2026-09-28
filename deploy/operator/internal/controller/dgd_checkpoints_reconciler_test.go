@@ -1624,7 +1624,7 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v2: "oldhash"})
 
 	t.Log("Compute the desired and checkpoint worker hashes")
-	desired, err := desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashes(dgd, dgd.Spec.Components)
 	if err != nil {
 		t.Fatalf("desiredWorkerHashes() error = %v", err)
 	}

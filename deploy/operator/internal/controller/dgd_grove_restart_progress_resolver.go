@@ -43,7 +43,7 @@ func (r *groveRestartProgressResolver) Resolve(
 	inProgress []string,
 ) []string {
 	logger := log.FromContext(ctx)
-	components := req.managedComponents()
+	components := req.ManagedComponents()
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	pcsName := dynamo.PCSNameForDGD(req.DGD.Name, components)
@@ -73,7 +73,7 @@ func (r *groveRestartProgressResolver) Resolve(
 			logger.V(1).Info("component not found in DGD", "componentName", componentName)
 			continue
 		}
-		resourceName := dynamo.GroveComponentResourceNameForComponents(req.DGD, components, componentName)
+		resourceName := dynamo.GroveComponentResourceName(req.DGD, components, componentName)
 
 		var (
 			isReady bool

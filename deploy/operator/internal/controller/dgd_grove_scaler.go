@@ -72,7 +72,7 @@ func (s *groveScaler) Reconcile(
 		}
 
 		usesPCSG := component.UsesPCSG()
-		resourceName := dynamo.GroveComponentResourceNameForComponents(dgd, components, componentName)
+		resourceName := dynamo.GroveComponentResourceName(dgd, components, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
 		if usesPCSG {

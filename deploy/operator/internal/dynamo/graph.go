@@ -250,21 +250,6 @@ type RollingUpdateContext struct {
 // The map key is the component name.
 func GenerateDynamoComponentsDeployments(
 	parentDGD *v1beta1.DynamoGraphDeployment,
-	restartState *RestartState,
-	existingRestartAnnotations map[string]string,
-	rollingUpdateCtx RollingUpdateContext,
-) (map[string]*v1beta1.DynamoComponentDeployment, error) {
-	return generateDynamoComponentsDeployments(
-		parentDGD,
-		parentDGD.Spec.Components,
-		restartState,
-		existingRestartAnnotations,
-		rollingUpdateCtx,
-	)
-}
-
-func generateDynamoComponentsDeployments(
-	parentDGD *v1beta1.DynamoGraphDeployment,
 	components []v1beta1.DynamoComponentDeploymentSharedSpec,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
@@ -2575,37 +2560,10 @@ func resolveGroveSchedulerQueue(
 }
 
 // GenerateGrovePodCliqueSet reads the provider inputs needed to construct the
-// desired PodCliqueSet. Resolved domain values stay local and are passed to
-// the leaf rendering helpers that consume them.
-// The deployment must contain only components owned by this PCS.
+// desired PodCliqueSet for the supplied component selection while retaining
+// the complete DGD for graph-wide configuration. Resolved domain values stay
+// local and are passed to the leaf rendering helpers that consume them.
 func GenerateGrovePodCliqueSet(
-	ctx context.Context,
-	dynamoDeployment *v1beta1.DynamoGraphDeployment,
-	operatorConfig *configv1alpha1.OperatorConfiguration,
-	runtimeConfig *controller_common.RuntimeConfig,
-	reader ctrlclient.Reader,
-	secretsRetriever SecretsRetriever,
-	restartState *RestartState,
-	existingRestartAnnotations map[string]string,
-	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
-) (*grovev1alpha1.PodCliqueSet, error) {
-	return GenerateGrovePodCliqueSetForComponents(
-		ctx,
-		dynamoDeployment,
-		dynamoDeployment.Spec.Components,
-		operatorConfig,
-		runtimeConfig,
-		reader,
-		secretsRetriever,
-		restartState,
-		existingRestartAnnotations,
-		checkpointInfoByComponent,
-	)
-}
-
-// GenerateGrovePodCliqueSetForComponents renders the supplied component
-// selection while retaining the complete DGD for graph-wide configuration.
-func GenerateGrovePodCliqueSetForComponents(
 	ctx context.Context,
 	dynamoDeployment *v1beta1.DynamoGraphDeployment,
 	components []v1beta1.DynamoComponentDeploymentSharedSpec,
