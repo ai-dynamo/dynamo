@@ -113,6 +113,9 @@ def pytest_runtest_protocol(item, nextitem):
         item.config.getoption("forked", default=False)
         or item.get_closest_marker("forked")
     ):
+        # Match pytest's teardown when the session will not run the next item.
+        if item.session.shouldfail or item.session.shouldstop:
+            nextitem = None
         reraise: tuple[type[BaseException], ...] = (pytest.exit.Exception,)
         if not item.config.getoption("usepdb", False):
             reraise += (KeyboardInterrupt,)
