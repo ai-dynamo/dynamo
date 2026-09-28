@@ -91,10 +91,10 @@ impl RelayCkfOverlapStore {
 
     pub(super) fn withdraw(&self, pool_id: &RoutingPoolId, generation: u64) {
         let mut sessions = self.sessions.write();
-        if let Some(session) = sessions.get_mut(pool_id) {
-            if session.generation == generation {
-                session.ready = None;
-            }
+        if let Some(session) = sessions.get_mut(pool_id)
+            && session.generation == generation
+        {
+            session.ready = None;
         }
     }
 }

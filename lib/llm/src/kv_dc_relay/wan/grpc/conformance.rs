@@ -431,6 +431,34 @@ async fn actual_relay_transport_accepts_plaintext_grpc() {
 }
 
 #[tokio::test]
+async fn catalog_heartbeat_republishes_the_same_revision() {
+    let fixture = RelayFixture::start(|config| config.catalog_heartbeat_interval_ms = 10).await;
+    let mut client = fixture.client().await;
+    let mut stream = client
+        .watch_kv_pool_catalog(proto::WatchKvPoolCatalogRequest {
+            subscriber_id: "catalog-heartbeat-test".into(),
+            contract_marker: proto::RELAY_CONTRACT_MARKER,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let first = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let heartbeat = tokio::time::timeout(IO_TIMEOUT, stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(heartbeat.revision, first.revision);
+    assert_eq!(heartbeat.snapshot, first.snapshot);
+    assert_eq!(heartbeat.relay, first.relay);
+    fixture.shutdown().await;
+}
+
+#[tokio::test]
 async fn heartbeat_follows_complete_chunked_snapshot_without_advancing_sequence() {
     let fixture =
         RelayFixture::start_with_pool_capacity(4 * images::SNAPSHOT_CHUNK_BUCKETS, |config| {

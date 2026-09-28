@@ -80,6 +80,8 @@ impl Drop for Epoch {
 /// Keep the DGD view connected across stream failures. Each retry starts a
 /// fresh catalog/readiness epoch and can only score a newly validated CKF
 /// producer. The delay uses bounded equal jitter across router replicas.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 async fn run_relay_view_publishing(
     channel: Channel,
     scope: RelayPoolScope,
@@ -139,6 +141,8 @@ async fn run_relay_view_publishing(
 
 /// Consume the catalog/CKF Relay and the separate PR #13187 stats listener
 /// against one DGD assembler. Deployment supplies the stats proxy channel.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_relay_view_with_stats(
     relay_channel: Channel,
     stats_channel: Channel,
@@ -193,6 +197,8 @@ pub async fn run_relay_view(
 /// A failed/closed CKF stream also ends this connection epoch so the caller can
 /// reconnect and fetch a new catalog before subscribing to another generation.
 /// All three observations are invalidated on exit, including task cancellation.
+// Each source parameter owns a distinct connection or lifecycle boundary.
+#[allow(clippy::too_many_arguments)]
 async fn run_relay_view_epoch_publishing(
     channel: Channel,
     scope: RelayPoolScope,
@@ -226,7 +232,9 @@ async fn run_relay_view_epoch_publishing(
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<(u64, Result<()>)>();
     let mut relay_key = None;
     let mut last_catalog_revision = None;
+    let mut last_catalog_snapshot = None;
     let mut last_readiness_revision = None;
+    let mut last_readiness_entries = None;
     let mut next_ckf_generation = 0u64;
 
     loop {
@@ -238,11 +246,18 @@ async fn run_relay_view_epoch_publishing(
                 if last_catalog_revision.is_some_and(|last| update.revision < last) {
                     bail!("Relay catalog revision moved backwards");
                 }
+                let projection = project_catalog(&update, &scope, now_unix_ms())?;
                 if last_catalog_revision == Some(update.revision) {
+                    if last_catalog_snapshot.as_ref() != update.snapshot.as_ref() {
+                        bail!("Relay catalog changed without advancing its revision");
+                    }
+                    if !epoch.assembler.apply(epoch.catalog_lease, projection.observation)? {
+                        bail!("Relay catalog heartbeat was superseded");
+                    }
                     continue;
                 }
                 last_catalog_revision = Some(update.revision);
-                let projection = project_catalog(&update, &scope, now_unix_ms())?;
+                last_catalog_snapshot = update.snapshot.clone();
                 let selected = projection.sole_aggregated_overlap_producer(&model).cloned();
                 let stats_catalog = relay_key.and_then(|relay| {
                     StatsCatalog::from_projection(&projection, &model, relay)
@@ -292,11 +307,15 @@ async fn run_relay_view_epoch_publishing(
                 if last_readiness_revision.is_some_and(|last| update.revision < last) {
                     bail!("Relay readiness revision moved backwards");
                 }
-                if last_readiness_revision == Some(update.revision) {
-                    continue;
-                }
-                last_readiness_revision = Some(update.revision);
                 let observation = project_readiness(&update, &scope, now_unix_ms())?;
+                if last_readiness_revision == Some(update.revision) {
+                    if last_readiness_entries.as_ref() != Some(&update.entries) {
+                        bail!("Relay readiness changed without advancing its revision");
+                    }
+                } else {
+                    last_readiness_revision = Some(update.revision);
+                    last_readiness_entries = Some(update.entries.clone());
+                }
                 if !epoch.assembler.apply(epoch.readiness_lease, observation)? {
                     bail!("Relay readiness observation was superseded");
                 }

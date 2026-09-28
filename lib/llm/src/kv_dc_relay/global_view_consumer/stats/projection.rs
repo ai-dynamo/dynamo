@@ -316,7 +316,6 @@ pub fn project_load(
             received_at_unix_ms: Some(received_at),
             expected_sources: model_status.expected_sources,
             observed_sources: model_status.observed_sources,
-            ..Default::default()
         }),
     };
     let load = load_status.map(|status| PoolObservation::Load {
@@ -383,7 +382,6 @@ pub fn combined_capacity(
                 .and_then(|value| value.capacity_status.as_ref()?.expected_sources),
             observed_sources: usage
                 .and_then(|value| value.capacity_status.as_ref()?.observed_sources),
-            ..Default::default()
         },
     })
 }

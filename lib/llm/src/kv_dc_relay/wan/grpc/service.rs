@@ -102,6 +102,7 @@ pub(super) struct KvEventRelayService {
     source: GrpcPublicationSource,
     cancel: CancellationToken,
     pool_heartbeat_interval: Duration,
+    catalog_heartbeat_interval: Duration,
     readiness_heartbeat_interval: Duration,
     load_updates: LoadUpdateHub,
     limits: SubscriberLimits,
@@ -109,6 +110,7 @@ pub(super) struct KvEventRelayService {
 
 pub(super) struct KvEventRelayServiceConfig {
     pub(super) pool_heartbeat_interval: Duration,
+    pub(super) catalog_heartbeat_interval: Duration,
     pub(super) readiness_heartbeat_interval: Duration,
     pub(super) load_updates: LoadUpdateHub,
     pub(super) limits: SubscriberLimits,
@@ -124,6 +126,7 @@ impl KvEventRelayService {
             source,
             cancel,
             pool_heartbeat_interval: config.pool_heartbeat_interval,
+            catalog_heartbeat_interval: config.catalog_heartbeat_interval,
             readiness_heartbeat_interval: config.readiness_heartbeat_interval,
             load_updates: config.load_updates,
             limits: config.limits,
@@ -167,24 +170,27 @@ impl proto::KvEventRelay for KvEventRelayService {
         let mut catalogs = self.source.watch_catalog();
         let cancel = self.cancel.clone();
         let relay = self.source.relay_identity();
-        let initial = catalogs.borrow().clone();
+        let heartbeat_interval = self.catalog_heartbeat_interval;
+        let initial = catalogs.borrow_and_update().clone();
         let stream = try_stream! {
             let _permit = permit;
             yield catalog_to_wire(initial, relay);
+            let first_heartbeat = tokio::time::Instant::now() + heartbeat_interval;
+            let mut heartbeat = tokio::time::interval_at(first_heartbeat, heartbeat_interval);
+            heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                let changed = tokio::select! {
+                let catalog = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
-                    changed = catalogs.changed() => changed,
+                    changed = catalogs.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        catalogs.borrow_and_update().clone()
+                    }
+                    _ = heartbeat.tick() => catalogs.borrow().clone(),
                 };
-                if changed.is_err() {
-                    break;
-                }
-                let update = {
-                    let current = catalogs.borrow_and_update();
-                    current.clone()
-                };
-                yield catalog_to_wire(update, relay);
+                yield catalog_to_wire(catalog, relay);
             }
         };
         Ok(Response::new(Box::pin(stream)))

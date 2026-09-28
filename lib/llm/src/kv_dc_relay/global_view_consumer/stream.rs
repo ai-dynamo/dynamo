@@ -290,6 +290,8 @@ impl Drop for CkfStreamSession {
 /// cancels this task when the catalog withdraws or replaces that producer and
 /// starts a fresh task on reconnect. A closed or invalid stream returns an
 /// error; dropping the session removes its overlap score immediately.
+// Keep producer identity, stream, observation, and cancellation inputs explicit.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_exact_aggregated_producer(
     client: wire::KvEventRelayClient<Channel>,
     routing_pool_id: RoutingPoolId,
