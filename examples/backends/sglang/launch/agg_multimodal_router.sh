@@ -169,7 +169,7 @@ echo "=== All services are ready ==="
 echo "Frontend:        http://127.0.0.1:${HTTP_PORT}"
 for i in $(seq 1 "${NUM_WORKERS}"); do
     # Use the actual port values from the launch loop above so the
-    # summary reflects DYN_SYSTEM_PORT{i} / KV_EVENTS_PORT_BASE overrides
+    # summary reflects DYN_SYSTEM_PORT{i} / DYN_VLLM_KV_EVENT_PORT{i} overrides
     # the harness may have applied (instead of the default formula).
     echo "Worker $i health: http://127.0.0.1:${WORKER_PORTS[i-1]}/health"
     echo "Worker $i kv-events: tcp://*:${KV_EVENTS_PORTS[i-1]}"
