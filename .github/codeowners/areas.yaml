@@ -341,6 +341,7 @@ areas:
   - container/launch_message/
   - container/render.py
   - container/run.sh
+  - container/validate-global-router-poc.sh
   - container/templates/
   - container/use-sccache.sh
   - deny.toml
