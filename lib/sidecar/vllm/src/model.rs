@@ -22,6 +22,7 @@ struct ModelIdentity {
     tool_call_parser: Option<String>,
     supports_lora: bool,
     max_loras: u32,
+    supports_multimodal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ impl DiscoveredModel {
             tool_call_parser: tool_call_parser.clone(),
             supports_lora,
             max_loras,
+            supports_multimodal: model.supports_multimodal,
         };
         Ok(Self {
             source,

@@ -1104,8 +1104,12 @@ class VllmProcessor:
                     metrics["video_count"] = video_count
                 if audio_count:
                     metrics["audio_count"] = audio_count
-                envelope["event"] = "llm_metrics"
-                envelope["comment"] = [json.dumps(metrics)]
+                # Attach metrics to data when available; otherwise use an annotation.
+                if data := envelope.get("data"):
+                    data["llm_metrics"] = metrics
+                else:
+                    envelope["event"] = "llm_metrics"
+                    envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
             _nvtx.end_range(rng_stream)

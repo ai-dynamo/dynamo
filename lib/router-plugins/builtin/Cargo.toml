@@ -9,13 +9,17 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Worker-selection policies Dynamo ships and always links"
+description = "Router plugins shipped with Dynamo"
 
 [dependencies]
 fastrand = "2"
 parking_lot.workspace = true
 dynamo-kv-router = { workspace = true, features = ["standalone-selection"] }
 serde.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

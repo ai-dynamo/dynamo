@@ -292,7 +292,7 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub nvext: Option<serde_json::Value>,
     /// Internal frontend metrics payload. This must never be serialized to
     /// client-facing OpenAI-compatible streams.
-    #[serde(skip)]
+    #[serde(default, skip_serializing)]
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
