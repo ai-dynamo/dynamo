@@ -318,6 +318,41 @@ func TestDiscoverGPUsFiltered_HomogeneousCountsAllNodes(t *testing.T) {
 	assert.Equal(t, 2, info.NodesWithGPUs)
 }
 
+func TestDiscoverGPUsFiltered_UnknownModelsGroupByNormalizedName(t *testing.T) {
+	t.Log("Given two GFD nodes with normalized-equivalent unknown GPU models")
+	node1 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unknown-node-1",
+			Labels: map[string]string{
+				LabelGPUCount:   "8",
+				LabelGPUProduct: "Mystery GPU",
+				LabelGPUMemory:  "81920",
+			},
+		},
+	}
+	node2 := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "unknown-node-2",
+			Labels: map[string]string{
+				LabelGPUCount:         "8",
+				LabelGPUProduct:       "mystery-gpu",
+				LabelGPUMemory:        "81920",
+				LabelNFDRDMAAvailable: "true",
+			},
+		},
+	}
+	k8sClient := newFakeClient(node1, node2)
+
+	t.Log("When GFD discovery aggregates the selected group")
+	info, err := DiscoverGPUsFiltered(context.Background(), k8sClient, "")
+
+	t.Log("Then both nodes are counted and RDMA from the second node is detected")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, 2, info.NodesWithGPUs)
+	assert.True(t, info.RDMAEnabled)
+}
+
 func TestDiscoverGPUsFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
 	ctx := context.Background()
 
@@ -1165,6 +1200,82 @@ func TestDiscoverGPUsFromDCGMFiltered_MixedSKU(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, info1.System, info2.System, "different SKU filters should return different results")
 	})
+}
+
+func TestDiscoverGPUsFromDCGMFiltered_UnknownModelsGroupByNormalizedName(t *testing.T) {
+	t.Log("Given two running DCGM exporter pods on nodes with normalized-equivalent unknown models")
+	node1 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "unknown-node-1"}}
+	node2 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "unknown-node-2",
+		Labels: map[string]string{LabelNFDRDMAAvailable: "true"},
+	}}
+	pod1 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "dcgm-unknown-1", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+		Spec:   corev1.PodSpec{NodeName: "unknown-node-1"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	pod2 := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "dcgm-unknown-2", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+		Spec:   corev1.PodSpec{NodeName: "unknown-node-2"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+	}
+	k8sClient := newFakeClient(node1, node2, pod1, pod2)
+	discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+		model := "Mystery GPU"
+		if strings.Contains(endpoint, "10.0.0.2") {
+			model = "mystery-gpu"
+		}
+		return &GPUInfo{GPUsPerNode: 8, Model: model, VRAMPerGPU: 81920}, nil
+	})
+
+	t.Log("When DCGM discovery aggregates the selected group")
+	info, err := discovery.DiscoverGPUsFromDCGMFiltered(context.Background(), k8sClient, nil, "")
+
+	t.Log("Then both nodes are counted and RDMA from the second node is detected")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, 2, info.NodesWithGPUs)
+	assert.True(t, info.RDMAEnabled)
+}
+
+func TestDiscoverGPUsFromDCGMFiltered_EmptyModelsStayIsolatedByNode(t *testing.T) {
+	t.Log("Given two DCGM nodes with empty models and only the non-selected node has RDMA")
+	selectedNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "selected-node"}}
+	otherNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+		Name:   "other-node",
+		Labels: map[string]string{LabelNFDRDMAAvailable: "true"},
+	}}
+	selectedPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "dcgm-selected", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+		Spec:   corev1.PodSpec{NodeName: "selected-node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1"},
+	}
+	otherPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "dcgm-other", Namespace: "gpu-operator",
+			Labels: map[string]string{LabelApp: LabelValueNvidiaDCGMExporter}},
+		Spec:   corev1.PodSpec{NodeName: "other-node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"},
+	}
+	k8sClient := newFakeClient(selectedNode, otherNode, selectedPod, otherPod)
+	discovery := NewGPUDiscovery(func(_ context.Context, endpoint string) (*GPUInfo, error) {
+		if strings.Contains(endpoint, "10.0.0.1") {
+			return &GPUInfo{NodeName: "selected-node", GPUsPerNode: 8, VRAMPerGPU: 81920}, nil
+		}
+		return &GPUInfo{NodeName: "other-node", GPUsPerNode: 4, VRAMPerGPU: 40960}, nil
+	})
+
+	t.Log("When DCGM discovery selects the node with more GPUs")
+	info, err := discovery.DiscoverGPUsFromDCGMFiltered(context.Background(), k8sClient, nil, "")
+
+	t.Log("Then only the selected node is counted and RDMA from the other node is excluded")
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, "selected-node", info.NodeName)
+	assert.Equal(t, 1, info.NodesWithGPUs)
+	assert.False(t, info.RDMAEnabled)
 }
 
 func TestDiscoverGPUsFromDCGMFiltered_DetectsRDMAAvailableLabel(t *testing.T) {
