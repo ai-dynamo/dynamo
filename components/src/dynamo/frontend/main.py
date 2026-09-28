@@ -31,6 +31,7 @@ from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.utils.gc_freeze import install_gc_pause_logger, maybe_freeze_gc_heap
 from dynamo.llm import (
     AicPerfConfig,
     EngineType,
@@ -373,6 +374,9 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     config, vllm_flags, sglang_flags = parse_args()
     dump_config(config.dump_config_to, config)
+    # Before any heavy import or the runtime, so startup-time collections are
+    # visible too when an operator is chasing a stall.
+    install_gc_pause_logger(config.gc_pause_log_ms)
     max_seq_info = (
         f", max_seq_len: {config.migration_max_seq_len}"
         if config.migration_max_seq_len is not None
@@ -480,6 +484,12 @@ async def async_main():
     frontend_route_extensions = load_frontend_route_extensions(
         config.frontend_route_extensions
     )
+    # Everything built so far (runtime bindings, config, route extensions, the
+    # engine imports pulled in by --dyn-chat-processor) lives for the process
+    # lifetime. Pin it now so gen2 collections never walk it again. The chat
+    # processors freeze again once a model's tokenizer and parsers exist,
+    # which is where most of the static heap comes from.
+    maybe_freeze_gc_heap(config.freeze_gc_heap, context="frontend startup")
 
     try:
         if config.interactive:

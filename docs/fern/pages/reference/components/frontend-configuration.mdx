@@ -677,6 +677,18 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_PREPROCESS_WORKERS`
 </ParamField>
 
+<ParamField path="--dyn-freeze-gc-heap" type="boolean" default="true">
+  Freeze the frontend's CPython garbage-collector heap (`gc.collect()` then `gc.freeze()`) once its static state is built: after startup, and again after each model's chat processor is constructed with `--dyn-chat-processor vllm` or `sglang`, in the main process and in every `--dyn-preprocess-workers` process. With a Python chat processor the frontend holds the engine's imports, the tokenizer, and parser registries; without the freeze every full (generation 2) collection walks them again and stalls the event loop for 0.2 to 1 second, increasingly often as request rate rises. Objects alive at freeze time that later die are never reclaimed. Pass `--no-dyn-freeze-gc-heap` to keep default CPython behavior. Has no measurable effect with the default `dynamo` chat processor, where the request path runs in Rust.
+
+  Environment variable: `DYN_FREEZE_GC_HEAP`
+</ParamField>
+
+<ParamField path="--dyn-gc-pause-log-ms" type="float" default="0">
+  Log every CPython garbage collection whose pause lasts at least this many milliseconds, with the generation, duration, and object count, at `WARNING` level through `gc.callbacks`. `0` disables the hook. Use it to attribute latency stalls to GC and to verify `--dyn-freeze-gc-heap`.
+
+  Environment variable: `DYN_GC_PAUSE_LOG_MS`
+</ParamField>
+
 <ParamField path="-i / --interactive" type="boolean" default="false">
   Interactive text chat mode.
 

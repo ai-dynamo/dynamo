@@ -279,6 +279,42 @@ class DynamoVllmArgGroup(ArgGroup):
             "See vLLM multi-node data parallel documentation for more details.",
         )
 
+        add_negatable_bool_argument(
+            g,
+            flag_name="--freeze-gc-heap",
+            env_var="DYN_VLLM_FREEZE_GC_HEAP",
+            default=True,
+            help=(
+                "Freeze this process's CPython GC heap (gc.collect() then gc.freeze()) "
+                "once the engine is initialized, before the model is registered. The Dynamo worker process holds vLLM's "
+                "imports, the tokenizer and config objects (~1M long-lived objects); "
+                "without a freeze every full (gen2) collection re-walks them and stalls "
+                "the request loop for 0.4-2 s, increasingly often as request rate "
+                "grows, while EngineCore sits idle. vLLM freezes its own EngineCore "
+                "and GPU-worker heaps the same way; this covers the Dynamo-owned "
+                "process it does not reach. Objects alive at freeze time that later "
+                "die are never reclaimed. Use --no-freeze-gc-heap to keep default "
+                "CPython GC behaviour."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--gc-pause-log-ms",
+            env_var="DYN_VLLM_GC_PAUSE_LOG_MS",
+            default=0.0,
+            arg_type=float,
+            help=(
+                "Log every CPython garbage collection in this process whose pause is "
+                "at least this many milliseconds (generation, duration, objects "
+                "collected) at WARNING level, via gc.callbacks. 0 (default) disables. "
+                "Use it to attribute latency stalls to GC and to verify "
+                "--freeze-gc-heap; the hook adds two clock reads per collection and "
+                "nothing else. Applies to the Dynamo worker process only, not to "
+                "vLLM's EngineCore or GPU worker processes."
+            ),
+        )
+
         # ModelExpress P2P
         add_argument(
             g,
@@ -557,6 +593,10 @@ class DynamoVllmConfig(ConfigBase):
     # Headless mode for multi-node TP/PP
     headless: bool = False
 
+    # CPython GC: pin the post-registration static heap; opt-in pause log.
+    freeze_gc_heap: bool = True
+    gc_pause_log_ms: float = 0.0
+
     # ModelExpress P2P
     model_express_url: Optional[str] = None
 
@@ -614,6 +654,11 @@ class DynamoVllmConfig(ConfigBase):
         self._load_explicit_benchmark_points()
         self._resolve_legacy_benchmark_sampling()
         self._validate_benchmark_sampling()
+        self._validate_gc_pause_log_ms()
+
+    def _validate_gc_pause_log_ms(self) -> None:
+        if not (self.gc_pause_log_ms >= 0.0):  # also rejects NaN
+            raise ValueError("--gc-pause-log-ms must be >= 0 (0 disables)")
 
     def _load_explicit_benchmark_points(self) -> None:
         self._benchmark_points = None

@@ -117,6 +117,18 @@ These flags control which role this worker plays in a disaggregated deployment. 
   Environment variable: `DYN_VLLM_HEADLESS`
 </ParamField>
 
+<ParamField path="--freeze-gc-heap" type="boolean" default="true">
+  Freeze the Dynamo worker process's CPython garbage-collector heap (`gc.collect()` then `gc.freeze()`) once the engine is initialized, before the model is registered. The worker process holds vLLM's imports, the tokenizer, and config objects, about a million long-lived Python objects. Without the freeze, every full (generation 2) collection walks them again and stalls the request loop for 0.4 to 2 seconds while EngineCore idles, and the stalls become more frequent as request rate rises. vLLM freezes its own EngineCore and GPU-worker heaps the same way; this flag covers the Dynamo-owned process those do not reach. Objects alive at freeze time that later die are never reclaimed. Pass `--no-freeze-gc-heap` to keep default CPython behavior.
+
+  Environment variable: `DYN_VLLM_FREEZE_GC_HEAP`
+</ParamField>
+
+<ParamField path="--gc-pause-log-ms" type="float" default="0">
+  Log every CPython garbage collection in the Dynamo worker process whose pause lasts at least this many milliseconds, with the generation, duration, and object count, at `WARNING` level through `gc.callbacks`. `0` disables the hook. Use it to attribute latency stalls to GC and to verify `--freeze-gc-heap`. Does not cover vLLM's EngineCore or GPU worker processes.
+
+  Environment variable: `DYN_VLLM_GC_PAUSE_LOG_MS`
+</ParamField>
+
 ## Tokenizer and multimodal
 
 <ParamField path="--use-vllm-tokenizer" type="boolean" default="false">

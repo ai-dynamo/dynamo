@@ -22,6 +22,7 @@ from sglang.srt.utils.hf_transformers_utils import get_tokenizer
 
 from dynamo._internal import ModelDeploymentCard
 from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+from dynamo.common.utils.gc_freeze import maybe_freeze_gc_heap
 from dynamo.frontend.frontend_args import FrontendConfig
 from dynamo.llm import ModelCardInstanceId, PythonAsyncEngine, RoutedEngine
 from dynamo.llm.exceptions import InvalidArgument, Unknown
@@ -315,8 +316,14 @@ def _init_worker(
     template_force_reasoning: bool = False,
     chat_template: str | None = None,
     default_thinking_mode: str | None = None,
+    freeze_gc_heap: bool = False,
 ) -> None:
-    """Initialize a worker process with its own tokenizer."""
+    """Initialize a worker process with its own tokenizer.
+
+    ``freeze_gc_heap`` defaults to False so a direct call (tests, tooling)
+    leaves the calling interpreter's GC alone; the pool initializer passes the
+    frontend's configured value explicitly.
+    """
     global _w_tokenizer, _w_tool_call_parser_name, _w_reasoning_parser_name
     global _w_exclude_tools_when_tool_choice_none, _w_template_force_reasoning
     global _w_default_thinking_mode
@@ -328,6 +335,10 @@ def _init_worker(
     _w_exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
     _w_template_force_reasoning = template_force_reasoning
     _w_default_thinking_mode = default_thinking_mode
+    # Each pool worker carries its own copy of the tokenizer + sglang imports
+    # and runs the same per-request allocation pattern as the main process,
+    # so it has the same gen2 stall without this.
+    maybe_freeze_gc_heap(freeze_gc_heap, context="SGLang preprocess worker init")
 
 
 def _preprocess_worker(
@@ -1074,6 +1085,7 @@ class SglangEngineFactory:
                     template_force_reasoning,
                     chat_template,
                     default_thinking_mode,
+                    self.config.freeze_gc_heap,
                 ),
             )
             futures = [
@@ -1113,6 +1125,15 @@ class SglangEngineFactory:
         )
         gen.exclude_tools_when_tool_choice_none = (
             self.config.exclude_tools_when_tool_choice_none
+        )
+
+        # The tokenizer, chat template and sglang parser imports built above
+        # are the bulk of this process's long-lived heap; see
+        # vllm_processor.EngineFactory.chat_engine_factory for why one
+        # blocking collect+freeze per model registration is worth it.
+        maybe_freeze_gc_heap(
+            self.config.freeze_gc_heap,
+            context=f"SGLang chat processor for {mdc.name()!r}",
         )
 
         return PythonAsyncEngine(gen.generator, loop)

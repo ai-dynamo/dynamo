@@ -809,3 +809,56 @@ class TestEmbeddingWorkerProcesses:
         config.headless = True
         with pytest.raises(ValueError, match="--headless"):
             config._validate_embedding_worker_processes()
+
+
+class TestGcHeapFlags:
+    """--freeze-gc-heap / --gc-pause-log-ms on the Dynamo worker process."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_env(self, monkeypatch):
+        for name in ("DYN_VLLM_FREEZE_GC_HEAP", "DYN_VLLM_GC_PAUSE_LOG_MS"):
+            monkeypatch.delenv(name, raising=False)
+
+    @staticmethod
+    def _parse(args):
+        parser = argparse.ArgumentParser()
+        DynamoVllmArgGroup().add_arguments(parser)
+        return parser.parse_args(args)
+
+    def test_defaults(self):
+        parsed = self._parse([])
+        assert parsed.freeze_gc_heap is True
+        assert parsed.gc_pause_log_ms == 0.0
+
+    @pytest.mark.parametrize(
+        ("args", "env_value", "expected"),
+        [
+            (["--no-freeze-gc-heap"], None, False),
+            (["--freeze-gc-heap"], None, True),
+            ([], "false", False),
+            ([], "0", False),
+            (["--freeze-gc-heap"], "false", True),
+            (["--no-freeze-gc-heap"], "true", False),
+        ],
+    )
+    def test_freeze_flag_and_env(self, monkeypatch, args, env_value, expected):
+        if env_value is not None:
+            monkeypatch.setenv("DYN_VLLM_FREEZE_GC_HEAP", env_value)
+        assert self._parse(args).freeze_gc_heap is expected
+
+    def test_pause_log_threshold_cli_and_env(self, monkeypatch):
+        assert self._parse(["--gc-pause-log-ms", "50"]).gc_pause_log_ms == 50.0
+        monkeypatch.setenv("DYN_VLLM_GC_PAUSE_LOG_MS", "12.5")
+        assert self._parse([]).gc_pause_log_ms == 12.5
+
+    @pytest.mark.parametrize("value", [-1.0, float("nan")])
+    def test_pause_log_threshold_rejects_negative_and_nan(self, value):
+        config = create_config()
+        config.gc_pause_log_ms = value
+        with pytest.raises(ValueError, match="--gc-pause-log-ms must be >= 0"):
+            config._validate_gc_pause_log_ms()
+
+    def test_zero_threshold_passes_validation(self):
+        config = create_config()
+        config.gc_pause_log_ms = 0.0
+        config._validate_gc_pause_log_ms()

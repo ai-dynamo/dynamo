@@ -103,6 +103,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     tokenizer_fallback: bool
     trust_remote_code: bool
     frontend_route_extensions: list[str]
+    freeze_gc_heap: bool = True
+    gc_pause_log_ms: float = 0.0
 
     _VALID_TOKENIZER_BACKENDS = {"default", "fastokens", "basetenkenizer"}
 
@@ -154,6 +156,8 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
                 f"--tokenizer: invalid value '{self.tokenizer_backend}' "
                 f"(choose from {sorted(self._VALID_TOKENIZER_BACKENDS)})"
             )
+        if not (self.gc_pause_log_ms >= 0.0):  # also rejects NaN
+            raise ValueError("--dyn-gc-pause-log-ms must be >= 0 (0 disables)")
         if self.router_prefill_load_model == "aic":
             if self.router_mode != "kv":
                 raise ValueError(
@@ -670,6 +674,41 @@ class FrontendArgGroup(ArgGroup):
                 "Supported with '--dyn-chat-processor vllm' and '--dyn-chat-processor sglang'."
             ),
             arg_type=int,
+        )
+
+        add_negatable_bool_argument(
+            g,
+            flag_name="--dyn-freeze-gc-heap",
+            env_var="DYN_FREEZE_GC_HEAP",
+            default=True,
+            dest="freeze_gc_heap",
+            help=(
+                "Freeze the CPython GC heap (gc.collect() then gc.freeze()) once the "
+                "frontend's static state is built: after startup, and again after each "
+                "model's chat processor is constructed with '--dyn-chat-processor vllm' "
+                "or 'sglang' (in the main process and in every --dyn-preprocess-workers "
+                "process). Full (gen2) collections then skip the tokenizer, parser and "
+                "engine-import heap instead of walking it on every pass, which removes "
+                "the 0.2-1 s main-thread stalls that heap causes under load. Objects "
+                "alive at freeze time that later die are never reclaimed. Use "
+                "--no-dyn-freeze-gc-heap to keep default CPython GC behaviour."
+            ),
+        )
+
+        add_argument(
+            g,
+            flag_name="--dyn-gc-pause-log-ms",
+            env_var="DYN_GC_PAUSE_LOG_MS",
+            default=0.0,
+            dest="gc_pause_log_ms",
+            help=(
+                "Log every CPython garbage collection whose pause is at least this many "
+                "milliseconds (generation, duration, objects collected) at WARNING level, "
+                "via gc.callbacks. 0 (default) disables. Use it to attribute latency "
+                "stalls to GC and to verify --dyn-freeze-gc-heap; the hook adds two "
+                "clock reads per collection and nothing else."
+            ),
+            arg_type=float,
         )
 
         add_argument(
