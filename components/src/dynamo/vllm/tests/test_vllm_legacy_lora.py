@@ -477,15 +477,18 @@ async def test_legacy_lora_request_drain_preserves_concurrent_generation():
 
 
 @pytest.mark.asyncio
-async def test_lora_unload_blocks_keep_pause_until_active_request_drains(monkeypatch):
+async def test_lora_unload_drain_allows_other_adapter_admission(monkeypatch):
     handler = _make_prefill_handler()
     handler._lora_state.loaded_loras = {
-        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter-a"),
+        "adapterB": LoRAInfo(id=456, path="/cache/adapter-b"),
     }
     handler._engine_loaded_loras = {"adapterA"}
     handler._lora_state.begin_request("adapterA")
-    handler.engine_client.pause_generation = AsyncMock()
     monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+
+    async def _generate(_lora_request):
+        yield SimpleNamespace()
 
     async def _run_unload():
         return [
@@ -494,19 +497,63 @@ async def test_lora_unload_blocks_keep_pause_until_active_request_drains(monkeyp
 
     unload_task = asyncio.create_task(_run_unload())
     await asyncio.sleep(0)
-    pause_task = asyncio.create_task(handler.pause_generation({"mode": "keep"}))
-    await asyncio.sleep(0)
 
-    assert not pause_task.done()
-    handler.engine_client.pause_generation.assert_not_awaited()
+    admission = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterB"),
+        _generate,
+    )
+    await asyncio.wait_for(anext(admission), timeout=1)
+    await admission.aclose()
+    assert handler._lora_state.active_requests == {"adapterA": 1}
 
     handler._lora_state.end_request("adapterA")
     results = await unload_task
-    pause_result = await pause_task
 
     assert results[-1]["status"] == "success"
-    assert pause_result["status"] == "ok"
-    handler.engine_client.pause_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lora_download_allows_other_adapter_admission(monkeypatch):
+    handler = _make_prefill_handler()
+    handler._lora_state.loaded_loras = {
+        "adapterB": LoRAInfo(id=456, path="/cache/adapter-b")
+    }
+    download_started = asyncio.Event()
+    allow_download = asyncio.Event()
+
+    async def _blocked_download(_uri):
+        download_started.set()
+        await allow_download.wait()
+        return {"status": "success", "local_path": "/cache/adapter-a"}
+
+    async def _generate(_lora_request):
+        yield SimpleNamespace()
+
+    manager = SimpleNamespace(download_lora=_blocked_download)
+    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(handlers_mod, "register_model", AsyncMock())
+
+    async def _run_load():
+        return [
+            result
+            async for result in handler.load_lora(
+                {"lora_name": "adapterA", "source": {"uri": "file:///adapter-a"}}
+            )
+        ]
+
+    load_task = asyncio.create_task(_run_load())
+    await download_started.wait()
+
+    admission = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterB"),
+        _generate,
+    )
+    await asyncio.wait_for(anext(admission), timeout=1)
+    await admission.aclose()
+
+    allow_download.set()
+    results = await load_task
+    assert results[-1]["status"] == "success"
 
 
 @pytest.mark.asyncio

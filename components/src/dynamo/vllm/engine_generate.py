@@ -220,6 +220,11 @@ def adapt_engine_generate_request(
         raise ValueError(
             "sampling_params.routed_experts_prompt_start must be a non-negative integer"
         )
+    if raw_prompt_start >= len(token_ids):
+        raise ValueError(
+            "sampling_params.routed_experts_prompt_start must be smaller than "
+            "the prompt token count"
+        )
     reconstructed = {**envelope, "token_ids": token_ids}
     _, generate_request_type = _native_generate_api()
     native_request = generate_request_type.model_validate(reconstructed)

@@ -133,26 +133,22 @@ def test_tito_adapter_rejects_invalid_routed_experts_prompt_start(prompt_start):
 
 
 @pytest.mark.parametrize("prompt_start", [3, 99])
-def test_tito_adapter_accepts_prompt_length_or_larger_routed_experts_start(
-    prompt_start,
-):
+def test_tito_adapter_rejects_out_of_range_routed_experts_start(prompt_start):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    adapted = adapt_engine_generate_request(
-        _request(
-            sampling_params={
-                "max_tokens": 1,
-                "routed_experts_prompt_start": prompt_start,
-            }
-        ),
-        enable_multimodal=False,
-        decode_capable=True,
-        vllm_config=_vllm_config(),
-        default_sampling_params={},
-    )
-
-    assert adapted is not None
-    assert adapted.sampling_params.routed_experts_prompt_start == prompt_start
+    with pytest.raises(ValueError, match="smaller than the prompt token count"):
+        adapt_engine_generate_request(
+            _request(
+                sampling_params={
+                    "max_tokens": 1,
+                    "routed_experts_prompt_start": prompt_start,
+                }
+            ),
+            enable_multimodal=False,
+            decode_capable=True,
+            vllm_config=_vllm_config(),
+            default_sampling_params={},
+        )
 
 
 def test_tito_adapter_rejects_nonprogressing_guided_json_cycle():

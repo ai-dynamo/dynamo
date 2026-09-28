@@ -2697,7 +2697,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
-            async with lock, self._pause_lock:
+            async with lock:
                 capacity_reserved = False
                 committed_lora_info = False
                 try:
@@ -2765,16 +2765,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap and old_info is not None and old_engine_loaded:
                         try:
-                            if getattr(
-                                self, "_paused", False
-                            ) and self._lora_state.active_requests.get(lora_name, 0):
-                                raise RuntimeError(
-                                    f"Cannot hot-swap LoRA '{lora_name}' while generation "
-                                    "is paused with active requests; resume generation or "
-                                    "abort the requests first"
-                                )
+                            async with self._pause_lock:
+                                if getattr(
+                                    self, "_paused", False
+                                ) and self._lora_state.active_requests.get(
+                                    lora_name, 0
+                                ):
+                                    raise RuntimeError(
+                                        f"Cannot hot-swap LoRA '{lora_name}' while generation "
+                                        "is paused with active requests; resume generation or "
+                                        "abort the requests first"
+                                    )
                             await self._lora_state.wait_until_idle(lora_name)
-                            await self.engine_client.remove_lora(old_info.id)
+                            async with self._pause_lock:
+                                await self.engine_client.remove_lora(old_info.id)
                             self._engine_loaded_loras.discard(lora_name)
                         except Exception as e:
                             if capacity_reserved:
@@ -2801,13 +2805,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
                     if preload_into_engine:
                         try:
-                            await self.engine_client.add_lora(
-                                LoRARequest(
-                                    lora_name=lora_name,
-                                    lora_int_id=lora_id,
-                                    lora_path=lora_path,
+                            async with self._pause_lock:
+                                await self.engine_client.add_lora(
+                                    LoRARequest(
+                                        lora_name=lora_name,
+                                        lora_int_id=lora_id,
+                                        lora_path=lora_path,
+                                    )
                                 )
-                            )
                             self._engine_loaded_loras.add(lora_name)
                         except Exception as e:
                             if (
@@ -2816,13 +2821,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                 and old_engine_loaded
                             ):
                                 try:
-                                    await self.engine_client.add_lora(
-                                        LoRARequest(
-                                            lora_name=lora_name,
-                                            lora_int_id=old_info.id,
-                                            lora_path=old_info.path,
+                                    async with self._pause_lock:
+                                        await self.engine_client.add_lora(
+                                            LoRARequest(
+                                                lora_name=lora_name,
+                                                lora_int_id=old_info.id,
+                                                lora_path=old_info.path,
+                                            )
                                         )
-                                    )
                                     self._engine_loaded_loras.add(lora_name)
                                 except Exception as rollback_error:
                                     self._lora_state.loaded_loras.pop(lora_name, None)
@@ -2853,7 +2859,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
                     if is_hot_swap:
                         try:
-                            await self.engine_client.reset_prefix_cache()
+                            async with self._pause_lock:
+                                await self.engine_client.reset_prefix_cache()
                         except Exception as e:
                             # The new adapter is already active in the engine, but
                             # the prefix cache still holds entries computed under
@@ -2866,16 +2873,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                             if old_info is not None:
                                 try:
                                     if preload_into_engine:
-                                        await self.engine_client.remove_lora(lora_id)
+                                        async with self._pause_lock:
+                                            await self.engine_client.remove_lora(
+                                                lora_id
+                                            )
                                         self._engine_loaded_loras.discard(lora_name)
                                     if old_engine_loaded:
-                                        await self.engine_client.add_lora(
-                                            LoRARequest(
-                                                lora_name=lora_name,
-                                                lora_int_id=old_info.id,
-                                                lora_path=old_info.path,
+                                        async with self._pause_lock:
+                                            await self.engine_client.add_lora(
+                                                LoRARequest(
+                                                    lora_name=lora_name,
+                                                    lora_int_id=old_info.id,
+                                                    lora_path=old_info.path,
+                                                )
                                             )
-                                        )
                                         self._engine_loaded_loras.add(lora_name)
                                     self._lora_state.loaded_loras[lora_name] = old_info
                                     rolled_back = (
@@ -2926,7 +2937,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                                     logger.debug(
                                         f"Rolling back: removing LoRA '{lora_name}' from engine"
                                     )
-                                    await self.engine_client.remove_lora(lora_id)
+                                    async with self._pause_lock:
+                                        await self.engine_client.remove_lora(lora_id)
                                     self._engine_loaded_loras.discard(lora_name)
                                 self._lora_state.loaded_loras.pop(lora_name, None)
                                 logger.debug(
@@ -2990,7 +3002,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
             # Serialize load/unload operations per lora_name.
             lock = self._get_lora_lock(lora_name)
-            async with lock, self._pause_lock:
+            async with lock:
                 try:
                     # Check if the LoRA exists *after* waiting for any in-progress load.
                     lora = self._lora_state.loaded_loras.get(lora_name)
@@ -3005,19 +3017,20 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     lora_id = lora.id
 
                     if lora_name in self._engine_loaded_loras:
-                        if getattr(
-                            self, "_paused", False
-                        ) and self._lora_state.active_requests.get(lora_name, 0):
-                            yield {
-                                "status": "error",
-                                "message": (
-                                    f"Cannot unload LoRA '{lora_name}' while generation "
-                                    "is paused with active requests; resume generation or "
-                                    "abort the requests first"
-                                ),
-                                "lora_name": lora_name,
-                            }
-                            return
+                        async with self._pause_lock:
+                            if getattr(
+                                self, "_paused", False
+                            ) and self._lora_state.active_requests.get(lora_name, 0):
+                                yield {
+                                    "status": "error",
+                                    "message": (
+                                        f"Cannot unload LoRA '{lora_name}' while generation "
+                                        "is paused with active requests; resume generation or "
+                                        "abort the requests first"
+                                    ),
+                                    "lora_name": lora_name,
+                                }
+                                return
                         await self._lora_state.wait_until_idle(lora_name)
 
                     # Stop advertising the adapter before mutating engine or
@@ -3054,7 +3067,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     # reached vLLM.
                     if lora_name in self._engine_loaded_loras:
                         try:
-                            await self.engine_client.remove_lora(lora_id)
+                            async with self._pause_lock:
+                                await self.engine_client.remove_lora(lora_id)
                         except Exception as e:
                             if not self._is_lora_not_loaded_error(e):
                                 raise
