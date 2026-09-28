@@ -406,6 +406,14 @@ class TestBuildPlannerConfigEmbedsAicSpec:
         assert cfg.prefill_engine_num_gpu == 8
         assert cfg.decode_engine_num_gpu == 8
 
+    @pytest.mark.parametrize("model_name", [None, "", "served-alias"])
+    def test_planner_model_name_preserves_override(self, model_name):
+        planner = PlannerConfig(model_name=model_name)
+        dgdr = _dgdr(planner=planner)
+        cfg = _build_planner_config(dgdr, None, None)
+        assert cfg.model_name == (model_name or dgdr.model)
+        assert planner.model_name == model_name
+
     def test_ais_perf_model_threads_into_planner_config(self, monkeypatch):
         resolved_versions = []
 

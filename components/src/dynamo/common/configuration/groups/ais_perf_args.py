@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 
+import yaml
+
 from dynamo.common.configuration.arg_group import ArgGroup
 from dynamo.common.configuration.config_base import ConfigBase
 
@@ -39,9 +41,10 @@ def parse_ais_perf_config(value):
     if value.lstrip().startswith("{"):
         result = json.loads(value)
     else:
-        import yaml
-
-        result = yaml.safe_load(Path(value).read_text())
+        try:
+            result = yaml.safe_load(Path(value).read_text())
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(f"cannot read AIS perf config {value!r}: {exc}") from exc
     if not isinstance(result, dict):
         raise ValueError("AIS perf config must contain an object")
     return result
@@ -108,7 +111,7 @@ class AisPerfArgGroup(ArgGroup):
         group.add_argument(
             "--ais-perf-config",
             type=parse_ais_perf_config,
-            default=_env("perf_config", parse_ais_perf_config, None),
+            default=os.environ.get("DYN_AIS_PERF_CONFIG"),
             help="Complete ForwardPassPerfModelConfig as JSON or a JSON/YAML path.",
         )
         for name, (convert, default, _) in _FIELDS.items():

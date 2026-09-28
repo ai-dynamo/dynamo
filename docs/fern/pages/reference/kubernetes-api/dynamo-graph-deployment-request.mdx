@@ -265,7 +265,7 @@ service.
 ### Optimization target
 
 <ParamField path="optimization_target" type="string" default="throughput">
-  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the Planner engine-query layer and AIC core performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
+  Scaling strategy. `throughput` and `latency` use static thresholds on queue depth and KV cache utilization — no SLA targets or profiling required. `load` uses user-defined prefill queue-token and decode KV-utilization thresholds. `sla` uses the AISimulate `RustForwardPassPerfModel.best_available(config)` performance model to target specific `ttft_ms` / `itl_ms` values. Under any target other than `sla`, the Planner forces load scaling on, throughput scaling off, and ignores `ttft_ms` / `itl_ms`.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>throughput</Badge> <Badge intent="note" minimal>latency</Badge> <Badge intent="note" minimal>load</Badge> <Badge intent="note" minimal>sla</Badge></span>
 </ParamField>

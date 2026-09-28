@@ -81,6 +81,41 @@ def test_only_ais_environment_is_read(monkeypatch):
     assert _parse([]).ais_backend == "sglang"
 
 
+@pytest.mark.parametrize("source", ["cli", "env"])
+@pytest.mark.parametrize("contents", [None, "model: [unterminated"])
+def test_invalid_config_file_reports_usage_error(
+    tmp_path, monkeypatch, capsys, source, contents
+):
+    path = tmp_path / "invalid.yaml"
+    if contents is not None:
+        path.write_text(contents)
+    if source == "env":
+        monkeypatch.setenv("DYN_AIS_PERF_CONFIG", str(path))
+        args = []
+    else:
+        monkeypatch.delenv("DYN_AIS_PERF_CONFIG", raising=False)
+        args = ["--ais-perf-config", str(path)]
+    with pytest.raises(SystemExit) as error:
+        _parse(args)
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "--ais-perf-config" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_bad_environment_config_allows_help_and_explicit_override(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("DYN_AIS_PERF_CONFIG", str(tmp_path / "missing.yaml"))
+    with pytest.raises(SystemExit) as error:
+        _parse(["--help"])
+    assert error.value.code == 0
+    assert "--ais-perf-config" in capsys.readouterr().out
+    assert _parse(["--ais-perf-config", '{"model":"explicit"}']).ais_perf_config == {
+        "model": "explicit"
+    }
+
+
 def test_unknown_canonical_field_rejected():
     with pytest.raises(TypeError, match="unexpected keyword"):
         _parse(

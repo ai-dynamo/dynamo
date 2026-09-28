@@ -5,11 +5,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
 
 from dynamo.replay.config import load_engine_args
+from dynamo.runtime import DistributedRuntime
 
 pytestmark = [
     pytest.mark.aiconfigurator,
@@ -196,12 +198,10 @@ def test_canonical_python_presets_survive_mocker_round_trip_and_replay(
 
 @pytest.mark.asyncio
 @pytest.mark.forked
-@pytest.mark.parametrize(
-    "discovery_backend,request_plane", [("mem", "tcp")], indirect=True
-)
+@pytest.mark.timeout(30)
 @pytest.mark.parametrize("num_gpu_blocks", [None, 1000])
 async def test_live_mocker_file_normalizes_canonical_python_presets(
-    runtime, tmp_path, num_gpu_blocks
+    tmp_path, num_gpu_blocks
 ) -> None:
     from dynamo._core import EngineType, EntrypointArgs, MockEngineArgs, make_engine
 
@@ -224,12 +224,18 @@ async def test_live_mocker_file_normalizes_canonical_python_presets(
     assert parsed.num_gpu_blocks == (
         16384 if num_gpu_blocks is None else num_gpu_blocks
     )
-    engine = await make_engine(
-        runtime,
-        EntrypointArgs(
-            engine_type=EngineType.Mocker,
-            model_name="ais-file-config-test",
-            extra_engine_args=str(path),
-        ),
+    runtime = DistributedRuntime(
+        asyncio.get_running_loop(), "mem", "tcp", event_plane="zmq"
     )
-    assert engine is not None
+    try:
+        engine = await make_engine(
+            runtime,
+            EntrypointArgs(
+                engine_type=EngineType.Mocker,
+                model_name="ais-file-config-test",
+                extra_engine_args=str(path),
+            ),
+        )
+        assert engine is not None
+    finally:
+        runtime.shutdown()

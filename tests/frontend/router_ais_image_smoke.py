@@ -11,7 +11,7 @@ import sys
 
 def main() -> None:
     # Keep this smoke offline: the selected model config and perf database are
-    # shipped inside aiconfigurator-core.
+    # shipped in the AISimulate wheel's aisimulate_core package.
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
 

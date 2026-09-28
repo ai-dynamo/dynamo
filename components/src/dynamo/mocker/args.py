@@ -664,7 +664,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     import sys
 
     argv = list(sys.argv[1:] if argv is None else argv)
-    spellings = {}
+    spellings: dict[str, str] = {}
     for token in argv:
         flag = token.split("=", 1)[0]
         if flag.startswith(("--ais-", "--aic-")):

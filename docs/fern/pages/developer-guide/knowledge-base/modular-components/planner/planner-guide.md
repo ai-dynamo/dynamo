@@ -7,7 +7,7 @@ subtitle: Configures Planner optimization targets, scaling modes, and PlannerCon
 
 The Dynamo Planner is an autoscaling controller that adjusts prefill and decode engine replica counts at runtime to meet latency SLAs. It reads traffic signals (Prometheus metrics or load predictor output) and engine performance models to decide when to scale up or down.
 
-Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AIConfigurator estimate is unavailable.
+Forward Pass Metrics (FPM) are per-iteration scheduler records from inference workers. They describe batch composition, queue depth, token counts, and forward-pass duration. The Planner uses these records to tune its performance model from live traffic or to build a regression model when a native AISimulate estimate is unavailable.
 
 For a quick overview, see the [Planner overview](overview.md). For architecture internals, see [Planner Design](planner-design.md).
 
@@ -25,7 +25,7 @@ The planner supports four optimization targets that determine how scaling decisi
 - Start with **`throughput`** (the default) — it works immediately with no configuration.
 - Switch to **`latency`** if your workload has strict latency requirements and you prefer to over-provision rather than queue.
 - Use **`load`** when you want direct control through prefill queue and decode KV utilization thresholds.
-- Use **`sla`** when you want to target specific TTFT/ITL values with native AIC estimates, optional bootstrap profiling data, or live FPM warmup.
+- Use **`sla`** when you want to target specific TTFT/ITL values with native AISimulate estimates, optional bootstrap profiling data, or live FPM warmup.
 
 ## PlannerConfig Reference
 
@@ -75,7 +75,7 @@ Advisory mode is suggestion-only. The Planner computes recommended replica count
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AIC core performance modeling with `ttft_ms`/`itl_ms` targets. |
+| `optimization_target` | string | `throughput` | `throughput`: scale based on queue/utilization thresholds. `latency`: aggressive low-latency thresholds. `load`: user-defined prefill queue and decode KV utilization thresholds. `sla`: AISimulate performance modeling with `ttft_ms`/`itl_ms` targets. |
 
 When `optimization_target` is `throughput`, `latency`, or `load`, load-based scaling is automatically enabled and throughput-based scaling is disabled. The `ttft_ms`/`itl_ms` fields are ignored.
 

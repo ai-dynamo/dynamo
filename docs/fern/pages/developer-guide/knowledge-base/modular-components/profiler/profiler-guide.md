@@ -9,7 +9,7 @@ subtitle: Runs the AIConfigurator-driven profiling pipeline that turns a model, 
 
 The Dynamo Profiler analyzes model inference performance and generates optimized deployment configurations (DynamoGraphDeployments). Given a model, hardware, and SLA targets, it determines the best parallelization strategy, selects optimal prefill and decode engine configurations, and produces a ready-to-deploy DGD YAML.
 
-The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the native AIC model identity and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
+The profiler accepts a `DynamoGraphDeploymentRequestSpec` (DGDR) as input and uses [AIConfigurator (AIC)](../../../additional-resources/aiconfigurator-reference.md) compatibility APIs from the `aisimulate` wheel for performance simulation, candidate enumeration, and configuration picking. When the Planner is enabled, the profiler also emits the canonical AIS configuration under `ais_perf_model.roles` and can generate optional engine interpolation curves used to bootstrap runtime autoscaling.
 
 ## Workflow
 
@@ -140,9 +140,9 @@ features:
 
 `optimization_target` must be set to `sla` for `enable_throughput_scaling` and the planner's `ttft_ms`/`itl_ms` SLA targets to take effect. The `PlannerConfig` default is `throughput`, which uses static queue/utilization thresholds: it silently flips `enable_throughput_scaling` to `false` (so pre-deployment profiling is skipped and `planner-profile-data-XXXX` is not emitted) and ignores any `features.planner.ttft_ms`/`itl_ms` values. `enable_load_scaling` is unaffected (easy-mode keeps load scaling enabled). See the [Planner Guide](../planner/planner-guide.md#optimization-target) for the full explanation of each `optimization_target` value.
 
-- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIC performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
+- **rapid**: Uses AIC simulation to generate interpolation curves (~30s, no GPUs). Consumers use AIS performance-model flags, planner `ais_perf_model.roles`, or in-process interpolation, so `planner-profile-data-XXXX` is not emitted.
 - **thorough**: Deploys the selected engine config on real GPUs and sweeps across ISL/concurrency ranges (2-4h). When profile data is needed, the profiler packages it into `planner-profile-data-XXXX`.
-- **none**: Skips interpolation. Planner throughput scaling can still start from native AIC or live FPM regression warmup. Mocker still requires pre-deployment sweeping.
+- **none**: Skips interpolation. Planner throughput scaling can still start from native AISimulate or live FPM regression warmup. Mocker still requires pre-deployment sweeping.
 
 The generated DGD can include these ConfigMaps:
 - **planner-config-XXXX**: Serialized `PlannerConfig` JSON (with `ais_perf_model.roles` when available and `profile_results_dir` pointing to the profiling data mount)
@@ -164,8 +164,8 @@ The profiler enforces these rules at startup:
 |-----------|----------|
 | `searchStrategy: thorough` + `backend: auto` | Rejected. Specify a concrete backend. |
 | `enable_throughput_scaling: true` without `optimization_target: sla` | Silently coerced. `PlannerConfig` defaults `optimization_target` to `throughput`, which flips `enable_throughput_scaling` to `false` at validation time. Set `optimization_target: sla` explicitly to keep throughput-based scaling enabled. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AIC when available or waits for enough live FPM observations. |
-| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for Planner. The AIC core model falls back to observed-FPM regression when native AIC estimates are unavailable. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: none` (or unset) | Allowed for planner. The perf model starts from native AISimulate when available or waits for enough live FPM observations. |
+| `enable_throughput_scaling: true` + `pre_deployment_sweeping_mode: rapid` + AIC unsupported | Allowed for Planner. The AISimulate model falls back to observed-FPM regression when native AISimulate estimates are unavailable. |
 | `e2eLatency` provided together with an explicitly-set `ttft` or `itl` | Rejected by SLA validator. Provide only `e2eLatency`; `ttft` and `itl` do not need to be explicitly nulled. |
 | All AIC rapid experiments return no SLA-feasible configuration | Profiling fails and no DGD is generated. SLA targets are not relaxed automatically. |
 | A real-GPU thorough sweep returns results, but none meet the SLA | Warning logged and the closest measured configuration is selected. |

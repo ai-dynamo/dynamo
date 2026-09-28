@@ -15,14 +15,14 @@ planner 支持四个优化目标，这些目标决定扩缩容决策的方式：
 - **`throughput`**（默认）：基于队列深度和 KV cache 利用率使用静态阈值。不需要 SLA 目标或 profiling。开箱即用。
 - **`latency`**：与 `throughput` 采用相同方法，但使用更激进的阈值，即更早扩容并容忍更少排队。适合对延迟敏感的工作负载。
 - **`load`**：使用用户定义的 prefill 队列 token 阈值和 decode KV 利用率阈值，进行反应式的基于负载扩缩容。
-- **`sla`**：使用 Planner 自有的引擎查询层，并通过 AISimulate Python wheel 提供的 `aiconfigurator_core` 兼容命名空间获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
+- **`sla`**：通过 `aisimulate_core.sdk.RustForwardPassPerfModel.best_available(config)` 获取前向计算估算；同时支持在线 FPM 调优和 FPM 回归回退。支持基于吞吐量（预测式）和基于负载（反应式）的扩缩容模式。适合需要精确 SLA 控制的高级用户。
 
 **何时使用哪种模式：**
 
 - 从 **`throughput`**（默认）开始，它无需配置即可立即工作。
 - 如果工作负载有严格的延迟要求，并且你更倾向于过度预配置而不是排队，请切换到 **`latency`**。
 - 当你希望通过 prefill 队列和 decode KV 利用率阈值直接控制扩缩容时，请使用 **`load`**。
-- 当你希望使用原生 AIC 估算、可选的部署前 profiling 数据或在线 FPM warmup，以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
+- 当你希望使用原生 AISimulate 估算、可选的部署前 profiling 数据或在线 FPM warmup，以特定 TTFT/ITL 值为目标时，请使用 **`sla`**。
 
 ## PlannerConfig 参考
 
@@ -66,7 +66,7 @@ advisory 模式仅提供建议。Planner 会计算建议副本数、记录日志
 
 | 字段 | 类型 | 默认值 | 说明 |
 |-------|------|---------|-------------|
-| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 Planner 自有的引擎查询层和 AISimulate wheel 中的 `aiconfigurator_core` 兼容命名空间，以 ttft_ms/itl_ms 为目标扩缩容。 |
+| `optimization_target` | string | `throughput` | `throughput`：基于队列/利用率阈值扩缩容。`latency`：激进的低延迟阈值。`load`：用户定义的 prefill 队列和 decode KV 利用率阈值。`sla`：通过 AISimulate `best_available(config)` 性能模型，以 ttft_ms/itl_ms 为目标扩缩容。 |
 
 当 `optimization_target` 为 `throughput`、`latency` 或 `load` 时，会自动启用基于负载的扩缩容，并禁用基于吞吐量的扩缩容。`ttft_ms`/`itl_ms` 字段会被忽略。
 
@@ -93,7 +93,7 @@ SLA 模式通过唯一构造接口 `aisimulate_core.sdk.RustForwardPassPerfModel
 
 通过 `ais_perf_model.roles` 配置模型身份和 estimator 参数。旧 `aic_perf_model` 字段及 `hf_id` / parallel-pick 格式不再支持，使用时会报错。
 
-启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AIC 可用或在线 FPM 足够之前报告 `model_not_ready`。
+启动时，planner 总会先尝试从 `get_perf_metrics` Dynamo 端点获取自基准测试结果。如果不可用，则在配置存在时回退到 rapid 模式 AIC interpolation 数据或 `profile_results_dir` 中 profiler 生成的数据（npz 或 JSON）。这些数据都会转换为 ForwardPassMetrics，并用于调优或启动性能模型。当 `pre_deployment_sweeping_mode: none` 时，planner 仍然可以启动；吞吐量决策会在原生 AISimulate 可用或在线 FPM 足够之前报告 `model_not_ready`。
 
 在 DynamoGraphDeploymentRequest 中配置各角色模型：
 

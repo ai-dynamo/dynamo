@@ -684,7 +684,8 @@ def _build_planner_config(
     else:
         planner_cfg = PlannerConfig()
 
-    planner_cfg.model_name = dgdr.model
+    if not planner_cfg.model_name:
+        planner_cfg.model_name = dgdr.model
 
     if best_prefill_mapping is not None:
         planner_cfg.prefill_engine_num_gpu = best_prefill_mapping.num_gpus
