@@ -2174,7 +2174,10 @@ async fn run_load_collector(
 ) {
     let mut retry = LoadRetryBackoff::default();
     loop {
-        let subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint).await;
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint) => subscriber,
+        };
         let mut subscriber = match subscriber {
             Ok(subscriber) => subscriber,
             Err(error) => {
@@ -2194,12 +2197,12 @@ async fn run_load_collector(
         loop {
             let event = tokio::select! {
                 _ = cancel.cancelled() => return,
-                event = subscriber.next() => event,
+                event = subscriber.next_enveloped() => event,
             };
             match event {
-                Some(Ok(load)) => {
+                Some(Ok((envelope, load))) => {
                     retry.succeeded();
-                    if !pools.observe_load(pool_id, layout_generation, load) {
+                    if !pools.observe_load(pool_id, layout_generation, &envelope, load) {
                         tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
                     }
                 }

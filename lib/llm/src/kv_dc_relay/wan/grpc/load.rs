@@ -136,6 +136,10 @@ mod tests {
             kv_observed_ranks: 2,
             kv_capacity_ranks: 2,
             kv_expected_ranks: 2,
+            active_decode_blocks: None,
+            active_prefill_tokens: None,
+            kv_source_observed_at_unix_ms: 0,
+            scheduler_source_observed_at_unix_ms: 0,
         });
 
         assert_eq!(entry.kv_used_blocks, u64::MAX);

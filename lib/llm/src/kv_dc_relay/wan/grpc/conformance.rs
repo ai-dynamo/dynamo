@@ -15,6 +15,7 @@ use dynamo_kv_router::protocols::{
     KvCacheStoredBlockData, LocalBlockHash, RouterEvent,
 };
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 use dynamo_runtime::{
     DistributedRuntime, Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider,
 };
@@ -99,6 +100,13 @@ impl RelayFixture {
         assert!(registry.observe_load(
             pool_id,
             attachment.layout_generation,
+            &EventEnvelope {
+                publisher_id: fixture_id,
+                sequence: 1,
+                published_at: 1,
+                topic: String::new(),
+                payload: Default::default(),
+            },
             ActiveLoad {
                 worker_id: WORKER_ID,
                 dp_rank: 0,
