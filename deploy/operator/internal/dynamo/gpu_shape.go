@@ -34,9 +34,21 @@ func ResolveGroveGPUShapes(
 	dgd *v1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 ) (map[string]GPUShape, error) {
+	return ResolveGroveGPUShapesForComponents(ctx, reader, dgd, dgd.Spec.Components, pcs)
+}
+
+// ResolveGroveGPUShapesForComponents computes GPU shapes for an explicit
+// component selection rendered from the complete DGD.
+func ResolveGroveGPUShapesForComponents(
+	ctx context.Context,
+	reader client.Reader,
+	dgd *v1beta1.DynamoGraphDeployment,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	pcs *grovev1alpha1.PodCliqueSet,
+) (map[string]GPUShape, error) {
 	shapes := make(map[string]GPUShape)
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	for i := range components {
+		component := &components[i]
 		roleCounts := make(map[string]int32)
 		for _, role := range expandRolesForComponent(
 			component.ComponentName,

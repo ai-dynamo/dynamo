@@ -806,22 +806,21 @@ spec:
 						&controller_common.RuntimeConfig{},
 						nil,
 					)
-					renderedPCS, err := renderer.Render(ctx, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
+					renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
 					require.NoError(t, err)
 					pcs := renderedPCS.desired
-					renderDGD := renderedPCS.renderDeployment
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
-					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
+					decodeComponent := testComponentByName(renderedPCS.components, "VllmDecodeWorker")
 					require.NotNil(t, decodeComponent)
 					service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-						ServiceName:     dynamo.GetDCDResourceName(renderDGD, "VllmDecodeWorker", ""),
-						Namespace:       renderDGD.Namespace,
+						ServiceName:     dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
+						Namespace:       dgd.Namespace,
 						ComponentType:   string(decodeComponent.ComponentType),
-						DynamoNamespace: renderDGD.GetDynamoNamespaceForComponent(decodeComponent),
+						DynamoNamespace: dgd.GetDynamoNamespaceForComponent(decodeComponent),
 						ComponentName:   "VllmDecodeWorker",
-						Labels:          dynamo.GetDGDComponentResourceLabels(renderDGD, "VllmDecodeWorker", decodeComponent),
-						Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDGD, "VllmDecodeWorker", decodeComponent),
+						Labels:          dynamo.GetDGDComponentResourceLabels(dgd, "VllmDecodeWorker", decodeComponent),
+						Annotations:     dynamo.GetDGDComponentResourceAnnotations(dgd, "VllmDecodeWorker", decodeComponent),
 						IsK8sDiscovery:  true,
 					})
 					require.NoError(t, err)
@@ -932,13 +931,12 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	renderedPCS, err := renderer.Render(ctx, projectWithoutExternallyManagedComponents(dgd), nil, nil, false)
+	renderedPCS, err := renderer.Render(ctx, testGroveReconcileRequest(dgd), nil, nil, false)
 	require.NoError(t, err)
 	desired := renderedPCS.desired
-	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
-	prefillComponent := renderDGD.GetComponentByName("prefill")
+	prefillComponent := testComponentByName(renderedPCS.components, "prefill")
 	require.NotNil(t, prefillComponent)
 	require.Equal(t, v1beta1.ComponentTypePrefill, prefillComponent.ComponentType)
 	prefillClique := requireGroveClique(t, desired, "prefill")

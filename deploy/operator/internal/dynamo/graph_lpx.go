@@ -34,7 +34,7 @@ func RenderLPXPodCliqueSet(
 	runtimeConfig *controller_common.RuntimeConfig,
 	pcsName string,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	// Reuse the ordinary Grove defaults once for the complete LPX graph.
+	// Reuse the shared Grove defaults once for the complete LPX graph.
 	pcs, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
 	if err != nil {
 		return nil, err
@@ -139,7 +139,7 @@ type lpxInputRevisionPayload struct {
 }
 
 // LPXInputRevision hashes all LPX components and their shared render inputs.
-// Source identity is checked separately by ValidateLPXSource. Ordinary component payloads,
+// Source identity is checked separately by ValidateLPXSource. Managed component payloads,
 // DGD bookkeeping and raw restart requests are excluded: restart is the effective
 // token selected by persisted DGD restart state. Operator configuration is not a
 // source revision; rejected topology inputs remain included because they change
@@ -187,7 +187,7 @@ func LPXInputRevision(dgd *v1beta1.DynamoGraphDeployment, restart string) (strin
 		AlphaSubComponentType: make(map[string]string),
 	}
 	// The shared role renderer also reads preserved alpha component metadata.
-	// Use the same conversion reader, excluding ordinary component payloads and
+	// Use the same conversion reader, excluding managed component payloads and
 	// keeping conversion bookkeeping out of LPX's input contract.
 	if alpha := getDGDAlpha(dgd); alpha != nil {
 		for _, component := range components {
@@ -241,7 +241,7 @@ func PCSNameForLPX(deployment *v1alpha1.LPXGraphDeployment) string {
 	return prefix + "-" + hex.EncodeToString(digest[:2])
 }
 
-// renderLPXComponents merges ordinary Dynamo defaults independently into every
+// renderLPXComponents merges shared Dynamo defaults independently into every
 // authored role. The full source DGD supplies discovery and shared defaults;
 // LPX component's roles are returned to the same PCS renderer.
 // Preflight supplies the non-nil validated workload and materialization plan.

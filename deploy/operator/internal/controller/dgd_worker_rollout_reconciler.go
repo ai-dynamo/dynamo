@@ -77,7 +77,14 @@ func newDGDWorkerRolloutReconciler(
 func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (unsupportedWorkerHashTransition, error) {
-	desired, err := desiredWorkerHashes(dgd)
+	return r.planUnsupportedWorkerHashTransitionForComponents(dgd, dgd.Spec.Components)
+}
+
+func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransitionForComponents(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (unsupportedWorkerHashTransition, error) {
+	desired, err := desiredWorkerHashesForComponents(dgd, components)
 	if err != nil {
 		return unsupportedWorkerHashTransition{}, err
 	}
@@ -156,7 +163,14 @@ func (h workerGenerationHashes) contains(hash string) bool {
 func desiredWorkerHashes(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (workerGenerationHashes, error) {
-	v2Hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	return desiredWorkerHashesForComponents(dgd, dgd.Spec.Components)
+}
+
+func desiredWorkerHashesForComponents(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (workerGenerationHashes, error) {
+	v2Hash, err := dynamo.ComputeDGDWorkersSpecHashForComponents(dgd, components)
 	if err != nil {
 		return workerGenerationHashes{}, fmt.Errorf("failed to compute v2 worker hash: %w", err)
 	}
@@ -324,6 +338,14 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
+	return r.migrateCurrentWorkerHashIfNeededForComponents(ctx, dgd, dgd.Spec.Components)
+}
+
+func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeededForComponents(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) error {
 	logger := log.FromContext(ctx)
 
 	current := r.currentWorkerHashes(dgd)
@@ -336,7 +358,7 @@ func (r *dgdWorkerRolloutReconciler) migrateCurrentWorkerHashIfNeeded(
 		return nil
 	}
 
-	desired, err := desiredWorkerHashes(dgd)
+	desired, err := desiredWorkerHashesForComponents(dgd, components)
 	if err != nil {
 		return err
 	}

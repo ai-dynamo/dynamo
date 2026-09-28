@@ -188,7 +188,7 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 			}
 
 			t.Log("Verify suffix rendering from the worker generation")
-			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.hashChanged); got != tt.wantSuffix {
+			if got := shouldRenderGroveWorkerHashSuffix(testGroveReconcileRequest(dgd), existing, tt.hashChanged); got != tt.wantSuffix {
 				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
 			}
 		})
@@ -269,20 +269,21 @@ func TestGroveRenderDeploymentWorkerHashSuffix(t *testing.T) {
 			})
 			before := dgd.DeepCopy()
 
-			t.Log("Render the Grove deployment")
-			rendered, err := groveRenderDeployment(projectWithoutExternallyManagedComponents(dgd), nil, tt.workerHashSuffix)
+			t.Log("Render the managed Grove components")
+			req := testGroveReconcileRequest(dgd)
+			rendered, err := groveRenderComponents(req, nil, tt.workerHashSuffix)
 			require.NoError(t, err)
-			worker := rendered.GetComponentByName("worker")
+			worker := testComponentByName(rendered, "worker")
 			require.NotNil(t, worker)
-			require.Len(t, rendered.Spec.Components, 2)
-			require.Nil(t, rendered.GetComponentByName("lpx"))
-			require.Equal(t, "worker", rendered.Spec.Components[0].ComponentName)
-			require.Equal(t, "frontend", rendered.Spec.Components[1].ComponentName)
-			rendered.Spec.Components[1].PodTemplate.Labels["test"] = "rendered"
+			require.Len(t, rendered, 2)
+			require.Nil(t, testComponentByName(rendered, "lpx"))
+			require.Equal(t, "worker", rendered[0].ComponentName)
+			require.Equal(t, "frontend", rendered[1].ComponentName)
+			rendered[1].PodTemplate.Labels["test"] = "rendered"
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
-				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+				wantHash, err := dynamo.ComputeDGDWorkersSpecHashForComponents(dgd, req.managedComponents())
 				require.NoError(t, err)
 				require.NotNil(t, worker.PodTemplate)
 				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])

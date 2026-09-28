@@ -368,7 +368,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.Equal(t, Reason(child.Status.Conditions[0].Reason), result.Reason)
 	require.Equal(t, Message(child.Status.Conditions[0].Message), result.Message)
 
-	t.Log("Ordinary source metadata does not advance the child generation or frozen source identity")
+	t.Log("Unrelated source metadata does not advance the child generation or frozen source identity")
 	source.Labels = map[string]string{"unrelated": "metadata"}
 	require.NoError(t, env.Client().Update(t.Context(), source))
 	unchanged, err := handoff.Reconcile(t.Context(), source)

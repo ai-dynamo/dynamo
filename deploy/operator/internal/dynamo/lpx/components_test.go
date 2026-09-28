@@ -78,7 +78,7 @@ func TestComponentGroups(t *testing.T) {
 		{name: "shared conductor last", conductors: []bool{false, true}, want: map[string][]string{"component-1": {"component-0", "component-1"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			t.Log("Author LPX members beside an ordinary frontend")
+			t.Log("Author external LPX members beside a managed frontend")
 			dgd := newSelectedTestDGD(t, "graph", dynamov1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: dynamov1beta1.ComponentTypeFrontend})
 			for i, conductor := range test.conductors {
 				component := testLPXComponent(fmt.Sprintf("component-%d", i), "build", dynamov1beta1.ComponentRoleSpec{Name: dynamov1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("agent")})

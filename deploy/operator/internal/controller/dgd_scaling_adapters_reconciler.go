@@ -56,11 +56,29 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) error {
+	return r.reconcile(ctx, dgd, func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool { return true })
+}
+
+func (r *dgdScalingAdaptersReconciler) ReconcileManaged(
+	ctx context.Context,
+	req groveReconcileRequest,
+) error {
+	return r.reconcile(ctx, req.DGD, req.Managed)
+}
+
+func (r *dgdScalingAdaptersReconciler) reconcile(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	managed func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool,
+) error {
 	logger := log.FromContext(ctx)
 
 	// Reconcile adapters for current components while preserving adapter-owned replicas.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
+		if !managed(component) {
+			continue
+		}
 		componentName := component.ComponentName
 		adapterName := generateAdapterName(dgd.Name, componentName)
 		adapter := &nvidiacomv1alpha1.DynamoGraphDeploymentScalingAdapter{
@@ -169,8 +187,8 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		adapter := &adapterList.Items[i]
 		componentName := adapter.Spec.DGDRef.ServiceName
 
-		// Retain adapters whose component still exists.
-		if dgd.GetComponentByName(componentName) != nil {
+		// Retain adapters whose component is still managed by this path.
+		if component := dgd.GetComponentByName(componentName); component != nil && managed(component) {
 			continue
 		}
 

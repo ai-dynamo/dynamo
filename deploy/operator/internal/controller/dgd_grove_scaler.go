@@ -46,13 +46,14 @@ func newGroveScaler(kubeClient client.Client) *groveScaler {
 func (s *groveScaler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 
-	for i := range dgd.Spec.Components {
-		component := &dgd.Spec.Components[i]
+	for i := range components {
+		component := &components[i]
 		componentName := component.ComponentName
 		info := checkpointInfos[componentName]
 		gated := info != nil &&
@@ -71,7 +72,7 @@ func (s *groveScaler) Reconcile(
 		}
 
 		usesPCSG := component.UsesPCSG()
-		resourceName := dynamo.GroveComponentResourceName(dgd, componentName)
+		resourceName := dynamo.GroveComponentResourceNameForComponents(dgd, components, componentName)
 		resourceKind := "PodClique"
 		gvr := consts.PodCliqueGVR
 		if usesPCSG {

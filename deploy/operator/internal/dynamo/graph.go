@@ -254,15 +254,31 @@ func GenerateDynamoComponentsDeployments(
 	existingRestartAnnotations map[string]string,
 	rollingUpdateCtx RollingUpdateContext,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
+	return generateDynamoComponentsDeployments(
+		parentDGD,
+		parentDGD.Spec.Components,
+		restartState,
+		existingRestartAnnotations,
+		rollingUpdateCtx,
+	)
+}
+
+func generateDynamoComponentsDeployments(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rollingUpdateCtx RollingUpdateContext,
+) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
-	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
+	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD, components)
 	if err != nil {
 		return nil, err
 	}
 
 	// Generate DCDs for each component.
-	for i := range parentDGD.Spec.Components {
-		component := &parentDGD.Spec.Components[i]
+	for i := range components {
+		component := &components[i]
 		componentName := component.ComponentName
 
 		// Reject invalid GMS client references before synchronizing any DCDs.
@@ -331,14 +347,17 @@ func gmsExtraClientContainersError(
 	return fmt.Errorf("gpuMemoryService.extraClientContainers %s", strings.Join(problems, "; "))
 }
 
-func backendFrameworkForGeneratedDCDs(parentDGD *v1beta1.DynamoGraphDeployment) (string, error) {
+func backendFrameworkForGeneratedDCDs(
+	parentDGD *v1beta1.DynamoGraphDeployment,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, error) {
 	if parentDGD.Spec.BackendFramework != "" {
 		return parentDGD.Spec.BackendFramework, nil
 	}
 
 	var detected BackendFramework
-	for i := range parentDGD.Spec.Components {
-		component := &parentDGD.Spec.Components[i]
+	for i := range components {
+		component := &components[i]
 		if !IsWorkerComponent(string(component.ComponentType)) {
 			continue
 		}
@@ -2380,7 +2399,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	// Decorate the completed ordinary template through shared clique assembly.
+	// Decorate the completed component template through shared clique assembly.
 	return buildCliqueFromTemplate(p, corev1.PodTemplateSpec{
 		ObjectMeta: generatePodMetadata(p.component, p.dynamoDeployment, getDGDAlphaComponent(p.dynamoDeployment, p.componentName), p.componentName, p.discoveryContext),
 		Spec:       *podSpec,
@@ -2570,12 +2589,40 @@ func GenerateGrovePodCliqueSet(
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	// Construct the common PCS envelope before rendering ordinary components.
+	return GenerateGrovePodCliqueSetForComponents(
+		ctx,
+		dynamoDeployment,
+		dynamoDeployment.Spec.Components,
+		operatorConfig,
+		runtimeConfig,
+		reader,
+		secretsRetriever,
+		restartState,
+		existingRestartAnnotations,
+		checkpointInfoByComponent,
+	)
+}
+
+// GenerateGrovePodCliqueSetForComponents renders the supplied component
+// selection while retaining the complete DGD for graph-wide configuration.
+func GenerateGrovePodCliqueSetForComponents(
+	ctx context.Context,
+	dynamoDeployment *v1beta1.DynamoGraphDeployment,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	operatorConfig *configv1alpha1.OperatorConfiguration,
+	runtimeConfig *controller_common.RuntimeConfig,
+	reader ctrlclient.Reader,
+	secretsRetriever SecretsRetriever,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
+) (*grovev1alpha1.PodCliqueSet, error) {
+	// Construct the common PCS envelope before rendering managed components.
 	gangSet, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
 	if err != nil {
 		return nil, err
 	}
-	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Components)
+	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, components)
 
 	validatedQueueName, err := resolveGroveSchedulerQueue(ctx, dynamoDeployment.Annotations, runtimeConfig)
 	if err != nil {
@@ -2600,8 +2647,8 @@ func GenerateGrovePodCliqueSet(
 		resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
 	)
 
-	for i := range dynamoDeployment.Spec.Components {
-		component := dynamoDeployment.Spec.Components[i].DeepCopy()
+	for i := range components {
+		component := components[i].DeepCopy()
 		componentName := component.ComponentName
 		dynamoNamespace := GetDynamoNamespace(dynamoDeployment, component)
 		propagateDGDAnnotations(dynamoDeployment.GetAnnotations(), component)

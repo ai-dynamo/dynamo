@@ -70,7 +70,7 @@ func TestEnsureModelsDownloaded(t *testing.T) {
 			wantBuilds: []string{modelDownloadTestBuildID, modelDownloadTestSecondBuildID},
 		},
 		{
-			name: "skips ordinary components, sorts remote builds and records partial progress",
+			name: "skips managed components, sorts remote builds and records partial progress",
 			dgd:  pending,
 			registry: newModelDownloadRegistry(t, map[string]bool{
 				modelDownloadTestBuildID: true,

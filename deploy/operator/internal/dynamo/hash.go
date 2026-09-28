@@ -42,9 +42,22 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 	if dgd == nil {
 		return "", fmt.Errorf("nil DynamoGraphDeployment")
 	}
+	return ComputeDGDWorkersSpecHashForComponents(dgd, dgd.Spec.Components)
+}
 
-	dcds, err := GenerateDynamoComponentsDeployments(
+// ComputeDGDWorkersSpecHashForComponents computes the worker hash for an
+// explicit component selection while retaining complete graph configuration.
+func ComputeDGDWorkersSpecHashForComponents(
+	dgd *v1beta1.DynamoGraphDeployment,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, error) {
+	if dgd == nil {
+		return "", fmt.Errorf("nil DynamoGraphDeployment")
+	}
+
+	dcds, err := generateDynamoComponentsDeployments(
 		dgd,
+		components,
 		nil,
 		nil,
 		RollingUpdateContext{NewWorkerHash: dgdWorkerHashPlaceholderValue},

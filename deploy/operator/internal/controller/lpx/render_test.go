@@ -101,24 +101,23 @@ func TestGenerateGrovePodCliqueSet_FromDGDYaml(t *testing.T) {
 				require.True(t, component.IsLPX())
 			}
 
-			t.Log("Render conventional components independently from their ordinary-only input")
-			ordinary := dynamoDeployment.DeepCopy()
-			ordinary.Spec.Components = slices.DeleteFunc(ordinary.Spec.Components, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+			t.Log("Render managed components independently from their explicit selection")
+			managed := slices.DeleteFunc(slices.Clone(dynamoDeployment.Spec.Components), func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
 				return component.IsLPX()
 			})
-			normal, err := dynamo.GenerateGrovePodCliqueSet(
-				t.Context(), ordinary, controllerConfig, runtimeConfig,
+			managedPCS, err := dynamo.GenerateGrovePodCliqueSetForComponents(
+				t.Context(), &dynamoDeployment, managed, controllerConfig, runtimeConfig,
 				kubeClient, nil, nil, nil, nil,
 			)
 			require.NoError(t, err)
-			require.NotEqual(t, normal.Name, got.Name)
-			for _, clique := range normal.Spec.Template.Cliques {
+			require.NotEqual(t, managedPCS.Name, got.Name)
+			for _, clique := range managedPCS.Spec.Template.Cliques {
 				require.NotEqual(t, v1alpha1.LPXSchedulerName, clique.Spec.PodSpec.SchedulerName)
 				require.False(t, dynamoDeployment.GetComponentByName(clique.Labels[consts.KubeLabelDynamoComponent]).IsLPX())
 			}
 			podCliqueSets := []*grovev1alpha1.PodCliqueSet{got}
-			if len(normal.Spec.Template.Cliques) > 0 {
-				podCliqueSets = append(podCliqueSets, normal)
+			if len(managedPCS.Spec.Template.Cliques) > 0 {
+				podCliqueSets = append(podCliqueSets, managedPCS)
 			}
 
 			for _, pcs := range podCliqueSets {
@@ -300,7 +299,7 @@ func TestLPXRenderingPreservesCyborgOverrides(t *testing.T) {
 	}
 	leader.Spec.Volumes = append(leader.Spec.Volumes, authoredConfig)
 
-	t.Log("Render the complete LPX workload with ordinary pod spec overrides")
+	t.Log("Render the complete LPX workload with managed pod spec overrides")
 	selected, err := lpx.ResolveWorkload(t.Context(), dgd, singleGroupComponents(t, dgd), newTestDataModelRegistry(t, t.TempDir()))
 	require.NoError(t, err)
 	plan := mustPlanSelectedLPX(t, dgd, selected)

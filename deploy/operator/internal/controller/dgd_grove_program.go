@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -41,6 +40,25 @@ type groveProgram struct {
 	topology           *dgdGroveTopologyConditionReconciler
 	gate               features.Gate
 	lpx                *dgdLPXHandoff
+}
+
+// groveReconcileRequest keeps the complete DGD together with the component
+// ownership boundary selected by the outer Grove program.
+type groveReconcileRequest struct {
+	DGD *nvidiacomv1beta1.DynamoGraphDeployment
+	// Managed is defined once by groveProgram and is authoritative for nested reconcilers.
+	Managed func(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool
+}
+
+func (r groveReconcileRequest) managedComponents() []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+	components := make([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, 0, len(r.DGD.Spec.Components))
+	for i := range r.DGD.Spec.Components {
+		component := &r.DGD.Spec.Components[i]
+		if r.Managed(component) {
+			components = append(components, *component)
+		}
+	}
+	return components
 }
 
 // newGroveProgram wires the Grove pathway at the DGD composition root.
@@ -81,8 +99,14 @@ func (r *DynamoGraphDeploymentReconciler) newGroveProgram() *groveProgram {
 // are persisted through req.DGD; status accumulates in the returned result.
 func (p *groveProgram) Reconcile(
 	ctx context.Context,
-	req workloadProgramRequest,
+	programReq workloadProgramRequest,
 ) (programResult workloadProgramResult, retErr error) {
+	req := groveReconcileRequest{
+		DGD: programReq.DGD,
+		Managed: func(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
+			return !component.ManagedByExternalController()
+		},
+	}
 	programResult = newWorkloadProgramResult(req.DGD)
 	clearComponentGPUShapes(programResult.Status.Components)
 
@@ -95,8 +119,6 @@ func (p *groveProgram) Reconcile(
 		programResult.Fail(req.DGD.Generation, reasonSelectedWorkloadProviderUnavailable, err)
 		return programResult, reconcile.TerminalError(err)
 	}
-	var ordinaryDGD *nvidiacomv1beta1.DynamoGraphDeployment
-
 	defer func() {
 		if retErr != nil {
 			reason := reasonFailedToReconcileResources
@@ -105,17 +127,14 @@ func (p *groveProgram) Reconcile(
 			}
 			programResult.Fail(req.DGD.Generation, reason, retErr)
 		}
-		if ordinaryDGD == nil {
-			ordinaryDGD = projectWithoutExternallyManagedComponents(req.DGD)
-		}
-		p.topology.Reconcile(ctx, ordinaryDGD, &programResult)
+		p.topology.Reconcile(ctx, req, &programResult)
 	}()
 	log.FromContext(ctx).Info(
 		"Reconciling Grove resources",
 		"hasMultinode", req.DGD.HasAnyMultinodeComponent(),
 	)
 
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, req.DGD); err != nil {
+	if err := p.rollout.migrateCurrentWorkerHashIfNeededForComponents(ctx, req.DGD, req.managedComponents()); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
 		return programResult, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
 	}
@@ -126,18 +145,15 @@ func (p *groveProgram) Reconcile(
 	if err != nil {
 		return programResult, err
 	}
-	ordinaryDGD = projectWithoutExternallyManagedComponents(req.DGD)
-
 	previousRestart := programResult.Status.Restart
 	restart := p.restart.Resolve(
 		ctx,
 		req.DGD,
 		&programResult.Status,
-		func(ctx context.Context, source *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+		func(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
 			return resolveCompositeGroveRestartProgress(
 				ctx,
-				source,
-				ordinaryDGD,
+				groveReconcileRequest{DGD: dgd, Managed: req.Managed},
 				inProgress,
 				p.restartProgress,
 				p.lpxRestartProgress,
@@ -149,8 +165,7 @@ func (p *groveProgram) Reconcile(
 
 	result, err := p.workloads.Reconcile(
 		ctx,
-		req.DGD,
-		ordinaryDGD,
+		req,
 		restart.State,
 		checkpoints.Infos,
 	)
@@ -169,7 +184,7 @@ func (p *groveProgram) Reconcile(
 		return programResult, nil
 	}
 
-	// Keep LPX creation and updates after ordinary reconciliation and restart selection.
+	// Keep LPX creation and updates after managed reconciliation and restart selection.
 	if req.DGD.HasLPXComponent() {
 		child, err := p.lpx.Reconcile(ctx, req.DGD)
 		if err != nil {
@@ -181,7 +196,7 @@ func (p *groveProgram) Reconcile(
 	result = applyCheckpointStartupReadiness(result, checkpoints.Infos)
 
 	if result.State != nvidiacomv1beta1.DGDStatePending || result.Reason != reasonWaitingForCheckpoint {
-		if err := p.scalingAdapters.Reconcile(ctx, ordinaryDGD); err != nil {
+		if err := p.scalingAdapters.ReconcileManaged(ctx, req); err != nil {
 			log.FromContext(ctx).Error(err, "Failed to reconcile scaling adapters")
 			return programResult, fmt.Errorf("failed to reconcile scaling adapters: %w", err)
 		}
@@ -189,17 +204,4 @@ func (p *groveProgram) Reconcile(
 
 	programResult.applyReconcileResult(req.DGD.Generation, result)
 	return programResult, nil
-}
-
-// projectWithoutExternallyManagedComponents copies source without externally managed components.
-// The source must be non-nil; shared nested data must not be mutated by callers.
-func projectWithoutExternallyManagedComponents(source *nvidiacomv1beta1.DynamoGraphDeployment) *nvidiacomv1beta1.DynamoGraphDeployment {
-	projected := *source
-	projected.Spec.Components = slices.DeleteFunc(
-		slices.Clone(projected.Spec.Components),
-		func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-			return component.ManagedByExternalController()
-		},
-	)
-	return &projected
 }

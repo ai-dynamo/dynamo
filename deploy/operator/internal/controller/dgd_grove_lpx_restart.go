@@ -25,48 +25,47 @@ func newLPXRestartProgressResolver(reader client.Reader) *lpxRestartProgressReso
 // Resolve returns LPX components whose current child has not completed the selected restart.
 func (r *lpxRestartProgressResolver) Resolve(
 	ctx context.Context,
-	source *v1beta1.DynamoGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
-	if r.observeRestart(ctx, source) == nil {
+	if r.observeRestart(ctx, dgd) == nil {
 		return inProgress
 	}
 	return nil
 }
 
-// resolveCompositeGroveRestartProgress composes child-owned LPX and ordinary Grove observations.
+// resolveCompositeGroveRestartProgress composes external and managed Grove observations.
 func resolveCompositeGroveRestartProgress(
 	ctx context.Context,
-	source *v1beta1.DynamoGraphDeployment,
-	ordinaryDGD *v1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
 	inProgress []string,
-	ordinaryResolver *groveRestartProgressResolver,
+	managedResolver *groveRestartProgressResolver,
 	lpxResolver *lpxRestartProgressResolver,
 ) []string {
-	ordinary := make([]string, 0, len(inProgress))
-	lpxComponents := make([]string, 0, len(inProgress))
+	managed := make([]string, 0, len(inProgress))
+	external := make([]string, 0, len(inProgress))
 	pending := make(map[string]bool, len(inProgress))
 
 	for _, name := range inProgress {
-		component := source.GetComponentByName(name)
+		component := req.DGD.GetComponentByName(name)
 		if component == nil {
 			continue
 		}
-		if component.IsLPX() {
-			lpxComponents = append(lpxComponents, name)
+		if req.Managed(component) {
+			managed = append(managed, name)
 		} else {
-			ordinary = append(ordinary, name)
+			external = append(external, name)
 		}
 	}
 
-	// Observe the shared LPX child before ordinary Grove restart progress.
-	if len(lpxComponents) > 0 {
-		for _, name := range lpxResolver.Resolve(ctx, source, lpxComponents) {
+	// Observe the external child before managed Grove restart progress.
+	if len(external) > 0 {
+		for _, name := range lpxResolver.Resolve(ctx, req.DGD, external) {
 			pending[name] = true
 		}
 	}
-	if len(ordinary) > 0 {
-		for _, name := range ordinaryResolver.Resolve(ctx, ordinaryDGD, ordinary) {
+	if len(managed) > 0 {
+		for _, name := range managedResolver.Resolve(ctx, req, managed) {
 			pending[name] = true
 		}
 	}
@@ -84,13 +83,13 @@ func resolveCompositeGroveRestartProgress(
 // A failed read or incomplete child leaves every requested member pending.
 func (r *lpxRestartProgressResolver) observeRestart(
 	ctx context.Context,
-	source *v1beta1.DynamoGraphDeployment,
+	dgd *v1beta1.DynamoGraphDeployment,
 ) *v1alpha1.LPXGraphDeployment {
 	child := &v1alpha1.LPXGraphDeployment{}
-	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(source), child); err != nil ||
+	if err := r.reader.Get(ctx, client.ObjectKeyFromObject(dgd), child); err != nil ||
 		child.Status.ObservedGeneration != child.Generation || !child.DeletionTimestamp.IsZero() ||
-		!metav1.IsControlledBy(child, source) || source.Spec.Restart == nil ||
-		child.Annotations[dynamo.LPXRestartAnnotation] != source.Spec.Restart.ID {
+		!metav1.IsControlledBy(child, dgd) || dgd.Spec.Restart == nil ||
+		child.Annotations[dynamo.LPXRestartAnnotation] != dgd.Spec.Restart.ID {
 		return nil
 	}
 
@@ -101,7 +100,7 @@ func (r *lpxRestartProgressResolver) observeRestart(
 	}
 
 	// Restart progress is resolved before handoff; an old Ready child cannot cover a newer DGD input.
-	revision, err := dynamo.LPXInputRevision(source, source.Spec.Restart.ID)
+	revision, err := dynamo.LPXInputRevision(dgd, dgd.Spec.Restart.ID)
 	if err != nil || child.Spec.InputRevision != revision {
 		return nil
 	}

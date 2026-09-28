@@ -116,7 +116,7 @@ func TestRenderSelectedLPXRolePreservesTemplate(t *testing.T) {
 				&podTemplateRuntimeDefaults{ComponentDefaults: NewWorkerDefaults()})
 			require.NoError(t, err)
 
-			t.Log("Retain authored security and use the ordinary shared memory default unless resized or disabled")
+			t.Log("Retain authored security and use the standard shared memory default unless resized or disabled")
 			if test.sharedMemorySize == nil {
 				test.volumes = []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
 					Medium: corev1.StorageMediumMemory, SizeLimit: ptr.To(resource.MustParse("8Gi")),
@@ -143,7 +143,7 @@ func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
 	name := PCSNameForLPX(deployment)
 	t.Log("Keep the deployment name visible with four hexadecimal identity characters")
 	require.Equal(t, "chat-3efb", name)
-	t.Log("An ordinary DGD named chat-lpx must not collide with the LPX PCS of chat")
+	t.Log("A non-LPX DGD named chat-lpx must not collide with the LPX PCS of chat")
 	require.NotEqual(t, PCSNameForDGD("chat-lpx", nil), name)
 	require.NotEqual(t, PCSNameForDGD(deployment.Name, nil), name)
 
@@ -240,7 +240,7 @@ func TestLPXInputRevision(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 
-	t.Log("Each LPX component or shared-input change invalidates the revision; ordinary edits do not")
+	t.Log("Each external component or shared-input change invalidates the revision; managed edits do not")
 	source.GetComponentByName("decode").LPX.Scheduling = &v1beta1.SchedulingSpec{}
 	want, err = LPXInputRevision(source, "")
 	require.NoError(t, err)
@@ -311,12 +311,12 @@ func TestLPXInputRevision(t *testing.T) {
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"decode"}}
 		}},
 		{"ignored/backend", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.BackendFramework = "vllm" }},
-		{"ignored/ordinary-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
-		{"ignored/ordinary-image", false, func(d *v1beta1.DynamoGraphDeployment) {
+		{"ignored/managed-replicas", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Components[0].Replicas = ptr.To(int32(9)) }},
+		{"ignored/managed-image", false, func(d *v1beta1.DynamoGraphDeployment) {
 			d.Spec.Components[0].PodTemplate = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "prefill:next"}}}}
 		}},
-		{"ignored/ordinary-restart", false, func(d *v1beta1.DynamoGraphDeployment) {
-			d.Spec.Restart = &v1beta1.Restart{ID: "restart-ordinary"}
+		{"ignored/managed-restart", false, func(d *v1beta1.DynamoGraphDeployment) {
+			d.Spec.Restart = &v1beta1.Restart{ID: "restart-managed"}
 			d.Status.Restart = &v1beta1.RestartStatus{ObservedID: d.Spec.Restart.ID, Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{d.Spec.Components[0].ComponentName}}
 		}},
 		{"ignored/unselected-restart", false, func(d *v1beta1.DynamoGraphDeployment) { d.Spec.Restart = &v1beta1.Restart{ID: "not-delivered"} }},
@@ -471,12 +471,12 @@ func TestLPXInputRevisionIgnoresUnrelatedConvertedMetadata(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, after)
 
-	t.Log("Ignore conversion bookkeeping and metadata on the ordinary component")
+	t.Log("Ignore conversion bookkeeping and metadata on the managed component")
 	alpha := &v1alpha1.DynamoGraphDeployment{}
 	require.NoError(t, alpha.ConvertFrom(source))
-	alpha.Spec.Services["epp"].Labels = map[string]string{"ordinary-label": "changed"}
-	alpha.Spec.Services["epp"].Annotations = map[string]string{"ordinary-annotation": "changed"}
-	alpha.Spec.Services["epp"].SubComponentType = "ordinary-subtype"
+	alpha.Spec.Services["epp"].Labels = map[string]string{"managed-label": "changed"}
+	alpha.Spec.Services["epp"].Annotations = map[string]string{"managed-annotation": "changed"}
+	alpha.Spec.Services["epp"].SubComponentType = "managed-subtype"
 	converted := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, alpha.ConvertTo(converted))
 	require.NotEqual(t, source.Annotations, converted.Annotations)

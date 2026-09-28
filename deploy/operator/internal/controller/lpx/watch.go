@@ -119,7 +119,7 @@ func lpxGraphDeploymentPredicate() predicate.Predicate {
 	)
 }
 
-// dgdPredicate ignores ordinary scaling/status traffic but wakes the child
+// dgdPredicate ignores managed scaling/status traffic but wakes the child
 // for relevant intent, DGD identity/deletion, and persisted restart selection.
 // Its registered informer supplies non-nil DGDs.
 func dgdPredicate() predicate.Predicate {
@@ -136,7 +136,7 @@ func dgdPredicate() predicate.Predicate {
 			return true
 		}
 		// Spec edits advance generation; only the selected restart depends on status.
-		// Avoid conversion and hashing for ordinary status-only events.
+		// Avoid conversion and hashing for managed status-only events.
 		oldRestart, newRestart := dynamo.LPXRestartToken(oldDGD, ""), dynamo.LPXRestartToken(newDGD, "")
 		if oldDGD.Generation == newDGD.Generation && oldRestart == newRestart &&
 			maps.Equal(oldDGD.Labels, newDGD.Labels) && maps.Equal(oldDGD.Annotations, newDGD.Annotations) {

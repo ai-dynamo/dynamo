@@ -39,6 +39,13 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
 - The program request contains only the explicitly mutable DGD. Clients, recorders,
   configuration, and other dependencies live on the concrete program or collaborator
   that uses them.
+- A `DynamoGraphDeployment` value always represents the complete API object. Never
+  construct or pass a copy with `spec.components` filtered.
+- When a composite program divides components between managed and external paths, set
+  the ownership predicate once at the program composition root and pass it with the
+  complete DGD to nested reconcilers. Nested reconcilers must not reclassify component
+  ownership. Materialize component slices or maps only as focused renderer or lookup
+  inputs, and never wrap them in a synthetic DGD.
 - The program result contains `ctrl.Result`, the complete desired DGD status, and queued
   status-transition events.
 - Do not add speculative `Facts`, `Inputs`, `ComputedState`, `WorkloadModel`, render
@@ -71,14 +78,14 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
   callbacks, patch collections, or mutation bags.
 - Queue transitions represented by returned status in the program result and emit them
   only after status persistence succeeds.
-- Emit ordinary resource-mutation events directly only after a semantic create, update,
+- Emit resource-mutation events directly only after a semantic create, update,
   patch, or delete succeeds. Do not emit them for no-ops, failed operations, ignored
   `AlreadyExists`, or ignored `NotFound`.
 
 ## Reconciler and renderer boundaries
 
 - Extract a reconciler when it owns a cohesive resource family, a distinct dependency
-  set, or an independently testable fixture contract. Keep ordinary calculations as
+  set, or an independently testable fixture contract. Keep plain calculations as
   functions; do not wrap a trivial `Get` merely to manufacture another abstraction.
 - Use `Reconcile` for external convergence, `Resolve` for read-only observation or
   derivation, and `Render` for desired-object construction without persistence.

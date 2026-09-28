@@ -176,7 +176,7 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 		{lpxv1alpha1.PodRoleAgent, true},
 		{lpxv1alpha1.PodRoleConductor, true},
 		{lpxv1alpha1.PodRoleCyborgWorker, true},
-		{"ordinary", false},
+		{"managed", false},
 	} {
 		t.Run(test.role, func(t *testing.T) {
 			clique := &grovev1alpha1.PodClique{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
@@ -192,16 +192,16 @@ func TestPodCliquePredicateRoles(t *testing.T) {
 }
 
 func TestDGDPredicate(t *testing.T) {
-	t.Log("Observe LPX input changes, not ordinary capacity and status churn")
+	t.Log("Observe LPX input changes, not managed capacity and status churn")
 	dgd := loadTestDGD(t, lpx.PipelineSingle, "build-v2")
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", Replicas: ptr.To(int32(1))})
 	filter := dgdPredicate()
 
-	ordinary := dgd.DeepCopy()
-	ordinary.Spec.Components = ordinary.Spec.Components[1:]
-	ordinary.Generation++
-	require.False(t, filter.Create(event.CreateEvent{Object: ordinary}))
-	require.False(t, filter.Delete(event.DeleteEvent{Object: ordinary}))
+	managed := dgd.DeepCopy()
+	managed.Spec.Components = managed.Spec.Components[1:]
+	managed.Generation++
+	require.False(t, filter.Create(event.CreateEvent{Object: managed}))
+	require.False(t, filter.Delete(event.DeleteEvent{Object: managed}))
 	require.True(t, filter.Create(event.CreateEvent{Object: dgd}))
 	require.True(t, filter.Delete(event.DeleteEvent{Object: dgd}))
 
@@ -238,8 +238,8 @@ func TestDGDPredicate(t *testing.T) {
 		want    bool
 	}{
 		{"status only", statusOnly, false},
-		{"ordinary capacity and status", capacity, false},
-		{"LPX deselection", ordinary, true},
+		{"managed capacity and status", capacity, false},
+		{"LPX deselection", managed, true},
 		{"runtime image", image, true},
 		{"component topology", componentTopology, true},
 		{"graph topology", graphTopology, true},

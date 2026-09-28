@@ -57,16 +57,18 @@ func newGroveStableResourcesReconciler(
 
 func (r *groveStableResourcesReconciler) Reconcile(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	req groveReconcileRequest,
+	components []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 ) ([]Resource, error) {
 	logger := log.FromContext(ctx)
+
+	// Model discovery is owned by the DGD and spans managed and external components.
 	if err := dynamo.ReconcileModelServicesForComponents(
 		ctx,
 		r,
-		dgd,
-		dynamo.ComponentsByName(dgd),
-		dgd.Namespace,
+		req.DGD,
+		dynamo.ComponentsByName(req.DGD),
+		req.DGD.Namespace,
 	); err != nil {
 		logger.Error(err, "failed to reconcile model services")
 		return nil, fmt.Errorf("failed to reconcile model services: %w", err)
@@ -75,15 +77,14 @@ func (r *groveStableResourcesReconciler) Reconcile(
 	resources := []Resource{}
 	isK8sDiscoveryEnabled := commoncontroller.IsK8sDiscoveryEnabled(
 		r.config.Discovery.Backend,
-		dgd.Annotations,
+		req.DGD.Annotations,
 	)
-	for i := range renderDeployment.Spec.Components {
-		component := &renderDeployment.Spec.Components[i]
+	for i := range components {
+		component := &components[i]
 		if isK8sDiscoveryEnabled || string(component.ComponentType) == commonconsts.ComponentTypeFrontend {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,
-				dgd,
-				renderDeployment,
+				req.DGD,
 				component,
 				isK8sDiscoveryEnabled,
 			)
@@ -99,8 +100,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 		// Sync every component so one that stops qualifying has its Service deleted.
 		epService, err := r.reconcileElasticEPLeaderService(
 			ctx,
-			dgd,
-			renderDeployment,
+			req.DGD,
 			component,
 			!isSinglePodElasticEPLeader(component),
 		)
@@ -116,7 +116,7 @@ func (r *groveStableResourcesReconciler) Reconcile(
 		}
 		ingressResources, err := r.reconcileFrontendIngress(
 			ctx,
-			dgd,
+			req.DGD,
 			component,
 		)
 		if err != nil {
@@ -131,7 +131,6 @@ func (r *groveStableResourcesReconciler) Reconcile(
 func (r *groveStableResourcesReconciler) reconcileComponentService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	isK8sDiscoveryEnabled bool,
 ) (Resource, error) {
@@ -141,10 +140,10 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		ComponentType:   string(component.ComponentType),
-		DynamoNamespace: renderDeployment.GetDynamoNamespaceForComponent(component),
+		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
-		Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
-		Annotations:     dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component),
+		Labels:          dynamo.GetDGDComponentResourceLabels(dgd, componentName, component),
+		Annotations:     dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component),
 		IsK8sDiscovery:  isK8sDiscoveryEnabled,
 	})
 	if err != nil {
@@ -169,7 +168,7 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	}
 
 	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(
-		renderDeployment,
+		dgd,
 		componentName,
 		component,
 	)
@@ -259,19 +258,18 @@ func isSinglePodElasticEPLeader(component *nvidiacomv1beta1.DynamoComponentDeplo
 func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	renderDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	toDelete bool,
 ) (Resource, error) {
 	componentName := component.ComponentName
-	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(renderDeployment, componentName, component)
+	desiredAnnotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component)
 	service := dynamo.GenerateElasticEPHeadlessService(dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
 		ComponentType:   string(component.ComponentType),
-		DynamoNamespace: renderDeployment.GetDynamoNamespaceForComponent(component),
+		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
-		Labels:          dynamo.GetDGDComponentResourceLabels(renderDeployment, componentName, component),
+		Labels:          dynamo.GetDGDComponentResourceLabels(dgd, componentName, component),
 		Annotations:     desiredAnnotations,
 	})
 
