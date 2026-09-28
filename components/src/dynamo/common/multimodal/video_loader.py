@@ -357,6 +357,12 @@ class VideoLoader:
         video_mm_items: List[Dict[str, Any]],
         media_io_kwargs: Dict[str, Any] | None = None,
     ) -> List[tuple[np.ndarray, Dict[str, Any]]]:
+        """Load URL or frontend-decoded videos after validating the full batch.
+
+        Raises ``ValueError`` for malformed items or decoded items when frontend
+        decoding is disabled. Validation happens before any load coroutine is
+        created so an invalid item cannot leave earlier loads unawaited.
+        """
         video_futures: List[Awaitable[tuple[np.ndarray, Dict[str, Any]]]] = []
 
         # Validate the whole batch before creating coroutines so an invalid
