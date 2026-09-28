@@ -22,7 +22,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
-const admissionBypassUsername = "operatorenv-controller-admission-bypass"
+const (
+	admissionBypassUsername = "operatorenv-controller-admission-bypass"
+	testOperatorPrincipal   = "system:serviceaccount:dynamo-system:operator"
+)
 
 var (
 	sharedEnv = operatorenv.New(operatorenv.Options{
@@ -31,7 +34,8 @@ var (
 			Validating:  true,
 			BypassUsers: []string{admissionBypassUsername},
 		},
-		SetupWebhooks: setupProductionWebhooks,
+		SetupWebhooks:     setupProductionWebhooks,
+		OperatorPrincipal: testOperatorPrincipal,
 	})
 	k8sClient             client.Client
 	admissionBypassClient client.Client

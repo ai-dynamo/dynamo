@@ -86,6 +86,10 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		}
 		return ctrl.Result{}, err
 	}
+	gvks, _, err := r.Scheme.ObjectKinds(dgd)
+	if err == nil && len(gvks) == 1 {
+		dgd.SetGroupVersionKind(gvks[0])
+	}
 
 	// 3. Find the target component in the DGD's components list.
 	componentName := adapter.Spec.DGDRef.ComponentName
@@ -123,16 +127,19 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 			logger.Error(err, "Unable to generate unstructured object", "dgd", dgdKey)
 			return ctrl.Result{}, err
 		}
+		apply := &unstructured.Unstructured{Object: obj}
+		apply.SetGroupVersionKind(dgd.GroupVersionKind())
+		apply.SetManagedFields(nil)
 
 		if err := r.Apply(
 			ctx,
-			client.ApplyConfigurationFromUnstructured(&unstructured.Unstructured{Object: obj}),
+			client.ApplyConfigurationFromUnstructured(apply),
 			client.FieldOwner("dynamo-operator-dgdsa"),
 			client.ForceOwnership,
 		); err != nil {
-			logger.Error(err, "Failed to patch DGD")
-			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "PatchFailed", "Patch",
-				"Failed to patch DGD %s: %v", dgd.Name, err)
+			logger.Error(err, "Failed to apply DGD update")
+			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "ApplyFailed", "Apply",
+				"Failed to apply DGD %s: %v", dgd.Name, err)
 			return ctrl.Result{}, err
 		}
 
