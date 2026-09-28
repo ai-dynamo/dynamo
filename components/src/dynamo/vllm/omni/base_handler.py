@@ -146,9 +146,9 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
         # source in engine_args while forwarding them to Omni's diffusion
         # topology explicitly.
         if DiffusionParallelConfig is not None:
-            # Compatibility workaround for the XPU image's vLLM-Omni 0.27 pin
-            # in container/context.yaml. Remove this filtering when that pin is
-            # bumped to a version supporting every OmniParallelKwargs field.
+            # Older installed Omni versions can lack newly added parallel
+            # options. Ignore unsupported default values, but reject explicit
+            # non-default values rather than silently changing configuration.
             parallel_kwargs = dataclasses.asdict(config.parallel)
             supported_parallel_fields = {
                 field.name for field in dataclasses.fields(DiffusionParallelConfig)
@@ -180,7 +180,6 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
                     for field, value in parallel_kwargs.items()
                     if field in supported_parallel_fields
                 }
-
             parallel_config = DiffusionParallelConfig(
                 tensor_parallel_size=getattr(
                     config.engine_args, "tensor_parallel_size", 1

@@ -14,7 +14,7 @@ use super::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId, EventScope,
     EventSourceInstanceId, ModelCardInstanceId, classify_discovery_change, encode_event_segment,
-    model_with_updated_taints, reconcile_discovery_snapshot, validate_event_source_reregistration,
+    model_with_updated_taints, resync_discovery_events, validate_event_source_reregistration,
     validate_model_reregistration,
 };
 use crate::storage::kv;
@@ -362,17 +362,16 @@ impl KVStoreDiscovery {
                     }
                 }
 
-                let (events, reconciled) =
-                    reconcile_discovery_snapshot(known_instances, next_instances);
+                let old_count = known_instances.len();
+                let events = resync_discovery_events(known_instances, next_instances);
 
                 tracing::warn!(
-                    old_count = known_instances.len(),
-                    new_count = reconciled.len(),
+                    old_count,
+                    new_count = known_instances.len(),
                     emitted_events = events.len(),
                     "KVStoreDiscovery::list_and_watch resynced discovery state"
                 );
 
-                *known_instances = reconciled;
                 events
             }
         }
@@ -725,12 +724,15 @@ impl Discovery for KVStoreDiscovery {
         // Use the provided cancellation token, or fall back to the default token
         let cancel_token = cancel_token.unwrap_or_else(|| self.cancel_token.clone());
 
-        // Use the kv::Manager's watch mechanism
-        let (_, mut rx) = self.store.clone().watch(
-            bucket_name,
-            None, // No TTL
-            cancel_token,
-        );
+        let (_, mut rx) = self
+            .store
+            .clone()
+            .watch(
+                bucket_name,
+                None, // No TTL
+                cancel_token,
+            )
+            .await?;
 
         // Create a stream that filters and transforms WatchEvents to DiscoveryEvents
         let stream = async_stream::stream! {
@@ -791,6 +793,13 @@ mod tests {
         )
     }
 
+    fn resync_ids(event: &DiscoveryEvent) -> HashSet<DiscoveryInstanceId> {
+        let DiscoveryEvent::Resync(instances) = event else {
+            panic!("expected a resync event, got {event:?}");
+        };
+        instances.iter().map(DiscoveryInstance::id).collect()
+    }
+
     #[test]
     fn test_resync_removes_missing_discovery_instances() {
         let prefix = format!("{}/{}/{}", INSTANCES_BUCKET, "ns", "component");
@@ -822,12 +831,17 @@ mod tests {
         );
 
         assert!(!events.contains(&DiscoveryEvent::Added(second)));
+        assert_eq!(events.len(), 3);
         assert_eq!(
-            events,
-            vec![
+            events[..2],
+            [
                 DiscoveryEvent::Removed(endpoint_instance(1).id()),
                 DiscoveryEvent::Added(third),
             ]
+        );
+        assert_eq!(
+            resync_ids(&events[2]),
+            HashSet::from([endpoint_instance(2).id(), endpoint_instance(3).id()])
         );
         assert_eq!(known_instances.len(), 2);
         assert!(known_instances.contains_key(&endpoint_instance(2).id()));
@@ -855,7 +869,8 @@ mod tests {
             &mut known_instances,
         );
 
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(resync_ids(&events[0]), HashSet::from([first.id()]));
         assert_eq!(known_instances.len(), 1);
         assert_eq!(known_instances.get(&first.id()), Some(&first));
     }
@@ -881,15 +896,20 @@ mod tests {
             &mut known_instances,
         );
 
+        assert_eq!(events.len(), 2);
         assert_eq!(
-            events,
-            vec![DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+            events[0],
+            DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
                 id: id.clone(),
                 taints: vec![
                     "dynamo.topology/zone=west".to_string(),
                     "second".to_string(),
                 ],
-            })]
+            })
+        );
+        assert_eq!(
+            resync_ids(&events[1]),
+            HashSet::from([DiscoveryInstanceId::Model(id.clone())])
         );
         assert_eq!(
             known_instances.get(&DiscoveryInstanceId::Model(id)),
@@ -1212,6 +1232,91 @@ mod tests {
 
         register_task.await.unwrap();
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn watch_reports_an_unregister_that_follows_establishment() {
+        let client = KVStoreDiscovery::new(kv::Manager::memory(), CancellationToken::new());
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                device_type: None,
+                request_plane_codec: None,
+                transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            })
+            .await
+            .unwrap();
+
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+        client.unregister(instance.clone()).await.unwrap();
+
+        let added = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, DiscoveryEvent::Added(instance.clone()));
+
+        let removed = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            removed,
+            DiscoveryEvent::Removed(instance.id()),
+            "an unregister after establishment must reach the stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_reports_a_resync_after_the_backend_lags() {
+        use crate::storage::kv::Bucket;
+
+        let store = kv::Manager::memory();
+        let client = KVStoreDiscovery::new(store.clone(), CancellationToken::new());
+        let mut stream = client
+            .list_and_watch(DiscoveryQuery::AllEndpoints, None)
+            .await
+            .unwrap();
+
+        let instance = client
+            .register(DiscoverySpec::Endpoint {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep".to_string(),
+                device_type: None,
+                request_plane_codec: None,
+                transport: TransportType::Nats("nats://127.0.0.1:4222".to_string()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            client.list(DiscoveryQuery::AllEndpoints).await.unwrap(),
+            vec![instance.clone()]
+        );
+        client.unregister(instance).await.unwrap();
+
+        // The memory store has one change buffer for all buckets. These writes push the register
+        // and the unregister out of the buffer before the watch task reads them: on the
+        // current-thread test runtime that task cannot run before this test yields.
+        let filler = store.get_or_create_bucket("filler", None).await.unwrap();
+        let key = kv::Key::new("key".to_string());
+        for revision in 1..=(kv::MEMORY_EVENT_BUFFER_CAPACITY + 1) as u64 {
+            filler.insert(&key, "value".into(), revision).await.unwrap();
+        }
+
+        let event = tokio::time::timeout(tokio::time::Duration::from_secs(1), stream.next())
+            .await
+            .expect("the stream must report the resync")
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, DiscoveryEvent::Resync(vec![]));
     }
 
     fn model_spec(taint: &str) -> DiscoverySpec {

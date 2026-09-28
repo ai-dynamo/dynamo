@@ -295,11 +295,12 @@ class KvRouterArgGroup(ArgGroup):
             default=False,
             dest="load_aware",
             help=(
-                "KV Router: Enable load-aware routing without cache-reuse signals. "
+                "KV Router: Enable the load-aware routing preset. "
                 "On the frontend, this implies --router-mode kv. "
                 "This preset sets overlap_score_credit=0, disables KV events and "
                 "KV-reuse assumptions, enables active-block "
-                "and prefill-token load tracking, and disables remote/shared cache indexers."
+                "and prefill-token load tracking, and disables remote/shared cache indexers. "
+                "The builtin policy does not request cache inputs in this mode."
             ),
         )
         add_argument(
