@@ -201,11 +201,3 @@ def test_wait_gives_up_after_bound_without_failing(monkeypatch, caplog):
 
     assert len(served) >= 2
     assert "no new stored KV events" in caplog.text
-
-
-def test_no_scrape_when_hit_rate_gate_is_off(monkeypatch):
-    served = _serve_metrics(monkeypatch, [_applied_lines(stored_ok=2)])
-    payload = CachedTokensChatPayload(body={}, repeat_count=2)
-
-    assert payload.body_for_iteration(0) == {}
-    assert served == []

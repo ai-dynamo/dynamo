@@ -544,11 +544,12 @@ class CachedTokensChatPayload(ChatPayload):
     def _wait_for_r1_stored_events(self) -> None:
         """Wait until the router has applied a stored KV event issued after R1.
 
-        The worker publishes KV events asynchronously, and on the first request
-        its publisher thread only starts at the first token. Without this wait
-        R2 can be routed against an index that does not hold R1's blocks yet,
-        which scores overlap 0 even though the hashes match. On timeout this
-        only warns: the router_kv_hit_rate assertion stays the judge.
+        The worker publishes KV events asynchronously (for TensorRT-LLM the
+        publisher thread only starts at the first token of the first request).
+        Without this wait R2 can be routed against an index that does not hold
+        R1's blocks yet, which scores overlap 0 even though the hashes match.
+        On timeout this only warns: the router_kv_hit_rate assertion stays the
+        judge.
         """
         before = self._stored_events_before_r1
         if before is None:
