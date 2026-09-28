@@ -360,6 +360,7 @@ sidecar:
   - 'tests/utils/prometheus.py'
   - 'tests/utils/router_logs.py'
   - 'tests/utils/router_nvext.py'
+  - 'tests/utils/payloads.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
