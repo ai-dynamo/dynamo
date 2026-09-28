@@ -21,6 +21,7 @@ import dynamo.sglang.args as sglang_args
 from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
+    cache_salt_kwargs,
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
     get_sglang_model_config,
@@ -811,6 +812,27 @@ def test_compat_filters_async_generate_kwargs_for_older_engines():
     assert filter_supported_async_generate_kwargs(OldEngine(), kwargs) == {
         "input_ids": [1, 2, 3]
     }
+
+
+@pytest.mark.parametrize("salt", [None, "", "tenant-a"])
+def test_cache_salt_kwargs_for_older_engines(salt):
+    class OldEngine:
+        async def async_generate(self, input_ids=None):
+            return None
+
+    if salt:
+        with pytest.raises(ValueError, match="cache_salt is not supported"):
+            cache_salt_kwargs(OldEngine(), salt)
+    else:
+        assert cache_salt_kwargs(OldEngine(), salt) == {}
+
+
+def test_cache_salt_kwargs_preserves_supported_salt():
+    class SaltedEngine:
+        async def async_generate(self, cache_salt=None):
+            return None
+
+    assert cache_salt_kwargs(SaltedEngine(), "tenant-a") == {"cache_salt": "tenant-a"}
 
 
 def test_compat_keeps_async_generate_kwargs_for_newer_engines():

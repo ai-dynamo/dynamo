@@ -6,6 +6,7 @@ import importlib
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -660,7 +661,7 @@ async def test_vp9_without_software_decoder_is_actionable(monkeypatch):
     async def fake_validate(url, policy):
         return url
 
-    async def fake_fetch(url, timeout, policy=None):
+    async def fake_fetch(url, timeout, policy=None, max_bytes=None):
         return b"vp9-bytes"
 
     monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
@@ -688,7 +689,7 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     async def fake_validate(url, policy):
         return url
 
-    async def fake_fetch(url, timeout, policy=None):
+    async def fake_fetch(url, timeout, policy=None, max_bytes=None):
         return b"vp9-bytes"
 
     monkeypatch.setattr(ewh, "validate_media_url", fake_validate)
@@ -701,6 +702,24 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
     result = await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
 
     assert result == b"vp9-bytes"
+
+
+@pytest.mark.asyncio
+async def test_remote_video_fetch_honors_configured_media_limit(monkeypatch):
+    import dynamo.sglang.request_handlers.multimodal.encode_worker_handler as ewh
+    from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
+
+    monkeypatch.setenv(DYN_MM_MAX_FILE_SIZE_MB, "1")
+    fetch = AsyncMock(return_value=b"vp9-bytes")
+    monkeypatch.setattr(ewh, "fetch_bytes", fetch)
+    monkeypatch.setattr(ewh, "probe_video_codec", lambda b: "vp9")
+    monkeypatch.setattr(ewh, "should_use_nvdec", lambda c: False)
+    monkeypatch.setattr(ewh.importlib, "import_module", _selective_import({"decord"}))
+
+    handler = _bare_handler()
+    await handler._maybe_nvdec_decoder("https://example.com/clip.webm")
+
+    assert fetch.await_args.kwargs["max_bytes"] == 1024 * 1024
 
 
 @pytest.mark.asyncio
