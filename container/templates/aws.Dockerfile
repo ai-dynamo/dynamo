@@ -76,7 +76,7 @@ keeping ${MOONCAKE_PKG} (Mooncake EFA protocol unavailable)"; \
     else \
         {{ pkg_uninstall }} "${MOONCAKE_PKG}" 2>/dev/null || true; \
         {{ pkg_install }} \
-            "${MOONCAKE_EFA_PKG}==${MOONCAKE_VERSION}"; \
+            "${MOONCAKE_EFA_PKG}>=${MOONCAKE_VERSION}"; \
         # Verify by distribution metadata rather than importing the module: the
         # extension links libcuda.so.1, absent from a GPU-less builder.
         python3 -c "import importlib.metadata as m; m.version('${MOONCAKE_EFA_PKG}')"; \
