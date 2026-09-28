@@ -167,13 +167,13 @@ impl fmt::Display for GrpcEndpoint {
 }
 
 #[cfg(test)]
-mod unit_common_endpoint {
+mod tests {
     use super::{GrpcEndpoint, HttpEndpoint};
 
     const ARGUMENT: &str = "--test-endpoint";
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn normalizes_plaintext_endpoints() {
             assert_eq!(
@@ -198,10 +198,10 @@ mod unit_common_endpoint {
             assert_eq!(ipv6.as_str(), "http://[2001:db8::1]:50051");
             assert_eq!(ipv6.authority_host(), "[2001:db8::1]");
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn rejects_unsupported_or_ambiguous_endpoints() {
             for endpoint in [
@@ -219,10 +219,10 @@ mod unit_common_endpoint {
                 assert!(GrpcEndpoint::parse(endpoint, ARGUMENT).is_err());
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn derives_http_endpoint_from_grpc_host() {
             let grpc = GrpcEndpoint::parse("http://server:30001", ARGUMENT).unwrap();
@@ -238,10 +238,10 @@ mod unit_common_endpoint {
             assert_eq!(http.as_str(), "http://[2001:db8::1]:30000/");
             assert!(HttpEndpoint::from_grpc(&grpc, 0).is_err());
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn parses_http_endpoints_with_path_prefixes() {
             for endpoint in [
@@ -252,10 +252,10 @@ mod unit_common_endpoint {
                 assert!(HttpEndpoint::parse(endpoint, "--http-endpoint").is_ok());
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn rejects_invalid_http_endpoints() {
             for endpoint in [
@@ -271,5 +271,5 @@ mod unit_common_endpoint {
                 assert!(HttpEndpoint::parse(endpoint, "--http-endpoint").is_err());
             }
         }
-    }
+    );
 }

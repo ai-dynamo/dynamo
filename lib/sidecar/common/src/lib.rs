@@ -33,4 +33,4 @@ pub use transport::{DEFAULT_MAX_GRPC_MESSAGE_SIZE, GrpcChannelPool, format_error
 
 #[cfg(test)]
 #[path = "transport/tests.rs"]
-mod unit_common_transport;
+mod transport_tests;

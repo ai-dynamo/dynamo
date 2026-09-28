@@ -314,16 +314,17 @@ where
 }
 
 #[cfg(test)]
-mod unit_model {
+mod tests {
     use super::*;
-    use crate::unit_vllm_fixtures::{model_info, server_info};
+    use crate::test_fixtures::{model_info, server_info};
     use serde_json::json;
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn engine_config_advertises_supported_capabilities() {
-            let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+            let model =
+                DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
             assert!(
                 !model
                     .engine_config()
@@ -338,10 +339,10 @@ mod unit_model {
                 Some(&json!(true))
             );
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
             for (dimension, expected) in [
@@ -355,15 +356,16 @@ mod unit_model {
                     "pipeline" => parallelism.pipeline_parallel_size = 0,
                     _ => unreachable!(),
                 }
-                let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
+                let model =
+                    DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
                 let error = model.rl_worker_metadata(None, None).unwrap_err();
                 assert!(error.to_string().contains(expected));
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn discovery_rejects_zero_data_parallelism() {
             let mut server = server_info();
@@ -378,10 +380,10 @@ mod unit_model {
 
             assert!(error.to_string().contains("data-parallel size of zero"));
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn startup_compatibility_rejects_parallelism_change() {
             let bootstrap = DiscoveredModel::from_proto(model_info(), server_info())
@@ -408,10 +410,10 @@ mod unit_model {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn discovery_rejects_incompatible_model_metadata() {
             let mut unsupported_api = server_info();
@@ -434,10 +436,10 @@ mod unit_model {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn discovery_rejects_nonzero_dp_start_without_local_size() {
             let mut server = server_info();
@@ -446,18 +448,18 @@ mod unit_model {
             parallelism.data_parallel_rank = 4;
             assert!(DiscoveredModel::from_proto(model_info(), server).is_err());
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
             for (aggregate_blocks, expected_per_rank_blocks) in [(0, None), (4097, Some(2048))] {
                 let mut server = server_info();
                 server.total_kv_blocks = aggregate_blocks;
 
-                let model =
-                    DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
+                let model = DiscoveredModel::from_proto(model_info(), server)
+                    .expect("valid discovery metadata");
                 let registration = model.engine_config().llm.expect("LLM registration");
 
                 assert_eq!(
@@ -466,10 +468,10 @@ mod unit_model {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn discovered_aliases_lora_and_legacy_parallelism_are_preserved() {
             let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
@@ -497,10 +499,10 @@ mod unit_model {
             );
             assert!(!model.supports_lora());
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn incompatible_bootstrap_identity_and_capabilities_fail_closed() {
             let baseline = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
@@ -535,10 +537,10 @@ mod unit_model {
                     .contains("RL capabilities changed")
             );
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn absent_effective_attention_block_size_uses_legacy_fallback() {
             for (effective, physical, expected) in [
@@ -556,10 +558,10 @@ mod unit_model {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn unrepresentable_effective_block_size_is_rejected_without_truncation() {
             let mut server = server_info();
@@ -567,25 +569,39 @@ mod unit_model {
             let error = DiscoveredModel::from_proto(model_info(), server).unwrap_err();
             assert_eq!(
                 error.error_type(),
-                dynamo_backend_common::ErrorType::Backend(dynamo_backend_common::BackendError::Unknown)
+                dynamo_backend_common::ErrorType::Backend(
+                    dynamo_backend_common::BackendError::Unknown
+                )
             );
             assert!(error.to_string().contains("effective attention block size"));
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn missing_model_identity_is_rejected() {
-            assert!(DiscoveredModel::from_proto({ let mut info = model_info(); info.model_id.clear(); info }, server_info()).is_err());
+            assert!(
+                DiscoveredModel::from_proto(
+                    {
+                        let mut info = model_info();
+                        info.model_id.clear();
+                        info
+                    },
+                    server_info()
+                )
+                .is_err()
+            );
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn local_dp_ownership_requires_a_valid_unambiguous_range() {
-            for (global, start, local, expected) in [(2, 0, 0, 0..2), (8, 0, 4, 0..4), (8, 4, 4, 4..8)] {
+            for (global, start, local, expected) in
+                [(2, 0, 0, 0..2), (8, 0, 4, 0..4), (8, 4, 4, 4..8)]
+            {
                 assert_eq!(
                     local_data_parallel_range(global, start, local).unwrap(),
                     expected
@@ -604,10 +620,10 @@ mod unit_model {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn model_identity_and_limits_are_preserved() {
             let config = DiscoveredModel::from_proto(model_info(), server_info())
@@ -621,10 +637,10 @@ mod unit_model {
             assert_eq!(llm.max_num_seqs, Some(128));
             assert_eq!(llm.max_num_batched_tokens, Some(2048));
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn missing_optional_limits_are_not_invented() {
             let llm = DiscoveredModel::from_proto(
@@ -648,10 +664,10 @@ mod unit_model {
                 (None, None, None, None)
             );
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn logical_block_size_and_per_rank_capacity_are_registered() {
             let mut server = server_info();
@@ -666,5 +682,5 @@ mod unit_model {
             assert_eq!(llm.data_parallel_size, Some(2));
             assert_eq!(llm.data_parallel_start_rank, Some(0));
         }
-    }
+    );
 }

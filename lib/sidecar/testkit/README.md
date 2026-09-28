@@ -62,8 +62,8 @@ cancellation, and cleanup through its normal public API.
 
 The testkit library has no direct concrete sidecar, Mocker, protobuf, or tonic dependency.
 The integration tests depend on those crates through `dev-dependencies`. Normal
-production sidecar and Mocker builds do not depend on the testkit. The vLLM
-sidecar uses a dev-dependency to share common input builders in its unit tests.
+production sidecar and Mocker builds do not depend on the testkit. vLLM unit
+fixtures live in its own crate, so it also has no testkit dev-dependency.
 
 | Location | Responsibility |
 |---|---|
@@ -82,8 +82,10 @@ private converters accessible. Small tests are inline; the larger transport and
 vLLM conversion modules use adjacent test files. Inputs, production calls and
 assertions live together, with no unit source-group macros or backend adapters.
 The only retained unit macro, `sidecar_test!` in `src/lanes.rs`, records each
-case's CI lane. Common fixtures remain a test-only testkit dependency; reusable
-native fixtures remain in `tests/support/fixtures/vllm.rs` for both layers.
+case's CI lane using format-compatible macro syntax. Native builders, including
+`minimal_request()`, live in `vllm/src/test_fixtures.rs` under `#[cfg(test)]`,
+reused by vLLM units and its retained fake-server tests. Shared integration
+helpers remain in testkit; no shared unit-testing layer is introduced.
 
 ## Request controls and observations
 
@@ -216,44 +218,58 @@ suite.
 
 ## Isolated units beside production
 
-This alternative preserves the 81 isolated cases from #15089: 11 common and
-70 vLLM cases. The ten formerly shared vLLM scenarios now live in the vLLM
-modules that own their production calls and assertions. No assertion is removed
-by this relocation, and no SGLang unit coverage is claimed.
+This alternative preserves the 81 isolated cases from #15089 and moves the
+existing LoRA lock-registry unit into `lora.rs`, bringing the isolated selection
+to **82 cases: 11 common and 71 vLLM**. The ten formerly shared vLLM scenarios
+remain local. No assertions are removed and no SGLang unit coverage is claimed.
+The broader `vllm/src/tests.rs` retains 37 tests.
 
 Common argument, endpoint and error units are inline in `common/src`; transport
 units live in `common/src/transport/tests.rs`, registered once by the common
 crate root to avoid duplicate collection through the two Tonic implementations.
-vLLM model, worker, JSON and LoRA units are inline; request/response cases and
-candidate checks live in `vllm/src/convert/{request_tests,response_tests}.rs`.
-The former `tests/unit/` tree is removed.
+vLLM model, worker, JSON and LoRA units use inline `tests` modules. Conversion
+cases live in `vllm/src/convert/{request_tests,response_tests}.rs`, declared by
+matching module names in `convert.rs`. The former `tests/unit/` tree is removed.
 
-`src/lanes.rs` retains the small lane macro unchanged, included by both crate
-roots. Every governed unit declares its earliest CI lane with `sidecar_test!`:
-`pre_merge`, `post_merge` or `nightly`. Later lanes include earlier lanes. All
-current units are `pre_merge`; assigning a future test to `nightly` excludes it
-from pre-merge and post-merge execution. Suite, backend and lane remain
-independent runner selections:
+`src/lanes.rs` retains the small lane macro, included by both crate roots:
 
-```sh
-python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge --list
-python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge
+```rust
+sidecar_test!(
+    #[lane(pre_merge)]
+    #[test]
+    fn preserves_request_fields() {
+        // Scenario assertions.
+    }
+);
 ```
 
-Common fixtures, including `minimal_request`, remain in `src/fixtures.rs`.
-Native builders remain in `tests/support/fixtures/vllm.rs`, outside unit sources,
-so integration tests can use them too. The existing four wire families and both
-retained Mocker suites remain. Only vLLM's before-start/repeated-cleanup wire
-subsection has its isolated replacement; SGLang's checks remain.
+This syntax allows rustfmt to format test bodies. Every marked unit declares
+`pre_merge`, `post_merge` or `nightly`; later lanes include earlier lanes. All
+current units are pre-merge. Run them directly with Cargo:
 
-Fresh validation preserved all 81 scenario/lane pairs and passed all 81
-exported-runner units, 121 common/vLLM library tests, eight testkit conformance
-and both four-case Mocker suites. All 81 units also passed in a CPU container
-with networking disabled; targeted Clippy, formatting and pre-commit passed.
-The runs at `47ae1fb270` belong to the original shared-unit layout and remain
-historical evidence. These results do not claim GitHub CI, a full Dynamo
-workspace run or native-engine/GPU execution.
-[UNITS.md](UNITS.md) records the source layout, assertion mapping, lane semantics
-and inventory/export commands. [COVERAGE.md](COVERAGE.md) records retained
+```sh
+cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
+  --features dynamo-sidecar-common/tonic-v14 --lib __sidecar_lane_
+```
+
+For pre-merge, add `-- --skip ::__sidecar_lane_post_merge
+--skip ::__sidecar_lane_nightly`; post-merge excludes only
+`::__sidecar_lane_nightly`. CI runs unrelated workspace packages separately so
+custom harnesses do not receive libtest flags. Ordinary unmarked tests still
+execute in the broad Cargo suite. `run.py` and its manifest/export modes are
+removed. There is no additional CPU-container run; nightly Rust coverage
+continues to execute all lanes.
+
+Native fixtures and `minimal_request()` now belong to
+`vllm/src/test_fixtures.rs`; the vLLM testkit dev-dependency is removed. Shared
+integration keeps its own testkit helpers. Existing wire scenarios and both
+retained Mocker suites remain unchanged by this cleanup.
+
+At the prior `2f6224d332` revision, all 81 scenario/lane pairs, 121 common/vLLM
+library tests, eight conformance cases and both four-case Mocker suites passed.
+All 81 units also passed in a CPU container; formatting, Clippy and pre-commit
+passed. These are historical results, not validation of the current cleanup.
+[UNITS.md](UNITS.md) records the source layout, assertion mapping, direct Cargo
+commands and lane semantics. [COVERAGE.md](COVERAGE.md) records retained
 integration coverage and revision-specific execution;
 [DEVIATIONS.md](DEVIATIONS.md) records departures from the read-only DEP.

@@ -20,8 +20,8 @@ fn config() -> GrpcTransportConfig {
     }
 }
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[tokio::test(start_paused = true)]
     async fn failed_connection_retries_then_pool_contains_every_slot() {
         let attempts = Cell::new(0);
@@ -44,10 +44,10 @@ sidecar_test! {
         assert_eq!(attempts.get(), 4);
         assert_eq!(started.elapsed(), Duration::from_millis(10));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[tokio::test(start_paused = true)]
     async fn later_pool_slots_share_the_original_deadline() {
         let observed = std::cell::RefCell::new(Vec::new());
@@ -81,10 +81,10 @@ sidecar_test! {
         assert!(error.to_string().contains("pool slot 2"));
         assert!(error.to_string().contains("exceeded the startup deadline"));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[tokio::test(start_paused = true)]
     async fn retry_wait_is_capped_and_last_failure_is_preserved() {
         let mut transport = config();
@@ -99,4 +99,4 @@ sidecar_test! {
         assert!(error.to_string().contains("peer rejected connection"));
         assert!(error.to_string().contains("after 1 attempts"));
     }
-}
+);

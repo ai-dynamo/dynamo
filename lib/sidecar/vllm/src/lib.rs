@@ -25,8 +25,4 @@ pub use engine::VllmSidecarEngine;
 mod tests;
 
 #[cfg(test)]
-use dynamo_sidecar_testkit::fixtures as unit_fixtures;
-
-#[cfg(test)]
-#[path = "../../testkit/tests/support/fixtures/vllm.rs"]
-mod unit_vllm_fixtures;
+mod test_fixtures;

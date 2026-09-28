@@ -2,13 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::unit_fixtures::minimal_request;
-use crate::unit_vllm_fixtures::*;
+use crate::test_fixtures::*;
 use dynamo_backend_common::{FinishReason, StopReason};
 use serde_json::json;
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn encode_response_enforces_terminal_contract() {
         let request = epd_image_request();
@@ -55,10 +54,10 @@ sidecar_test! {
         assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
         assert!(terminal.encoder_result.is_none());
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn early_prompt_frames_retain_exact_native_metadata() {
         for (has_prompt_logprobs, has_output) in [(false, false), (true, false), (true, true)] {
@@ -110,10 +109,10 @@ sidecar_test! {
             assert_eq!(result.engine_data, has_prompt_logprobs.then(|| json!({"prompt_logprobs": [null, {"22": {"logprob": -0.25, "rank": 1}, "23": {"logprob": -0.75, "rank": 2}}, {"33": {"logprob": -0.5, "rank": 2}}]})));
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn negative_infinity_logprobs_are_normalized() {
         let request = request();
@@ -154,10 +153,10 @@ sidecar_test! {
         assert_eq!(prompt["22"]["logprob"], json!(-9999.0));
         assert_eq!(prompt["23"]["logprob"], json!(-9999.0));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn missing_outputs_and_buffered_text_preserve_native_semantics() {
         let mut request = request();
@@ -183,10 +182,10 @@ sidecar_test! {
         let terminal = state.convert(response).unwrap().unwrap();
         assert_eq!(terminal.text.as_deref(), Some(""));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn malformed_responses_return_typed_protocol_errors() {
         type ResponseMutation = fn(&mut pb::GenerateResponse);
@@ -260,10 +259,10 @@ sidecar_test! {
             assert!(error.to_string().contains(message), "{message}: {error}");
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn output_logprobs_preserve_native_ranks_and_token_metadata() {
         let mut request = request();
@@ -305,10 +304,10 @@ sidecar_test! {
             ]
         );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn nonfinite_and_underflowing_logprobs_keep_associations() {
         for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -10000.0] {
@@ -330,10 +329,10 @@ sidecar_test! {
             );
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prefill_handoff_is_required_only_for_successful_native_terminals() {
         for reason in [
@@ -372,7 +371,11 @@ sidecar_test! {
                         assert!(terminal.text.is_none());
                         let usage = terminal.completion_usage.unwrap();
                         assert_eq!(
-                            (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens),
+                            (
+                                usage.prompt_tokens,
+                                usage.completion_tokens,
+                                usage.total_tokens
+                            ),
                             (3, 0, 3)
                         );
                     }
@@ -382,19 +385,27 @@ sidecar_test! {
             }
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn empty_chunks_and_delta_tokens_preserve_terminal_usage() {
         let request = minimal_request();
         let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-        assert!(state.convert(pb::GenerateResponse {
-            outputs: Some(pb::SequenceOutput::default()),
-            ..Default::default()
-        }).unwrap().is_none());
-        let first = state.convert(sequence_response(false, false, None)).unwrap().unwrap();
+        assert!(
+            state
+                .convert(pb::GenerateResponse {
+                    outputs: Some(pb::SequenceOutput::default()),
+                    ..Default::default()
+                })
+                .unwrap()
+                .is_none()
+        );
+        let first = state
+            .convert(sequence_response(false, false, None))
+            .unwrap()
+            .unwrap();
         assert_eq!(first.token_ids, vec![42]);
         assert!(first.completion_usage.is_none());
         let mut response = sequence_response(true, false, None);
@@ -408,7 +419,11 @@ sidecar_test! {
         assert!(terminal.disaggregated_params.is_none());
         let usage = terminal.completion_usage.unwrap();
         assert_eq!(
-            (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens),
+            (
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.total_tokens
+            ),
             (3, 3, 6)
         );
 
@@ -418,17 +433,20 @@ sidecar_test! {
             .unwrap();
         assert!(decode.disaggregated_params.is_none());
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn output_logprobs_preserve_opt_in_alignment_and_values() {
         for requested in [None, Some(0), Some(2)] {
             let mut request = minimal_request();
             request.output_options.logprobs = requested;
             let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
-            let first = state.convert(sequence_response(false, true, None)).unwrap().unwrap();
+            let first = state
+                .convert(sequence_response(false, true, None))
+                .unwrap()
+                .unwrap();
             assert_eq!(first.token_ids, vec![42]);
             assert_eq!(first.log_probs, requested.map(|_| vec![-0.25]));
             let mut response = sequence_response(true, true, None);
@@ -464,10 +482,10 @@ sidecar_test! {
             );
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn user_stops_are_preserved_and_system_stops_are_hidden() {
         for (stop, explicit, expected) in [
@@ -476,17 +494,36 @@ sidecar_test! {
                 vec![],
                 Some(StopReason::String("done".into())),
             ),
-            (pb::finish_info::StopReason::StopTokenId(42), vec![42], Some(StopReason::Int(42))),
+            (
+                pb::finish_info::StopReason::StopTokenId(42),
+                vec![42],
+                Some(StopReason::Int(42)),
+            ),
             (pb::finish_info::StopReason::StopTokenId(2), vec![], None),
             (pb::finish_info::StopReason::EosTokenId(2), vec![], None),
-            (pb::finish_info::StopReason::EosTokenId(2), vec![2], Some(StopReason::Int(2))),
-            (pb::finish_info::StopReason::StopTokenId(2), vec![2], Some(StopReason::Int(2))),
+            (
+                pb::finish_info::StopReason::EosTokenId(2),
+                vec![2],
+                Some(StopReason::Int(2)),
+            ),
+            (
+                pb::finish_info::StopReason::StopTokenId(2),
+                vec![2],
+                Some(StopReason::Int(2)),
+            ),
         ] {
             let mut request = minimal_request();
             request.stop_conditions.stop_token_ids = Some(explicit);
             request.stop_conditions.stop_token_ids_hidden = Some(vec![2]);
             let mut response = sequence_response(true, false, None);
-            response.outputs.as_mut().unwrap().finish_info.as_mut().unwrap().stop_reason = Some(stop);
+            response
+                .outputs
+                .as_mut()
+                .unwrap()
+                .finish_info
+                .as_mut()
+                .unwrap()
+                .stop_reason = Some(stop);
             let result = ResponseState::new(&request, DisaggregationMode::Aggregated)
                 .convert(response)
                 .unwrap()
@@ -494,10 +531,10 @@ sidecar_test! {
             assert_eq!(result.stop_reason, expected);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prefill_terminal_has_zero_completion_usage() {
         for reason in [
@@ -506,8 +543,16 @@ sidecar_test! {
             FinishReason::Cancelled,
         ] {
             let mut response = terminal_response(reason.clone());
-            response.outputs.as_mut().unwrap().finish_info.as_mut().unwrap().kv_transfer_params = Some(
-                json_to_struct(json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}})).unwrap()
+            response
+                .outputs
+                .as_mut()
+                .unwrap()
+                .finish_info
+                .as_mut()
+                .unwrap()
+                .kv_transfer_params = Some(
+                json_to_struct(json!({"remote_port": 5600, "nested": {"ids": [1, 2], "ok": true}}))
+                    .unwrap(),
             );
             let terminal = ResponseState::new(&minimal_request(), DisaggregationMode::Prefill)
                 .convert(response)
@@ -517,7 +562,11 @@ sidecar_test! {
             assert!(terminal.text.is_none());
             let usage = terminal.completion_usage.unwrap();
             assert_eq!(
-                (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens),
+                (
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    usage.total_tokens
+                ),
                 (3, 0, 3)
             );
             assert_eq!(terminal.finish_reason, Some(reason.clone()));
@@ -526,10 +575,10 @@ sidecar_test! {
             }
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prompt_metadata_preserves_opt_in_positions_and_values() {
         for has_prompt_logprobs in [false, true] {
@@ -565,10 +614,10 @@ sidecar_test! {
             }
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn terminal_reasons_are_preserved() {
         for expected in [
@@ -583,4 +632,4 @@ sidecar_test! {
             assert_eq!(result.finish_reason, Some(expected));
         }
     }
-}
+);

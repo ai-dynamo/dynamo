@@ -40,11 +40,11 @@ lib/sidecar/
     model.rs, engine.rs, json.rs, lora.rs  # Inline vLLM unit modules
     convert/request_tests.rs        # Request and candidate assertions
     convert/response_tests.rs       # Response assertions and local setup
+    test_fixtures.rs                # Native builders, including minimal_request
   testkit/
     src/lanes.rs                    # Per-test lane declaration only
-    src/fixtures.rs                 # Common inputs for units and integration
+    src/fixtures.rs                 # Shared integration request helpers
     src/assert.rs                   # Existing integration output assertions
-    tests/support/fixtures/vllm.rs  # Reusable native builders
     tests/conformance.rs            # Existing shared CPU integration scenarios
 ```
 
@@ -54,13 +54,15 @@ lib/sidecar/
 | [Common transport][transport] | Retry/pool policy with paused time; one registration avoids duplicate collection through `transport.rs`'s Tonic-version include. |
 | [Model][config], [worker][worker], [JSON][json], [LoRA][lora] | Local production calls, setup and assertions for each vLLM owner. |
 | [Request units][requests], [response units][responses] | Larger conversion suites in adjacent files included by `convert.rs`. |
-| [`src/lanes.rs`](src/lanes.rs) | Unchanged `sidecar_test!` lane declaration macro, included by the common and vLLM crate roots. |
-| [`src/fixtures.rs`](src/fixtures.rs) | Minimal canonical request and existing integration input builders. |
-| [`tests/support/fixtures/vllm.rs`](tests/support/fixtures/vllm.rs) | Native request, model, response, media and handoff builders reused by unit and retained wire tests. |
+| [`src/lanes.rs`](src/lanes.rs) | `sidecar_test!` lane declaration macro with format-compatible syntax, included by the common and vLLM crate roots. |
+| [`src/fixtures.rs`](src/fixtures.rs) | Shared integration input builders and output collection. |
+| [`vllm/src/test_fixtures.rs`](../vllm/src/test_fixtures.rs) | Native request, model, response, media and handoff builders, including `minimal_request()`, reused by vLLM unit and retained wire tests. |
 
-The runner reports common and native cases. Governed unit module names retain
-`unit_` prefixes so missing lane markers cannot silently omit a case. The ten
-formerly shared vLLM scenarios remain local, with unchanged inputs/assertions:
+Inline unit modules use ordinary `tests` names; `convert.rs` declares
+`request_tests` and `response_tests` without custom paths. Common transport
+keeps its explicit one-time registration. There are no shared unit scenarios
+or backend adapters. The ten formerly shared vLLM scenarios remain local,
+with unchanged inputs/assertions:
 
 | Local owner | Preserved scenarios |
 | --- | --- |
@@ -69,68 +71,69 @@ formerly shared vLLM scenarios remain local, with unchanged inputs/assertions:
 | Model | Model identity/limits, absent optional limits and logical block size/per-rank capacity. |
 | Worker | Worker options/model identity and generation/cleanup before startup. |
 
-The vLLM crate keeps its test-only dependency on testkit for common fixtures.
-Normal sidecar builds gain no dependency on testing infrastructure. Shared
-integration scenarios and their backend adapters remain separate from units.
+Native builders belong to the vLLM crate under `#[cfg(test)]`; moving
+`minimal_request()` there removes its dev-dependency on testkit. No testing
+feature is added. Shared integration scenarios keep their separate testkit
+helpers and backend adapters.
 
-## Per-test lanes and runner selection
+## Per-test lanes and Cargo selection
 
-Each test declares the earliest lane in which it runs:
+Each isolated test declares the earliest lane in which it runs:
 
 ```rust
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn preserves_request_fields() {
         // Scenario assertions.
     }
-}
+);
 ```
 
-`#[tokio::test]` and result-returning tests use the same declaration. The macro
-encodes one lane in the compiled test name; invalid or missing lane declarations
-in governed unit modules fail compilation or inventory validation.
+The parentheses and attribute-shaped lane declaration let rustfmt format the
+function body. `#[tokio::test]` and result-returning tests use the same form.
+The macro preserves the terminal compiled-name markers
+`__sidecar_lane_pre_merge`, `__sidecar_lane_post_merge` and
+`__sidecar_lane_nightly`. Unknown or missing lane declarations inside the macro
+fail compilation. Ordinary tests outside the macro still run in the broad
+Cargo suite; only marked cases are selected as isolated units.
 
-| Selected lane | Test declarations included |
-| --- | --- |
-| `pre-merge` | `pre_merge` |
-| `post-merge` | `pre_merge`, `post_merge` |
-| `nightly` or `all` | `pre_merge`, `post_merge`, `nightly` |
+| Selected lane | Included declarations | Libtest exclusions |
+| --- | --- | --- |
+| Pre-merge | `pre_merge` | `--skip ::__sidecar_lane_post_merge --skip ::__sidecar_lane_nightly` |
+| Post-merge | `pre_merge`, `post_merge` | `--skip ::__sidecar_lane_nightly` |
+| Nightly | All three | None |
 
-`--suite unit` selects isolated units, `--framework vllm` selects the implemented
-backend plus common tests, and `--lane` selects this cumulative lane set.
-`--framework all` currently selects the same backend. Explicit
-`--framework sglang` fails until its unit setup is implemented; it does not
-fall back to vLLM. The compatibility aliases are `--level pre-merge` for
-`--suite unit --lane pre-merge`, and `--level unit` or `--level all` for
-`--suite unit --lane all`. Conflicting `--level` and `--lane` values fail.
+The isolated selection is **82 registrations: 11 common and 71 vLLM cases**,
+all `pre_merge`. It preserves the prior 81 scenarios and moves the existing
+LoRA lock-registry test from `vllm/src/tests.rs` into `lora.rs::tests`, with
+its inputs and assertions intact. The broader file retains 37 tests. This is
+one reclassified test, not new coverage. The ten formerly shared vLLM
+scenarios remain local: three request, two response, three model and two
+worker cases.
 
-The runner inventories compiled test binaries, classifies common/native
-cases, validates every governed lane marker, and executes exact selected names.
-Export records all unit lanes in versioned `tests.json`, even when an earlier
-lane was requested. Running exported artifacts recollects each binary and
-checks it against the stored inventory before selection. Empty, duplicate,
-missing or mismatched inventories, failures, and ignored governed tests fail.
-The relocated suite retains **81 test registrations: 11 common and 70 vLLM
-native cases**, all `pre_merge`. This includes the ten formerly shared vLLM
-scenarios: three request, two response, three model and two worker cases.
-Compiled collection confirmed exact scenario/lane parity with the original
-81-case inventory, and all 81 exported-runner cases passed. Counts describe
-observed coverage, not an acceptance quota.
+Direct Cargo commands replace `run.py`, its inventory, compatibility aliases
+and manifest/export modes. PR execution selects pre-merge; push-triggered
+execution selects post-merge. CI first runs the other workspace packages with
+their existing arguments, then the common/vLLM owners with lane exclusions.
+Their existing unmarked tests still execute. This keeps libtest arguments away
+from unrelated custom test harnesses.
 
-The PR workflow selects pre-merge. Push-triggered execution of
-`pre-merge.yml` selects post-merge, and nightly Rust coverage includes all lanes.
-The workspace CI entry point validates the unit inventory, runs other packages
-with their original Cargo arguments, then runs all targets of registered unit
-owners with lane filters. This preserves their legacy socket and executable
-tests without forwarding libtest arguments to unrelated custom benchmarks.
-The isolated unit selection does not claim integration execution.
+Nightly Rust coverage still runs all lanes. Unit tests run directly through
+Cargo, without an additional CPU-container job. Unit selection does not claim
+integration execution.
+
+When #15091 is restacked, replace its positive `unit_` selector and
+`--skip unit_` exclusion with `__sidecar_lane_` markers. Its process/native
+artifact export remains owned by that integration PR; it must replace its
+calls to the removed runner and container tooling. That PR is not
+changed by this unit cleanup.
 
 ## Deferred SGLang units
 
-Future SGLang units should live beside their production owners and reuse common
-fixtures only where useful. Existing SGLang model, rank-fallback and other
-assertions must be preserved before any old test is removed. Its live response
+Future SGLang units should live beside their production owners with local
+fixtures. Shared scenarios remain an integration concern. Existing SGLang model,
+rank-fallback and other assertions must be preserved before any old test is removed. Its live response
 conversion stays at the integration boundary unless a callable production
 helper provides an isolated boundary. Worker construction currently performs
 bootstrap I/O; a private in-memory construction seam is separate follow-up work.
@@ -185,14 +188,15 @@ executable owner; deferred scenarios do not count as executed coverage.
 
 ## Preserved and consolidated assertions
 
-The original unit increment moved these 21 pure definitions from
-`vllm/src/tests.rs`. The mapping below follows their assertions to the local
+The original unit increment moved 21 pure definitions from
+`vllm/src/tests.rs`; this cleanup moves the LoRA lock-registry unit as well. The mapping below follows their assertions to the local
 production owners; renamed or split scenarios are not lost coverage. Socket
 tests remain in [that file][legacy]. Rich/native builders are in
-[the vLLM fixtures](tests/support/fixtures/vllm.rs), used by both layers.
+[the vLLM fixtures](../vllm/src/test_fixtures.rs), used by both layers.
 
 | Original test | New owner |
 | --- | --- |
+| `lora_lock_registry_reclaims_idle_entries_without_losing_waiters` | [LoRA units][lora], preserving idle reclamation, active waiters and published locks. |
 | `engine_config_advertises_supported_capabilities` | Identity, limits and native capability assertions in [model config][config]. |
 | `rl_worker_metadata_identifies_zero_parallelism_dimensions` | [Model config][config] |
 | `discovery_rejects_zero_data_parallelism` | [Model config][config] |
@@ -260,13 +264,58 @@ inputs receive explicit rejection tests. Native messages cannot expose missing
 cached-token, expert-tensor or thinking-token fields. GPU work release and KV
 transfer require the separate native integration evidence.
 
+## Current local commands
+
+Use Rust 1.96.1, protoc 30.2 and an external `CARGO_TARGET_DIR`. Set `PROTOC` and
+`PROTOC_INCLUDE` to that compiler and its matching includes. From the repository
+root, list or run all marked units:
+
+```sh
+cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
+  --features dynamo-sidecar-common/tonic-v14 --lib __sidecar_lane_ -- --list
+cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
+  --features dynamo-sidecar-common/tonic-v14 --lib __sidecar_lane_
+```
+
+For pre-merge, append `-- --skip ::__sidecar_lane_post_merge
+--skip ::__sidecar_lane_nightly` to the run command; for post-merge, append
+`-- --skip ::__sidecar_lane_nightly`. Nightly applies no exclusions. To run all
+library tests, including the broader fake-server suite, omit `__sidecar_lane_`.
+
+The common target explicitly enables `tonic-v14`, which vLLM consumes, without
+relying on workspace feature unification. There is no Python runner, unit
+manifest or container export. Record selected names, failures and ignored cases
+when validating a new revision. Wire-preservation commands are in
+[COVERAGE.md](COVERAGE.md).
+
 ## Validation
 
-Fresh local validation of this alternative confirms all 81 scenarios and lane
-assignments are retained. Moving ten cases from shared to native changes their
+### Local runner/fixture cleanup
+
+The edited common/vLLM library binaries passed all 121 tests: 13 common and
+108 vLLM, with zero failures or ignored tests. Their compiled inventory retains
+all 81 prior marked scenarios and adds the migrated LoRA case, for 82 isolated
+units. Before its removal, the CPU-container workflow step was executed locally
+and passed all 82 with `--network none`; this remains historical validation,
+not a recurring CI check. All eight testkit conformance cases also passed.
+
+`cargo fmt --all -- --check` passed. A deliberately misformatted copy of the
+request suite failed rustfmt, confirming that it formats the new macro syntax.
+Targeted common/vLLM/testkit Clippy passed with warnings denied, and pre-commit
+hooks passed on all cleanup files.
+A temporary Cargo workspace verified pre-merge/post-merge exclusions, nightly
+selection and unchanged arguments for custom test harnesses. Independent source
+review found no changed test assertions or production behavior. This validation
+does not include a full Dynamo workspace run, GitHub CI or native-engine/GPU
+execution.
+
+### Historical local-unit draft (`2f6224d332`)
+
+Validation at `2f6224d332`, before the runner/fixture cleanup, confirmed that all
+81 scenarios and lane assignments were retained. Moving ten cases from shared to native changes their
 reported category and module paths, not their assertions.
 
-| Selection | Result on this alternative |
+| Selection | Historical result at `2f6224d332` |
 | --- | --- |
 | Compiled inventory | Exact scenario/lane parity: 11 common and 70 native vLLM cases, all `pre_merge`. |
 | Exported runner | All 81 isolated units passed. |
@@ -278,8 +327,8 @@ reported category and module paths, not their assertions.
 | Targeted Clippy | Common, vLLM and testkit packages passed with `--all-targets --no-deps -- -D warnings`. |
 | Source review | Independent review found no lost assertions across all 81 cases; this is review evidence, separate from execution. |
 
-These results do not claim current-head GitHub CI, a full Dynamo workspace run,
-or native-engine/GPU execution.
+These historical results do not validate the current local cleanup or claim
+current-head GitHub CI, a full Dynamo workspace run, or native-engine/GPU execution.
 
 ### Historical original-PR boundary (`47ae1fb270`)
 
@@ -310,24 +359,6 @@ network-isolated CPU run. Its 121 common/vLLM library tests, eight conformance
 cases and both four-case Mocker suites also passed. These historical results
 belong to that previous structure; neither they nor the `47ae1fb270` table
 validate this alternative.
-
-Use Rust 1.96.1, protoc 30.2 and an external `CARGO_TARGET_DIR`. Set `PROTOC` and
-`PROTOC_INCLUDE` to that compiler and its matching includes. From the repository
-root:
-
-```sh
-python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge --list
-python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --lane pre-merge
-python3 lib/sidecar/testkit/run.py --suite unit --framework vllm --export "$artifacts"
-docker build -f lib/sidecar/testkit/CPU.Dockerfile -t sidecar-units "$artifacts"
-docker run --rm --network none sidecar-units --suite unit --framework vllm --lane pre-merge
-docker run --rm --network none sidecar-units --suite unit --framework vllm --lane nightly --list
-```
-
-The common target explicitly enables `tonic-v14`, which vLLM consumes, without
-relying on workspace feature unification. Record selected names, failures and
-ignored cases when validating a new revision. Wire-preservation commands are in
-[COVERAGE.md](COVERAGE.md).
 
 ### Previous unit boundary
 

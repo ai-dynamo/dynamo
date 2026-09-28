@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 macro_rules! sidecar_test {
-    (lane: pre_merge; $($test:tt)*) => {
+    (#[lane(pre_merge)] $($test:tt)*) => {
         sidecar_test!(@case __sidecar_lane_pre_merge; $($test)*);
     };
-    (lane: post_merge; $($test:tt)*) => {
+    (#[lane(post_merge)] $($test:tt)*) => {
         sidecar_test!(@case __sidecar_lane_post_merge; $($test)*);
     };
-    (lane: nightly; $($test:tt)*) => {
+    (#[lane(nightly)] $($test:tt)*) => {
         sidecar_test!(@case __sidecar_lane_nightly; $($test)*);
     };
     (@case $lane:ident; $(#[$attribute:meta])* fn $name:ident() $(-> $result:ty)? $body:block) => {

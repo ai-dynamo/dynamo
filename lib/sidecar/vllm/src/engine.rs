@@ -1293,11 +1293,10 @@ fn is_hot_swap_requested() -> bool {
 }
 
 #[cfg(test)]
-mod unit_worker {
+mod tests {
     use super::*;
-    use crate::unit_vllm_fixtures::{model_info, server_info};
+    use crate::test_fixtures::{minimal_request, model_info, server_info};
 
-    use crate::unit_fixtures::minimal_request;
     use clap::Parser;
     use dynamo_backend_common::{BackendError, ErrorType};
 
@@ -1327,8 +1326,8 @@ mod unit_worker {
         VllmSidecarEngine::from_discovered(args(mode), model).unwrap()
     }
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn worker_omits_parsers_and_preserves_encode_options() {
             for mode in ["aggregated", "prefill", "decode", "encode"] {
@@ -1339,7 +1338,10 @@ mod unit_worker {
                     assert_eq!(config.namespace, "test-namespace");
                     assert_eq!(config.component, "encode");
                     assert_eq!(config.endpoint, "tokens");
-                    assert_eq!(config.custom_jinja_template.as_deref(), Some(std::path::Path::new("local-template.jinja")));
+                    assert_eq!(
+                        config.custom_jinja_template.as_deref(),
+                        Some(std::path::Path::new("local-template.jinja"))
+                    );
                     assert_eq!(config.model_name, "model-source");
                     assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
                     assert!(config.enable_kv_routing);
@@ -1347,10 +1349,10 @@ mod unit_worker {
                 }
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn unsupported_parsers_and_encode_models_are_rejected() {
             for flag in ["--dyn-tool-call-parser", "--dyn-reasoning-parser"] {
@@ -1377,10 +1379,10 @@ mod unit_worker {
                 .expect("encode requires media");
             assert!(error.to_string().contains("requires a multimodal engine"));
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[tokio::test]
         async fn draft_updates_require_both_native_capabilities() {
             for flags in [
@@ -1400,7 +1402,8 @@ mod unit_worker {
                     }
                 }
                 let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
-                let (engine, _) = VllmSidecarEngine::from_discovered(args("aggregated"), model).unwrap();
+                let (engine, _) =
+                    VllmSidecarEngine::from_discovered(args("aggregated"), model).unwrap();
                 let supported = flags == Some((true, true));
                 assert_eq!(
                     engine
@@ -1416,7 +1419,10 @@ mod unit_worker {
                 if !supported {
                     assert_eq!(
                         engine
-                            .engine_update("start_draft_weight_update".into(), serde_json::json!({}))
+                            .engine_update(
+                                "start_draft_weight_update".into(),
+                                serde_json::json!({})
+                            )
                             .await
                             .unwrap(),
                         serde_json::json!({
@@ -1429,10 +1435,10 @@ mod unit_worker {
                 }
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn worker_options_and_model_identity_are_preserved() {
             for (mode, component) in [
@@ -1457,23 +1463,27 @@ mod unit_worker {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[tokio::test]
         async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
             let (engine, _) = worker("aggregated");
-            let context = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+            let context =
+                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
             let error = engine
                 .generate(minimal_request(), context)
                 .await
                 .err()
                 .expect("unstarted engine");
-            assert_eq!(error.error_type(), ErrorType::Backend(BackendError::EngineShutdown));
+            assert_eq!(
+                error.error_type(),
+                ErrorType::Backend(BackendError::EngineShutdown)
+            );
             engine.cleanup().await.unwrap();
             engine.cleanup().await.unwrap();
             assert!(engine.cancel.is_cancelled());
         }
-    }
+    );
 }

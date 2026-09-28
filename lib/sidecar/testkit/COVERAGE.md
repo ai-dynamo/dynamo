@@ -18,12 +18,13 @@ The foundation is refreshed onto main
 
 The foundation's four families remain instantiated for both vLLM and SGLang.
 This alternative places unit cases beside their production owners: 11 common
-and 70 vLLM cases (81 total), all pre-merge. The ten formerly shared vLLM
-scenarios become ordinary local cases with the same inputs and assertions.
-SGLang units remain follow-up work. Common production tests run once; reusable
-fixtures and shared integration scenarios remain in testkit. Fresh compiled
-collection confirmed exact scenario/lane parity and all 81 exported-runner
-cases passed; counts describe observed coverage, not a quota.
+and 71 vLLM cases (82 total), all pre-merge. The existing LoRA lock-registry
+test moves from `vllm/src/tests.rs` into `lora.rs`; all of its assertions remain,
+and the broader file retains 37 tests. The ten formerly shared vLLM scenarios
+remain ordinary local cases. No shared unit layer is added. SGLang units remain
+follow-up work. Native fixtures, including `minimal_request()`, move into the
+vLLM crate and remove its testkit dev-dependency. Shared integration keeps its
+separate testkit helpers. Historical execution results are recorded below.
 
 | Requirement / retained assertions | Owning layer | Disposition in this alternative |
 | --- | --- | --- |
@@ -61,7 +62,7 @@ distinct assertions before removing them; moving this work between PRs is not a 
 
 ## Validation and historical evidence
 
-Fresh local validation of this alternative confirmed exact parity for all 81
+At the prior `2f6224d332` revision, local validation confirmed exact parity for all 81
 scenario/lane pairs: 11 common and 70 native vLLM cases, all `pre_merge`. All 81
 exported-runner units and all 121 common/vLLM library tests (13 common, 108 vLLM,
 including those 81 units) passed. Five temporary runner checks also passed,
@@ -73,8 +74,8 @@ exported-artifact mount. Common/vLLM/testkit Clippy passed with
 `--all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`, pre-commit on
 all task files (including Black/Ruff), and CODEOWNERS coverage for new paths
 passed. Independent review found no assertion loss across the 81 cases.
-These results do not claim current-head GitHub CI, a full Dynamo workspace run,
-or native-engine/GPU execution.
+These historical results do not validate the current runner/fixture cleanup or
+claim current-head GitHub CI, a full Dynamo workspace run, or native-engine/GPU execution.
 
 The following successful results were recorded at the original PR's
 `47ae1fb270` boundary, before relocation. They remain historical evidence.
@@ -91,7 +92,7 @@ Five temporary runner checks passed, including compiled lane filtering and
 workspace selection with custom/legacy targets. The permanent runner self-test
 file and its CI invocation are removed. These checks do not claim GitHub CI or
 a full Dynamo workspace run. [UNITS.md](UNITS.md) owns the detailed results,
-inventory/export commands, lane semantics and assertion mapping.
+direct Cargo commands, lane semantics and assertion mapping.
 
 The previous `0857c0722e` revision passed the same 81 units with its former
 11 common / 28 shared / 42 native split, as well as the retained suites. That
@@ -102,7 +103,7 @@ eight retained Mocker cases with GPUs hidden. The previous unit boundary
 `b3ab1638` passed 62 isolated cases in a network-isolated CPU container, eight
 conformance cases and 102 common/vLLM library cases. These selections overlap;
 they cannot be summed or reused as proof for the current changes. Run the
-retained wire boundary independently of the isolated unit runner:
+retained wire boundary independently of the isolated unit selection:
 
 ```sh
 cargo metadata --locked --format-version 1 >/dev/null

@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::unit_fixtures::minimal_request;
-use crate::unit_vllm_fixtures::*;
+use crate::test_fixtures::*;
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     BackendError, ErrorType, OutputOptions, SamplingOptions, StopConditions,
@@ -17,8 +16,8 @@ fn assert_invalid(error: DynamoError) {
     );
 }
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn compatibility_envelope_preserves_typed_controls() {
         for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
@@ -75,10 +74,10 @@ sidecar_test! {
             assert_eq!(response.skip_special_tokens, Some(false));
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn native_sampling_is_rejected_instead_of_silently_discarded() {
         for mode in [DisaggregationMode::Aggregated, DisaggregationMode::Decode] {
@@ -99,27 +98,28 @@ sidecar_test! {
             );
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prefill_uses_canonical_controls_without_decode_sampling_json() {
         let mut request = request();
         request.extra_args = Some(json!({
             "vllm_tito": {"sampling_params": {"skip_special_tokens": false, "max_tokens": 100}}
         }));
-        let wire = build_generate_request(request, "prefill".to_string(), DisaggregationMode::Prefill)
-            .expect("prefill does not require native decode sampling");
+        let wire =
+            build_generate_request(request, "prefill".to_string(), DisaggregationMode::Prefill)
+                .expect("prefill does not require native decode sampling");
         let stopping = wire.stopping.expect("stopping");
         assert_eq!(stopping.max_new_tokens, 1);
         assert_eq!(stopping.min_new_tokens, 1);
         assert_eq!(wire.response.unwrap().skip_special_tokens, Some(false));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn released_envelope_hydrates_kv_transfer_with_canonical_precedence() {
         let mut legacy = request();
@@ -143,16 +143,17 @@ sidecar_test! {
                 "kv_transfer_params": {"source": "legacy"}
             }
         }));
-        let canonical = normalize_response_options(canonical).expect("normalize canonical KV transfer");
+        let canonical =
+            normalize_response_options(canonical).expect("normalize canonical KV transfer");
         assert_eq!(
             canonical.extra_args.as_ref().unwrap()["kv_transfer_params"],
             json!({"source": "canonical"})
         );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn unsafe_media_uuids_are_rejected() {
         for uuid in [
@@ -179,10 +180,10 @@ sidecar_test! {
             assert!(error.to_string().contains("safe identifier"), "uuid={uuid}");
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn encode_requests_reject_non_image_media() {
         let mut request = epd_image_request();
@@ -201,14 +202,14 @@ sidecar_test! {
         .expect_err("Encode must remain image-only");
         assert!(error.to_string().contains("image media only"));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn absent_and_explicit_zero_controls_preserve_native_sentinels() {
         for explicit in [false, true] {
-            let mut request = crate::unit_fixtures::minimal_request();
+            let mut request = crate::test_fixtures::minimal_request();
             if explicit {
                 request.sampling_options.temperature = Some(0.0);
                 request.sampling_options.top_p = Some(0.0);
@@ -275,10 +276,10 @@ sidecar_test! {
             assert!(wire.kv.unwrap().cache_salt.is_empty());
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn native_envelope_controls_are_validated() {
         type RequestMutation = fn(&mut PreprocessedRequest);
@@ -319,10 +320,10 @@ sidecar_test! {
             assert!(error.to_string().contains(expected), "{expected}: {error}");
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn canonical_cache_identity_and_bypass_alias_precedence_are_preserved() {
         for (extra, expected) in [
@@ -335,17 +336,20 @@ sidecar_test! {
         ] {
             let mut request = request();
             request.extra_args = Some(extra);
-            let wire = build_generate_request(request, "cache".into(), DisaggregationMode::Aggregated)
-                .unwrap();
+            let wire =
+                build_generate_request(request, "cache".into(), DisaggregationMode::Aggregated)
+                    .unwrap();
             let kv = wire.kv.unwrap();
             assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
             assert_eq!(kv.bypass_prefix_cache, expected);
         }
         let mut prefixed = request();
-        prefixed.routing.as_mut().unwrap().cache_namespace = Some("dynamo-cache-salt:caller".into());
+        prefixed.routing.as_mut().unwrap().cache_namespace =
+            Some("dynamo-cache-salt:caller".into());
         prefixed.extra_args = None;
-        let wire = build_generate_request(prefixed, "prefixed".into(), DisaggregationMode::Aggregated)
-            .unwrap();
+        let wire =
+            build_generate_request(prefixed, "prefixed".into(), DisaggregationMode::Aggregated)
+                .unwrap();
         assert_eq!(
             wire.kv.unwrap().cache_salt,
             "dynamo-cache-salt:dynamo-cache-salt:caller"
@@ -361,10 +365,10 @@ sidecar_test! {
         .unwrap();
         assert!(wire.kv.unwrap().cache_salt.is_empty());
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn native_handoff_ports_and_opaque_payloads_are_preserved() {
         for (port, expected) in [
@@ -396,10 +400,10 @@ sidecar_test! {
             }
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn vllm_extensions_preserve_native_fields() {
         let sent = build_generate_request(
@@ -426,10 +430,10 @@ sidecar_test! {
             json!({"connector_data": {"values": [1, true, null]}})
         );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn encode_ignores_routing_rank() {
         let mut request = request();
@@ -441,23 +445,26 @@ sidecar_test! {
             None
         );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn special_token_policy_is_forwarded() {
         let mut request = minimal_request();
         request.output_options.skip_special_tokens = Some(false);
         let wire = build_generate_request(
-            request, "special-tokens".into(), DisaggregationMode::Aggregated,
-        ).unwrap();
+            request,
+            "special-tokens".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
         assert_eq!(wire.response.unwrap().skip_special_tokens, Some(false));
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn canonical_priority_preserves_native_ordering() {
         for (priority, expected) in [(-7, 7), (7, -7), (i32::MIN, i32::MAX)] {
@@ -466,32 +473,31 @@ sidecar_test! {
                 priority: Some(priority),
                 ..Default::default()
             });
-            let wire = build_generate_request(
-                request, "priority".into(), DisaggregationMode::Aggregated,
-            ).unwrap();
+            let wire =
+                build_generate_request(request, "priority".into(), DisaggregationMode::Aggregated)
+                    .unwrap();
             assert_eq!(wire.priority, expected);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prefill_limits_generation() {
         let mut request = minimal_request();
         request.stop_conditions.max_tokens = Some(100);
         request.stop_conditions.min_tokens = Some(4);
-        let wire = build_generate_request(
-            request, "prefill".into(), DisaggregationMode::Prefill,
-        ).unwrap();
+        let wire =
+            build_generate_request(request, "prefill".into(), DisaggregationMode::Prefill).unwrap();
         let stopping = wire.stopping.unwrap();
         assert_eq!(stopping.max_new_tokens, 1);
         assert_eq!(stopping.min_new_tokens, 1);
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn absent_and_explicit_zero_options_remain_distinct() {
         for explicit in [false, true] {
@@ -499,121 +505,166 @@ sidecar_test! {
             request.sampling_options.temperature = explicit.then_some(0.0);
             request.output_options.logprobs = explicit.then_some(0);
             request.output_options.prompt_logprobs = explicit.then_some(0);
-            let wire = build_generate_request(
-                request, "zero".into(), DisaggregationMode::Aggregated,
-            ).unwrap();
+            let wire =
+                build_generate_request(request, "zero".into(), DisaggregationMode::Aggregated)
+                    .unwrap();
             assert_eq!(wire.temperature, explicit.then_some(0.0));
             let response = wire.response.unwrap();
             assert_eq!(response.output_logprobs, explicit);
             assert_eq!(response.prompt_logprobs, explicit);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn invalid_canonical_controls_are_rejected_before_submission() {
         type Mutation = fn(&mut PreprocessedRequest);
         let cases: &[(&str, Mutation)] = &[
             ("token_ids", |r| r.token_ids = Arc::new(Vec::new())),
             ("n must be 1", |r| r.sampling_options.n = Some(2)),
-            ("prompt embeddings", |r| r.prompt_embeds = Some("encoded".into())),
+            ("prompt embeddings", |r| {
+                r.prompt_embeds = Some("encoded".into())
+            }),
             ("best_of", |r| r.sampling_options.best_of = Some(2)),
-            ("beam search", |r| r.sampling_options.use_beam_search = Some(true)),
-            ("length_penalty", |r| r.sampling_options.length_penalty = Some(0.5)),
+            ("beam search", |r| {
+                r.sampling_options.use_beam_search = Some(true)
+            }),
+            ("length_penalty", |r| {
+                r.sampling_options.length_penalty = Some(0.5)
+            }),
             ("top_k", |r| r.sampling_options.top_k = Some(-2)),
-            ("visible stop", |r| r.stop_conditions.stop_token_ids_visible = Some(vec![42])),
-            ("max_thinking_tokens", |r| r.stop_conditions.max_thinking_tokens = Some(5)),
-            ("multimodal features", |r| r.mm_processor_kwargs = Some(json!({}))),
+            ("visible stop", |r| {
+                r.stop_conditions.stop_token_ids_visible = Some(vec![42])
+            }),
+            ("max_thinking_tokens", |r| {
+                r.stop_conditions.max_thinking_tokens = Some(5)
+            }),
+            ("multimodal features", |r| {
+                r.mm_processor_kwargs = Some(json!({}))
+            }),
             ("without multi_modal_data", |r| {
                 r.multi_modal_uuids = Some(std::collections::HashMap::from([(
-                    "image_url".into(), vec![Some("image-a".into())],
+                    "image_url".into(),
+                    vec![Some("image-a".into())],
                 )]));
             }),
         ];
         build_generate_request(
-            minimal_request(), "supported".into(), DisaggregationMode::Aggregated,
-        ).unwrap();
+            minimal_request(),
+            "supported".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
         for &(expected, mutate) in cases {
             let mut request = minimal_request();
             mutate(&mut request);
-            let error = build_generate_request(
-                request, "invalid".into(), DisaggregationMode::Aggregated,
-            ).expect_err("invalid canonical control");
+            let error =
+                build_generate_request(request, "invalid".into(), DisaggregationMode::Aggregated)
+                    .expect_err("invalid canonical control");
             assert!(error.to_string().contains(expected), "{expected}: {error}");
             assert_invalid(error);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn guide_variants_preserve_type_and_payload() {
         use pb::decoding_parameters::StructuredOutput;
         for (guide, expected) in [
             (
                 GuidedDecodingOptions {
-                    json: Some(json!({"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]})),
+                    json: Some(
+                        json!({"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}),
+                    ),
                     ..Default::default()
                 },
                 StructuredOutput::Json(
-                    r#"{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}"#.into(),
+                    r#"{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}"#
+                        .into(),
                 ),
             ),
             (
-                GuidedDecodingOptions { regex: Some("[a-z]+".into()), ..Default::default() },
+                GuidedDecodingOptions {
+                    regex: Some("[a-z]+".into()),
+                    ..Default::default()
+                },
                 StructuredOutput::Regex("[a-z]+".into()),
             ),
             (
-                GuidedDecodingOptions { grammar: Some("root ::= 'yes'".into()), ..Default::default() },
+                GuidedDecodingOptions {
+                    grammar: Some("root ::= 'yes'".into()),
+                    ..Default::default()
+                },
                 StructuredOutput::Grammar("root ::= 'yes'".into()),
             ),
             (
-                GuidedDecodingOptions { choice: Some(vec!["yes".into(), "no".into()]), ..Default::default() },
-                StructuredOutput::Choice(pb::decoding_parameters::StringChoices { choices: vec!["yes".into(), "no".into()] }),
+                GuidedDecodingOptions {
+                    choice: Some(vec!["yes".into(), "no".into()]),
+                    ..Default::default()
+                },
+                StructuredOutput::Choice(pb::decoding_parameters::StringChoices {
+                    choices: vec!["yes".into(), "no".into()],
+                }),
             ),
             (
-                GuidedDecodingOptions { structural_tag: Some(json!("<answer>")), ..Default::default() },
+                GuidedDecodingOptions {
+                    structural_tag: Some(json!("<answer>")),
+                    ..Default::default()
+                },
                 StructuredOutput::StructuralTag("<answer>".into()),
             ),
             (
-                GuidedDecodingOptions { structural_tag: Some(json!({"tag": "answer"})), ..Default::default() },
+                GuidedDecodingOptions {
+                    structural_tag: Some(json!({"tag": "answer"})),
+                    ..Default::default()
+                },
                 StructuredOutput::StructuralTag(r#"{"tag":"answer"}"#.into()),
             ),
         ] {
             let mut request = minimal_request();
             request.sampling_options.guided_decoding = Some(guide);
-            let wire = build_generate_request(
-                request, "guide".into(), DisaggregationMode::Aggregated,
-            ).unwrap();
+            let wire =
+                build_generate_request(request, "guide".into(), DisaggregationMode::Aggregated)
+                    .unwrap();
             assert_eq!(wire.decoding.unwrap().structured_output, Some(expected));
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn guide_modifiers_are_rejected() {
         for backend in [true, false] {
             let mut request = minimal_request();
             request.sampling_options.guided_decoding = Some(if backend {
-                GuidedDecodingOptions { backend: Some("xgrammar".into()), ..Default::default() }
+                GuidedDecodingOptions {
+                    backend: Some("xgrammar".into()),
+                    ..Default::default()
+                }
             } else {
-                GuidedDecodingOptions { whitespace_pattern: Some(" *".into()), ..Default::default() }
+                GuidedDecodingOptions {
+                    whitespace_pattern: Some(" *".into()),
+                    ..Default::default()
+                }
             });
             let error = build_generate_request(
-                request, "guide-modifier".into(), DisaggregationMode::Aggregated,
-            ).unwrap_err();
+                request,
+                "guide-modifier".into(),
+                DisaggregationMode::Aggregated,
+            )
+            .unwrap_err();
             assert_invalid(error);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn conflicting_guides_are_rejected() {
         let mut request = minimal_request();
@@ -622,68 +673,83 @@ sidecar_test! {
             regex: Some(".*".into()),
             ..Default::default()
         });
-        assert_invalid(build_generate_request(
-            request, "conflicting-guides".into(), DisaggregationMode::Aggregated,
-        ).unwrap_err());
+        assert_invalid(
+            build_generate_request(
+                request,
+                "conflicting-guides".into(),
+                DisaggregationMode::Aggregated,
+            )
+            .unwrap_err(),
+        );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn stopping_tokens_are_merged_and_deduplicated() {
         let mut request = minimal_request();
         request.stop_conditions.stop_token_ids = Some(vec![3, 2, 3]);
         request.stop_conditions.stop_token_ids_hidden = Some(vec![2, 4]);
-        let wire = build_generate_request(
-            request, "stops".into(), DisaggregationMode::Aggregated,
-        ).unwrap();
+        let wire = build_generate_request(request, "stops".into(), DisaggregationMode::Aggregated)
+            .unwrap();
         assert_eq!(wire.stopping.unwrap().stop_token_ids, [2, 3, 4]);
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn top_k_preserves_native_sentinels_and_explicit_limits() {
         for (top_k, expected) in [
-            (None, 0), (Some(-1), 0), (Some(0), 0), (Some(7), 7), (Some(i32::MAX), i32::MAX as u32),
+            (None, 0),
+            (Some(-1), 0),
+            (Some(0), 0),
+            (Some(7), 7),
+            (Some(i32::MAX), i32::MAX as u32),
         ] {
             let mut request = minimal_request();
             request.sampling_options.top_k = top_k;
-            let wire = build_generate_request(
-                request, "top-k".into(), DisaggregationMode::Aggregated,
-            ).unwrap();
+            let wire =
+                build_generate_request(request, "top-k".into(), DisaggregationMode::Aggregated)
+                    .unwrap();
             assert_eq!(wire.sampling.unwrap().top_k, expected);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn canonical_cache_controls_are_preserved() {
         let mut identity = minimal_request();
         identity.routing = Some(RoutingHints {
-            cache_namespace: Some("cache-salt".into()), ..Default::default()
+            cache_namespace: Some("cache-salt".into()),
+            ..Default::default()
         });
         let wire = build_generate_request(
-            identity, "cache-identity".into(), DisaggregationMode::Aggregated,
-        ).unwrap();
+            identity,
+            "cache-identity".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
         assert_eq!(wire.kv.unwrap().cache_salt, "dynamo-cache-salt:cache-salt");
         for bypass in [false, true] {
             let mut request = minimal_request();
             request.extra_args = Some(json!({"bypass_prefix_cache": bypass}));
             let wire = build_generate_request(
-                request, "cache-bypass".into(), DisaggregationMode::Aggregated,
-            ).unwrap();
+                request,
+                "cache-bypass".into(),
+                DisaggregationMode::Aggregated,
+            )
+            .unwrap();
             assert_eq!(wire.kv.unwrap().bypass_prefix_cache, bypass);
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn decode_requires_and_preserves_valid_handoff_metadata() {
         let mut request = minimal_request();
@@ -691,9 +757,8 @@ sidecar_test! {
             disaggregated_params: json!({"remote_engine_id": "prefill-0", "remote_host": "127.0.0.1", "remote_port": 20097, "remote_block_ids": [7, 8]}),
             prompt_tokens_details: None,
         });
-        let wire = build_generate_request(
-            request, "decode".into(), DisaggregationMode::Decode,
-        ).unwrap();
+        let wire =
+            build_generate_request(request, "decode".into(), DisaggregationMode::Decode).unwrap();
         assert_eq!(
             struct_to_json(wire.kv.unwrap().kv_transfer_params.unwrap()).unwrap(),
             json!({"remote_engine_id": "prefill-0", "remote_host": "127.0.0.1", "remote_port": "20097", "remote_block_ids": [7, 8]}),
@@ -701,17 +766,19 @@ sidecar_test! {
         for value in [None, Some(json!([])), Some(json!("invalid"))] {
             let mut request = minimal_request();
             request.prefill_result = value.map(|disaggregated_params| PrefillResult {
-                disaggregated_params, prompt_tokens_details: None,
+                disaggregated_params,
+                prompt_tokens_details: None,
             });
-            assert_invalid(build_generate_request(
-                request, "bad-handoff".into(), DisaggregationMode::Decode,
-            ).unwrap_err());
+            assert_invalid(
+                build_generate_request(request, "bad-handoff".into(), DisaggregationMode::Decode)
+                    .unwrap_err(),
+            );
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn canonical_sampling_and_stopping_fields_are_preserved() {
         let mut request = minimal_request();
@@ -733,18 +800,31 @@ sidecar_test! {
             ..Default::default()
         };
         let wire = build_generate_request(
-            request, "canonical-fields".into(), DisaggregationMode::Aggregated,
-        ).unwrap();
+            request,
+            "canonical-fields".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
         assert_eq!(wire.request_id, "canonical-fields");
-        assert_eq!(wire.prompt, Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
-            ids: vec![11, 22, 33],
-        })));
+        assert_eq!(
+            wire.prompt,
+            Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 22, 33],
+            }))
+        );
         assert_eq!(wire.temperature, Some(0.2));
         let sampling = wire.sampling.unwrap();
-        assert_eq!((sampling.top_k, sampling.top_p, sampling.min_p), (4, 0.9, 0.1));
+        assert_eq!(
+            (sampling.top_k, sampling.top_p, sampling.min_p),
+            (4, 0.9, 0.1)
+        );
         let decoding = wire.decoding.unwrap();
         assert_eq!(
-            (decoding.presence_penalty, decoding.frequency_penalty, decoding.repetition_penalty),
+            (
+                decoding.presence_penalty,
+                decoding.frequency_penalty,
+                decoding.repetition_penalty
+            ),
             (0.3, 0.4, 1.1),
         );
         let stopping = wire.stopping.unwrap();
@@ -752,10 +832,10 @@ sidecar_test! {
         assert_eq!(stopping.stop_strings, ["done"]);
         assert!(stopping.ignore_eos);
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn oversized_logprob_counts_are_rejected() {
         for prompt in [false, true] {
@@ -766,8 +846,12 @@ sidecar_test! {
             } else {
                 request.output_options.logprobs = Some(count);
             }
-            let error = build_generate_request(request, "shared-request".into(), DisaggregationMode::Aggregated)
-                .expect_err("oversized logprob count");
+            let error = build_generate_request(
+                request,
+                "shared-request".into(),
+                DisaggregationMode::Aggregated,
+            )
+            .expect_err("oversized logprob count");
             assert!(error.to_string().contains("fit in i32"));
             assert_eq!(
                 error.error_type(),
@@ -775,10 +859,10 @@ sidecar_test! {
             );
         }
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn selected_lora_adapter_is_forwarded() {
         let mut request = minimal_request();
@@ -786,13 +870,18 @@ sidecar_test! {
             lora_name: Some("adapter-a".into()),
             ..Default::default()
         });
-        let wire = build_generate_request(request, "shared-lora".into(), DisaggregationMode::Aggregated).unwrap();
+        let wire = build_generate_request(
+            request,
+            "shared-lora".into(),
+            DisaggregationMode::Aggregated,
+        )
+        .unwrap();
         assert_eq!(wire.lora_name, "adapter-a");
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn prefill_rank_overrides_decode_rank_with_fallback() {
         let mut request = minimal_request();
@@ -814,10 +903,10 @@ sidecar_test! {
             Some(5)
         );
     }
-}
+);
 
-sidecar_test! {
-    lane: pre_merge;
+sidecar_test!(
+    #[lane(pre_merge)]
     #[test]
     fn full_vocabulary_logprobs_select_all_candidates() {
         let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
@@ -826,4 +915,4 @@ sidecar_test! {
             Some(pb::candidate_tokens::Select::All(true))
         );
     }
-}
+);

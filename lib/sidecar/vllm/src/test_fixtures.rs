@@ -10,6 +10,17 @@ use dynamo_backend_common::{
 use prost_types_v14 as prost_types;
 use serde_json::json;
 
+pub(crate) fn minimal_request() -> PreprocessedRequest {
+    PreprocessedRequest::builder()
+        .model("served-model".to_string())
+        .token_ids(vec![11, 22, 33])
+        .sampling_options(Default::default())
+        .stop_conditions(Default::default())
+        .output_options(Default::default())
+        .build()
+        .expect("minimal request")
+}
+
 pub(crate) fn model_info() -> pb::ModelInfo {
     pb::ModelInfo {
         model_id: "model-source".to_string(),

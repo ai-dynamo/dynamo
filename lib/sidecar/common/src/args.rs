@@ -108,7 +108,7 @@ impl Default for GrpcTransportConfig {
 }
 
 #[cfg(test)]
-mod unit_common_args {
+mod tests {
     use std::time::Duration;
 
     use clap::Parser;
@@ -121,8 +121,8 @@ mod unit_common_args {
         sidecar: SidecarArgs,
     }
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn parses_defaults_and_overrides() {
             let defaults = TestArgs::try_parse_from(["test", "--grpc-endpoint", "127.0.0.1:50051"])
@@ -153,10 +153,10 @@ mod unit_common_args {
             assert_eq!(config.retry_interval, Duration::from_secs(3));
             assert_eq!(config.startup_deadline, Duration::from_secs(11));
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn rejects_zero_values() {
             for flag in [
@@ -166,10 +166,16 @@ mod unit_common_args {
                 "--grpc-startup-deadline-secs",
             ] {
                 assert!(
-                    TestArgs::try_parse_from(["test", "--grpc-endpoint", "127.0.0.1:50051", flag, "0",])
-                        .is_err()
+                    TestArgs::try_parse_from([
+                        "test",
+                        "--grpc-endpoint",
+                        "127.0.0.1:50051",
+                        flag,
+                        "0",
+                    ])
+                    .is_err()
                 );
             }
         }
-    }
+    );
 }

@@ -109,13 +109,13 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
 }
 
 #[cfg(test)]
-mod unit_common_errors {
+mod tests {
     use dynamo_backend_common::{BackendError, ErrorType};
 
     use super::status_to_dynamo;
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn maps_transport_statuses_to_backend_errors() {
             for (code, expected) in [
@@ -158,5 +158,5 @@ mod unit_common_errors {
                 }
             }
         }
-    }
+    );
 }

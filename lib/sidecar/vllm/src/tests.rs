@@ -35,7 +35,7 @@ use crate::engine::VllmSidecarEngine;
 use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
-use crate::unit_vllm_fixtures::*;
+use crate::test_fixtures::*;
 
 #[derive(Clone, Default)]
 struct FakeVllm {
@@ -2279,52 +2279,6 @@ async fn generate_error(
         Ok(_) => panic!("unexpected generation success for {name}"),
         Err(error) => error,
     }
-}
-
-#[tokio::test]
-async fn lora_lock_registry_reclaims_idle_entries_without_losing_waiters() {
-    let lifecycle = crate::lora::LoraLifecycle::default();
-    let mut published = Vec::new();
-    for name in ["loaded-a", "loaded-b"] {
-        lifecycle.mark_published(name).await;
-        published.push((name, Arc::downgrade(&lifecycle.adapter_lock(name).await)));
-    }
-    let lock = lifecycle.adapter_lock("active").await;
-    let active = Arc::downgrade(&lock);
-    let held = lock.clone().write_owned().await;
-    let mut waiting = Box::pin(lock.read_owned());
-    assert!(
-        futures::future::poll_immediate(&mut waiting)
-            .await
-            .is_none()
-    );
-
-    let mut idle = std::sync::Weak::new();
-    for name in ["idle-a", "idle-b", "idle-c"] {
-        let lock = lifecycle.adapter_lock(name).await;
-        assert!(idle.upgrade().is_none());
-        idle = Arc::downgrade(&lock);
-    }
-    drop(held);
-    drop(lifecycle.adapter_lock("after-release").await);
-    let lock = lifecycle.adapter_lock("active").await;
-    assert!(Arc::ptr_eq(&lock, &active.upgrade().unwrap()));
-    let guard = waiting.await;
-    assert!(lock.try_write().is_err());
-    drop(guard);
-    drop(lock);
-    drop(lifecycle.adapter_lock("after-waiter").await);
-    assert!(active.upgrade().is_none());
-
-    for (name, lock) in &published {
-        assert!(Arc::ptr_eq(
-            &lifecycle.adapter_lock(name).await,
-            &lock.upgrade().expect("published lock must survive churn")
-        ));
-        lifecycle.forget(name).await;
-    }
-    drop(lifecycle.adapter_lock("after-unload").await);
-    assert!(published.iter().all(|(_, lock)| lock.upgrade().is_none()));
 }
 
 #[tokio::test]

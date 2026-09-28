@@ -1245,9 +1245,7 @@ fn normalize_logprob(logprob: f32) -> f64 {
 }
 
 #[cfg(test)]
-#[path = "convert/request_tests.rs"]
-mod unit_requests;
+mod request_tests;
 
 #[cfg(test)]
-#[path = "convert/response_tests.rs"]
-mod unit_responses;
+mod response_tests;

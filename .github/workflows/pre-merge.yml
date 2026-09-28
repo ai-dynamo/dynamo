@@ -439,18 +439,18 @@ jobs:
       shell: bash
       run: |
         if [[ '${{ matrix.dir }}' == '.' ]]; then
-          python3 lib/sidecar/testkit/run.py --workspace-tests --lane "$SIDECAR_TEST_LANE"
+          cargo test --locked --workspace --all-targets \
+            --exclude dynamo-sidecar-common --exclude dynamo-vllm-sidecar
+          lane_filters=(--skip ::__sidecar_lane_nightly)
+          if [[ "$SIDECAR_TEST_LANE" == 'pre-merge' ]]; then
+            lane_filters+=(--skip ::__sidecar_lane_post_merge)
+          fi
+          cargo test --locked --all-targets \
+            -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
+            --features dynamo-sidecar-common/tonic-v14 -- "${lane_filters[@]}"
         else
           cargo test --locked --all-targets
         fi
-    - name: Run sidecar CPU tests without engines or external networking
-      if: matrix.dir == '.'
-      run: |
-        artifacts=$(mktemp -d)
-        python3 lib/sidecar/testkit/run.py --suite unit --lane "$SIDECAR_TEST_LANE" --export "$artifacts"
-        cp lib/sidecar/testkit/run.py "$artifacts/run.py"
-        docker build -f lib/sidecar/testkit/CPU.Dockerfile -t sidecar-cpu-tests "$artifacts"
-        docker run --rm --network none sidecar-cpu-tests --suite unit --lane "$SIDECAR_TEST_LANE"
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

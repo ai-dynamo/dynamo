@@ -386,13 +386,13 @@ pub(crate) async fn unpublish_lora_model(
 }
 
 #[cfg(test)]
-mod unit_lora {
+mod tests {
     use super::*;
     use dynamo_backend_common::{BackendError, ErrorType};
     use serde_json::json;
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn lora_load_payload_validates_names_and_source_schemes_without_io() {
             for uri in [
@@ -401,7 +401,8 @@ mod unit_lora {
                 "s3://bucket/adapter",
             ] {
                 let update =
-                    parse_load_lora(&json!({"lora_name": "adapter-a", "source": {"uri": uri}})).unwrap();
+                    parse_load_lora(&json!({"lora_name": "adapter-a", "source": {"uri": uri}}))
+                        .unwrap();
                 assert_eq!(
                     update,
                     LoadLoraUpdate {
@@ -427,10 +428,10 @@ mod unit_lora {
                 );
             }
         }
-    }
+    );
 
-    sidecar_test! {
-        lane: pre_merge;
+    sidecar_test!(
+        #[lane(pre_merge)]
         #[test]
         fn native_lora_inventory_requires_unique_usable_identity() {
             let adapter = |name: &str, id| pb::LoraAdapter {
@@ -464,5 +465,54 @@ mod unit_lora {
                 );
             }
         }
-    }
+    );
+
+    sidecar_test!(
+        #[lane(pre_merge)]
+        #[tokio::test]
+        async fn lora_lock_registry_reclaims_idle_entries_without_losing_waiters() {
+            let lifecycle = crate::lora::LoraLifecycle::default();
+            let mut published = Vec::new();
+            for name in ["loaded-a", "loaded-b"] {
+                lifecycle.mark_published(name).await;
+                published.push((name, Arc::downgrade(&lifecycle.adapter_lock(name).await)));
+            }
+            let lock = lifecycle.adapter_lock("active").await;
+            let active = Arc::downgrade(&lock);
+            let held = lock.clone().write_owned().await;
+            let mut waiting = Box::pin(lock.read_owned());
+            assert!(
+                futures::future::poll_immediate(&mut waiting)
+                    .await
+                    .is_none()
+            );
+
+            let mut idle = std::sync::Weak::new();
+            for name in ["idle-a", "idle-b", "idle-c"] {
+                let lock = lifecycle.adapter_lock(name).await;
+                assert!(idle.upgrade().is_none());
+                idle = Arc::downgrade(&lock);
+            }
+            drop(held);
+            drop(lifecycle.adapter_lock("after-release").await);
+            let lock = lifecycle.adapter_lock("active").await;
+            assert!(Arc::ptr_eq(&lock, &active.upgrade().unwrap()));
+            let guard = waiting.await;
+            assert!(lock.try_write().is_err());
+            drop(guard);
+            drop(lock);
+            drop(lifecycle.adapter_lock("after-waiter").await);
+            assert!(active.upgrade().is_none());
+
+            for (name, lock) in &published {
+                assert!(Arc::ptr_eq(
+                    &lifecycle.adapter_lock(name).await,
+                    &lock.upgrade().expect("published lock must survive churn")
+                ));
+                lifecycle.forget(name).await;
+            }
+            drop(lifecycle.adapter_lock("after-unload").await);
+            assert!(published.iter().all(|(_, lock)| lock.upgrade().is_none()));
+        }
+    );
 }
