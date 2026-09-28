@@ -24,8 +24,8 @@ from tests.serve.common import (
 from tests.utils.constants import DynamoPortRange
 from tests.utils.engine_process import EngineConfig
 from tests.utils.gpu_args import map_cuda_visible_devices
-from tests.utils.payload_builder import chat_payload_default
-from tests.utils.payloads import ChatPayload
+from tests.utils.payload_builder import LONG_PROMPT_FOR_CACHING, chat_payload_default
+from tests.utils.payloads import ChatPayload, DisaggregatedChatPayload
 from tests.utils.port_utils import reserved_ports
 
 vllm_sidecar_dir = os.environ.get("VLLM_SIDECAR_DIR") or os.path.join(
@@ -76,6 +76,23 @@ TRTLLM_OPENENGINE_SKIP_REASON = (
     "release 1.3.0rc27 or newer, which container/context.yaml pins. Seeing this "
     "skip in CI means the pin moved backwards."
 )
+
+
+def _disaggregated_chat_payload() -> DisaggregatedChatPayload:
+    return DisaggregatedChatPayload(
+        body={
+            "messages": [{"role": "user", "content": LONG_PROMPT_FOR_CACHING}],
+            "max_tokens": 64,
+            "n": 1,
+            "temperature": 0,
+            "stream": False,
+            "nvext": {"extra_fields": ["worker_id"]},
+        },
+        repeat_count=1,
+        expected_response=[],
+        expected_log=[],
+        expected_num_choices=1,
+    )
 
 
 # Sequential stage only: no profiled_vram_gib mark yet, since actual peak VRAM
@@ -138,20 +155,25 @@ sidecar_configs = {
             chat_payload_default(),
         ],
     ),
-    # The disaggregated launcher runs two engines and two sidecars, so it is
-    # the only config here that uses both DYN_SYSTEM_PORT1 and _PORT2 -- which
-    # is what `num_system_ports=2` on the test is sized for. A green run proves
-    # the prefill worker produced a `KvSessionRef` handoff and the decode worker
-    # replayed it: with the handoff broken, the decode leg has no KV to resume
-    # and the request fails rather than returning a short answer.
+    # Prefill/decode handoff is a critical native-sidecar path. The payload
+    # asserts the request was served by two distinct workers, so a decode leg
+    # that silently fell back to aggregated fails instead of passing on a
+    # plausible-looking answer.
     "trtllm_disaggregated": EngineConfig(
         name="trtllm_disaggregated",
         directory=trtllm_sidecar_dir,
         script_name="disagg.sh",
         marks=[
             pytest.mark.trtllm,
-            # Prefill on GPU 0, decode on GPU 1 -- the launcher's defaults.
-            pytest.mark.gpu_2,
+            # Both engines share one GPU: the handoff is what this covers, and
+            # a co-resident pair keeps it on the existing 1-GPU sidecar runner.
+            # `requested_trtllm_kv_tokens` caps each engine's KV pool so the
+            # second one has memory left to load. The KV cache still moves over
+            # the launcher's NIXL default; note that NIXL's shared-memory
+            # transport needs more than a 64 MiB `/dev/shm` to bring up a
+            # second agent, as `deploy/disagg.yaml` also calls out.
+            pytest.mark.gpu_1,
+            pytest.mark.requested_trtllm_kv_tokens(2048),
             # Two engines load serially before either sidecar can register, so
             # this needs longer than the single-engine configs above. Raise the
             # readiness budget with it: `pytest.mark.timeout` is only the outer
@@ -168,13 +190,19 @@ sidecar_configs = {
         ],
         model="Qwen/Qwen3-0.6B",
         timeout=1000,
+        health_check_workers=True,
+        health_check_worker_count=2,
         env={
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",
+            # The TensorRT-LLM release image runs as uid 0 and PRTE refuses
+            # to run as root unless told twice; without these the engines'
+            # worker spawn fails with `MPI_ERR_UNKNOWN` and neither binds its
+            # gRPC port. Same pair, same reason, as `deploy/disagg.yaml`.
+            "PRTE_ALLOW_RUN_AS_ROOT": "1",
+            "PRTE_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         },
-        request_payloads=[
-            chat_payload_default(),
-        ],
+        request_payloads=[_disaggregated_chat_payload()],
     ),
 }
 
@@ -196,11 +224,12 @@ def test_serve_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    monkeypatch,
 ):
     """
-    Launch a lib/sidecar/<backend>/launch/agg.sh script end-to-end (Dynamo
-    frontend + native-gRPC engine + dynamo-<backend>-sidecar) and confirm it
-    serves a real chat completion.
+    Launch a lib/sidecar/<backend>/launch script end-to-end (Dynamo frontend +
+    native-gRPC engine(s) + dynamo-<backend>-sidecar) and confirm it serves a
+    real chat completion.
     """
     assert (
         num_system_ports >= 2
@@ -208,7 +237,27 @@ def test_serve_deployment(
     config = dataclasses.replace(
         sidecar_config_test, frontend_port=dynamo_dynamic_ports.frontend_port
     )
-    if config.name == "vllm_aggregated":
+    if config.name == "trtllm_disaggregated":
+        monkeypatch.delenv("DYN_NAMESPACE_WORKER_SUFFIX", raising=False)
+        monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+        device = map_cuda_visible_devices([0], os.environ.get("CUDA_VISIBLE_DEVICES"))
+        assert device != "-1", "One visible GPU is required"
+        # The launcher exposes one gRPC port per engine and no HTTP listener.
+        with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
+            run_serve_deployment(
+                config,
+                request,
+                ports=dynamo_dynamic_ports,
+                extra_env={
+                    "TRTLLM_PREFILL_GPU": device,
+                    "TRTLLM_DECODE_GPU": device,
+                    "TRTLLM_PREFILL_GRPC_PORT": str(engine_ports[0]),
+                    "TRTLLM_DECODE_GRPC_PORT": str(engine_ports[1]),
+                    "DYN_NAMESPACE": f"sidecar-disagg-{generate_random_suffix()}",
+                    "MODEL": config.model,
+                },
+            )
+    elif config.name == "vllm_aggregated":
         with reserved_ports(2, start_port=DynamoPortRange.SERVE.value) as engine_ports:
             run_serve_deployment(
                 config,
