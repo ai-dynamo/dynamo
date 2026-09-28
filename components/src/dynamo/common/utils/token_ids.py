@@ -11,12 +11,22 @@ can consume a buffer directly leave the value alone.
 
 import array
 import sys
-from typing import Any, Optional
+from typing import Any, Optional, overload
 
 _INT32 = "i" if array.array("i").itemsize == 4 else "l"
 
 
-def token_ids_to_list(value: Any) -> Optional[list]:
+@overload
+def token_ids_to_list(value: None) -> None:
+    ...
+
+
+@overload
+def token_ids_to_list(value: Any) -> list[int]:
+    ...
+
+
+def token_ids_to_list(value: Any) -> Optional[list[int]]:
     if value is None or isinstance(value, list):
         return value
     if isinstance(value, (bytes, bytearray, memoryview)):
