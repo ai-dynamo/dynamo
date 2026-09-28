@@ -27,6 +27,7 @@ from _tool_guidance_parity import (
     parity_tool,
     tool_choice_value,
 )
+from jinja2.exceptions import TemplateError, UndefinedError
 from sglang.srt.function_call.function_call_parser import FunctionCallParser
 from sglang.srt.function_call.json_array_parser import JsonArrayParser
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -2077,6 +2078,74 @@ class TestRuntimeConfigParserName:  # FRONTEND.2 — parser name resolution from
 # ---------------------------------------------------------------------------
 # preprocess_chat_request
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.core
+class TestChatTemplateErrors:
+    @pytest.mark.parametrize(
+        "error_type", [TemplateError, UndefinedError, TypeError, RuntimeError]
+    )
+    @pytest.mark.parametrize("stage", ["render", "messages", "tokens", "parsers"])
+    def test_render_error_boundary(self, tokenizer, monkeypatch, stage, error_type):
+        error = error_type("render failure")
+
+        def fail(*args, **kwargs):
+            raise error
+
+        if stage == "render":
+            monkeypatch.setattr(tokenizer, "apply_chat_template", fail)
+        else:
+            target = {
+                "messages": "_normalize_messages_for_template",
+                "tokens": "_normalize_prompt_token_ids",
+                "parsers": "create_parsers",
+            }[stage]
+            monkeypatch.setattr(sglang_prepost_module, target, fail)
+        classified = stage == "render" and error_type is not RuntimeError
+        with pytest.raises(PreprocessError if classified else error_type) as caught:
+            preprocess_chat_request(
+                {"model": MODEL, "messages": [{"role": "user", "content": "Hi"}]},
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+        assert str(caught.value) == "render failure"
+        assert (caught.value.__cause__ if classified else caught.value) is error
+
+    @pytest.mark.parametrize("effort", [None, "custom-budget", 32, "ultra"])
+    def test_template_owns_reasoning_values(self, tokenizer, monkeypatch, effort):
+        monkeypatch.setattr(
+            tokenizer,
+            "chat_template",
+            "{% if reasoning_effort is defined and reasoning_effort not in ['custom-budget', 32] %}{{ raise_exception('Unsupported reasoning_effort') }}{% endif %}Ready",
+        )
+        request = {"model": MODEL, "messages": [{"role": "user", "content": "Hi"}]}
+        if effort is not None:
+            request["chat_template_kwargs"] = {"reasoning_effort": effort}
+        engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": tokenizer.encode("ok", add_special_tokens=False),
+                    "finish_reason": "stop",
+                }
+            ]
+        )
+        processor = SglangProcessor(tokenizer, engine, None, None, None)
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        if effort == "ultra":
+            with pytest.raises(
+                InvalidArgument, match="Unsupported reasoning_effort"
+            ) as caught:
+                asyncio.run(collect())
+            assert isinstance(caught.value.__cause__, PreprocessError)
+            assert isinstance(caught.value.__cause__.__cause__, TemplateError)
+            assert not engine.requests
+        else:
+            assert asyncio.run(collect())
+            assert len(engine.requests) == 1
 
 
 class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preprocessing (multi-turn assistant tool_calls, role handling)
