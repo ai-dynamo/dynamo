@@ -93,6 +93,12 @@ With a Python chat processor, routed requests that start a response stream also 
 Inputs that cannot be replayed, including multimodal requests, retain timing and routing metadata
 but omit `request.replay`. This path does not yet add session or parsed finish-reason metadata.
 
+Python replay hashing runs off the response path. Each process permits at most four pending hashing
+tasks and retains at most 32 MiB of prompt-vector capacity for them. If either limit is reached,
+the request emits timing and routing metadata without `request.replay`; inference does not wait for
+hashing capacity. The limits cover queued and running hashing tasks, not the separate trace bus
+or sink buffers.
+
 ### `request_payload`
 
 Contains the OpenAI `/v1/chat/completions` client request and, when available, its response. Dynamo
