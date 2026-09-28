@@ -136,6 +136,7 @@ ignore:
   # Standalone router POC image has no CI image-build workflow yet; validated by
   # a local full build and runtime smoke check in its draft PR.
   - 'container/Dockerfile.global-router-poc'
+  - 'container/validate-global-router-poc.sh'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'
