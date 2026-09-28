@@ -149,6 +149,17 @@ def _ais_perf_config_from_prediction(
             if key in names and value is not None
         }
     )
+    fpm_parquet_path = timing.get("fpm_parquet_path")
+    if fpm_parquet_path is not None:
+        interpolation = config.setdefault("estimator_config", {}).setdefault(
+            "fpm_interpolation", {}
+        )
+        if interpolation.get("fpm_parquet_path", fpm_parquet_path) != fpm_parquet_path:
+            raise ValueError(
+                "conflicting fpm_parquet_path and "
+                "estimator_config.fpm_interpolation.fpm_parquet_path"
+            )
+        interpolation["fpm_parquet_path"] = fpm_parquet_path
     config.update(
         model=engine["model"],
         system=worker.get("hardware") or engine["hardware"],

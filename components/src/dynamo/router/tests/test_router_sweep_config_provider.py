@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 
 pytest.importorskip(
@@ -289,6 +291,56 @@ def test_public_router_ais_load_model_reaches_runtime_config() -> None:
             worker_type="aggregated",
         ).to_dict()
     )
+
+
+@pytest.mark.parametrize("nested_path", [None, "matching", "conflicting"])
+def test_public_router_preserves_external_fpm_path_and_controls(
+    tmp_path, nested_path
+) -> None:
+    roots = [tmp_path / "first", tmp_path / "second"]
+    for root in roots:
+        root.mkdir()
+    fpm_path = str(tmp_path / "forward.parquet")
+    controls = {"correction": {"enabled": False}}
+    if nested_path is not None:
+        controls["fpm_interpolation"] = {
+            "fpm_parquet_path": fpm_path
+            if nested_path == "matching"
+            else str(tmp_path / "other.parquet")
+        }
+    engine = {
+        "mode": "disaggregated",
+        "model": "example/model",
+        "hardware": "h200_sxm",
+        "backend": "vllm",
+        "workers": {
+            "prefill": {
+                "timing": {
+                    "estimation_mode": "fpm_interpolation",
+                    "fpm_parquet_path": fpm_path,
+                    "systems_paths": [str(root) for root in roots],
+                    "estimator_config": controls,
+                },
+            }
+        },
+    }
+    original = deepcopy(engine)
+    context = PredictionAdapterContext(engine=engine, traffic={}, evaluation={})
+    public = {"policy": "kv_router", "prefill_load_model": {"type": "ais"}}
+    if nested_path == "conflicting":
+        with pytest.raises(ValueError, match="conflicting fpm_parquet_path"):
+            create_provider().compile_prediction(public, context)
+    else:
+        replay_spec = create_provider().compile_prediction(public, context)
+        perf_config = replay_spec.runtime_hooks[0].config["ais_perf_config"]
+        assert perf_config["worker_type"] == "prefill"
+        assert perf_config["systems_paths"] == [str(root) for root in roots]
+        assert perf_config["estimation_mode"] == "fpm_interpolation"
+        assert perf_config["estimator_config"] == {
+            "correction": {"enabled": False},
+            "fpm_interpolation": {"fpm_parquet_path": fpm_path},
+        }
+    assert engine == original
 
 
 def test_router_public_schema_rejects_internal_fields_and_supports_ranges() -> None:

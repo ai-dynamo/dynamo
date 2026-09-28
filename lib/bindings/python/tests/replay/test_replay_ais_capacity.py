@@ -40,6 +40,36 @@ def test_canonical_config_owns_identity_and_topology():
         MockEngineArgs(ais_perf_config=_config(worker_type="decode"))
 
 
+@pytest.mark.parametrize("input_kind", ["constructor", "json", "external_json"])
+def test_canonical_config_rejects_pipeline_parallelism(input_kind):
+    config = _config(pp=2)
+    with pytest.raises(Exception, match="supports only pp=1; got pp=2"):
+        if input_kind == "constructor":
+            MockEngineArgs(ais_perf_config=config)
+        else:
+            payload = (
+                {"ais_perf_config": config}
+                if input_kind == "json"
+                else {
+                    "timing_model": {
+                        "type": "external",
+                        "provider": "aic",
+                        "config": config,
+                    }
+                }
+            )
+            MockEngineArgs.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("pp", [None, 1])
+def test_single_pipeline_stage_survives_mocker_overrides(pp):
+    config = _config(**({} if pp is None else {"pp": pp}))
+    args = MockEngineArgs(ais_perf_config=config, num_gpu_blocks=1000)
+    updated = args.with_overrides(num_gpu_blocks=1001)
+    assert updated.ais_perf_config["pp"] == 1
+    assert updated.num_gpu_blocks == 1001
+
+
 def test_removed_sdk_names_are_rejected():
     import dynamo.llm as llm
 

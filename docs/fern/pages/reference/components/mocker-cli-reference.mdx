@@ -149,6 +149,7 @@ mode.
   data roots, selection policy and nested estimator controls. Defaults to
   `estimation_mode: auto` and `fallback_policy: deny`. Do not combine this input
   with flat AIS identity flags. Cold regression is rejected by Router and Mocker.
+  Mocker and Dynamo Replay require `pp: 1`; pipeline-parallel configurations are rejected.
 </ParamField>
 
 Legacy `--aic-*` spellings remain input aliases. Use `--ais-*` in new configurations.

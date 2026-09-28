@@ -1177,6 +1177,11 @@ impl MockEngineArgs {
         let canonical: aisimulate_core::ForwardPassPerfModelConfig =
             serde_json::from_value(config.clone())
                 .map_err(|error| anyhow::anyhow!("invalid ais_perf_config: {error}"))?;
+        anyhow::ensure!(
+            canonical.pp == 1,
+            "Mocker/Replay supports only pp=1; got pp={}",
+            canonical.pp
+        );
         // The upstream schema owns required fields, enums, unknown-field
         // rejection and defaults. Validate before any legacy branch selection.
         let config = serde_json::to_value(canonical)?;
@@ -1387,6 +1392,53 @@ mod tests {
             .normalized()
             .unwrap();
         assert_eq!(args.ais_tp_size, Some(2));
+    }
+
+    #[test]
+    fn canonical_ais_config_rejects_pipeline_parallelism() {
+        let config = json!({
+            "model": "model", "system": "gpu", "backend": "vllm",
+            "worker_type": "aggregated", "pp": 2
+        });
+        let error = MockEngineArgs::builder()
+            .ais_perf_config(Some(config.clone()))
+            .build()
+            .unwrap()
+            .normalized()
+            .unwrap_err();
+        assert!(error.to_string().contains("supports only pp=1; got pp=2"));
+
+        let mut alias_config = config.clone();
+        alias_config.as_object_mut().unwrap().remove("pp");
+        alias_config["pp_size"] = json!(2);
+        for value in [
+            json!({"ais_perf_config": config}),
+            json!({"timing_model": {
+                "type": "external", "provider": "aic", "config": alias_config
+            }}),
+        ] {
+            let error = MockEngineArgs::from_json_str(&value.to_string()).unwrap_err();
+            assert!(error.to_string().contains("supports only pp=1; got pp=2"));
+        }
+    }
+
+    #[test]
+    fn canonical_ais_config_accepts_default_and_explicit_single_pipeline_stage() {
+        let config = json!({
+            "model": "model", "system": "gpu", "backend": "vllm",
+            "worker_type": "aggregated"
+        });
+        for pp in [None, Some(1)] {
+            let mut config = config.clone();
+            if let Some(pp) = pp {
+                config["pp"] = json!(pp);
+            }
+            let args =
+                MockEngineArgs::from_json_str(&json!({"ais_perf_config": config}).to_string())
+                    .unwrap();
+            assert_eq!(args.ais_perf_config, Some(config));
+            assert_eq!(args.ais_gpus_per_worker(), 1);
+        }
     }
 
     #[derive(Default)]
