@@ -39,7 +39,9 @@ _SGLANG_ELASTIC_EP_SOURCES = (
 # Both distributions ship the same extension; only one is normally installed.
 _MOONCAKE_DISTRIBUTIONS = (
     "mooncake-transfer-engine-cuda13",
+    "mooncake-transfer-engine-efa-cuda13",
     "mooncake-transfer-engine",
+    "mooncake-transfer-engine-efa"
 )
 
 # Compiled ProcessGroup extensions are named for the exact torch release they
