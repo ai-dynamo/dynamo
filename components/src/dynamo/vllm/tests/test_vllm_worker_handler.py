@@ -12,7 +12,7 @@ import base64
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import numpy as np
 import pytest
@@ -2285,32 +2285,30 @@ class TestRLAdminRouteHardening:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("load_format", "raw_chain", "desired"),
+        ("load_format", "desired"),
         [
-            ("modelexpress", "RL", "policy-7"),
-            ("mx", " rl ", "policy-8"),
+            ("modelexpress", "policy-7"),
+            ("mx", "policy-8"),
         ],
     )
     async def test_modelexpress_rl_startup_declares_the_desired_version(
-        self, monkeypatch, load_format, raw_chain, desired
+        self, monkeypatch, load_format, desired
     ):
-        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", raw_chain)
-        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", f" {desired} ")
-        monkeypatch.setattr(
-            mod,
-            "_modelexpress_envs",
-            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            mod,
-            "_modelexpress_rl_envs",
-            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID=desired),
-            raising=False,
-        )
+        envs = {
+            "modelexpress.envs": SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
+            "modelexpress_rl.envs": SimpleNamespace(
+                MX_REFIT_DESIRED_VERSION_UID=desired
+            ),
+        }
+        import_module = MagicMock(side_effect=envs.__getitem__)
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
 
         handler = self._constructed_handler(load_format)
 
+        assert import_module.call_args_list == [
+            call("modelexpress.envs"),
+            call("modelexpress_rl.envs"),
+        ]
         assert await handler.get_weight_version({}) == {
             "status": "ok",
             "version": desired,
@@ -2318,13 +2316,16 @@ class TestRLAdminRouteHardening:
         }
 
     @pytest.mark.asyncio
-    async def test_startup_version_stays_undeclared_without_rl_loader_support(
+    async def test_startup_version_stays_undeclared_without_rl_policy_attributes(
         self, monkeypatch
     ):
-        monkeypatch.setenv("MX_LOAD_STRATEGY_CHAIN", "RL")
-        monkeypatch.setenv("MX_REFIT_DESIRED_VERSION_UID", "policy-7")
-        monkeypatch.setattr(mod, "_modelexpress_envs", None, raising=False)
-        monkeypatch.setattr(mod, "_modelexpress_rl_envs", None, raising=False)
+        envs = {
+            "modelexpress.envs": SimpleNamespace(),
+            "modelexpress_rl.envs": SimpleNamespace(),
+        }
+        monkeypatch.setattr(
+            mod.importlib, "import_module", MagicMock(side_effect=envs.__getitem__)
+        )
 
         handler = self._constructed_handler("modelexpress")
 
@@ -2332,51 +2333,80 @@ class TestRLAdminRouteHardening:
         assert resp["version_declared"] is False
         assert resp["version"] is None
 
+    @pytest.mark.asyncio
+    async def test_startup_version_stays_undeclared_without_rl_loader_support(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            MagicMock(
+                side_effect=ModuleNotFoundError(
+                    "ModelExpress is not installed", name="modelexpress"
+                )
+            ),
+        )
+
+        handler = self._constructed_handler("modelexpress")
+
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    def test_modelexpress_startup_propagates_broken_install(self, monkeypatch):
+        monkeypatch.setattr(
+            mod.importlib,
+            "import_module",
+            MagicMock(side_effect=RuntimeError("incompatible grpcio")),
+        )
+
+        with pytest.raises(RuntimeError, match="incompatible grpcio"):
+            self._constructed_handler("modelexpress")
+
     def test_startup_version_reads_declared_load_format_directly(self, monkeypatch):
         config = _make_config(enable_multimodal=False)
         config.engine_args = SimpleNamespace()
-        monkeypatch.setattr(
-            mod,
-            "_modelexpress_envs",
-            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN="RL"),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            mod,
-            "_modelexpress_rl_envs",
-            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID="policy-7"),
-            raising=False,
-        )
+        import_module = MagicMock()
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
 
         with pytest.raises(AttributeError):
             mod._modelexpress_startup_weight_version(config)
+        import_module.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_modelexpress_startup_does_not_import_modelexpress(
+        self, monkeypatch
+    ):
+        import_module = MagicMock(side_effect=RuntimeError("incompatible grpcio"))
+        monkeypatch.setattr(mod.importlib, "import_module", import_module)
+
+        handler = self._constructed_handler("auto")
+
+        import_module.assert_not_called()
+        resp = await handler.get_weight_version({})
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("load_format", "chain", "desired"),
         [
             # The INFERENCE chain ignores the desired version and loads base weights.
-            ("modelexpress", None, "policy-7"),
             ("modelexpress", "INFERENCE", "policy-7"),
             ("modelexpress", "RL", None),
-            # Without the ModelExpress loader, the environment says nothing about weights.
-            ("auto", "RL", "policy-7"),
         ],
     )
     async def test_startup_version_stays_undeclared_without_the_rl_loader(
         self, monkeypatch, load_format, chain, desired
     ):
+        envs = {
+            "modelexpress.envs": SimpleNamespace(MX_LOAD_STRATEGY_CHAIN=chain),
+            "modelexpress_rl.envs": SimpleNamespace(
+                MX_REFIT_DESIRED_VERSION_UID=desired
+            ),
+        }
         monkeypatch.setattr(
-            mod,
-            "_modelexpress_envs",
-            SimpleNamespace(MX_LOAD_STRATEGY_CHAIN=chain or "INFERENCE"),
-            raising=False,
-        )
-        monkeypatch.setattr(
-            mod,
-            "_modelexpress_rl_envs",
-            SimpleNamespace(MX_REFIT_DESIRED_VERSION_UID=desired),
-            raising=False,
+            mod.importlib, "import_module", MagicMock(side_effect=envs.__getitem__)
         )
 
         handler = self._constructed_handler(load_format)

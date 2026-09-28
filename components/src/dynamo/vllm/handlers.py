@@ -33,15 +33,6 @@ from typing import (
 
 import numpy as np
 import torch
-
-try:
-    from modelexpress import envs as _modelexpress_envs
-    from modelexpress_rl import envs as _modelexpress_rl_envs
-except ModuleNotFoundError as exc:
-    if exc.name not in {"modelexpress", "modelexpress_rl"}:
-        raise
-    _modelexpress_envs = None
-    _modelexpress_rl_envs = None
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
@@ -181,22 +172,32 @@ _WEIGHT_VERSION_UNDECLARED: Final = object()
 def _modelexpress_startup_weight_version(config: Config) -> Any:
     """Return the version enforced by the ModelExpress RL startup loader.
 
-    ModelExpress releases without the RL startup policy do not expose its
-    configuration module and leave the version undeclared. When the policy is
-    available, its environment modules provide the same parsed values used by
-    the loader. The RL loader fails engine initialization unless every rank
-    loads the desired version, so a subsequently constructed handler serves
-    that version.
+    ModelExpress releases without the RL startup policy leave the version
+    undeclared. When the policy is available, its environment modules provide
+    the same parsed values used by the loader. The RL loader fails engine
+    initialization unless every rank loads the desired version, so a
+    subsequently constructed handler serves that version.
     """
     load_format = config.engine_args.load_format
-    if (
-        load_format not in MX_LOAD_FORMATS
-        or _modelexpress_envs is None
-        or _modelexpress_rl_envs is None
-        or _modelexpress_envs.MX_LOAD_STRATEGY_CHAIN != "RL"
-    ):
+    if load_format not in MX_LOAD_FORMATS:
         return _WEIGHT_VERSION_UNDECLARED
-    desired = _modelexpress_rl_envs.MX_REFIT_DESIRED_VERSION_UID
+
+    try:
+        modelexpress_envs = importlib.import_module("modelexpress.envs")
+        modelexpress_rl_envs = importlib.import_module("modelexpress_rl.envs")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {
+            "modelexpress",
+            "modelexpress.envs",
+            "modelexpress_rl",
+            "modelexpress_rl.envs",
+        }:
+            raise
+        return _WEIGHT_VERSION_UNDECLARED
+
+    if getattr(modelexpress_envs, "MX_LOAD_STRATEGY_CHAIN", None) != "RL":
+        return _WEIGHT_VERSION_UNDECLARED
+    desired = getattr(modelexpress_rl_envs, "MX_REFIT_DESIRED_VERSION_UID", None)
     return desired if desired is not None else _WEIGHT_VERSION_UNDECLARED
 
 
