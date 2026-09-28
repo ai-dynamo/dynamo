@@ -75,6 +75,15 @@ pub enum StructuralTagScope {
     Always,
 }
 
+/// Legacy structural-tag enablement field used by older frontends.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuralTagMode {
+    #[default]
+    Off,
+    On,
+}
+
 /// Controls which layer owns a reasoning boundary before structural-tag output.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +277,15 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structural_tag: Option<StructuralTagConfig>,
 
+    // Compatibility with v1.4/v1.5 workers and frontends during v1.6 rolling upgrades
+    // TODO: remove when v1.5 falls outside the N-2 compatibility window
+    #[serde(default)]
+    pub structural_tag_mode: StructuralTagMode,
+    #[serde(default)]
+    pub structural_tag_scope: StructuralTagScope,
+    #[serde(default)]
+    pub structural_tag_schema: StructuralTagSchemaMode,
+
     /// When true, strip tool definitions from the chat template when tool_choice is "none".
     #[serde(default = "default_exclude_tools_when_tool_choice_none")]
     pub exclude_tools_when_tool_choice_none: bool,
@@ -399,6 +417,9 @@ impl Default for ModelRuntimeConfig {
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
             structural_tag: None,
+            structural_tag_mode: StructuralTagMode::Off,
+            structural_tag_scope: StructuralTagScope::Auto,
+            structural_tag_schema: StructuralTagSchemaMode::Auto,
             exclude_tools_when_tool_choice_none: default_exclude_tools_when_tool_choice_none(),
             data_parallel_start_rank: default_data_parallel_start_rank(),
             data_parallel_size: default_data_parallel_size(),
@@ -421,6 +442,27 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Normalize older wire fields into the current policy and project it back for older readers
+    pub(crate) fn normalize_structural_tag_compatibility(&mut self) {
+        if self.structural_tag.is_none() && self.structural_tag_mode == StructuralTagMode::On {
+            self.structural_tag = Some(StructuralTagConfig {
+                scope: self.structural_tag_scope,
+                schema: self.structural_tag_schema,
+                ..Default::default()
+            });
+        }
+
+        if let Some(config) = &self.structural_tag {
+            self.structural_tag_mode = StructuralTagMode::On;
+            self.structural_tag_scope = config.scope;
+            self.structural_tag_schema = config.schema;
+        } else {
+            self.structural_tag_mode = StructuralTagMode::Off;
+            self.structural_tag_scope = StructuralTagScope::Auto;
+            self.structural_tag_schema = StructuralTagSchemaMode::Auto;
+        }
+    }
+
     /// Check whether a runtime boolean is explicitly enabled.
     ///
     /// Rust callers commonly store booleans, while compatibility cards may
@@ -832,6 +874,47 @@ mod tests {
             serde_json::from_value::<StructuralTagConfig>(serde_json::json!({"unexpected": true}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_structural_tag_fields_normalize_to_current_config() {
+        let mut runtime: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "structural_tag_mode": "on",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "strict"
+        }))
+        .unwrap();
+
+        runtime.normalize_structural_tag_compatibility();
+
+        assert_eq!(
+            runtime.structural_tag,
+            Some(StructuralTagConfig {
+                scope: StructuralTagScope::Always,
+                schema: StructuralTagSchemaMode::Strict,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn current_structural_tag_config_controls_legacy_projection() {
+        let mut runtime: ModelRuntimeConfig = serde_json::from_value(serde_json::json!({
+            "structural_tag": {"scope": "auto", "schema": "strict"},
+            "structural_tag_mode": "off",
+            "structural_tag_scope": "always",
+            "structural_tag_schema": "auto"
+        }))
+        .unwrap();
+
+        runtime.normalize_structural_tag_compatibility();
+
+        let wire = serde_json::to_value(&runtime).unwrap();
+        assert_eq!(wire["structural_tag_mode"], "on");
+        assert_eq!(wire["structural_tag_scope"], "auto");
+        assert_eq!(wire["structural_tag_schema"], "strict");
+        assert_eq!(wire["structural_tag"]["scope"], "auto");
+        assert_eq!(wire["structural_tag"]["schema"], "strict");
     }
 
     // Env-touching tests use `temp_env` (snapshot + restore around the closure) and

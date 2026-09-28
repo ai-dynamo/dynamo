@@ -1117,6 +1117,7 @@ impl ModelDeploymentCard {
     pub(crate) fn for_mdc_wire(&self) -> Self {
         let mut card = self.clone();
         card.legacy_context_length = Some(self.effective_context_length());
+        card.runtime_config.normalize_structural_tag_compatibility();
         card
     }
 
@@ -3026,6 +3027,9 @@ mod tests {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    use crate::local_model::runtime_config::{
+        StructuralTagConfig, StructuralTagSchemaMode, StructuralTagScope,
+    };
 
     #[test]
     fn architectural_context_prefers_config_then_text_config_then_tokenizer() -> anyhow::Result<()>
@@ -3180,6 +3184,24 @@ mod ownership_tests {
         let wire_value: serde_json::Value =
             serde_json::from_str(&parsed.to_json().unwrap()).unwrap();
         assert_eq!(wire_value["context_length"], 8_192);
+    }
+
+    #[test]
+    fn structural_tag_wire_includes_fields_for_older_frontends() {
+        let mut card = ModelDeploymentCard::with_name_only("model");
+        card.runtime_config.structural_tag = Some(StructuralTagConfig {
+            scope: StructuralTagScope::Always,
+            schema: StructuralTagSchemaMode::Strict,
+            ..Default::default()
+        });
+
+        let wire: serde_json::Value = serde_json::from_str(&card.to_json().unwrap()).unwrap();
+        let runtime = &wire["runtime_config"];
+        assert_eq!(runtime["structural_tag_mode"], "on");
+        assert_eq!(runtime["structural_tag_scope"], "always");
+        assert_eq!(runtime["structural_tag_schema"], "strict");
+        assert_eq!(runtime["structural_tag"]["scope"], "always");
+        assert_eq!(runtime["structural_tag"]["schema"], "strict");
     }
 
     #[test]
