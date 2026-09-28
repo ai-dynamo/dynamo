@@ -119,6 +119,7 @@ impl KvDcRelay {
             publication_delay_ms,
             recovery_attempt_timeout_ms,
             expected_unique_blocks,
+            grpc_listen_address: None,
         };
 
         let mut transport = match bind {
