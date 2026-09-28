@@ -123,8 +123,8 @@ mode.
   one tokio runtime and thread pool.
 </ParamField>
 
-<ParamField path="--stagger-delay" type="float" default="-1 (auto)">
-  Delay between worker launches, in seconds. `0` disables; `-1` enables auto mode.
+<ParamField path="--stagger-delay" type="float" default="0">
+  Delay between worker launches, in seconds. `0` disables staggering (default); `-1` enables auto mode.
 </ParamField>
 
 ## Performance modeling

@@ -372,7 +372,7 @@ impl KvReplayRouter {
         self.scheduler.get_potential_loads(
             None,
             isl_tokens,
-            std::collections::HashMap::new(),
+            Default::default(),
             track_prefill_tokens,
         )
     }

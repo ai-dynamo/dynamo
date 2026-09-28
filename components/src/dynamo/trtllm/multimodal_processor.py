@@ -39,7 +39,10 @@ from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     video_decoder_missing,
 )
-from dynamo.common.multimodal.image_loader import ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    ImageLoader,
+    image_cache_scope_from_request,
+)
 from dynamo.common.multimodal.media_source import describe_media_source
 from dynamo.common.multimodal.nvdec_decoder import probe_video_codec, should_use_nvdec
 from dynamo.common.multimodal.video_loader import VideoLoader
@@ -163,7 +166,8 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer_factory(model_dir)
 
         self.image_loader = ImageLoader(
-            enable_frontend_decoding=enable_frontend_decoding
+            enable_frontend_decoding=enable_frontend_decoding,
+            max_bytes=self.max_file_size_bytes,
         )
 
         # Reuse the shared default so this preprocessor and the vLLM/SGLang
@@ -516,7 +520,8 @@ class MultimodalRequestProcessor:
                 if image_urls:
                     try:
                         pil_images = await self.image_loader.load_image_batch(
-                            image_urls
+                            image_urls,
+                            cache_scope=image_cache_scope_from_request(request),
                         )
                         if pil_images:
                             processed_mm_data["image"] = pil_images
@@ -588,7 +593,10 @@ class MultimodalRequestProcessor:
                     normalized_url = await validate_media_url(url, self._url_policy)
                     if urlparse(normalized_url).scheme in ("http", "https"):
                         content = await fetch_bytes(
-                            normalized_url, 30.0, policy=self._url_policy
+                            normalized_url,
+                            30.0,
+                            policy=self._url_policy,
+                            max_bytes=self.max_file_size_bytes,
                         )
                         # Dual decode path: H.264/H.265 via NVDEC (hardware); other
                         # codecs via the vendor cv2 loader. NVDEC failure falls back.
