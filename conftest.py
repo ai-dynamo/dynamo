@@ -90,6 +90,28 @@ def pytest_runtest_setup(item):
     _strip_bad_path()
 
 
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Tear down the parent's setup stack after a forked item.
+
+    pytest-forked runs setup and teardown only in the child process
+    (https://github.com/pytest-dev/pytest-forked, ``forked_run_report``), so
+    the parent never calls ``teardown_exact(nextitem)`` for a forked item.
+    Collectors the parent set up for earlier non-forked items, such as the
+    ``Package`` of a test directory whose last tests are forked, then stay on
+    the stack, and the first item of the next package fails setup with
+    "previous item was not torn down properly". Doing the teardown pytest
+    would have done keeps the parent's stack in step with ``nextitem``.
+    """
+    result = yield
+    if item.config.pluginmanager.has_plugin("pytest_forked") and (
+        item.config.getoption("forked", default=False)
+        or item.get_closest_marker("forked")
+    ):
+        item.session._setupstate.teardown_exact(nextitem)
+    return result
+
+
 def _is_unmanaged(item) -> bool:
     """True when the item lives in a demo or script tree, not a CI suite."""
     try:
