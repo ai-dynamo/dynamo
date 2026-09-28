@@ -1326,129 +1326,15 @@ mod tests {
         VllmSidecarEngine::from_discovered(args(mode), model).unwrap()
     }
 
-    sidecar_test!(
-        #[lane(pre_merge)]
-        #[test]
-        fn worker_omits_parsers_and_preserves_encode_options() {
-            for mode in ["aggregated", "prefill", "decode", "encode"] {
-                let (_, config) = worker(mode);
-                assert!(config.tool_call_parser.is_none());
-                assert!(config.reasoning_parser.is_none());
-                if mode == "encode" {
-                    assert_eq!(config.namespace, "test-namespace");
-                    assert_eq!(config.component, "encode");
-                    assert_eq!(config.endpoint, "tokens");
-                    assert_eq!(
-                        config.custom_jinja_template.as_deref(),
-                        Some(std::path::Path::new("local-template.jinja"))
-                    );
-                    assert_eq!(config.model_name, "model-source");
-                    assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
-                    assert!(config.enable_kv_routing);
-                    assert_eq!(config.disaggregation_mode.as_str(), "encode");
-                }
-            }
-        }
-    );
-
-    sidecar_test!(
-        #[lane(pre_merge)]
-        #[test]
-        fn unsupported_parsers_and_encode_models_are_rejected() {
-            for flag in ["--dyn-tool-call-parser", "--dyn-reasoning-parser"] {
-                let error = VllmSidecarEngine::from_args(Some(vec![
-                    "sidecar".into(),
-                    "--grpc-endpoint".into(),
-                    "127.0.0.1:12345".into(),
-                    flag.into(),
-                    "parser".into(),
-                ]))
-                .err()
-                .expect("unsupported parser");
-                assert_eq!(
-                    error.error_type(),
-                    dynamo_backend_common::ErrorType::Backend(
-                        dynamo_backend_common::BackendError::InvalidArgument
-                    )
-                );
-                assert!(error.to_string().contains("does not preserve"));
-            }
-            let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
-            let error = VllmSidecarEngine::from_discovered(args("encode"), model)
-                .err()
-                .expect("encode requires media");
-            assert!(error.to_string().contains("requires a multimodal engine"));
-        }
-    );
-
-    sidecar_test!(
-        #[lane(pre_merge)]
-        #[tokio::test]
-        async fn draft_updates_require_both_native_capabilities() {
-            for flags in [
-                None,
-                Some((false, false)),
-                Some((false, true)),
-                Some((true, false)),
-                Some((true, true)),
-            ] {
-                let mut server = server_info();
-                match flags {
-                    None => server.rl_capabilities = None,
-                    Some((transfer, draft)) => {
-                        let capabilities = server.rl_capabilities.as_mut().unwrap();
-                        capabilities.weight_transfer_enabled = transfer;
-                        capabilities.draft_weight_updates_enabled = draft;
-                    }
-                }
-                let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
-                let (engine, _) =
-                    VllmSidecarEngine::from_discovered(args("aggregated"), model).unwrap();
-                let supported = flags == Some((true, true));
-                assert_eq!(
-                    engine
-                        .supported_updates()
-                        .await
-                        .unwrap()
-                        .iter()
-                        .any(|name| name == "start_draft_weight_update"),
-                    supported,
-                    "capabilities: {flags:?}"
-                );
-                assert!(engine.client.get().is_none());
-                if !supported {
-                    assert_eq!(
-                        engine
-                            .engine_update(
-                                "start_draft_weight_update".into(),
-                                serde_json::json!({})
-                            )
-                            .await
-                            .unwrap(),
-                        serde_json::json!({
-                            "status": "error",
-                            "message": "unsupported engine update: start_draft_weight_update"
-                        }),
-                        "capabilities: {flags:?}"
-                    );
-                    assert!(engine.client.get().is_none());
-                }
-            }
-        }
-    );
-
-    sidecar_test!(
-        #[lane(pre_merge)]
-        #[test]
-        fn worker_options_and_model_identity_are_preserved() {
-            for (mode, component) in [
-                ("aggregated", "configured-component"),
-                ("prefill", "prefill"),
-                ("decode", "backend"),
-            ] {
-                let (_, config) = worker(mode);
+    #[test]
+    fn worker_omits_parsers_and_preserves_encode_options() {
+        for mode in ["aggregated", "prefill", "decode", "encode"] {
+            let (_, config) = worker(mode);
+            assert!(config.tool_call_parser.is_none());
+            assert!(config.reasoning_parser.is_none());
+            if mode == "encode" {
                 assert_eq!(config.namespace, "test-namespace");
-                assert_eq!(config.component, component);
+                assert_eq!(config.component, "encode");
                 assert_eq!(config.endpoint, "tokens");
                 assert_eq!(
                     config.custom_jinja_template.as_deref(),
@@ -1457,33 +1343,128 @@ mod tests {
                 assert_eq!(config.model_name, "model-source");
                 assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
                 assert!(config.enable_kv_routing);
-                assert_eq!(
-                    config.disaggregation_mode.as_str(),
-                    if mode == "aggregated" { "agg" } else { mode }
-                );
+                assert_eq!(config.disaggregation_mode.as_str(), "encode");
             }
         }
-    );
+    }
 
-    sidecar_test!(
-        #[lane(pre_merge)]
-        #[tokio::test]
-        async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
-            let (engine, _) = worker("aggregated");
-            let context =
-                GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
-            let error = engine
-                .generate(minimal_request(), context)
-                .await
-                .err()
-                .expect("unstarted engine");
+    #[test]
+    fn unsupported_parsers_and_encode_models_are_rejected() {
+        for flag in ["--dyn-tool-call-parser", "--dyn-reasoning-parser"] {
+            let error = VllmSidecarEngine::from_args(Some(vec![
+                "sidecar".into(),
+                "--grpc-endpoint".into(),
+                "127.0.0.1:12345".into(),
+                flag.into(),
+                "parser".into(),
+            ]))
+            .err()
+            .expect("unsupported parser");
             assert_eq!(
                 error.error_type(),
-                ErrorType::Backend(BackendError::EngineShutdown)
+                dynamo_backend_common::ErrorType::Backend(
+                    dynamo_backend_common::BackendError::InvalidArgument
+                )
             );
-            engine.cleanup().await.unwrap();
-            engine.cleanup().await.unwrap();
-            assert!(engine.cancel.is_cancelled());
+            assert!(error.to_string().contains("does not preserve"));
         }
-    );
+        let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
+        let error = VllmSidecarEngine::from_discovered(args("encode"), model)
+            .err()
+            .expect("encode requires media");
+        assert!(error.to_string().contains("requires a multimodal engine"));
+    }
+
+    #[tokio::test]
+    async fn draft_updates_require_both_native_capabilities() {
+        for flags in [
+            None,
+            Some((false, false)),
+            Some((false, true)),
+            Some((true, false)),
+            Some((true, true)),
+        ] {
+            let mut server = server_info();
+            match flags {
+                None => server.rl_capabilities = None,
+                Some((transfer, draft)) => {
+                    let capabilities = server.rl_capabilities.as_mut().unwrap();
+                    capabilities.weight_transfer_enabled = transfer;
+                    capabilities.draft_weight_updates_enabled = draft;
+                }
+            }
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let (engine, _) =
+                VllmSidecarEngine::from_discovered(args("aggregated"), model).unwrap();
+            let supported = flags == Some((true, true));
+            assert_eq!(
+                engine
+                    .supported_updates()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == "start_draft_weight_update"),
+                supported,
+                "capabilities: {flags:?}"
+            );
+            assert!(engine.client.get().is_none());
+            if !supported {
+                assert_eq!(
+                    engine
+                        .engine_update("start_draft_weight_update".into(), serde_json::json!({}))
+                        .await
+                        .unwrap(),
+                    serde_json::json!({
+                        "status": "error",
+                        "message": "unsupported engine update: start_draft_weight_update"
+                    }),
+                    "capabilities: {flags:?}"
+                );
+                assert!(engine.client.get().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn worker_options_and_model_identity_are_preserved() {
+        for (mode, component) in [
+            ("aggregated", "configured-component"),
+            ("prefill", "prefill"),
+            ("decode", "backend"),
+        ] {
+            let (_, config) = worker(mode);
+            assert_eq!(config.namespace, "test-namespace");
+            assert_eq!(config.component, component);
+            assert_eq!(config.endpoint, "tokens");
+            assert_eq!(
+                config.custom_jinja_template.as_deref(),
+                Some(std::path::Path::new("local-template.jinja"))
+            );
+            assert_eq!(config.model_name, "model-source");
+            assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
+            assert!(config.enable_kv_routing);
+            assert_eq!(
+                config.disaggregation_mode.as_str(),
+                if mode == "aggregated" { "agg" } else { mode }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unstarted_generation_fails_and_cleanup_is_idempotent() {
+        let (engine, _) = worker("aggregated");
+        let context = GenerateContext::new(dynamo_backend_common::testing::mock_context(), None);
+        let error = engine
+            .generate(minimal_request(), context)
+            .await
+            .err()
+            .expect("unstarted engine");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::EngineShutdown)
+        );
+        engine.cleanup().await.unwrap();
+        engine.cleanup().await.unwrap();
+        assert!(engine.cancel.is_cancelled());
+    }
 }

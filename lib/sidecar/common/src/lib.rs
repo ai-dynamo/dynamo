@@ -3,11 +3,6 @@
 
 //! Shared infrastructure for Rust sidecars.
 
-#[cfg(test)]
-#[macro_use]
-#[path = "../../testkit/src/lanes.rs"]
-mod test_lanes;
-
 mod args;
 mod endpoint;
 mod error;

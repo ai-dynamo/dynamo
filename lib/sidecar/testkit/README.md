@@ -81,9 +81,8 @@ ordinary `#[cfg(test)]` child modules beside their production owners, keeping
 private converters accessible. Small tests are inline; the larger transport and
 vLLM conversion modules use adjacent test files. Inputs, production calls and
 assertions live together, with no unit source-group macros or backend adapters.
-The only retained unit macro, `sidecar_test!` in `src/lanes.rs`, records each
-case's CI lane using format-compatible macro syntax. Native builders, including
-`minimal_request()`, live in `vllm/src/test_fixtures.rs` under `#[cfg(test)]`,
+Tests use ordinary `#[test]` or `#[tokio::test]` attributes. Native builders,
+including `minimal_request()`, live in `vllm/src/test_fixtures.rs` under `#[cfg(test)]`,
 reused by vLLM units and its retained fake-server tests. Shared integration
 helpers remain in testkit; no shared unit-testing layer is introduced.
 
@@ -231,34 +230,26 @@ vLLM model, worker, JSON and LoRA units use inline `tests` modules. Conversion
 cases live in `vllm/src/convert/{request_tests,response_tests}.rs`, declared by
 matching module names in `convert.rs`. The former `tests/unit/` tree is removed.
 
-`src/lanes.rs` retains the small lane macro, included by both crate roots:
+Tests use ordinary Rust test attributes, with no lane markers or unit macros:
 
 ```rust
-sidecar_test!(
-    #[lane(pre_merge)]
-    #[test]
-    fn preserves_request_fields() {
-        // Scenario assertions.
-    }
-);
+#[test]
+fn preserves_request_fields() {
+    // Scenario assertions.
+}
 ```
 
-This syntax allows rustfmt to format test bodies. Every marked unit declares
-`pre_merge`, `post_merge` or `nightly`; later lanes include earlier lanes. All
-current units are pre-merge. Run them directly with Cargo:
+Async tests use `#[tokio::test]`. Run all common/vLLM library tests, including
+the broader fake-server suite, directly with Cargo:
 
 ```sh
-cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
-  --features dynamo-sidecar-common/tonic-v14 --lib __sidecar_lane_
+cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar --lib
 ```
 
-For pre-merge, add `-- --skip ::__sidecar_lane_post_merge
---skip ::__sidecar_lane_nightly`; post-merge excludes only
-`::__sidecar_lane_nightly`. CI runs unrelated workspace packages separately so
-custom harnesses do not receive libtest flags. Ordinary unmarked tests still
-execute in the broad Cargo suite. `run.py` and its manifest/export modes are
-removed. There is no additional CPU-container run; nightly Rust coverage
-continues to execute all lanes.
+CI uses the ordinary `cargo test --locked --all-targets` command in each Rust
+workspace. All units run on pull requests and pushes; nightly Rust coverage
+also runs them. There is no package split, lane filtering or additional
+CPU-container run. `run.py` and its manifest/export modes are removed.
 
 Native fixtures and `minimal_request()` now belong to
 `vllm/src/test_fixtures.rs`; the vLLM testkit dev-dependency is removed. Shared
@@ -270,6 +261,6 @@ library tests, eight conformance cases and both four-case Mocker suites passed.
 All 81 units also passed in a CPU container; formatting, Clippy and pre-commit
 passed. These are historical results, not validation of the current cleanup.
 [UNITS.md](UNITS.md) records the source layout, assertion mapping, direct Cargo
-commands and lane semantics. [COVERAGE.md](COVERAGE.md) records retained
+commands. [COVERAGE.md](COVERAGE.md) records retained
 integration coverage and revision-specific execution;
 [DEVIATIONS.md](DEVIATIONS.md) records departures from the read-only DEP.

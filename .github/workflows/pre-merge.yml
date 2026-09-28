@@ -383,8 +383,6 @@ jobs:
   rust-tests:
     needs: changed-files
     if: needs.changed-files.outputs.rust == 'true'
-    env:
-      SIDECAR_TEST_LANE: ${{ github.event_name == 'pull_request' && 'pre-merge' || 'post-merge' }}
     runs-on:
       group: Fastchecker
     strategy:
@@ -436,21 +434,7 @@ jobs:
     - name: Run Unit Tests
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
-      shell: bash
-      run: |
-        if [[ '${{ matrix.dir }}' == '.' ]]; then
-          cargo test --locked --workspace --all-targets \
-            --exclude dynamo-sidecar-common --exclude dynamo-vllm-sidecar
-          lane_filters=(--skip ::__sidecar_lane_nightly)
-          if [[ "$SIDECAR_TEST_LANE" == 'pre-merge' ]]; then
-            lane_filters+=(--skip ::__sidecar_lane_post_merge)
-          fi
-          cargo test --locked --all-targets \
-            -p dynamo-sidecar-common -p dynamo-vllm-sidecar \
-            --features dynamo-sidecar-common/tonic-v14 -- "${lane_filters[@]}"
-        else
-          cargo test --locked --all-targets
-        fi
+      run: cargo test --locked --all-targets
     - name: Check isolated kv-router feature builds
       if: matrix.dir == '.'
       working-directory: ${{ matrix.dir }}

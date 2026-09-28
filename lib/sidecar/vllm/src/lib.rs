@@ -3,11 +3,6 @@
 
 //! Dynamo sidecar for vLLM's released native gRPC API.
 
-#[cfg(test)]
-#[macro_use]
-#[path = "../../testkit/src/lanes.rs"]
-mod test_support;
-
 mod args;
 mod client;
 mod convert;

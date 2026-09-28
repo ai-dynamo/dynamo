@@ -18,7 +18,8 @@ The foundation is refreshed onto main
 
 The foundation's four families remain instantiated for both vLLM and SGLang.
 This alternative places unit cases beside their production owners: 11 common
-and 71 vLLM cases (82 total), all pre-merge. The existing LoRA lock-registry
+and 71 vLLM cases (82 total), all ordinary Rust tests without lane markers.
+They run in pre-merge and normal nightly coverage. The existing LoRA lock-registry
 test moves from `vllm/src/tests.rs` into `lora.rs`; all of its assertions remain,
 and the broader file retains 37 tests. The ten formerly shared vLLM scenarios
 remain ordinary local cases. No shared unit layer is added. SGLang units remain
@@ -74,7 +75,7 @@ exported-artifact mount. Common/vLLM/testkit Clippy passed with
 `--all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`, pre-commit on
 all task files (including Black/Ruff), and CODEOWNERS coverage for new paths
 passed. Independent review found no assertion loss across the 81 cases.
-These historical results do not validate the current runner/fixture cleanup or
+These historical results do not validate the current lane-marker removal or
 claim current-head GitHub CI, a full Dynamo workspace run, or native-engine/GPU execution.
 
 The following successful results were recorded at the original PR's
@@ -92,7 +93,7 @@ Five temporary runner checks passed, including compiled lane filtering and
 workspace selection with custom/legacy targets. The permanent runner self-test
 file and its CI invocation are removed. These checks do not claim GitHub CI or
 a full Dynamo workspace run. [UNITS.md](UNITS.md) owns the detailed results,
-direct Cargo commands, lane semantics and assertion mapping.
+direct Cargo commands and assertion mapping.
 
 The previous `0857c0722e` revision passed the same 81 units with its former
 11 common / 28 shared / 42 native split, as well as the retained suites. That
