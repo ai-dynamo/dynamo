@@ -159,7 +159,7 @@ The KVIndexer supports two backend implementations, selected via `--router-event
 
 - **Single-threaded RadixTree** (`--router-event-threads 1`): Events are processed in a dedicated single-threaded tokio runtime via channel-based dispatch. Also supports TTL retention and experimental per-rank capacity-bounded LRU retention for `--no-router-kv-events` approximate mode.
 
-- **ConcurrentRadixTree** (default, `--router-event-threads N` where N > 1): A thread-safe radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
+- **ConcurrentRadixTreeCompressed** (default, `--router-event-threads N` where N > 1): A thread-safe compressed radix tree with a pool of N worker threads for event processing and approximate routing-decision writes (default: 4). Uses sticky worker-rank routing so request acquire, output materialization, release, capacity update, and reset operations share one FIFO. Read operations (`find_matches`) execute concurrently with writes.
 
 ### Inter-Router Communication
 

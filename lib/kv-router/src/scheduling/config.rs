@@ -857,7 +857,7 @@ pub struct KvRouterConfig {
     pub policy_config_cache: OnceLock<super::policy_config::RouterPolicyConfig>,
 
     /// Number of KV indexer worker threads.
-    /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
+    /// When > 1, uses ConcurrentRadixTreeCompressed with a thread pool for event-driven
     /// and approximate routing writes. Default: 4.
     pub router_event_threads: u32,
 
