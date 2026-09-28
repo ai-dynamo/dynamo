@@ -109,6 +109,37 @@ python -m dynamo.frontend --tokenizer basetenkenizer
 python -m dynamo.frontend --tokenizer basetenkenizer --no-tokenizer-fallback
 ```
 
+## Tokenizer Cache
+
+The L1 prefix cache is enabled by default. Dynamo selects a byte budget for each
+tokenizer cache when it creates the cache:
+
+| Effective memory | Default cache budget |
+|---|---|
+| Greater than 64 GiB | 8 GiB (8,589,934,592 bytes) |
+| 64 GiB or less | 64 MiB (67,108,864 bytes) |
+
+Effective memory is the smaller of total host RAM and the detected cgroup memory
+limit. This includes container and pod limits exposed through standard Linux
+cgroup v1 or v2 mounts, including parent limits. Dynamo uses host RAM if no cgroup
+information is returned, and 64 MiB if host RAM cannot be determined. These are
+binary units: 1 GiB is 1,073,741,824 bytes. The budget applies to each cache, not
+the whole process, and does not change when memory limits change later.
+
+Set `DYN_TOKENIZER_CACHE_BYTES` to override the budget in bytes. Valid values,
+including `0`, take precedence over memory detection and are not clamped to the
+detected limit. An invalid value produces a warning and uses the dynamic default.
+For example, to set an 8 GiB budget explicitly:
+
+```bash
+export DYN_TOKENIZER_CACHE_BYTES=8589934592
+```
+
+Set `DYN_TOKENIZER_CACHE=0` to disable the cache. Set
+`DYN_TOKENIZER_CACHE_EXTEND=0` to disable partial-hit extension. See the
+[frontend configuration reference](../../../../reference/components/frontend-configuration.mdx#tokenizer)
+for these environment variables.
+
 ## Dynamo Frontend Behavior
 
 When a non-default backend is selected:

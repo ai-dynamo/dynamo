@@ -33,7 +33,40 @@ use tokenizers::Tokenizer as HfTokenizer;
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
-const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const SMALL_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn tokenizer_cache_bytes_for_memory(host_bytes: u64, cgroup_bytes: Option<u64>) -> usize {
+    let memory_bytes = cgroup_bytes.map_or(host_bytes, |limit| host_bytes.min(limit));
+    if memory_bytes > 64 * 1024 * 1024 * 1024 {
+        8 * 1024 * 1024 * 1024
+    } else {
+        SMALL_TOKENIZER_CACHE_BYTES
+    }
+}
+
+fn default_tokenizer_cache_bytes() -> usize {
+    use sysinfo::{MemoryRefreshKind, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut system = System::new();
+    system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+    let process_limits = sysinfo::get_current_pid().ok().and_then(|pid| {
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+        system
+            .process(pid)
+            .and_then(|process| process.cgroup_limits())
+    });
+    // The root query also covers containers that expose their limit at the mount root.
+    let cgroup_bytes = process_limits
+        .or_else(|| system.cgroup_limits())
+        .map(|limits| limits.total_memory);
+
+    // sysinfo returns zero if host memory is unavailable, selecting the small budget.
+    tokenizer_cache_bytes_for_memory(system.total_memory(), cgroup_bytes)
+}
 
 fn append_runtime_contract_checksum(
     bytes: &mut Vec<u8>,
@@ -99,22 +132,23 @@ fn tokenizer_cache_enabled(value: Option<&str>) -> bool {
     !matches!(value, Some("0"))
 }
 
-fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
+fn tokenizer_cache_bytes(value: Option<&str>, default: impl FnOnce() -> usize) -> usize {
     match value {
         Some(value) => match value.parse::<usize>() {
             Ok(value) => value,
             Err(error) => {
+                let default = default();
                 tracing::warn!(
                     env_var = "DYN_TOKENIZER_CACHE_BYTES",
                     value,
-                    default = DEFAULT_TOKENIZER_CACHE_BYTES,
+                    default,
                     %error,
                     "Failed to parse tokenizer cache byte budget; using default"
                 );
-                DEFAULT_TOKENIZER_CACHE_BYTES
+                default
             }
         },
-        None => DEFAULT_TOKENIZER_CACHE_BYTES,
+        None => default(),
     }
 }
 
@@ -1291,7 +1325,10 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — byte budget per L1 cache. Defaults to 8 GiB
+    ///   when the smaller of host RAM and the detected cgroup limit exceeds 64 GiB,
+    ///   otherwise 64 MiB. Without cgroup information, uses host RAM; without host
+    ///   memory information, uses 64 MiB. Selected at cache creation, not resized later.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1322,8 +1359,10 @@ impl ModelDeploymentCard {
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
+        let cache_bytes = tokenizer_cache_bytes(
+            std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref(),
+            default_tokenizer_cache_bytes,
+        );
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -2488,16 +2527,40 @@ mod tests {
     }
 
     #[test]
-    fn tokenizer_cache_bytes_defaults_to_64_mib_and_accepts_valid_overrides() {
-        assert_eq!(
-            super::tokenizer_cache_bytes(None),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
-        assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
-        assert_eq!(
-            super::tokenizer_cache_bytes(Some("invalid")),
-            super::DEFAULT_TOKENIZER_CACHE_BYTES
-        );
+    fn tokenizer_cache_bytes_uses_memory_limits_and_preserves_overrides() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let small = super::SMALL_TOKENIZER_CACHE_BYTES;
+        let large = 8 * GIB as usize;
+        for (host, cgroup, expected) in [
+            (64 * GIB - 1, None, small),
+            (64 * GIB, None, small),
+            (64 * GIB + 1, None, large),
+            (128 * GIB, Some(16 * GIB), small),
+            (128 * GIB, Some(64 * GIB), small),
+            (128 * GIB, Some(64 * GIB + 1), large),
+            (32 * GIB, Some(128 * GIB), small),
+            (128 * GIB, Some(u64::MAX), large),
+            (0, None, small),
+            (0, Some(128 * GIB), small),
+        ] {
+            for value in [None, Some("invalid")] {
+                assert_eq!(
+                    super::tokenizer_cache_bytes(value, || {
+                        super::tokenizer_cache_bytes_for_memory(host, cgroup)
+                    }),
+                    expected,
+                    "host={host}, cgroup={cgroup:?}, override={value:?}",
+                );
+            }
+        }
+        for (value, expected) in [("0", 0), ("1024", 1024), ("8589934592", large)] {
+            assert_eq!(
+                super::tokenizer_cache_bytes(Some(value), || panic!(
+                    "override must skip detection"
+                )),
+                expected,
+            );
+        }
     }
 
     #[test]

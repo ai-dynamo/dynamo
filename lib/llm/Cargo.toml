@@ -137,6 +137,7 @@ bytemuck = "1.22"
 derive-getters = "0.5"
 offset-allocator = "0.2"
 rayon = "1"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 bincode = { version = "2.0.1", features = ["serde", "derive"] }
 
 # lora

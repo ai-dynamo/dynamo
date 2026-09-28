@@ -615,6 +615,34 @@ curl -s localhost:8000/metrics | grep dynamo_frontend_inter_token_latency_second
   Environment variable: `DYN_TOKENIZER_FALLBACK`
 </ParamField>
 
+<ParamField path="DYN_TOKENIZER_CACHE_BYTES" type="integer" default="dynamic">
+  Environment variable only. Byte budget per tokenizer cache, selected when the
+  cache is created. Defaults to **8 GiB** (8,589,934,592 bytes) when effective memory
+  is greater than **64 GiB**, otherwise **64 MiB** (67,108,864 bytes).
+
+  Effective memory is the smaller of total host RAM and the detected container or
+  pod cgroup limit, including parent limits. Detection supports standard Linux
+  cgroup v1/v2 mounts. If no cgroup information is returned, Dynamo uses host RAM.
+  If host RAM cannot be determined, the default is 64 MiB. These are binary units;
+  1 GiB is 1,073,741,824 bytes. Existing caches do not resize when limits change.
+
+  A valid byte value, including `0`, overrides detection without clamping. Invalid
+  values produce a warning and use the dynamic default. For an explicit 8 GiB
+  budget, set `DYN_TOKENIZER_CACHE_BYTES=8589934592`. The budget applies to each
+  cache, not the whole process.
+</ParamField>
+
+<ParamField path="DYN_TOKENIZER_CACHE" type="string" default="1">
+  Environment variable only. Set to `0` to disable the L1 prefix cache. Any other
+  value keeps the cache enabled.
+</ParamField>
+
+<ParamField path="DYN_TOKENIZER_CACHE_EXTEND" type="string" default="1">
+  Environment variable only. Set to `0` to disable partial-hit extension. By
+  default, a partial cache hit also caches the new suffix. Applies only when the
+  cache is enabled.
+</ParamField>
+
 ## Experimental
 
 ### Python route extensions
