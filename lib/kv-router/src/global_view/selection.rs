@@ -32,6 +32,7 @@ pub enum LoadBasis {
 #[derive(Clone, Debug)]
 pub struct PoolDecision {
     pub pool_id: PoolId,
+    pub region: String,
     pub frontend_endpoint: String,
     pub basis: LoadBasis,
     pub observed_requests: Option<u64>,
@@ -126,6 +127,7 @@ impl LoadPoolSelector {
             };
             let decision = PoolDecision {
                 pool_id: pool.pool_id.clone(),
+                region: pool.descriptors.location.region.clone(),
                 frontend_endpoint: pool.descriptors.frontend_endpoint.clone().unwrap(),
                 basis: if observed.is_some() {
                     LoadBasis::Observed
@@ -278,6 +280,7 @@ mod tests {
         let selector = LoadPoolSelector::new(repo, freshness());
         let decision = selector.select("model", 100).unwrap();
         assert_eq!(decision.pool_id, expected);
+        assert_eq!(decision.region, "a");
         assert_eq!(decision.observed_requests, Some(5));
         assert_eq!(decision.basis, LoadBasis::Observed);
     }
