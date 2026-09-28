@@ -117,9 +117,8 @@ Gateway topology.
 
 <ParamField path="DYN_ROUTER_REPLICA_SYNC" type="boolean" default="false">
   Publishes and consumes best-effort active-sequence state across EPP replicas through the Dynamo event
-  plane. It is off by default, matching the Frontend-hosted router, and is set through `podTemplate`
-  env. It has no peer to synchronize with at one replica, and the deprecated Go EPP cannot be
-  replicated at all. Set this field to `true` when enabling multiple EPP replicas. See
+  plane. Has no effect at one replica, and the deprecated Go EPP cannot be replicated. Set it to `true`
+  when running more than one EPP replica. See
   [EPP Replication and Routing Accuracy](#epp-replication-and-routing-accuracy).
 </ParamField>
 
@@ -140,13 +139,21 @@ For the full shared configuration surface and tuning guidance, see
 
 ## EPP Replication and Routing Accuracy
 
-Set `DYN_ROUTER_REPLICA_SYNC` to `true` when running more than one EPP replica. Without it, each
-replica sees only the load it routed itself, and load balancing across workers suffers.
+Set `DYN_ROUTER_REPLICA_SYNC` to `true` when running more than one EPP replica.
 
-The EPP embeds the same KV router as the Frontend and reads the same `DYN_ROUTER_*` settings, so
-replicated EPPs keep prefix-cache and active-load state the same way replicated Frontends do. See
-[Router Operations](../../developer-guide/knowledge-base/modular-components/router/router-operations.md)
-for how that state behaves across replicas and what `DYN_ROUTER_REPLICA_SYNC` synchronizes.
+The EPP embeds the same KV router as the Frontend, so replicated EPPs behave like replicated
+Frontends:
+
+- Prefix-cache state is the same on every replica. Each replica consumes worker KV events directly,
+  so replication does not affect cache-overlap scoring.
+- Active-load state is where replicas differ. Without `DYN_ROUTER_REPLICA_SYNC`, each replica sees
+  only the requests it routed. With it, replicas share that state on a best-effort basis and can
+  briefly disagree, for example when two replicas pick the same worker at the same time.
+- Router queueing, when enabled, is per replica. A replica does not see requests queued on its
+  peers, and its queued requests are lost if it stops.
+
+For which active-load events are synchronized and which stay local, see
+[Active Block Replica Synchronization](../../developer-guide/knowledge-base/modular-components/router/router-operations.md#active-block-replica-synchronization).
 
 ## Generated Resource Contract
 
