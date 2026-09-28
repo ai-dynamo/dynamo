@@ -235,16 +235,10 @@ jobs:
         with:
           aws_default_region: ${{ vars.AWS_DEFAULT_REGION }}
           ecr_registry: ${{ vars.ECR_REGISTRY }}
+          ecr_registry_east: ${{ inputs.push_image && env.ECR_REGISTRY_EAST || '' }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: East ECR Login
-        if: inputs.push_image
-        shell: bash
-        run: |
-          set -euo pipefail
-          aws ecr get-login-password --region us-east-1 | \
-            docker login --username AWS --password-stdin "${ECR_REGISTRY_EAST}"
       - name: Calculate target tag
         id: calculate-target-tag
         shell: bash
