@@ -327,4 +327,3 @@ def test_unseeded_rank_reports_empty_to_the_kv_router(monkeypatch):
         assert (
             _gauge_value(registry, "total_blocks", dp_rank) == per_rank_blocks
         ), f"dp_rank={dp_rank} must report its real capacity, not the default 1"
-
