@@ -223,6 +223,7 @@ func TestDGDPredicate(t *testing.T) {
 	restart := dgd.DeepCopy()
 	restart.Spec.Restart = &v1beta1.Restart{ID: "restart"}
 	selectedRestart := restart.DeepCopy()
+	restart.Generation++
 	selectedRestart.Status.Restart = &v1beta1.RestartStatus{ObservedID: "restart", Phase: v1beta1.RestartPhaseRestarting, InProgress: []string{"lpx"}}
 	replacement := dgd.DeepCopy()
 	replacement.UID = "replacement"

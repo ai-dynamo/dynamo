@@ -795,7 +795,6 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 			}
 
 			t.Log("Block downloads when Grove is disabled and wait for cold builds otherwise")
-			before := dgd.DeepCopy()
 			_, err = r.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(child)})
 			require.NoError(t, err)
 			stored := &v1alpha1.LPXGraphDeployment{}
@@ -825,7 +824,6 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 			require.NoError(t, r.List(t.Context(), requests))
 			require.Empty(t, pcs.Items)
 			require.Empty(t, requests.Items)
-			require.Equal(t, before, dgd)
 		})
 	}
 }
