@@ -4,7 +4,8 @@
 //! Basic model admission for pool selection. Cost ranking is a separate step.
 
 use super::state::{
-    FreshnessPolicy, PoolState, PoolStateRepository, ServingReadiness, SignalState, SignalStatus,
+    FreshnessPolicy, PoolRole, PoolState, PoolStateRepository, ServingReadiness, SignalState,
+    SignalStatus,
 };
 
 fn usable(status: &SignalStatus) -> bool {
@@ -25,18 +26,37 @@ pub fn eligible_pools(
     repository
         .list(now_unix_ms, freshness)
         .into_iter()
-        .filter(|pool| {
-            usable(&pool.signal_status.catalog)
-                && usable(&pool.signal_status.readiness)
-                && pool.descriptors.models.iter().any(|name| name == model)
-                && pool.descriptors.model_readiness.get(model) == Some(&ServingReadiness::Ready)
-                && pool
-                    .descriptors
-                    .frontend_endpoint
-                    .as_deref()
-                    .is_some_and(|endpoint| !endpoint.is_empty())
-        })
+        .filter(|pool| eligible_for_model(pool, model))
         .collect()
+}
+
+fn eligible_for_model(pool: &PoolState, model: &str) -> bool {
+    usable(&pool.signal_status.catalog)
+        && usable(&pool.signal_status.readiness)
+        && pool.descriptors.models.iter().any(|name| name == model)
+        && pool.descriptors.model_readiness.get(model) == Some(&ServingReadiness::Ready)
+        && pool
+            .descriptors
+            .frontend_endpoint
+            .as_deref()
+            .is_some_and(|endpoint| !endpoint.is_empty())
+}
+
+/// Readiness for the first aggregated router. Stale load and KV signals do
+/// not make a ready, cataloged pool unavailable to inference.
+pub fn has_ready_aggregated_pool(
+    repository: &dyn PoolStateRepository,
+    now_unix_ms: u64,
+    freshness: &FreshnessPolicy,
+) -> bool {
+    repository.list(now_unix_ms, freshness).iter().any(|pool| {
+        pool.descriptors.roles.contains(&PoolRole::Aggregated)
+            && pool
+                .descriptors
+                .models
+                .iter()
+                .any(|model| eligible_for_model(pool, model))
+    })
 }
 
 #[cfg(test)]
@@ -110,6 +130,8 @@ mod tests {
         assert_eq!(pools[0].descriptors.site_id, "ohio");
         assert_eq!(pools[0].load.kv_usage, None);
         assert_eq!(pools[0].signal_status.kv_usage.state, SignalState::Stale);
+        assert!(has_ready_aggregated_pool(&repo, 1_600, &freshness));
         assert!(eligible_pools(&repo, "other", 1_600, &freshness).is_empty());
+        assert!(!has_ready_aggregated_pool(&repo, 2_100, &freshness));
     }
 }

@@ -5,20 +5,43 @@
 
 use std::future::IntoFuture;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
-use dynamo_kv_router::global_view::state::FreshnessPolicy;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::get;
+use dynamo_kv_router::global_view::eligibility::has_ready_aggregated_pool;
+use dynamo_kv_router::global_view::state::{FreshnessPolicy, PoolStateRepository};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::http_forward::GlobalRouterHttp;
 use crate::kv_dc_relay::global_view_consumer::GlobalViewRuntime;
 
+struct ReadinessState {
+    repository: Arc<dyn PoolStateRepository>,
+    freshness: FreshnessPolicy,
+}
+
+async fn readyz(State(state): State<Arc<ReadinessState>>) -> StatusCode {
+    let now_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok());
+    if now_unix_ms.is_some_and(|now| {
+        has_ready_aggregated_pool(state.repository.as_ref(), now, &state.freshness)
+    }) {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
 pub struct GlobalRouterService {
     view: Arc<GlobalViewRuntime>,
     forwarder: Arc<GlobalRouterHttp>,
-    #[cfg(feature = "global-view-diagnostics")]
     freshness: FreshnessPolicy,
 }
 
@@ -31,7 +54,6 @@ impl GlobalRouterService {
         Ok(Self {
             view,
             forwarder,
-            #[cfg(feature = "global-view-diagnostics")]
             freshness,
         })
     }
@@ -39,7 +61,15 @@ impl GlobalRouterService {
     /// The same listener serves routed inference and, when enabled, read-only
     /// Global View inspection. Routing reads the repository directly.
     pub fn router(&self) -> Router {
-        let routes = self.forwarder.clone().router();
+        let readiness = Arc::new(ReadinessState {
+            repository: self.view.repository(),
+            freshness: self.freshness,
+        });
+        let routes = self.forwarder.clone().router().merge(
+            Router::new()
+                .route("/readyz", get(readyz))
+                .with_state(readiness),
+        );
         #[cfg(feature = "global-view-diagnostics")]
         let routes = routes.merge(self.view.diagnostics_router(self.freshness));
         routes
@@ -153,6 +183,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(pools.status(), reqwest::StatusCode::OK);
+        let readiness = client
+            .get(format!("http://{address}/readyz"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(readiness.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
         let inference = client
             .post(format!("http://{address}/v1/completions"))
             .body(r#"{"model":"model","prompt":"hi"}"#)
