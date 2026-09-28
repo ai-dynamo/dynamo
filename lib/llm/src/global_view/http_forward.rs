@@ -83,25 +83,12 @@ impl GlobalRouterHttp {
                 "no ready pool serves the requested model",
             );
         };
-        let mut endpoint = match reqwest::Url::parse(&decision.frontend_endpoint) {
-            Ok(endpoint)
-                if matches!(endpoint.scheme(), "http" | "https")
-                    && endpoint.host().is_some()
-                    && endpoint.path() == "/"
-                    && endpoint.query().is_none()
-                    && endpoint.fragment().is_none()
-                    && endpoint.username().is_empty()
-                    && endpoint.password().is_none() =>
-            {
-                endpoint
-            }
-            _ => {
-                tracing::error!(pool_id = %decision.pool_id, "pool has invalid private Frontend URL");
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    "selected pool has an invalid Frontend URL",
-                );
-            }
+        let Some(mut endpoint) = parse_private_frontend_base(&decision.frontend_endpoint) else {
+            tracing::error!(pool_id = %decision.pool_id, "pool has invalid private Frontend URL");
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "selected pool has an invalid Frontend URL",
+            );
         };
         endpoint.set_path(path);
         tracing::info!(
@@ -169,6 +156,20 @@ async fn completions(
     body: Body,
 ) -> Response {
     router.forward("/v1/completions", headers, body).await
+}
+
+/// Validate the configured local Frontend base URL before a request is sent.
+/// Private reachability is enforced by deployment networking, not by DNS text.
+pub(crate) fn parse_private_frontend_base(raw: &str) -> Option<reqwest::Url> {
+    let endpoint = reqwest::Url::parse(raw).ok()?;
+    (matches!(endpoint.scheme(), "http" | "https")
+        && endpoint.host().is_some()
+        && endpoint.path() == "/"
+        && endpoint.query().is_none()
+        && endpoint.fragment().is_none()
+        && endpoint.username().is_empty()
+        && endpoint.password().is_none())
+    .then_some(endpoint)
 }
 
 fn error(status: StatusCode, message: &'static str) -> Response {
