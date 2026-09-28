@@ -26,13 +26,30 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind Global Router listener at {address}"))?;
     tracing::info!(%address, "Global Router listening");
     let cancel = CancellationToken::new();
-    let signal_cancel = cancel.clone();
-    let signal_task = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            signal_cancel.cancel();
+    let run = service.run(listener, cancel.clone());
+    tokio::pin!(run);
+    tokio::select! {
+        result = &mut run => result,
+        signal = shutdown_signal() => {
+            signal?;
+            cancel.cancel();
+            run.await
         }
-    });
-    let result = service.run(listener, cancel).await;
-    signal_task.abort();
-    result
+    }
+}
+
+async fn shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = signal(SignalKind::terminate()).context("register SIGTERM handler")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("wait for Ctrl-C")?,
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.context("wait for Ctrl-C")?;
+    Ok(())
 }

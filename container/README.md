@@ -586,6 +586,12 @@ Build the CPU-only Rust router from this source revision:
 docker build -f container/Dockerfile.global-router-poc -t global-router-poc:local .
 ```
 
+Validate the packaged server and graceful container shutdown locally:
+
+```bash
+container/validate-global-router-poc.sh global-router-poc:local
+```
+
 Run it with a mounted JSON configuration file as its only argument. The image runs
 as UID 10001, so the mounted file must be readable by that user (a Kubernetes
 ConfigMap with default mode 0644 works). Set `listen` to `0.0.0.0:8080` in the
