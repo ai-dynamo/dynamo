@@ -1798,6 +1798,13 @@ def _test_router_threshold_none_disables_rejection(
         )
 
 
+# Reveal rounds allowed per ZMQ replay phase. Each extra round only re-triggers
+# gap detection + replay, so a real replay bug still fails every round.
+MAX_REVEAL_ROUNDS = 3
+# About 3 s of 0.2 s polls per reveal round.
+REVEAL_ROUND_POLL_ATTEMPTS = 15
+
+
 async def _zmq_replay_cycle(
     phase: int,
     router,
@@ -1807,8 +1814,15 @@ async def _zmq_replay_cycle(
     engine_workers,
     send_requests_to_router,
     model_name: str,
+    assert_standalone_matches,
 ):
-    """Pause indexer listeners, create gaps, then force each stream to reveal them."""
+    """Pause indexer listeners, create gaps, then force each stream to reveal them.
+
+    A resumed listener's SUB socket may still be joining the worker's PUB socket
+    when the first reveal batch is published, and ZMQ drops that batch. The stream
+    then sees no later batch, so the gap is never detected. Reveal again until the
+    standalone indexer matches the router, up to MAX_REVEAL_ROUNDS.
+    """
     await asyncio.sleep(1)
     worker_ids = list(engine_workers.worker_id_to_zmq_ports.keys())
     dp_size = getattr(engine_workers, "dp_size", None) or 1
@@ -1847,36 +1861,56 @@ async def _zmq_replay_cycle(
     replay_targets = [
         (wid, dp_rank) for wid in worker_ids for dp_rank in range(dp_size)
     ]
-    logger.info(
-        "Sending %s targeted requests after resume (triggers gap detection + replay)",
-        len(replay_targets),
-    )
-    post_resume_tasks = []
-    for wid, dp_rank in replay_targets:
-        request_tokens = [random.randint(1, 10000) for _ in range(30)]
-        post_resume_tasks.append(
-            asyncio.create_task(
-                send_request_via_python_kv_router(
-                    kv_python_router=router,
-                    model_name=model_name,
-                    token_ids=request_tokens,
-                    stop_conditions={
-                        "ignore_eos": True,
-                        "max_tokens": 10,
-                    },
-                    worker_id=wid,
-                    dp_rank=dp_rank,
+    last_error: Exception | None = None
+    for reveal_round in range(1, MAX_REVEAL_ROUNDS + 1):
+        logger.info(
+            "Sending %s targeted requests after resume (triggers gap detection + replay), round %s",
+            len(replay_targets),
+            reveal_round,
+        )
+        post_resume_tasks = []
+        for wid, dp_rank in replay_targets:
+            request_tokens = [random.randint(1, 10000) for _ in range(30)]
+            post_resume_tasks.append(
+                asyncio.create_task(
+                    send_request_via_python_kv_router(
+                        kv_python_router=router,
+                        model_name=model_name,
+                        token_ids=request_tokens,
+                        stop_conditions={
+                            "ignore_eos": True,
+                            "max_tokens": 10,
+                        },
+                        worker_id=wid,
+                        dp_rank=dp_rank,
+                    )
                 )
             )
+
+        post_resume_results = await asyncio.gather(*post_resume_tasks)
+        successful_post = sum(1 for result in post_resume_results if result)
+        assert successful_post == len(replay_targets), (
+            f"Expected {len(replay_targets)} targeted post-resume requests, "
+            f"got {successful_post}"
         )
 
-    post_resume_results = await asyncio.gather(*post_resume_tasks)
-    successful_post = sum(1 for result in post_resume_results if result)
-    assert successful_post == len(replay_targets), (
-        f"Expected {len(replay_targets)} targeted post-resume requests, "
-        f"got {successful_post}"
-    )
-    await asyncio.sleep(2)
+        for _ in range(REVEAL_ROUND_POLL_ATTEMPTS):
+            try:
+                await assert_standalone_matches(router, router_name)
+                return
+            except (AssertionError, aiohttp.ClientError) as exc:
+                last_error = exc
+                await asyncio.sleep(0.2)
+
+        logger.warning(
+            "Standalone indexer does not match %s after reveal round %s: %s",
+            router_name,
+            reveal_round,
+            last_error,
+        )
+
+    assert last_error is not None
+    raise last_error
 
 
 def _test_router_indexers_sync(
@@ -1971,6 +2005,18 @@ def _test_router_indexers_sync(
                     isinstance(v, dict) and "events" in v
                 ), f"{indexer_label} dump key '{k}' returned unexpected format: {v}"
             return sorted(dump[expected_standalone_key]["events"], key=sort_key)
+
+        async def assert_standalone_matches(router, router_label):
+            expected_events = sorted(
+                json.loads(await router.dump_events()), key=sort_key
+            )
+            async with aiohttp.ClientSession() as session:
+                actual_events = await fetch_standalone_events(
+                    session, standalone_indexer_url, "Standalone A"
+                )
+            assert_event_dumps_equal(
+                expected_events, actual_events, router_label, "Standalone A"
+            )
 
         async def wait_for_standalone_events(
             indexer_url, expected_events, expected_label, actual_label
@@ -2098,6 +2144,7 @@ def _test_router_indexers_sync(
                 engine_workers,
                 send_requests_to_router,
                 model_name,
+                assert_standalone_matches,
             )
 
         await asyncio.sleep(1)
@@ -2197,6 +2244,7 @@ def _test_router_indexers_sync(
                 engine_workers,
                 send_requests_to_router,
                 model_name,
+                assert_standalone_matches,
             )
 
         # Wait for internal synchronization and ZMQ event propagation
