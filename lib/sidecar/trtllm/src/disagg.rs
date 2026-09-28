@@ -53,8 +53,11 @@ struct Handoff {
     attributes: Value,
 }
 
+// No `deny_unknown_fields` here either: an unknown field inside `endpoints[]`
+// is the same rolling-upgrade case the module doc describes for the handoff
+// itself, and rejecting it would fail a newer peer's request as a
+// non-migratable 400 one level down from where that rule is stated.
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Endpoint {
     host: String,
     port: u32,

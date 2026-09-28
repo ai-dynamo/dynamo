@@ -153,7 +153,12 @@ sidecar_configs = {
             # Prefill on GPU 0, decode on GPU 1 -- the launcher's defaults.
             pytest.mark.gpu_2,
             # Two engines load serially before either sidecar can register, so
-            # this needs longer than the single-engine configs above.
+            # this needs longer than the single-engine configs above. Raise the
+            # readiness budget with it: `pytest.mark.timeout` is only the outer
+            # kill timer, while EngineConfig.timeout is what the harness gives
+            # the health checks (engine_process.py passes it as their deadline).
+            # Leaving that at its 600s default would let the health check fail
+            # at the single-engine budget and then idle until the kill timer.
             pytest.mark.timeout(1200),
             pytest.mark.pre_merge,
             pytest.mark.skipif(
@@ -162,6 +167,7 @@ sidecar_configs = {
             ),
         ],
         model="Qwen/Qwen3-0.6B",
+        timeout=1000,
         env={
             "TLLM_ALLOW_N_GREEDY_DECODING": "1",
             "PYTHONUNBUFFERED": "1",

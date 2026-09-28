@@ -77,6 +77,41 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
+/// Pins the non-deferring side of the dispatch guard in `engine.rs`.
+///
+/// `cancellation_yields_a_cancelled_terminal` stops the context *after* the
+/// stream exists, so it exercises the streaming loop rather than the dispatch.
+/// Nothing covered the aggregated case where the context is already stopped
+/// before `generate` runs, which is why replacing the guard's condition with a
+/// constant `false` -- deferring always -- left the suite green.
+///
+/// The second assertion is the one that fails if the condition is dropped: an
+/// already-cancelled aggregated request must never reach the engine.
+#[tokio::test]
+async fn an_aggregated_request_cancelled_before_dispatch_never_reaches_the_engine() {
+    let server = FakeServer::start(FakeTrtllm::default()).await;
+    let engine = engine(&server.endpoint, 1);
+    engine.start(0).await.expect("start");
+
+    let context = dynamo_backend_common::testing::mock_context();
+    context.stop_generating();
+
+    let mut stream = engine
+        .generate(request(), GenerateContext::new(context.clone(), None))
+        .await
+        .expect("generate");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+        .await
+        .expect("terminal within deadline")
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+    assert!(
+        server.service.requests.lock().await.is_empty(),
+        "a request cancelled before dispatch must not be sent to the engine"
+    );
+}
+
 /// The server answers `openengine-target-dp-rank` with UNIMPLEMENTED, so a
 /// rank hint has to be refused before dispatch: sending it anyway fails the
 /// whole request with a non-migratable 5xx. `nvext.dp_rank` and the
