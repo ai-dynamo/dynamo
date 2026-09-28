@@ -14,8 +14,9 @@
 # limitations under the License.
 
 # Opt-in development and qualification overlay for vLLM-Omni models that
-# generate joint video and audio. The standard Dynamo image intentionally
-# remains on its royalty-free VP9-only media stack.
+# generate joint video and audio, including FastH3 VSA. The standard Dynamo
+# image intentionally remains on its royalty-free VP9-only media stack and
+# does not acquire FastVideo's optional CUDA kernel.
 ARG BASE_IMAGE=dynamo:latest-vllm-runtime
 FROM ${BASE_IMAGE}
 
@@ -28,12 +29,19 @@ RUN apt-get update \
     && ln -sf /usr/bin/ffprobe /usr/local/bin/ffprobe \
     && rm -rf /var/lib/apt/lists/*
 
+# fastvideo-kernel 0.3.5's optional native extension targets torch 2.12,
+# while the vLLM 0.29 image uses torch 2.13. FastH3 VSA uses the portable
+# Triton path, so install without dependencies and do not require the native
+# extension. Avoid importing the package while building because that initializes
+# Triton, which requires a CUDA driver even though the image build does not.
 RUN uv pip install \
         --system \
         --no-deps \
         av==18.0.0 \
+        fastvideo-kernel==0.3.5 \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -Eq '(^| )libx264( |$)' \
     && python3 -c \
-        'import av; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
+        'from importlib.util import find_spec; import av; assert find_spec("fastvideo_kernel") is not None; av.codec.Codec("h264", "w"); av.codec.Codec("aac", "w")'
 
 RUN python3 <<'PY'
 import io

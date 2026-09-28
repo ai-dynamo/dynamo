@@ -201,6 +201,7 @@ fn preprocessed_request(
     let min_tokens = request.min_new_tokens().map_err(anyhow::Error::msg)?;
     let ignore_eos = request.ignore_eos().map_err(anyhow::Error::msg)?;
     let routing_priority = request.priority.unwrap_or_default();
+    let cache_namespace = request.cache_namespace().map(str::to_owned);
     let (input_ids, worker_envelope) = request.into_worker_envelope(request_id);
     let mut extra_args = serde_json::Map::new();
     extra_args.insert("sglang_tito".to_string(), worker_envelope);
@@ -227,6 +228,7 @@ fn preprocessed_request(
             expected_output_tokens: max_tokens,
             priority_jump: Some(routing_priority.max(0) as f64),
             priority: Some(routing_priority),
+            cache_namespace,
             ..Default::default()
         }))
         .extra_args(Some(serde_json::Value::Object(extra_args)))
@@ -481,6 +483,27 @@ mod tests {
 
     use crate::http::service::generate::tests::{WorkerUnavailableEngine, dispatch_test_context};
     use crate::http::service::metrics::{Endpoint, RequestType, Status};
+
+    #[test]
+    fn cache_salt_matches_routing_and_native_payload() {
+        for salt in [None, Some(""), Some("tenant-a")] {
+            let request: SglangGenerateRequest = serde_json::from_value(serde_json::json!({
+                "input_ids": [1, 2],
+                "cache_salt": salt,
+            }))
+            .unwrap();
+            let request = preprocessed_request(request, "test-model", None, "request-id").unwrap();
+            let expected = salt.filter(|salt| !salt.is_empty());
+            assert_eq!(
+                request.routing.unwrap().cache_namespace.as_deref(),
+                expected
+            );
+            assert_eq!(
+                request.extra_args.unwrap()["sglang_tito"]["cache_salt"].as_str(),
+                expected,
+            );
+        }
+    }
 
     #[tokio::test]
     async fn worker_unavailable_dispatch_returns_503() {

@@ -1091,16 +1091,8 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
             "enable_session_prefix_index is not supported with use_remote_indexer=true".to_string(),
         );
     }
-    if config.enable_session_prefix_index
-        && (!config.use_kv_events || config.overlap_score_credit <= 0.0)
-    {
-        return Err(
-            "enable_session_prefix_index requires use_kv_events=true and overlap_score_credit > 0"
-                .to_string(),
-        );
-    }
-    if config.serve_indexer && config.overlap_score_credit == 0.0 {
-        return Err("serve_indexer requires overlap_score_credit > 0".to_string());
+    if config.enable_session_prefix_index && !config.use_kv_events {
+        return Err("enable_session_prefix_index requires use_kv_events=true".to_string());
     }
     if config.router_predicted_ttl_secs.is_some() && !config.use_kv_events {
         return Err("router_predicted_ttl_secs requires use_kv_events=true".to_string());
@@ -1582,18 +1574,6 @@ impl KvRouterConfig {
             assume_kv_reuse,
             precomputed_block_hashes,
         ))
-    }
-
-    /// Check if KV event subscription should be started.
-    ///
-    /// Returns false if:
-    /// - KV events are disabled (`use_kv_events=false`)
-    /// - Overlap scoring is disabled (`overlap_score_credit=0`)
-    ///
-    /// When false, the router skips starting the KV event subscription entirely,
-    /// avoiding the need to query workers for their local indexer state.
-    pub fn should_subscribe_to_kv_events(&self) -> bool {
-        self.use_kv_events && self.overlap_score_credit > 0.0
     }
 }
 
@@ -2484,7 +2464,6 @@ models:
 
         assert_eq!(config.overlap_score_credit, 0.0);
         assert_eq!(config.prefill_load_scale, 0.0);
-        assert!(!config.should_subscribe_to_kv_events());
     }
 
     #[test]
@@ -2585,14 +2564,17 @@ models:
     }
 
     #[test]
-    fn test_overlap_credit_zero_skips_kv_event_subscription() {
-        let config = KvRouterConfig {
-            overlap_score_credit: 0.0,
-            use_kv_events: true,
-            ..Default::default()
-        };
-
-        assert!(!config.should_subscribe_to_kv_events());
+    fn indexer_features_do_not_depend_on_scoring_credit() {
+        for (serve_indexer, enable_session_prefix_index) in [(true, false), (false, true)] {
+            let config = KvRouterConfig {
+                overlap_score_credit: 0.0,
+                use_kv_events: true,
+                serve_indexer,
+                enable_session_prefix_index,
+                ..Default::default()
+            };
+            assert!(config.validate().is_ok());
+        }
     }
 
     #[test]
