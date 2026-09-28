@@ -73,6 +73,46 @@ def test_conflicting_aliases_and_config_are_rejected():
         ).ais_perf_kwargs()
 
 
+@pytest.mark.parametrize("prefix", ["ais", "aic"])
+def test_repeated_flag_with_same_spelling_uses_last_value(prefix):
+    assert (
+        _parse([f"--{prefix}-tp-size", "2", f"--{prefix}-tp-size", "4"]).ais_tp_size
+        == 4
+    )
+
+
+@pytest.mark.parametrize("legacy_name", ["DYN_AIC_TP_SIZE", "DYN_AIC_BACKEND"])
+def test_retired_environment_fails_before_constructing_ais_config(
+    monkeypatch, legacy_name
+):
+    monkeypatch.setenv(legacy_name, "2" if legacy_name.endswith("TP_SIZE") else "vllm")
+    config = _parse(
+        [
+            "--aic-backend",
+            "vllm",
+            "--aic-system",
+            "h200_sxm",
+            "--aic-model-path",
+            "example/model",
+        ]
+    )
+    with pytest.raises(ValueError, match=rf"{legacy_name}.*DYN_AIS_"):
+        config.ais_perf_kwargs()
+    monkeypatch.delenv(legacy_name)
+    monkeypatch.setenv("DYN_AIS_TP_SIZE", "2")
+    config = _parse(
+        [
+            "--ais-backend",
+            "vllm",
+            "--ais-system",
+            "h200_sxm",
+            "--ais-model-path",
+            "example/model",
+        ]
+    )
+    assert config.ais_perf_kwargs()["config"]["tp"] == 2
+
+
 def test_only_ais_environment_is_read(monkeypatch):
     monkeypatch.delenv("DYN_AIS_BACKEND", raising=False)
     monkeypatch.setenv("DYN_AIC_BACKEND", "vllm")

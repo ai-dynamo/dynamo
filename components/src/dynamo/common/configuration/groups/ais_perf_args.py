@@ -53,11 +53,12 @@ def parse_ais_perf_config(value):
 class _UniqueAlias(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         marker = "_seen_" + self.dest
-        if getattr(namespace, marker, False):
+        seen = getattr(namespace, marker, None)
+        if seen is not None and seen != option_string:
             raise argparse.ArgumentError(
                 self, "new and legacy spellings cannot be combined"
             )
-        setattr(namespace, marker, True)
+        setattr(namespace, marker, option_string)
         setattr(namespace, self.dest, values)
 
 
@@ -70,6 +71,16 @@ class AisPerfConfigBase(ConfigBase):
     ais_perf_config = None
 
     def ais_perf_kwargs(self) -> dict:
+        legacy = [
+            "DYN_AIC_" + name.upper()
+            for name in _FIELDS
+            if "DYN_AIC_" + name.upper() in os.environ
+        ]
+        if legacy:
+            raise ValueError(
+                "renamed environment variables are no longer read: "
+                f"{', '.join(legacy)}; use the DYN_AIS_* names"
+            )
         authored = getattr(self, "ais_perf_config", None)
         shorthand = {
             key: getattr(self, "ais_" + name, None)
