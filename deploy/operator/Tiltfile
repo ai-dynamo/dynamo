@@ -102,6 +102,8 @@ OPERATOR_VERSION = settings.get('operator_version', _read_chart_app_version())
 OPERATOR_DIR = os.getcwd()                                     # deploy/operator
 HELM_CHART   = os.path.join(OPERATOR_DIR, '..', 'helm', 'charts', 'platform')  # deploy/helm/charts/platform
 CRD_DIR      = os.path.join(OPERATOR_DIR, 'config', 'crd', 'bases')
+TILT_BIN_DIR = os.path.join(OPERATOR_DIR, 'tilt_bin')
+OPERATOR_CONFIG_FILE = os.path.join(TILT_BIN_DIR, 'operator-config.yaml')
 
 # ---------------------------------------------------------------------------
 # Local tool binaries — ensure kubectl and helm are downloaded via `make`
@@ -157,32 +159,6 @@ local_resource(
 )
 
 # ---------------------------------------------------------------------------
-# CRDs — regenerate & apply via server-side apply on change
-# ---------------------------------------------------------------------------
-SKIP_CODEGEN = settings['skip_codegen']
-_crd_cmd = (
-    'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
-    ' --version=' + OPERATOR_VERSION +
-    ' --lpx-enabled=' + str(HELM_VALUES.get('dynamo-operator.lpx.enabled', False)).lower() +
-    ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
-    ' --conversion-webhook-service-namespace=' + NAMESPACE
-)
-if not SKIP_CODEGEN:
-    _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
-
-_crds_deps = ['api/']
-if SKIP_CODEGEN:
-    _crds_deps.append(CRD_DIR)
-
-local_resource(
-    'crds',
-    _crd_cmd,
-    deps=_crds_deps,
-    ignore=['**/zz_generated.deepcopy.go'],
-    labels=['operator'],
-)
-
-# ---------------------------------------------------------------------------
 # Helm dependencies — update remote subcharts and package the local operator
 # subchart (file://components/operator).
 # ---------------------------------------------------------------------------
@@ -234,7 +210,7 @@ def render_helm():
         '--set', 'dynamo-operator.controllerManager.manager.image.repository=' + IMG,
         '--set', 'dynamo-operator.controllerManager.manager.image.tag=' + IMG_TAG,
         '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
-        # We apply CRDs ourselves in the local_resource above
+        # We apply CRDs ourselves in the crds local resource
         '--set', 'dynamo-operator.upgradeCRD=false',
     ]
 
@@ -277,12 +253,50 @@ def render_helm():
 
         patched.append(doc)
 
-    return encode_yaml_stream(patched)
+    # Extract the exact operator configuration mounted into the rendered manager Pod.
+    operator_configs = []
+    for doc in patched:
+        config_yaml = doc.get('data', {}).get('config.yaml')
+        if doc.get('kind') == 'ConfigMap' and config_yaml and 'kind: OperatorConfiguration' in config_yaml:
+            operator_configs.append(config_yaml)
+    if len(operator_configs) != 1:
+        fail('expected exactly one rendered OperatorConfiguration, found %d' % len(operator_configs))
+
+    return struct(resources=encode_yaml_stream(patched), operator_config=operator_configs[0])
 
 # Create the namespace before applying anything else
 local(kubectl_cmd + ' create namespace %s || true' % NAMESPACE, quiet=True)
 
-k8s_yaml(render_helm())
+rendered_helm = render_helm()
+local(['mkdir', '-p', TILT_BIN_DIR], quiet=True)
+local(['tee', OPERATOR_CONFIG_FILE], quiet=True, stdin=rendered_helm.operator_config)
+k8s_yaml(rendered_helm.resources)
+
+# ---------------------------------------------------------------------------
+# CRDs — regenerate & apply via server-side apply on change
+# ---------------------------------------------------------------------------
+SKIP_CODEGEN = settings['skip_codegen']
+_crd_cmd = (
+    'go run ./cmd/crd-apply --crds-dir=' + CRD_DIR +
+    ' --version=' + OPERATOR_VERSION +
+    ' --config=' + OPERATOR_CONFIG_FILE +
+    ' --conversion-webhook-service-name=dynamo-dynamo-operator-webhook-service' +
+    ' --conversion-webhook-service-namespace=' + NAMESPACE
+)
+if not SKIP_CODEGEN:
+    _crd_cmd = 'make generate && make manifests && ' + _crd_cmd
+
+_crds_deps = ['api/', 'cmd/crd-apply/', 'internal/operatorconfig/', OPERATOR_CONFIG_FILE]
+if SKIP_CODEGEN:
+    _crds_deps.append(CRD_DIR)
+
+local_resource(
+    'crds',
+    _crd_cmd,
+    deps=_crds_deps,
+    ignore=['**/zz_generated.deepcopy.go'],
+    labels=['operator'],
+)
 
 # ---------------------------------------------------------------------------
 # Docker image — minimal container with the compiled operator binaries

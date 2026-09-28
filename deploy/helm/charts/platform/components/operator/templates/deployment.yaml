@@ -74,9 +74,13 @@ spec:
         args:
           - "--crds-dir=/opt/dynamo-operator/crds/"
           - "--version={{ .Chart.AppVersion }}"
-          - "--lpx-enabled={{ .Values.lpx.enabled }}"
+          - "--config=/etc/dynamo-operator/config.yaml"
           - "--conversion-webhook-service-name={{ include "dynamo-operator.fullname" . }}-webhook-service"
           - "--conversion-webhook-service-namespace={{ .Release.Namespace }}"
+        volumeMounts:
+        - mountPath: /etc/dynamo-operator
+          name: operator-config
+          readOnly: true
       {{- end }}
       containers:
       - args:

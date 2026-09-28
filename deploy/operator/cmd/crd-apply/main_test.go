@@ -70,10 +70,24 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 	}
 	for index, crdDirectory := range crdDirectories {
 		lpxEnabled := index == len(crdDirectories)-2
+		operatorConfig := filepath.Join(dir, "operator-config.yaml")
+		configData := []byte(`apiVersion: operator.config.dynamo.nvidia.com/v1alpha1
+kind: OperatorConfiguration
+mpi:
+  sshSecretName: mpi-ssh
+  sshSecretNamespace: dynamo-system
+rbac:
+  plannerClusterRoleName: planner
+  dgdrProfilingClusterRoleName: dgdr-profiling
+  eppClusterRoleName: epp
+lpx:
+  enabled: ` + strconv.FormatBool(lpxEnabled) + "\n")
+		require.NoError(t, os.WriteFile(operatorConfig, configData, 0o600))
+
 		command := exec.CommandContext(t.Context(), installer,
 			"--crds-dir", crdDirectory,
 			"--version", "schema-test",
-			"--lpx-enabled="+strconv.FormatBool(lpxEnabled),
+			"--config", operatorConfig,
 			"--conversion-webhook-service-name", "dynamo-operator-webhook-service",
 			"--conversion-webhook-service-namespace", "dynamo-system",
 		)

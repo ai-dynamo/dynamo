@@ -44,7 +44,6 @@ import (
 	ctrlcontroller "sigs.k8s.io/controller-runtime/pkg/controller"
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -59,7 +58,6 @@ import (
 
 	semver "github.com/Masterminds/semver/v3"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	configvalidation "github.com/ai-dynamo/dynamo/deploy/operator/api/config/validation"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	internalcert "github.com/ai-dynamo/dynamo/deploy/operator/internal/cert"
@@ -70,6 +68,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/operatorconfig"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
@@ -83,32 +82,9 @@ import (
 )
 
 var (
-	crdScheme    = k8sruntime.NewScheme()
-	setupLog     = ctrl.Log.WithName("setup")
-	configScheme = k8sruntime.NewScheme()
+	crdScheme = k8sruntime.NewScheme()
+	setupLog  = ctrl.Log.WithName("setup")
 )
-
-// LoadAndValidateOperatorConfig loads the operator configuration from a file,
-// applies defaults via the scheme, and validates it.
-func LoadAndValidateOperatorConfig(path string) (*configv1alpha1.OperatorConfiguration, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file %s: %w", path, err)
-	}
-
-	codecFactory := serializer.NewCodecFactory(configScheme)
-	cfg := &configv1alpha1.OperatorConfiguration{}
-	if err := k8sruntime.DecodeInto(codecFactory.UniversalDecoder(), data, cfg); err != nil {
-		return nil, fmt.Errorf("failed to decode config file %s: %w", path, err)
-	}
-
-	// Validate the configuration
-	if errs := configvalidation.ValidateOperatorConfiguration(cfg); len(errs) > 0 {
-		return nil, fmt.Errorf("config validation failed: %s", errs.ToAggregate().Error())
-	}
-
-	return cfg, nil
-}
 
 func initCRDSchemes() {
 	utilruntime.Must(clientgoscheme.AddToScheme(crdScheme))
@@ -139,10 +115,6 @@ func initCRDSchemes() {
 	//+kubebuilder:scaffold:scheme
 }
 
-func initConfigScheme() {
-	utilruntime.Must(configv1alpha1.AddToScheme(configScheme))
-}
-
 // +kubebuilder:rbac:groups=authentication.k8s.io,resources=tokenreviews,verbs=create
 // +kubebuilder:rbac:groups=authorization.k8s.io,resources=subjectaccessreviews,verbs=create
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update
@@ -150,7 +122,6 @@ func initConfigScheme() {
 //nolint:gocyclo
 func main() {
 	initCRDSchemes()
-	initConfigScheme()
 
 	var configFile string
 	var operatorVersion string
@@ -181,8 +152,9 @@ func main() {
 		setupLog.Error(nil, "--config flag is required")
 		os.Exit(1)
 	}
+
 	// Load, default, and validate operator configuration
-	operatorCfg, err := LoadAndValidateOperatorConfig(configFile)
+	operatorCfg, err := operatorconfig.Load(configFile)
 	if err != nil {
 		setupLog.Error(err, "failed to load operator configuration", "configFile", configFile)
 		os.Exit(1)

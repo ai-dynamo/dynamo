@@ -24,7 +24,14 @@ tests:
           pattern: '(?m)^lpx:\n  enabled: false$'
       - contains:
           path: spec.template.spec.initContainers[0].args
-          content: --lpx-enabled=false
+          content: --config=/etc/dynamo-operator/config.yaml
+        template: charts/dynamo-operator/templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            mountPath: /etc/dynamo-operator
+            name: operator-config
+            readOnly: true
         template: charts/dynamo-operator/templates/deployment.yaml
 
   - it: enables LPX and externally installed Grove together
@@ -39,10 +46,6 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '(?m)^  grove:\n    enabled: true$'
-      - contains:
-          path: spec.template.spec.initContainers[0].args
-          content: --lpx-enabled=true
-        template: charts/dynamo-operator/templates/deployment.yaml
 
   - it: renders canonical LPX model registry configuration
     template: charts/dynamo-operator/templates/operator-config.yaml

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/operatorconfig"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,7 +33,7 @@ const (
 func main() {
 	crdsDir := flag.String("crds-dir", "/opt/dynamo-operator/crds/", "Directory containing CRD YAML files")
 	version := flag.String("version", "", "Operator version to stamp on CRDs")
-	lpxEnabled := flag.Bool("lpx-enabled", false, "Install the experimental LPXGraphDeployment CRD")
+	configFile := flag.String("config", "", "Path to operator configuration file (required)")
 	conversionWebhookServiceName := flag.String(
 		"conversion-webhook-service-name",
 		"",
@@ -47,6 +48,16 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 	log := ctrl.Log.WithName("crd-apply")
+	if *configFile == "" {
+		log.Error(nil, "--config flag is required")
+		os.Exit(1)
+	}
+
+	operatorConfig, err := operatorconfig.Load(*configFile)
+	if err != nil {
+		log.Error(err, "failed to load operator configuration", "configFile", *configFile)
+		os.Exit(1)
+	}
 
 	config, err := ctrl.GetConfig()
 	if err != nil {
@@ -86,7 +97,7 @@ func main() {
 			log.Error(err, "unable to unmarshal CRD", "file", filePath)
 			os.Exit(1)
 		}
-		if crd.Name == "lpxgraphdeployments.nvidia.com" && !*lpxEnabled {
+		if crd.Name == "lpxgraphdeployments.nvidia.com" && !operatorConfig.LPX.Enabled {
 			continue
 		}
 
