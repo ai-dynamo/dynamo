@@ -577,3 +577,19 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.trtllm --model Qwen/Qwen3-0.6B --free-gpu-
 - **vLLM**: `--gpu-memory-utilization 0.20` (use 20% GPU memory), `--enforce-eager` (disable CUDA graphs), `--no-enable-prefix-caching` (save memory), `--max-num-seqs 64` (max concurrent sequences)
 - **SGLang**: `--mem-fraction-static 0.20` (20% GPU memory for static allocation), `--max-running-requests 64` (max concurrent requests)
 - **TensorRT-LLM**: `--free-gpu-memory-fraction 0.20` (reserve 20% GPU memory), `--max-num-tokens 8192` (max tokens in batch), `--max-batch-size 64` (max batch size)
+
+## Global Router POC image
+
+Build the CPU-only Rust router from this source revision:
+
+```bash
+docker build -f container/Dockerfile.global-router-poc -t global-router-poc:local .
+```
+
+Run it with a mounted JSON configuration file as its only argument. Set `listen` to
+`0.0.0.0:8080` in that file; the serving endpoint and `/readyz` share port 8080.
+Each configured pool has a private local Frontend base URL, Relay gRPC URL, and
+Relay stats proxy gRPC URL. A regional public API endpoint points at this router;
+the router forwards directly to the chosen pool's private Frontend, including
+when that pool is in another region. The image includes no AWS credentials or
+pool configuration.
