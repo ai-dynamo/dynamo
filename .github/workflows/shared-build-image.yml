@@ -242,15 +242,8 @@ jobs:
       - name: East ECR Login
         if: inputs.push_image
         shell: bash
-        env:
-          ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
         run: |
           set -euo pipefail
-          ECR_REGISTRY_EAST="${ECR_REGISTRY/us-west-2/us-east-1}"
-          if [[ "${ECR_REGISTRY_EAST}" == "${ECR_REGISTRY}" ]]; then
-            echo "::error::Expected the primary ECR registry to be in us-west-2"
-            exit 1
-          fi
           aws ecr get-login-password --region us-east-1 | \
             docker login --username AWS --password-stdin "${ECR_REGISTRY_EAST}"
       - name: Calculate target tag
