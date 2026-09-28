@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -111,13 +112,24 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 
 	// 4. Update DGD if replicas changed (DGDSA is the source of truth)
 	if currentReplicas != adapter.Spec.Replicas {
-		// Use a strategic merge patch to update only the target component's replicas.
-		// This avoids racing with the DGD controller's Status().Update by not touching
-		// the entire DGD object or its resourceVersion.
-		base := dgd.DeepCopy()
+		// Use server-side apply to update only the target component's replicas.
+		// This avoids racing with the DGD controller's Status().Update and provides
+		// field-level ownership semantics. The field manager name identifies this
+		// controller as the owner of the specific component's replicas field.
 		component.Replicas = &adapter.Spec.Replicas
 
-		if err := r.Patch(ctx, dgd, client.MergeFrom(base)); err != nil {
+		obj, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dgd)
+		if err != nil {
+			logger.Error(err, "Unable to generate unstructured object", "dgd", dgdKey)
+			return ctrl.Result{}, err
+		}
+
+		if err := r.Apply(
+			ctx,
+			client.ApplyConfigurationFromUnstructured(&unstructured.Unstructured{Object: obj}),
+			client.FieldOwner("dynamo-operator-dgdsa"),
+			client.ForceOwnership,
+		); err != nil {
 			logger.Error(err, "Failed to patch DGD")
 			r.Recorder.Eventf(adapter, dgd, corev1.EventTypeWarning, "PatchFailed", "Patch",
 				"Failed to patch DGD %s: %v", dgd.Name, err)
