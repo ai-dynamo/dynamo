@@ -183,6 +183,7 @@ impl WorkerMetricsPublisher {
                                 dp_rank: metrics.dp_rank,
                                 active_decode_blocks: metrics.active_decode_blocks,
                                 active_prefill_tokens: None,
+                                scheduler_load_scope: None,
                                 kv_used_blocks: metrics.kv_used_blocks,
                             };
 

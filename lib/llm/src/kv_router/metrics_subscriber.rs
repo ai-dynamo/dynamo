@@ -97,13 +97,20 @@ impl PendingActiveLoads {
                 dp_rank: _,
                 active_decode_blocks,
                 active_prefill_tokens,
+                scheduler_load_scope,
                 kv_used_blocks,
             } = load;
-            if active_decode_blocks.is_some() {
+            if scheduler_load_scope.is_some() {
                 pending.active_decode_blocks = active_decode_blocks;
-            }
-            if active_prefill_tokens.is_some() {
                 pending.active_prefill_tokens = active_prefill_tokens;
+                pending.scheduler_load_scope = scheduler_load_scope;
+            } else if pending.scheduler_load_scope.is_none() {
+                if active_decode_blocks.is_some() {
+                    pending.active_decode_blocks = active_decode_blocks;
+                }
+                if active_prefill_tokens.is_some() {
+                    pending.active_prefill_tokens = active_prefill_tokens;
+                }
             }
             if kv_used_blocks.is_some() {
                 pending.kv_used_blocks = kv_used_blocks;
@@ -341,8 +348,23 @@ mod tests {
             dp_rank,
             active_decode_blocks,
             active_prefill_tokens,
+            scheduler_load_scope: None,
             kv_used_blocks,
         }
+    }
+
+    #[tokio::test]
+    async fn direct_metrics_mailbox_preserves_scoped_scheduler_load() {
+        use dynamo_kv_router::protocols::SchedulerLoadScope;
+
+        let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
+        let mut scheduler = load(1, 0, Some(7), Some(11), None);
+        scheduler.scheduler_load_scope = Some(SchedulerLoadScope::Local);
+        sender.send(scheduler.clone()).unwrap();
+        sender.send(load(1, 0, Some(99), None, Some(5))).unwrap();
+
+        scheduler.kv_used_blocks = Some(5);
+        assert_eq!(receiver.recv().await.unwrap().unwrap(), scheduler);
     }
 
     #[tokio::test]
