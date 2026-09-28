@@ -31,16 +31,13 @@ def test_init_device_forwards_ro_connect_timeout(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(gms_worker, "_get_dp_adjusted_local_rank", lambda *_: 0)
     monkeypatch.setattr(
-        gms_worker, "get_vmm_device_type", lambda: SimpleNamespace(value="cuda")
-    )
-    monkeypatch.setattr(
         gms_worker, "get_socket_path", lambda *_: str(tmp_path / "weights.sock")
     )
     monkeypatch.setattr(
         "vllm.platforms.current_platform",
         SimpleNamespace(set_device=lambda _: None),
     )
-    monkeypatch.setattr(gms_worker._BaseWorker, "init_device", lambda _: None)
+    monkeypatch.setattr(gms_worker.Worker, "init_device", lambda _: None)
 
     worker = gms_worker.GMSWorker.__new__(gms_worker.GMSWorker)
     worker.local_rank = 0
