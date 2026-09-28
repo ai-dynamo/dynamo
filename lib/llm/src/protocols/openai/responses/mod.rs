@@ -387,10 +387,6 @@ fn convert_input_content_to_text(content: &[InputContent]) -> String {
         .join("")
 }
 
-/// Convert function-call output content to a Chat Completions tool message.
-///
-/// Text-only content keeps the plain text representation. Images become image_url
-/// parts and unsupported files are rejected instead of silently dropped.
 fn convert_function_call_output_content(
     content: &[InputContent],
 ) -> Result<ChatCompletionRequestToolMessageContent, anyhow::Error> {
@@ -419,6 +415,7 @@ fn convert_function_call_output_content(
                 ));
             }
             InputContent::InputFile(_) => {
+                // Reject unsupported files rather than silently dropping tool output.
                 return Err(ResponsesConversionError::UnsupportedContent(
                     "File function call output content is not yet supported".to_string(),
                 )
