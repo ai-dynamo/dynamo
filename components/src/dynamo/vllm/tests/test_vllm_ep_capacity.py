@@ -271,8 +271,8 @@ def test_repeated_timeouts_do_not_pile_up_gcs_queries(monkeypatch):
     """
     monkeypatch.setattr(vllm_handlers, "_EP_CAPACITY_RAY_TIMEOUT_S", 0.02)
     started: list[int] = []
-    # The gate stays shut through every poll, so the first snapshot is still stuck
-    # in its first Ray call and cannot finish or reach its next call on its own.
+    # The gate stays shut through every poll, so the first snapshot stays stuck
+    # in its first Ray call.
     gate = threading.Event()
     entered = threading.Event()
     _install_ray_stub(
@@ -302,10 +302,8 @@ def test_repeated_timeouts_do_not_pile_up_gcs_queries(monkeypatch):
         assert len(started) == 1, f"expected 1 in-flight query, got {len(started)}"
         assert started[0] != threading.get_ident()
 
-        # The single-worker executor would only queue extra snapshots behind the
-        # stuck one, so count after draining it: open the gate and let every queued
-        # snapshot run. Later polls must have joined the in-flight snapshot instead
-        # of launching their own, so exactly one snapshot (three Ray calls) ran.
+        # Extra snapshots would only queue behind the stuck one on the single worker,
+        # so drain it first; one joined snapshot means exactly three Ray calls.
         gate.set()
         handler._ep_capacity_executor.shutdown(wait=True)
         assert len(started) == 3, f"expected one snapshot (3 calls), got {len(started)}"
