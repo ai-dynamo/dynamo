@@ -1,0 +1,580 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceClaim",
+      "metadata": {
+        "name": "gms-restore-probe-0928",
+        "namespace": "schwinns-vcluster",
+        "labels": {
+          "experiment": "gms-restore-probe-0928"
+        }
+      },
+      "spec": {
+        "devices": {
+          "requests": [
+            {
+              "name": "tp-0",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-1",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-2",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-3",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-4",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-5",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-6",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-7",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "gms-restore-probe-0928",
+        "namespace": "schwinns-vcluster",
+        "labels": {
+          "experiment": "gms-restore-probe-0928"
+        }
+      },
+      "spec": {
+        "nodeSelector": {
+          "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "tolerations": [
+          {
+            "operator": "Exists",
+            "effect": "NoSchedule"
+          }
+        ],
+        "restartPolicy": "Never",
+        "imagePullSecrets": [
+          {
+            "name": "nvcr-secret"
+          },
+          {
+            "name": "acr-token-secret"
+          }
+        ],
+        "resourceClaims": [
+          {
+            "name": "gpus",
+            "resourceClaimName": "gms-restore-probe-0928"
+          }
+        ],
+        "containers": [
+          {
+            "name": "all",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/all"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-0",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-0"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-0"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-1",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-1"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-1"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-2",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-2"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-2"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-3",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-3"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-3"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-4",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-4"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-4"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-5",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-5"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-5"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-6",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-6"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-6"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          },
+          {
+            "name": "rank-7",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "sleep",
+              "infinity"
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-7"
+                }
+              ]
+            },
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/sockets/rank-7"
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "work",
+                "mountPath": "/work"
+              },
+              {
+                "name": "sockets",
+                "mountPath": "/sockets"
+              },
+              {
+                "name": "models",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "work",
+            "emptyDir": {}
+          },
+          {
+            "name": "sockets",
+            "emptyDir": {}
+          },
+          {
+            "name": "models",
+            "persistentVolumeClaim": {
+              "claimName": "shared-model-cache"
+            }
+          },
+          {
+            "name": "artifacts",
+            "persistentVolumeClaim": {
+              "claimName": "snapshot-pvc-x-schwinns-vcluster-x-schwinns-vcluster"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
