@@ -257,7 +257,7 @@ Aggregated serving is the default. The sidecar role is configured explicitly bec
 
 Encoder disaggregation uses Dynamo's Encode worker discovery and routing contract. All media items in one request are sent together to one Encode worker; per-item fan-out is not supported. Text-only requests bypass Encode workers. If the encoder hop fails, the downstream request retains its original media and vLLM encodes it inline.
 
-Encode workers accept image and video media, also together in one request. They reject a request that contains audio, so the downstream engine encodes all media of that request inline. The Encode worker runs the vision encoder, but each engine that receives the request still fetches and preprocesses all of its media, and decodes each video. The table shows the earliest vLLM release validated for each topology and modality:
+Encode workers accept image and video media, also together in one request. The Encode worker runs the vision encoder, but each engine that receives the request still fetches and preprocesses all of its media, and decodes each video. The table shows the earliest vLLM release validated for each topology and modality:
 
 | Topology | Image | Video |
 |---|---|---|
