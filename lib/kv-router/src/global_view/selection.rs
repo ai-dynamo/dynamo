@@ -155,11 +155,17 @@ impl LoadPoolSelector {
 }
 
 fn observed_requests(pool: &PoolState, model: &str) -> Option<u64> {
-    if !matches!(
-        pool.signal_status.load.state,
-        SignalState::Complete | SignalState::Degraded
-    ) {
+    let status = &pool.signal_status.load;
+    if !matches!(status.state, SignalState::Complete | SignalState::Degraded) {
         return None;
+    }
+    // Load status may be degraded because a scheduler signal is absent, while
+    // model counts still cover every frontend. Partial model coverage is not a
+    // comparable pool-level count and must use the fallback tier instead.
+    match (status.expected_sources, status.observed_sources) {
+        (Some(expected), Some(observed)) if expected > 0 && expected == observed => {}
+        (None, None) => {}
+        _ => return None,
     }
     let load = pool.load.request_plane.get(model)?;
     // PR #13187 counts input_processing_requests within pending_first_output_requests.
@@ -307,6 +313,41 @@ mod tests {
         let decision = selector.select("model", 100).unwrap();
         assert_eq!(decision.basis, LoadBasis::Fallback);
         assert_eq!(decision.observed_requests, None);
+    }
+
+    #[test]
+    fn partial_frontend_coverage_is_fallback_not_low_load() {
+        let repo = Arc::new(InMemoryPoolStateRepository::default());
+        let mut partial = pool("partial", Some(0), Some(0), None);
+        partial.signal_status.load.state = SignalState::Degraded;
+        partial.signal_status.load.expected_sources = Some(2);
+        partial.signal_status.load.observed_sources = Some(1);
+        let mut complete = pool("complete", Some(20), Some(0), None);
+        complete.signal_status.load.expected_sources = Some(2);
+        complete.signal_status.load.observed_sources = Some(2);
+        let expected = complete.pool_id.clone();
+        repo.replace(partial);
+        repo.replace(complete);
+        let decision = LoadPoolSelector::new(repo, freshness())
+            .select("model", 100)
+            .unwrap();
+        assert_eq!(decision.pool_id, expected);
+        assert_eq!(decision.basis, LoadBasis::Observed);
+    }
+
+    #[test]
+    fn degraded_scheduler_with_complete_frontend_coverage_uses_load() {
+        let repo = Arc::new(InMemoryPoolStateRepository::default());
+        let mut state = pool("pool", Some(2), Some(1), None);
+        state.signal_status.load.state = SignalState::Degraded;
+        state.signal_status.load.expected_sources = Some(2);
+        state.signal_status.load.observed_sources = Some(2);
+        repo.replace(state);
+        let decision = LoadPoolSelector::new(repo, freshness())
+            .select("model", 100)
+            .unwrap();
+        assert_eq!(decision.basis, LoadBasis::Observed);
+        assert_eq!(decision.observed_requests, Some(3));
     }
 
     #[test]
