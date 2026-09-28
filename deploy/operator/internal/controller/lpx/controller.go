@@ -33,7 +33,6 @@ import (
 
 // graphReconciler reconciles LPXGraphDeployments using their owning DGD's configuration.
 type graphReconciler struct {
-	enabled               bool
 	recorder              events.EventRecorder
 	runtimeConfig         *commoncontroller.RuntimeConfig
 	modelRegistry         lpx.ModelRegistry
@@ -43,11 +42,13 @@ type graphReconciler struct {
 	client.Client
 }
 
-// Setup registers the LPX controller and its dependencies.
+// Setup registers the LPX controller and its dependencies when LPX is enabled.
 func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runtimeConfig *commoncontroller.RuntimeConfig, secrets dynamo.SecretsRetriever) error {
+	if !runtimeConfig.Gate.Enabled(features.LPX) {
+		return nil
+	}
+
 	r := &graphReconciler{
-		// Disabled integration still serves child status; deletion uses owner garbage collection.
-		enabled:               integrationDisabledMessage(runtimeConfig) == "",
 		recorder:              mgr.GetEventRecorder("lpxgraphdeployment"),
 		runtimeConfig:         runtimeConfig,
 		config:                config,
@@ -55,7 +56,7 @@ func Setup(mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration, runti
 		Client:                mgr.GetClient(),
 	}
 
-	if r.enabled {
+	if runtimeConfig.Gate.Enabled(features.Grove) {
 		var err error
 		r.modelRegistry, err = newLPXModelRegistry(config)
 		if err != nil {
@@ -121,8 +122,8 @@ func (r *graphReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 		deployment.Status.Components[name] = component
 	}
 
-	if !r.enabled {
-		setReadyCondition(deployment, v1beta1.DGDStateFailed, integrationDisabledMessage(r.runtimeConfig))
+	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
+		setReadyCondition(deployment, v1beta1.DGDStateFailed, "Grove is disabled")
 		return ctrl.Result{}, nil
 	}
 
@@ -518,16 +519,4 @@ func (r *graphReconciler) deleteUnusedConfigMaps(ctx context.Context, deployment
 		}
 	}
 	return nil
-}
-
-// integrationDisabledMessage returns an empty string when integration is enabled.
-// runtimeConfig is non-nil; child status remains available when disabled.
-func integrationDisabledMessage(runtimeConfig *commoncontroller.RuntimeConfig) string {
-	if !runtimeConfig.Gate.Enabled(features.Grove) {
-		return "Grove is disabled"
-	}
-	if !runtimeConfig.Gate.Enabled(features.LPX) {
-		return "LPX integration is disabled"
-	}
-	return ""
 }

@@ -23,6 +23,7 @@ import (
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/golden"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/testing/operatorenv"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
@@ -39,6 +40,38 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
+
+func TestSetupDynamoGraphDeploymentWithoutLPXCRDs(t *testing.T) {
+	t.Log("Install only the public DGD workload CRDs with LPX disabled")
+	env := operatorenv.New(operatorenv.Options{
+		RuntimeConfig: &commoncontroller.RuntimeConfig{},
+		SetupWebhooks: setupProductionWebhooks,
+		CRDDirectoryPaths: []string{
+			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamographdeployments.yaml"),
+			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamocomponentdeployments.yaml"),
+			filepath.Join("..", "..", "config", "crd", "bases", "nvidia.com_dynamographdeploymentscalingadapters.yaml"),
+		},
+	}).RunT(t)
+	err := env.Client().List(t.Context(), &v1alpha1.LPXGraphDeploymentList{})
+	require.True(t, meta.IsNoMatchError(err), "private LPX API must be absent: %v", err)
+
+	t.Log("Start the production DGD controller setup without LPX watches or indexes")
+	config := env.OperatorConfig().DeepCopy()
+	config.Namespace.Restricted = env.Namespace()
+	env.StartManager(func(mgr ctrl.Manager) error {
+		return SetupDynamoGraphDeployment(mgr, DynamoGraphDeploymentSetupOptions{SetupOptions: SetupOptions{
+			Config: config, RuntimeConfig: env.RuntimeConfig(),
+		}})
+	})
+
+	t.Log("Verify an ordinary DGD still creates its component workloads")
+	golden.ApplyManifests(t, "testdata/dgd/components/input.yaml", env.Client(), env.Namespace())
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		components := &v1beta1.DynamoComponentDeploymentList{}
+		assert.NoError(c, env.Client().List(t.Context(), components, client.InNamespace(env.Namespace())))
+		assert.Len(c, components.Items, 2)
+	}, 20*time.Second, 50*time.Millisecond)
+}
 
 func TestLPXPublicationFailureReachesDGDThroughSetup(t *testing.T) {
 	t.Log("Encode a real two-partition LPU build owned by this test")

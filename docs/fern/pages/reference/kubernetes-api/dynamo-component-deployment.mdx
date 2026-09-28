@@ -59,11 +59,13 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
 <ParamField path="type" type="string">
   Role of the component within the graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. `prefill` and `decode` are first-class values for disaggregated serving and can be set directly. At most one component per graph may be `epp`. Immutable after it is set. Standalone DCDs cannot use `lpx`.
 
+  The `lpx` type is experimental, requires the operator's `lpx.enabled` setting, and may change incompatibly.
+
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>frontend</Badge> <Badge intent="note" minimal>worker</Badge> <Badge intent="note" minimal>prefill</Badge> <Badge intent="note" minimal>decode</Badge> <Badge intent="note" minimal>planner</Badge> <Badge intent="note" minimal>epp</Badge> <Badge intent="note" minimal>lpx</Badge></span>
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-  DGD-only compiled-model and scheduling configuration. Set `buildId`; placement comes from the build manifest. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
+  Experimental DGD-only compiled-model and scheduling configuration; requires the operator's `lpx.enabled` setting and may change incompatibly. Set `buildId`; placement comes from the build manifest. Runtime options belong in role pod templates. See [LPXConfig](full-api-reference.mdx#lpxconfig).
 
   When the operator's `lpx.modelRegistryURL` is configured, `buildId` must be relative to that registry; absolute paths and URLs require an empty registry URL.
 </ParamField>

@@ -13,6 +13,7 @@ import (
 	v1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	v1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -49,8 +50,8 @@ func (r *graphReconciler) setupWithManager(mgr ctrl.Manager) error {
 		Watches(&v1beta1.DynamoGraphDeployment{}, handler.EnqueueRequestsFromMapFunc(r.mapDGDToLPXGraphDeployments), builder.WithPredicates(dgdPredicate())).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.config, r.runtimeConfig))
 
-	// Primary and DGD events are sufficient while disabled.
-	if !r.enabled {
+	// Primary and DGD events are sufficient while Grove is disabled.
+	if !r.runtimeConfig.Gate.Enabled(features.Grove) {
 		return ctrlBuilder.Complete(r)
 	}
 

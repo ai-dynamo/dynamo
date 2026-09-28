@@ -6,6 +6,7 @@ templates:
   - charts/dynamo-operator/templates/operator-config.yaml
   - charts/dynamo-operator/templates/manager-rbac.yaml
   - charts/dynamo-operator/templates/validate-values.yaml
+  - charts/dynamo-operator/templates/deployment.yaml
 tests:
   - it: rejects LPX without Grove integration
     template: charts/dynamo-operator/templates/validate-values.yaml
@@ -21,6 +22,10 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '(?m)^lpx:\n  enabled: false$'
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: --lpx-enabled=false
+        template: charts/dynamo-operator/templates/deployment.yaml
 
   - it: enables LPX and externally installed Grove together
     template: charts/dynamo-operator/templates/operator-config.yaml
@@ -34,6 +39,10 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: '(?m)^  grove:\n    enabled: true$'
+      - contains:
+          path: spec.template.spec.initContainers[0].args
+          content: --lpx-enabled=true
+        template: charts/dynamo-operator/templates/deployment.yaml
 
   - it: renders canonical LPX model registry configuration
     template: charts/dynamo-operator/templates/operator-config.yaml

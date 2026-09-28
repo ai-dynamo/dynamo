@@ -80,8 +80,9 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	tests := []dgdAdmissionTestCase{
 		// Baseline create-path rules.
 		{
-			name:       "valid deployment with components",
-			deployment: betaDGDForAdmission(nil),
+			name:        "valid deployment with components",
+			lpxDisabled: true,
+			deployment:  betaDGDForAdmission(nil),
 		},
 		{
 			name: "beta component main image is required when pod template is absent on create",
@@ -3067,10 +3068,11 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				if test.oldBeforeUpdate == nil {
 					test.oldBeforeUpdate = dgdBeforeRestart(t, tt.oldDeployment)
 				}
-				if tt.checkpointOff || tt.groveDisabled {
+				if tt.checkpointOff || tt.groveDisabled || tt.lpxDisabled {
 					seedGates := gates
 					seedGates.Checkpoint = true
 					seedGates.Grove = true
+					seedGates.LPX = true
 					test.seedGates = &seedGates
 				}
 			}

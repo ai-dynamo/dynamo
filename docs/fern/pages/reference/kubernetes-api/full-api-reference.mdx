@@ -377,7 +377,7 @@ The name of the component
 </ParamField>
 
 <ParamField path="componentType" type="string">
-ComponentType indicates the role of this component (for example, "main").
+ComponentType indicates the role of this component (for example, "main"). The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
 </ParamField>
 
 <ParamField path="subComponentType" type="string">
@@ -495,7 +495,7 @@ See [FrontendSidecarSpec](#frontendsidecarspec).
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-LPX holds LPX integration configuration. Only meaningful when ComponentType is "lpx".
+LPX holds LPX integration configuration. Only meaningful when ComponentType is "lpx". Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
 See [LPXConfig](#lpxconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -550,7 +550,7 @@ The name of the component
 </ParamField>
 
 <ParamField path="componentType" type="string">
-ComponentType indicates the role of this component (for example, "main").
+ComponentType indicates the role of this component (for example, "main"). The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
 </ParamField>
 
 <ParamField path="subComponentType" type="string">
@@ -2629,7 +2629,7 @@ name is the stable logical identifier for this component within its DynamoGraphD
 </ParamField>
 
 <ParamField path="type" type="ComponentType">
-type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly.
+type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly. The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
 See [ComponentType](#componenttype).
 **Validation:** Enum: [frontend worker prefill decode planner epp lpx]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2697,7 +2697,7 @@ See [EPPConfig](#v1beta1-eppconfig).
 </ParamField>
 
 <ParamField path="lpx" type="LPXConfig">
-lpx holds LPX integration configuration. Only meaningful when `type` is `lpx`.
+lpx holds LPX integration configuration. Only meaningful when `type` is `lpx`. Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
 See [LPXConfig](#lpxconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2744,7 +2744,7 @@ name is the stable logical identifier for this component within its DynamoGraphD
 </ParamField>
 
 <ParamField path="type" type="ComponentType">
-type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly.
+type indicates the role of this component within a Dynamo graph. Drives port mapping, frontend detection, planner RBAC, and the pod label `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are first-class values, users can set them directly. The DGD-only "lpx" type is experimental, requires the operator's lpx.enabled setting, and may change incompatibly.
 See [ComponentType](#componenttype).
 **Validation:** Enum: [frontend worker prefill decode planner epp lpx]  Optional: \&#123;\&#125;
 </ParamField>

@@ -28,8 +28,10 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -41,6 +43,27 @@ type clusterTopologyInfo struct {
 	name        string
 	domainIndex map[string]int
 	domains     []string
+}
+
+// lpxComponentGateErrors freezes existing LPX graph components when the integration is disabled.
+// ctx, newSpec, and fldPath are non-nil; oldSpec is nil for a new component.
+func lpxComponentGateErrors(
+	ctx context.Context,
+	newSpec, oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+	source runtimeVersionValidationSource,
+) field.ErrorList {
+	if !newSpec.IsLPX() || features.MustGateFrom(ctx).Enabled(features.LPX) ||
+		(oldSpec != nil && apiequality.Semantic.DeepEqual(newSpec, oldSpec)) {
+		return nil
+	}
+
+	// Conversion preserves the source service name, so gate diagnostics can target the submitted API.
+	typePath := fldPath.Child("type")
+	if source == runtimeVersionSourceV1Alpha1 {
+		typePath = field.NewPath("spec", "services").Key(newSpec.ComponentName).Child("componentType")
+	}
+	return field.ErrorList{field.Forbidden(typePath, "LPX components require lpx.enabled=true")}
 }
 
 // invalidDynamoGraphDeploymentError converts allErrs for dgd into an API error.

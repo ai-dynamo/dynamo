@@ -79,6 +79,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
+	// The DGD-only "lpx" type is experimental, requires the operator's
+	// lpx.enabled setting, and may change incompatibly.
 	ComponentType string `json:"componentType,omitempty"`
 
 	// SubComponentType indicates the sub-role of this component (for example, "prefill").
@@ -207,6 +209,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// LPX holds LPX integration configuration. Only meaningful when
 	// ComponentType is "lpx".
+	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
 	// +optional
 	LPX *v1beta1.LPXConfig `json:"lpx,omitempty"`
 

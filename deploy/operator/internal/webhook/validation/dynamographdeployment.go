@@ -412,6 +412,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 
+		// Allow existing LPX components to survive disablement without accepting new or changed specs.
+		allErrs = append(allErrs, lpxComponentGateErrors(
+			v.ctx, component, opts.oldComponents[component.ComponentName], componentPath, v.runtimeVersionSource,
+		)...)
+
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,
 			componentPath,
@@ -855,6 +860,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
 		oldComponent, exists := oldComponents[newComponent.ComponentName]
+
+		// Enforce the same LPX gate when the stateful validator is called independently.
+		allErrs = append(allErrs, lpxComponentGateErrors(
+			v.ctx, newComponent, oldComponent, componentsPath.Index(i), v.runtimeVersionSource,
+		)...)
 		if !exists {
 			continue
 		}

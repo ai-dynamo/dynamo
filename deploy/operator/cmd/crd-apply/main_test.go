@@ -9,11 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -58,15 +60,20 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		t.Fatalf("build installer: %v\n%s", err, output)
 	}
 
-	t.Log("Install and reapply every generated CRD, optionally upgrading an external baseline")
-	crdDirectories := []string{"../../config/crd/bases", "../../config/crd/bases"}
+	t.Log("Install with LPX disabled, enable it, then disable it without changing its CRD")
+	client, err := apiextensionsclient.NewForConfig(config)
+	require.NoError(t, err)
+	var lpxCRD *apiextensionsv1.CustomResourceDefinition
+	crdDirectories := []string{"../../config/crd/bases", "../../config/crd/bases", "../../config/crd/bases"}
 	if baseline := os.Getenv("CRD_APPLY_BASELINE_DIR"); baseline != "" {
 		crdDirectories = append([]string{baseline}, crdDirectories...)
 	}
-	for _, crdDirectory := range crdDirectories {
+	for index, crdDirectory := range crdDirectories {
+		lpxEnabled := index == len(crdDirectories)-2
 		command := exec.CommandContext(t.Context(), installer,
 			"--crds-dir", crdDirectory,
 			"--version", "schema-test",
+			"--lpx-enabled="+strconv.FormatBool(lpxEnabled),
 			"--conversion-webhook-service-name", "dynamo-operator-webhook-service",
 			"--conversion-webhook-service-namespace", "dynamo-system",
 		)
@@ -74,13 +81,24 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("apply CRDs: %v\n%s", err, output)
 		}
+
+		current, err := client.ApiextensionsV1().CustomResourceDefinitions().Get(
+			t.Context(), "lpxgraphdeployments.nvidia.com", metav1.GetOptions{})
+		switch {
+		case lpxEnabled:
+			require.NoError(t, err)
+			lpxCRD = current
+		case lpxCRD == nil:
+			require.True(t, apierrors.IsNotFound(err), "LPX CRD must not be installed while disabled: %v", err)
+		default:
+			require.NoError(t, err)
+			require.Equal(t, lpxCRD.UID, current.UID)
+			require.Equal(t, lpxCRD.Spec, current.Spec)
+			require.Equal(t, lpxCRD.Annotations, current.Annotations)
+		}
 	}
 
 	t.Log("Verify installed schemas preserve DGD placement and keep model downloads on the private child")
-	client, err := apiextensionsclient.NewForConfig(config)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, name := range []string{
 		"dynamographdeployments.nvidia.com", "dynamocomponentdeployments.nvidia.com", "lpxgraphdeployments.nvidia.com",
 	} {
@@ -129,10 +147,16 @@ func TestCRDApplyInstallsGeneratedSchemas(t *testing.T) {
 				t.Log("Preserve upstream role PodTemplate documentation in both DGD versions")
 				spec := version.Schema.OpenAPIV3Schema.Properties["spec"]
 				var component *apiextensionsv1.JSONSchemaProps
+				typeField := "type"
 				if version.Name == "v1alpha1" {
 					component = spec.Properties["services"].AdditionalProperties.Schema
+					typeField = "componentType"
 				} else {
 					component = spec.Properties["components"].Items.Schema
+				}
+				for _, field := range []string{typeField, "lpx"} {
+					require.Contains(t, component.Properties[field].Description, "lpx.enabled")
+					require.Contains(t, component.Properties[field].Description, "may change incompatibly")
 				}
 				template := component.Properties["roles"].Items.Schema.Properties["podTemplate"]
 				require.NotEmpty(t, template.Description)

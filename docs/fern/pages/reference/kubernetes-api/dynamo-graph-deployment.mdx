@@ -11,6 +11,11 @@ A DGD is the resource that persists and serves traffic. Author one directly when
 
 This page documents the `nvidia.com/v1beta1` API — the served, current version.
 
+LPX components are experimental and require the operator's `lpx.enabled` setting. When disabled,
+admission rejects new or changed LPX components but permits otherwise valid updates that leave them
+unchanged, and deletion. Existing LPX DGDs report a disabled status without further workload
+reconciliation; installed CRDs and workloads are preserved.
+
 <Info>
   Each entry in `spec.components` is a `DynamoComponentDeploymentSharedSpec` — the same fields documented on the [DCD Reference](dynamo-component-deployment.mdx#shared-component-spec). This page covers the **graph-level** fields; per-component fields live there.
 </Info>

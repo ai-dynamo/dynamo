@@ -150,6 +150,46 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Zero(t, stored.Status.ObservedGeneration)
 }
 
+func TestDynamoGraphDeploymentReconcileWithLPXDisabled(t *testing.T) {
+	t.Log("Store a mixed graph without Grove or LPX API types")
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mixed", Namespace: "default", Generation: 4},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+			{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend},
+			{ComponentName: "worker", ComponentType: v1beta1.ComponentTypeLPX},
+		}},
+		Status: v1beta1.DynamoGraphDeploymentStatus{ObservedGeneration: 3},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(scheme))
+	kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client: kubeClient, Config: &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Grove: true}},
+	}
+
+	t.Log("Reconcile before provider selection or workload effects")
+	result, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
+	require.NoError(t, err)
+	require.Zero(t, result)
+
+	t.Log("Persist only the disabled diagnosis and preserve prior generation acknowledgement")
+	stored := &v1beta1.DynamoGraphDeployment{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dgd), stored))
+	require.Empty(t, stored.Annotations)
+	require.Empty(t, stored.Finalizers)
+	require.Equal(t, dgd.Spec, stored.Spec)
+	require.Equal(t, dgd.Status.ObservedGeneration, stored.Status.ObservedGeneration)
+	require.Equal(t, v1beta1.DGDStateFailed, stored.Status.State)
+	ready := meta.FindStatusCondition(stored.Status.Conditions, "Ready")
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
+	require.Equal(t, "lpx_disabled", ready.Reason)
+	require.Equal(t, "LPX integration is disabled", ready.Message)
+}
+
 func TestDynamoGraphDeploymentReconcilePersistsComponentProgramLPXRejection(t *testing.T) {
 	t.Log("Create a finalized DGD durably assigned to the component provider with an LPX component")
 	dgd := &v1beta1.DynamoGraphDeployment{
@@ -170,6 +210,7 @@ func TestDynamoGraphDeploymentReconcilePersistsComponentProgramLPXRejection(t *t
 	}
 	controller_common.AddFinalizer(dgd)
 	reconciler := createTestDGDReconcilerWithStatus(dgd)
+	reconciler.RuntimeConfig.Gate.LPX = true
 
 	t.Log("Reconcile through the outer controller")
 	_, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dgd)})
@@ -235,17 +276,19 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 	}
 }
 
-func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.T) {
-	t.Log("Create a deleting DGD in a scheme without the optional Snapshot API types")
+func TestDynamoGraphDeploymentReconcileFinalizesWithoutOptionalAPITypes(t *testing.T) {
+	t.Log("Create a deleting LPX DGD without optional API types and with LPX disabled")
 	now := metav1.Now()
 	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
 		Name:              "test-dgd",
 		Namespace:         "default",
 		DeletionTimestamp: &now,
 	}}
+	dgd.Spec.Components = []v1beta1.DynamoComponentDeploymentSharedSpec{{
+		ComponentName: "worker", ComponentType: v1beta1.ComponentTypeLPX,
+	}}
 	controller_common.AddFinalizer(dgd)
 	testScheme := runtime.NewScheme()
-	require.NoError(t, v1alpha1.AddToScheme(testScheme))
 	require.NoError(t, v1beta1.AddToScheme(testScheme))
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(testScheme).
@@ -261,7 +304,7 @@ func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.
 		RuntimeConfig: runtimeConfig,
 	}
 
-	t.Log("Finalize while treating unregistered Snapshot resources as unavailable")
+	t.Log("Finalize before the LPX gate check, treating unregistered Snapshot resources as unavailable")
 	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: client.ObjectKeyFromObject(dgd),
 	})

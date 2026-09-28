@@ -159,12 +159,12 @@ func runAdmissionTest(t *testing.T, test admissionTestCase) *unstructured.Unstru
 			seedClient = newAdmissionResourceClient(t, env, test.oldObject, legacySeedUsername, warnings)
 		}
 		old := seedAdmissionObject(t, seedClient, test, env.Namespace())
+		admissionGate.set(test.gates)
 		if test.terminating {
 			old = beginTermination(t, seedClient, old)
 		}
 
 		t.Log("Submit the update request through the Kubernetes API server")
-		admissionGate.set(test.gates)
 		warnings.clear()
 		oldFixture, _ := admissionObject(t, test.oldObject, env.Namespace(), nil)
 		current = applyAdmissionFixtureChanges(old, oldFixture, current)

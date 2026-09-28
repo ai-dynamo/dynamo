@@ -823,7 +823,10 @@ spec:
                     - message: checkpoint.job cannot be set when checkpointRef is specified
                       rule: '!has(self.job) || !has(self.checkpointRef) || size(self.checkpointRef) == 0'
                 componentType:
-                  description: ComponentType indicates the role of this component (for example, "main").
+                  description: |-
+                    ComponentType indicates the role of this component (for example, "main").
+                    The DGD-only "lpx" type is experimental, requires the operator's
+                    lpx.enabled setting, and may change incompatibly.
                   type: string
                 dynamoNamespace:
                   description: |-
@@ -36854,6 +36857,8 @@ spec:
                     port mapping, frontend detection, planner RBAC, and the pod label
                     `nvidia.com/dynamo-component-type`. Because `prefill` and `decode` are
                     first-class values, users can set them directly.
+                    The DGD-only "lpx" type is experimental, requires the operator's
+                    lpx.enabled setting, and may change incompatibly.
                   enum:
                     - frontend
                     - worker

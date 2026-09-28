@@ -17,6 +17,8 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 	const longLPXComponentName = "abcdefghijklmnopqrstuvwxyzabcd"
 	const conductorRoleErr = "spec.components: Forbidden: LPX components must each declare a conductor role or form a shared draft and target pair"
 	const conductorTemplateErr = "spec.components[0].roles[1].podTemplate: Required value: LPX conductor requires an explicit podTemplate"
+	const lpxGateErr = "spec.components[0].type: Forbidden: LPX components require lpx.enabled=true"
+	const alphaLPXGateErr = "spec.services[lpx].componentType: Forbidden: LPX components require lpx.enabled=true"
 
 	// Keep LPX inputs and oracles together without a separate admission execution path.
 	tests := []dgdAdmissionTestCase{
@@ -175,9 +177,79 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			wantCELErr: "spec.components[0]: Invalid value: scalingAdapter is not supported when type is lpx",
 		},
 		{
-			name:        "LPX integration availability is deferred to the child controller",
+			name:            "LPX gate rejects CREATE when disabled",
+			lpxDisabled:     true,
+			deployment:      betaLPXDGDForAdmission(nil),
+			wantWebhookErrs: []string{lpxGateErr},
+		},
+		{
+			name:            "v1alpha1 LPX gate rejects CREATE when disabled",
+			lpxDisabled:     true,
+			deployment:      alphaLPXDGDForAdmission(nil),
+			wantWebhookErrs: []string{alphaLPXGateErr},
+		},
+		// Disabling LPX freezes each existing component, while unrelated updates remain available.
+		{
+			name:        "LPX gate admits ordinary component updates and reordering when disabled",
 			lpxDisabled: true,
-			deployment:  betaLPXDGDForAdmission(nil),
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Components = append(dgd.Spec.Components, *betaWorkerComponent(betaDGDForAdmission(nil)))
+			}),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := *betaWorkerComponent(betaDGDForAdmission(nil))
+				worker.Replicas = k8sptr.To(int32(2))
+				dgd.Spec.Components = append([]nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{worker}, dgd.Spec.Components...)
+			}),
+		},
+		{
+			name:          "v1alpha1 LPX gate rejects build updates when disabled",
+			lpxDisabled:   true,
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].LPX.BuildID = "test/replacement"
+			}),
+			wantWebhookErrs: []string{alphaLPXGateErr},
+		},
+		{
+			name:          "v1alpha1 LPX gate rejects ingress updates when disabled",
+			lpxDisabled:   true,
+			oldDeployment: alphaLPXDGDForAdmission(nil),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
+			}),
+			wantWebhookErrs: []string{alphaLPXGateErr},
+		},
+		{
+			name:        "v1alpha1 LPX gate admits unrelated updates with unchanged ingress when disabled",
+			lpxDisabled: true,
+			oldDeployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
+			}),
+			deployment: alphaLPXDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Services["lpx"].Ingress = &nvidiacomv1alpha1.IngressSpec{Enabled: true, Host: "lpx.example.com"}
+				dgd.Labels = map[string]string{"updated": "true"}
+				dgd.Spec.Labels = map[string]string{"updated": "true"}
+			}),
+		},
+		{
+			name:          "LPX gate rejects component addition when disabled",
+			lpxDisabled:   true,
+			oldDeployment: betaLPXDGDForAdmission(nil),
+			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				component := dgd.Spec.Components[0].DeepCopy()
+				component.ComponentName = "additional"
+				dgd.Spec.Components = append(dgd.Spec.Components, *component)
+			}),
+			wantWebhookErrs: []string{"spec.components[1].type: Forbidden: LPX components require lpx.enabled=true"},
+		},
+		{
+			name:        "LPX gate admits finalizer removal when disabled",
+			lpxDisabled: true,
+			terminating: true,
+			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Finalizers = []string{dgdTerminatingFinalizer}
+			}),
+			deployment: betaLPXDGDForAdmission(nil),
 		},
 		{
 			name:            "LPX rejects the component pathway selected when Grove is disabled",
@@ -234,7 +306,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 			}),
 		},
 		{
-			name:          "LPX runtime command updates are admitted while the integration is unavailable",
+			name:          "LPX gate rejects runtime command updates when disabled",
 			lpxDisabled:   true,
 			oldDeployment: betaLPXDGDForAdmission(nil),
 			deployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
@@ -242,6 +314,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 				container.Command = []string{"sh", "-c"}
 				container.Args = []string{"exec /opt/dynamo-lpu serve"}
 			}),
+			wantWebhookErrs: []string{lpxGateErr},
 		},
 		{
 			name: "LPX rejects an unknown Pod role",
@@ -502,6 +575,7 @@ func lpxDGDAdmissionCases() []dgdAdmissionTestCase {
 		},
 		{
 			name:               "LPX does not grandfather invalid multinode configuration",
+			lpxDisabled:        true,
 			seedWithoutWebhook: true,
 			oldDeployment: betaLPXDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				dgd.Spec.Components[0].Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}

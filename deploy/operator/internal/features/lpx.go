@@ -14,7 +14,7 @@ import (
 // LPX enables LPX scheduler integration.
 //
 // Owner: @andrewpaprotsky
-// Experimental since: N/A
+// Experimental since: v1.6.0
 // Beta since: N/A
 // GA since: N/A
 // Configuration: lpx.enabled

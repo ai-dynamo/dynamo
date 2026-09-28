@@ -22,6 +22,7 @@ import (
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 )
@@ -109,6 +110,12 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdateV1al
 	fldPath *field.Path,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
+
+	// Alpha-only fields are absent from the storage-version component comparison.
+	if newSpec.IsLPX() && !features.MustGateFrom(v.ctx).Enabled(features.LPX) &&
+		!apiequality.Semantic.DeepEqual(newSpec, oldSpec) {
+		allErrs = append(allErrs, field.Forbidden(fldPath.Child("componentType"), "LPX components require lpx.enabled=true"))
+	}
 
 	// Ratchet only complete, unchanged source-version runtime contract violations.
 	if v.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) && !newSpec.IsLPX() {

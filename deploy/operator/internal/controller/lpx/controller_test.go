@@ -791,7 +791,6 @@ func TestLPXDownloadsBeforePublication(t *testing.T) {
 			r := newLPXTestReconciler(t, observedRegistry, child, dgd)
 			if scenario.name == "disabled Grove" {
 				r.runtimeConfig.Gate.Grove = false
-				r.enabled = false
 			}
 
 			t.Log("Block downloads when Grove is disabled and wait for cold builds otherwise")
@@ -2561,7 +2560,6 @@ func TestLPXPodCliqueSetListOrder(t *testing.T) {
 
 func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 	for _, scenario := range []struct{ name, message string }{
-		{"LPX", "LPX integration is disabled"},
 		{"Grove", "Grove is disabled"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -2577,7 +2575,6 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 				_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 				require.NoError(t, err)
 			}
-			require.NoError(t, r.Get(ctx, key, child))
 			before := []client.ObjectList{
 				&grovev1alpha1.PodCliqueSetList{}, &corev1.ConfigMapList{},
 				&corev1.ServiceList{}, &lpxv1alpha1.LPUPipelineRequestList{},
@@ -2588,15 +2585,10 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 			}
 
 			t.Log("Disable the provider before an input edit and an expired deadline can retire the workload")
-			if scenario.name == "LPX" {
-				r.runtimeConfig.Gate.LPX = false
-			} else {
-				r.runtimeConfig.Gate.Grove = false
-			}
-			r.enabled = false
+			r.runtimeConfig.Gate.Grove = false
 			r.modelRegistry = nil
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(dgd), dgd))
-			originalSpec := dgd.Spec.DeepCopy()
+			originalBuildID := dgd.Spec.Components[0].LPX.BuildID
 			dgd.Spec.Components[0].LPX.BuildID = "edited-while-disabled"
 			require.NoError(t, r.Update(ctx, dgd))
 			for range 2 {
@@ -2619,10 +2611,9 @@ func TestLPXDisabledPreservesPublishedWorkloadUntilReenabled(t *testing.T) {
 			}
 
 			t.Log("Re-enable unchanged intent and resume the original PCS and request identities")
-			dgd.Spec = *originalSpec
+			dgd.Spec.Components[0].LPX.BuildID = originalBuildID
 			require.NoError(t, r.Update(ctx, dgd))
-			r.runtimeConfig.Gate.LPX, r.runtimeConfig.Gate.Grove = true, true
-			r.enabled = true
+			r.runtimeConfig.Gate.Grove = true
 			r.modelRegistry = registry
 			_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 			require.NoError(t, err)
@@ -2854,7 +2845,6 @@ func newLPXTestReconciler(
 	return &graphReconciler{
 		Client:        newLPXTestClient(t, seed...),
 		recorder:      recorder,
-		enabled:       true,
 		runtimeConfig: runtimeConfig,
 		modelRegistry: registry,
 		config:        config,
