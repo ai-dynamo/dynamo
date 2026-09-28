@@ -98,11 +98,14 @@ from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, fields, is_dataclass, replace
 from datetime import datetime, timezone
+from importlib.metadata import version as _package_version
 from itertools import count
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 
 import msgspec.structs
+import vllm
+import vllm.envs as vllm_envs
 import zmq
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import get_hash_fn_by_name
@@ -354,25 +357,16 @@ def _bench_engine_quantization(vllm_config: Any, model_config: Any) -> dict[str,
 def _bench_engine_versions() -> dict[str, Any]:
     """Engine and runtime versions; every lookup is best-effort."""
     try:
-        # instrumented_scheduler already imported the real vllm at module
-        # level, so this resolves from sys.modules and cannot pick up the
-        # dynamo.vllm package by accident.
-        import vllm
-
         vllm_version = getattr(vllm, "__version__", None)
     except Exception:
         vllm_version = None
         logger.debug("Could not determine vllm version", exc_info=True)
     try:
-        import vllm.envs as vllm_envs
-
         build_commit = getattr(vllm_envs, "VLLM_BUILD_COMMIT", None)
     except Exception:
         build_commit = None
         logger.debug("Could not determine vllm build commit", exc_info=True)
     try:
-        from importlib.metadata import version as _package_version
-
         dynamo_version = _package_version("ai-dynamo")
     except Exception:
         dynamo_version = None
@@ -5019,13 +5013,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 out.append(prefix + tail)
             return out
 
+        # Stable prompt content must not turn a zero-KV slot into a prefix
+        # hit when aligned points repeat or content is all zeros. Isolate each
+        # warm/measured request; only positive-KV slots reuse the seeded chain.
+        cache_salts = [
+            chain["salts"][slot] if kv > 0 else f"__bench_{self._bench_seq + slot}"
+            for slot, kv in enumerate(kv_read_lengths)
+        ]
         if getattr(self, "_bench_realseed_stage", "warm") == "warm":
             self._bench_current_point = None
             self._bench_current_fpms = []
             injected = self._bench_inject_prefill(
                 prompt_lens=prompt_lens,
                 max_tokens=1,
-                cache_salts=chain["salts"],
+                cache_salts=cache_salts,
                 prompt_token_ids_list=prompts("rswarm"),
             )
             if injected != point.batch_size:
@@ -5053,7 +5054,7 @@ class InstrumentedScheduler(AsyncScheduler):
         injected = self._bench_inject_prefill(
             prompt_lens=prompt_lens,
             max_tokens=1,
-            cache_salts=chain["salts"],
+            cache_salts=cache_salts,
             expected_kv_read_tokens=list(kv_read_lengths),
             prompt_token_ids_list=prompts("rsm"),
         )

@@ -25,7 +25,16 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 import pytest
+import torch
+import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import CUDAGraphMode  # noqa: E402
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 
@@ -7211,6 +7220,247 @@ def test_real_seed_measured_tail_is_independent_of_request_history(monkeypatch):
         stub._bench_step_prefill()  # measurement
         measured.append(calls[-1]["prompt_token_ids_list"])
     assert measured[0] == measured[1]
+
+
+@pytest.fixture
+def realseed_prefix_cache(monkeypatch):
+    """Real vLLM request hashes/cache metadata; no model or KV tensors."""
+    monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test-root"), raising=False)
+
+    def build(point, *, drop=0, seq=0):
+        stub, _ = _realseed_prefill_stub(point, monkeypatch, seq=seq, drop=drop)
+        del stub._bench_inject_prefill
+        del stub._bench_synthetic_token_ids
+        stub._bench_hash_block_size = 32
+        stub._bench_vocab_size = 4096
+        stub._bench_content_seed = "0"
+        stub._fpm_dp_rank = 0
+        stub._bench_block_hasher = kv_cache_utils.get_request_block_hasher(32, sha256)
+        stub.kv_cache_manager = KVCacheManager(
+            KVCacheConfig(
+                num_blocks=2048,
+                kv_cache_tensors=[],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer"],
+                        FullAttentionSpec(
+                            block_size=32,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.bfloat16,
+                        ),
+                    )
+                ],
+            ),
+            max_model_len=4096,
+            scheduler_block_size=32,
+            hash_block_size=32,
+            enable_caching=True,
+            use_eagle=bool(drop),
+        )
+        stub.add_request = lambda req: stub.requests.__setitem__(req.request_id, req)
+        stub._bench_results = []
+        stub._bench_iteration_groups = []
+        stub._bench_grid_digest = "test-grid"
+        stub._bench_synchronizer = None
+        stub._bench_dp_size = 1
+        stub._bench_soft_timeout_elapsed = lambda: False
+        return stub
+
+    return build
+
+
+def _complete_realseed_cache_shot(stub):
+    """Complete only CPU cache bookkeeping and save a synthetic FPM shape."""
+    manager = stub.kv_cache_manager
+    requests = list(stub.requests.values())
+    hits = []
+    for req in requests:
+        blocks, num_cached, _ = manager.get_computed_blocks(req)
+        hits.append(num_cached)
+        assert (
+            manager.allocate_slots(
+                req,
+                req.num_tokens - num_cached,
+                num_new_computed_tokens=num_cached,
+                new_computed_blocks=blocks,
+            )
+            is not None
+        )
+    for req in requests:
+        manager.free(req)
+    manager.new_step_starts()
+    stub.requests.clear()
+    stub._bench_active_req_ids.clear()
+    point = stub._bench_current_point
+    if point is not None:
+        stub._bench_current_fpms = [
+            {
+                "counter_id": point.benchmark_id,
+                "dp_rank": 0,
+                "wall_time": 0.01,
+                "scheduled_requests": {
+                    "num_prefill_requests": len(requests),
+                    "sum_prefill_tokens": sum(req.num_tokens for req in requests)
+                    - sum(hits),
+                    "sum_prefill_kv_tokens": sum(hits),
+                },
+            }
+        ]
+        stub._bench_save_current_point()
+    return requests, hits
+
+
+@pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
+@pytest.mark.parametrize("drop", [0, 32])
+def test_real_seed_aligned_zero_kv_repeats_keep_content_and_miss_cache(
+    monkeypatch, realseed_prefix_cache, content, drop
+):
+    """Block alignment can collapse several native points to the same KV=0 row."""
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
+    point = BenchmarkPoint(
+        "prefill", total_prefill_tokens=8192, total_kv_read_tokens=0, batch_size=4
+    )
+    stub = realseed_prefix_cache(point, drop=drop)
+    if content == "zeros":
+        stub._bench_vocab_size = 1
+    elif content == "sharegpt":
+        stub._bench_prefill_pool = [7] * 4096
+    measured = []
+    evidence = []
+    salts = []
+    for benchmark_id in (11, 12, 13):
+        stub._bench_realseed_stage_point(
+            replace(point, benchmark_id=benchmark_id), [0] * 4, [2048] * 4
+        )
+        assert stub._bench_realseed_staged is False
+        assert stub._bench_realseed_pending_step()  # untimed shape warmup
+        warm, warm_hits = _complete_realseed_cache_shot(stub)
+        assert warm_hits == [0] * 4
+        assert stub._bench_realseed_pending_step()  # measured injection
+        assert stub._bench_realseed_ready is None
+        assert stub._bench_current_point is not None
+        evidence.append(stub._bench_prompt_evidence)
+        requests, hits = _complete_realseed_cache_shot(stub)
+        assert hits == [0] * 4
+        measured.append([req.prompt_token_ids for req in requests])
+        salts.extend(req.cache_salt for req in warm + requests)
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [11, 12, 13]
+    assert measured[0] == measured[1] == measured[2]
+    if content != "random":
+        expected = 0 if content == "zeros" else 7
+        assert all(set(prompt) == {expected} for prompt in measured[0])
+    assert evidence[0] == evidence[1] == evidence[2]
+    assert len(set(salts)) == 24  # warm and measured requests are all isolated
+
+
+@pytest.mark.parametrize("content", ["random", "zeros", "sharegpt"])
+@pytest.mark.parametrize("drop", [0, 32])
+def test_real_seed_mixed_slots_isolate_zero_kv_and_reuse_seeded_prefix(
+    monkeypatch, realseed_prefix_cache, content, drop
+):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_CONTENT", content)
+    new_tokens = [128, 32 + drop]
+    point = BenchmarkPoint(
+        "prefill",
+        total_prefill_tokens=sum(new_tokens),
+        total_kv_read_tokens=64,
+        batch_size=2,
+        rows=[[new_tokens[0], 0], [new_tokens[1], 64]],
+    )
+    stub = realseed_prefix_cache(point, drop=drop)
+    if content == "zeros":
+        stub._bench_vocab_size = 1
+    elif content == "sharegpt":
+        stub._bench_prefill_pool = [7] * 4096
+    prompts = []
+    zero_salts = []
+    for benchmark_id in (1, 2, 3):
+        stub._bench_realseed_stage_point(
+            replace(point, benchmark_id=benchmark_id), [0, 64], new_tokens
+        )
+        if benchmark_id == 1:
+            seeded, _ = _complete_realseed_cache_shot(stub)
+            assert len(seeded) == 1  # zero-KV slot never seeds an empty prompt
+        else:
+            assert not stub.requests  # reuse the existing real prefix
+        chain = stub._bench_rsc[2]
+        for stage in ("warm", "measure"):
+            assert stub._bench_realseed_pending_step()
+            requests, hits = _complete_realseed_cache_shot(stub)
+            assert hits == [0, 64]
+            assert requests[1].cache_salt == chain["salts"][1]
+            assert requests[0].cache_salt != chain["salts"][0]
+            zero_salts.append(requests[0].cache_salt)
+            if stage == "measure":
+                prompts.append([req.prompt_token_ids for req in requests])
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [1, 2, 3]
+    assert prompts[0] == prompts[1] == prompts[2]
+    if content != "random":
+        expected = 0 if content == "zeros" else 7
+        assert all(set(prompt) == {expected} for prompt in prompts[0])
+    assert len(set(zero_salts)) == 6
+
+
+def test_real_seed_mixed_slots_restage_evicted_positive_prefix(realseed_prefix_cache):
+    point = BenchmarkPoint(
+        "prefill",
+        benchmark_id=1,
+        total_prefill_tokens=160,
+        total_kv_read_tokens=64,
+        batch_size=2,
+        rows=[[128, 0], [32, 64]],
+    )
+    stub = realseed_prefix_cache(point)
+    stub._bench_realseed_stage_point(point, [0, 64], [128, 32])
+    _complete_realseed_cache_shot(stub)  # seed the positive-KV slot
+    assert stub._bench_realseed_pending_step()
+    warm, _ = _complete_realseed_cache_shot(stub)
+    assert stub.kv_cache_manager.reset_prefix_cache()
+
+    assert stub._bench_realseed_pending_step()  # miss: re-stage once
+    assert stub._bench_realseed_retried is True
+    assert stub._bench_results == []
+    assert stub._bench_skipped_points == []
+    seeded, _ = _complete_realseed_cache_shot(stub)
+    assert len(seeded) == 1
+    assert stub._bench_realseed_pending_step()
+    retried_warm, warm_hits = _complete_realseed_cache_shot(stub)
+    assert warm_hits == [0, 64]
+    assert [req.prompt_token_ids for req in warm] == [
+        req.prompt_token_ids for req in retried_warm
+    ]
+    assert warm[0].cache_salt != retried_warm[0].cache_salt
+    assert stub._bench_realseed_pending_step()
+    _, hits = _complete_realseed_cache_shot(stub)
+    assert hits == [0, 64]
+    assert stub._bench_realseed_retried is False
+    assert stub._bench_skipped_points == []
+    assert [result.point.benchmark_id for result in stub._bench_results] == [1]
+
+
+def test_benchmark_engine_versions_preserves_unavailable_metadata(monkeypatch):
+    class UnavailableMetadata:
+        def __getattr__(self, name):
+            raise RuntimeError("metadata unavailable")
+
+    def missing_package(name):
+        raise RuntimeError("package metadata unavailable")
+
+    monkeypatch.setattr(instrumented_scheduler_module, "vllm", UnavailableMetadata())
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "vllm_envs", UnavailableMetadata()
+    )
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "_package_version", missing_package
+    )
+    actual = instrumented_scheduler_module._bench_engine_versions()
+    assert actual["vllm"] is None
+    assert actual["vllm_build_commit"] is None
+    assert actual["dynamo"] is None
+    assert isinstance(actual["python"], str)
 
 
 def test_real_seed_eager_warmup_does_not_reuse_measured_tail(monkeypatch):
