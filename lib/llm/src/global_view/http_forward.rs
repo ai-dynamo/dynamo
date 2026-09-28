@@ -93,6 +93,7 @@ impl GlobalRouterHttp {
         endpoint.set_path(path);
         tracing::info!(
             pool_id = %decision.pool_id,
+            target_region = %decision.region,
             model,
             cost = decision.cost,
             basis = ?decision.basis,
@@ -186,9 +187,9 @@ mod tests {
 
     use super::*;
     use dynamo_kv_router::global_view::state::{
-        InMemoryPoolStateRepository, PoolCapacity, PoolDescriptors, PoolLoad, PoolLocation,
-        PoolRole, PoolSignalStatus, PoolState, PoolStateSink, ServingReadiness, SignalState,
-        SignalStatus,
+        InMemoryPoolStateRepository, ModelRequestLoad, PoolCapacity, PoolDescriptors, PoolLoad,
+        PoolLocation, PoolRole, PoolSignalStatus, PoolState, PoolStateSink, ServingReadiness,
+        SignalState, SignalStatus,
     };
     use dynamo_kv_router::global_view::{PoolIdDeriver, PoolKey, V1PoolIdDeriver};
 
@@ -303,6 +304,79 @@ mod tests {
         );
         router_task.abort();
         backend_task.abort();
+    }
+
+    #[tokio::test]
+    async fn ohio_ingress_forwards_to_lower_load_west_frontend() {
+        let ohio_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ohio_address = ohio_listener.local_addr().unwrap();
+        let ohio_task = tokio::spawn(async move {
+            axum::serve(
+                ohio_listener,
+                Router::new().route("/v1/completions", post(|| async { "ohio" })),
+            )
+            .await
+            .unwrap();
+        });
+        let west_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let west_address = west_listener.local_addr().unwrap();
+        let west_task = tokio::spawn(async move {
+            axum::serve(
+                west_listener,
+                Router::new().route("/v1/completions", post(|| async { "west" })),
+            )
+            .await
+            .unwrap();
+        });
+
+        let repo = repository(format!("http://{ohio_address}"));
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let mut ohio = repo.list(now, &freshness()).pop().unwrap();
+        let mut west = ohio.clone();
+        west.pool_id = V1PoolIdDeriver.derive(&PoolKey::new("west", "dynamo", "mocker").unwrap());
+        west.descriptors.site_id = "west".into();
+        west.descriptors.location.region = "us-west-2".into();
+        west.descriptors.frontend_endpoint = Some(format!("http://{west_address}"));
+        for (pool, requests) in [(&mut ohio, 20), (&mut west, 0)] {
+            pool.load.request_plane.insert(
+                "model".into(),
+                ModelRequestLoad {
+                    pending_first_output_requests: Some(requests),
+                    output_generation_requests: Some(0),
+                    ..Default::default()
+                },
+            );
+            pool.signal_status.load = SignalStatus {
+                state: SignalState::Complete,
+                received_at_unix_ms: Some(now),
+                ..Default::default()
+            };
+        }
+        repo.replace(ohio);
+        repo.replace(west);
+        let router = Arc::new(GlobalRouterHttp::new(repo, freshness()).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, router.router()).await.unwrap();
+        });
+        let response = reqwest::Client::new()
+            .post(format!("http://{address}/v1/completions"))
+            .body(r#"{"model":"model","prompt":"hi"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "west");
+        task.abort();
+        ohio_task.abort();
+        west_task.abort();
     }
 
     #[tokio::test]
