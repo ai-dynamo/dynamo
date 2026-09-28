@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -93,6 +93,52 @@ def _make_handler(stage_types=("diffusion",)):
     handler.engine_args = SimpleNamespace(model=config.model)
 
     return handler
+
+
+@pytest.mark.asyncio
+async def test_lora_unload_waits_for_single_stage_generation():
+    handler = _make_handler(stage_types=("llm",))
+    handler.generate_endpoint = None
+    handler.engine_client.remove_lora = AsyncMock()
+    handler._lora_state.loaded_loras = {
+        "adapterA": LoRAInfo(id=123, path="/cache/adapter")
+    }
+    handler._engine_loaded_loras = {"adapterA"}
+    in_flight = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _generate(_lora_request):
+        yield SimpleNamespace()
+        in_flight.set()
+        await release.wait()
+        yield SimpleNamespace()
+
+    generation = handler._generate_with_lora_admission_lock(
+        handler._resolve_lora_request("adapterA"),
+        _generate,
+        sampling_params_list=[SimpleNamespace()],
+    )
+    await anext(generation)
+    next_output = asyncio.create_task(anext(generation))
+    await in_flight.wait()
+
+    async def _run_unload():
+        return [
+            result async for result in handler.unload_lora({"lora_name": "adapterA"})
+        ]
+
+    unload_task = asyncio.create_task(_run_unload())
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+
+    release.set()
+    await next_output
+    assert not unload_task.done()
+    await generation.aclose()
+    results = await unload_task
+
+    assert results[-1]["status"] == "success"
+    handler.engine_client.remove_lora.assert_awaited_once_with(123)
 
 
 class TestEngineInputs:

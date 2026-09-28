@@ -23,6 +23,8 @@ class LoRAState:
             str, asyncio.Lock
         ] = weakref.WeakValueDictionary()
         self.lora_load_locks_guard = threading.Lock()
+        self.active_requests: dict[str, int] = {}
+        self.request_drained: dict[str, asyncio.Event] = {}
 
     def resolve_request(
         self,
@@ -75,6 +77,25 @@ class LoRAState:
                 lock = asyncio.Lock()
                 self.lora_load_locks[lora_name] = lock
             return lock
+
+    def begin_request(self, lora_name: str) -> None:
+        count = self.active_requests.get(lora_name, 0)
+        if count == 0:
+            self.request_drained[lora_name] = asyncio.Event()
+        self.active_requests[lora_name] = count + 1
+
+    def end_request(self, lora_name: str) -> None:
+        count = self.active_requests[lora_name]
+        if count > 1:
+            self.active_requests[lora_name] = count - 1
+            return
+        del self.active_requests[lora_name]
+        self.request_drained.pop(lora_name).set()
+
+    async def wait_until_idle(self, lora_name: str) -> None:
+        drained = self.request_drained.get(lora_name)
+        if drained is not None:
+            await drained.wait()
 
     def list_lora_ids(self) -> dict[str, int]:
         """Return map of loaded LoRA names to integer IDs.
