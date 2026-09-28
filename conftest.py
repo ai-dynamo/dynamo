@@ -90,7 +90,7 @@ def pytest_runtest_setup(item):
     _strip_bad_path()
 
 
-@pytest.hookimpl(wrapper=True)
+@pytest.hookimpl(wrapper=True, trylast=True)
 def pytest_runtest_protocol(item, nextitem):
     """Tear down the parent's setup stack after a forked item.
 
