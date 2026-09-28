@@ -166,14 +166,15 @@ time. They do not test elapsed deadlines or rely on shortened sleeps.
 ## Running and validating
 
 ```bash
-cargo test --locked -p dynamo-sidecar-testkit --test conformance
+cargo test --locked -p dynamo-sidecar-testkit
 cargo clippy --locked -p dynamo-sidecar-testkit --all-targets --no-deps -- -D warnings
 ```
 
 The crate is a workspace member, so the existing pre-merge workspace Rust test
-job discovers all eight cases without a feature flag or separate CI job. Tests
-start their servers inside the Rust test process on OS-assigned ports. GPU-free
-execution can also be checked with `CUDA_VISIBLE_DEVICES=` and
+job runs the controller unit test and all eight conformance cases without a
+feature flag or separate CI job. The conformance cases start their servers
+inside the Rust test process on OS-assigned ports. GPU-free execution can also
+be checked with `CUDA_VISIBLE_DEVICES=` and
 `NVIDIA_VISIBLE_DEVICES=void`.
 
 Retain the existing Mocker `tests/sidecar.rs` suites when migrating these four
