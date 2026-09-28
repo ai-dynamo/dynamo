@@ -26,6 +26,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -58,7 +59,7 @@ func newGroveStableResourcesReconciler(
 func (r *groveStableResourcesReconciler) Reconcile(
 	ctx context.Context,
 	req groveReconcileRequest,
-	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) ([]Resource, error) {
 	logger := log.FromContext(ctx)
 
@@ -79,13 +80,15 @@ func (r *groveStableResourcesReconciler) Reconcile(
 		r.config.Discovery.Backend,
 		req.DGD.Annotations,
 	)
-	for i := range renderedComponents {
-		component := &renderedComponents[i]
+	managedComponents := req.ManagedComponents()
+	for i := range managedComponents {
+		component := &managedComponents[i]
 		if isK8sDiscoveryEnabled || string(component.ComponentType) == commonconsts.ComponentTypeFrontend {
 			serviceResource, err := r.reconcileComponentService(
 				ctx,
 				req.DGD,
 				component,
+				podCliqueSet,
 				isK8sDiscoveryEnabled,
 			)
 			if err != nil {
@@ -132,17 +135,33 @@ func (r *groveStableResourcesReconciler) reconcileComponentService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	podCliqueSet *grovev1alpha1.PodCliqueSet,
 	isK8sDiscoveryEnabled bool,
 ) (Resource, error) {
 	logger := log.FromContext(ctx)
 	componentName := component.ComponentName
+	componentType := string(component.ComponentType)
+	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
+	if clique := podCliqueSetCliqueForComponent(podCliqueSet, componentName); clique != nil {
+		if renderedType := clique.Labels[commonconsts.KubeLabelDynamoComponentType]; renderedType != "" {
+			componentType = renderedType
+		}
+		for _, key := range []string{
+			commonconsts.KubeLabelDynamoSubComponentType,
+			commonconsts.KubeLabelDynamoWorkerHash,
+		} {
+			if value := clique.Labels[key]; value != "" {
+				labels[key] = value
+			}
+		}
+	}
 	service, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
 		ServiceName:     dynamo.GetDCDResourceName(dgd, componentName, ""),
 		Namespace:       dgd.Namespace,
-		ComponentType:   string(component.ComponentType),
+		ComponentType:   componentType,
 		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(component),
 		ComponentName:   componentName,
-		Labels:          dynamo.GetDGDComponentResourceLabels(dgd, componentName, component),
+		Labels:          labels,
 		Annotations:     dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, component),
 		IsK8sDiscovery:  isK8sDiscoveryEnabled,
 	})

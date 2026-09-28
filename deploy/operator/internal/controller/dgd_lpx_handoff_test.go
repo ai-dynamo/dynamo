@@ -104,10 +104,10 @@ func TestGroveComponentSelectionDoesNotMutateDGD(t *testing.T) {
 			}
 
 			t.Log("Seed the ordinary PCS only for mixed graphs, including the truncated-name case")
-			pcsName := dynamo.PCSNameForDGD(req.DGD.Name, managed)
+			pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 			if test.longNames {
 				require.NotEqual(t, source.Name, pcsName)
-				require.NotEqual(t, dynamo.PCSNameForDGD(source.Name, source.Spec.Components), pcsName)
+				require.NotEqual(t, dynamo.PCSNameForDGD(source, nil), pcsName)
 			}
 			pcs := &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{Name: pcsName, Namespace: source.Namespace, Generation: 1},
@@ -413,8 +413,7 @@ func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testi
 	_, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
-	managed := groveReq.ManagedComponents()
-	pcsName := dynamo.PCSNameForDGD(groveReq.DGD.Name, managed)
+	pcsName := dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated)
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKey{
 		Namespace: source.Namespace, Name: pcsName,
@@ -661,9 +660,8 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 
 			t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
 			groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
-			managed := groveReq.ManagedComponents()
 			pcs := &grovev1alpha1.PodCliqueSet{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForDGD(groveReq.DGD.Name, managed), Namespace: source.Namespace, Generation: 2},
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), Namespace: source.Namespace, Generation: 2},
 				Status:     grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1))},
 			}
 			require.NoError(t, kube.Create(t.Context(), pcs))
@@ -676,7 +674,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 			require.NoError(t, kube.Update(t.Context(), pcs))
 			prefill := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD.Name, managed), "prefill"), Namespace: source.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceName(dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated), "prefill"), Namespace: source.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
@@ -822,7 +820,7 @@ func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
 	}, adapterDeletes)
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	groveReq := groveReconcileRequest{DGD: source, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
-	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(groveReq.DGD.Name, groveReq.ManagedComponents())}
+	key := client.ObjectKey{Namespace: source.Namespace, Name: dynamo.PCSNameForDGD(groveReq.DGD, groveReq.IsDelegated)}
 	require.NoError(t, kube.Get(t.Context(), key, pcs))
 	require.True(t, metav1.IsControlledBy(pcs, source))
 	require.Len(t, pcs.Spec.Template.Cliques, 1)

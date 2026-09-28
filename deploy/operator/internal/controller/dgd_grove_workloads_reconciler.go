@@ -79,7 +79,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	// A graph with only external components still reconciles graph-wide stable resources.
 	if len(managedComponents) == 0 {
-		stableResources, err := r.stableResources.Reconcile(ctx, req, managedComponents)
+		stableResources, err := r.stableResources.Reconcile(ctx, req, nil)
 		if err != nil {
 			return ReconcileResult{}, err
 		}
@@ -115,7 +115,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
 		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&
-			!podCliqueSetUsesGroveWorkerHashSuffix(managedComponents, renderedPodCliqueSet.existing)
+			!podCliqueSetUsesGroveWorkerHashSuffix(req, renderedPodCliqueSet.existing)
 		observed, err := podCliqueSetObservesWorkerHash(req, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
@@ -138,7 +138,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Grove scaling: %w", err)
 	}
 
-	stableResources, err := r.stableResources.Reconcile(ctx, req, renderedPodCliqueSet.renderedComponents)
+	stableResources, err := r.stableResources.Reconcile(ctx, req, syncedPodCliqueSet)
 	if err != nil {
 		return ReconcileResult{}, err
 	}
@@ -146,7 +146,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	podCliqueSetResource, readiness, err := r.observePodCliqueSetReadiness(
 		ctx,
 		req,
-		renderedPodCliqueSet.renderedComponents,
 		syncedPodCliqueSet,
 	)
 	if err != nil {
@@ -209,10 +208,9 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 func (r *groveWorkloadsReconciler) observePodCliqueSetReadiness(
 	ctx context.Context,
 	req groveReconcileRequest,
-	renderedComponents []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	podCliqueSet *grovev1alpha1.PodCliqueSet,
 ) (*commoncontroller.Resource, dynamo.GroveReadiness, error) {
-	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, req.DGD, renderedComponents, podCliqueSet)
+	readiness, err := dynamo.EvaluateGroveReadiness(ctx, r.reader, req.DGD, req.IsDelegated, podCliqueSet)
 	if err != nil {
 		return nil, dynamo.GroveReadiness{}, err
 	}

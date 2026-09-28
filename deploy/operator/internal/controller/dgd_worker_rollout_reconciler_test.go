@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"testing"
 
@@ -243,7 +242,7 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
 }
 
-func TestGroveRenderComponentsWorkerHashSuffix(t *testing.T) {
+func TestGenerateGrovePodCliqueSetWorkerHashSuffix(t *testing.T) {
 	tests := []struct {
 		name             string
 		workerHashSuffix bool
@@ -272,29 +271,27 @@ func TestGroveRenderComponentsWorkerHashSuffix(t *testing.T) {
 
 			t.Log("Render the managed Grove components")
 			req := groveReconcileRequest{DGD: dgd, IsDelegated: (*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}
-			rendered, err := groveRenderComponents(req, nil, tt.workerHashSuffix)
+			pcs, err := dynamo.GenerateGrovePodCliqueSet(
+				t.Context(), dgd, req.IsDelegated,
+				&configv1alpha1.OperatorConfiguration{}, &commonController.RuntimeConfig{},
+				nil, nil, nil, nil, tt.workerHashSuffix, nil,
+			)
 			require.NoError(t, err)
-			workerIndex := slices.IndexFunc(rendered, func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-				return component.ComponentName == "worker"
-			})
-			require.NotEqual(t, -1, workerIndex)
-			worker := &rendered[workerIndex]
-			require.Len(t, rendered, 2)
-			require.Equal(t, -1, slices.IndexFunc(rendered, func(component nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-				return component.ComponentName == "lpx"
-			}))
-			require.Equal(t, "worker", rendered[0].ComponentName)
-			require.Equal(t, "frontend", rendered[1].ComponentName)
-			rendered[1].PodTemplate.Labels["test"] = "rendered"
+			worker := podCliqueSetCliqueForComponent(pcs, "worker")
+			require.NotNil(t, worker)
+			require.Len(t, pcs.Spec.Template.Cliques, 2)
+			require.Nil(t, podCliqueSetCliqueForComponent(pcs, "lpx"))
+			frontend := podCliqueSetCliqueForComponent(pcs, "frontend")
+			require.NotNil(t, frontend)
+			frontend.Labels["test"] = "rendered"
 
 			t.Log("Verify the rendered suffix and source DGD immutability")
 			if tt.workerHashSuffix {
 				wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 				require.NoError(t, err)
-				require.NotNil(t, worker.PodTemplate)
-				assert.Equal(t, wantHash, worker.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash])
+				assert.Equal(t, wantHash, worker.Labels[consts.KubeLabelDynamoWorkerHash])
 			} else {
-				assert.Nil(t, worker.PodTemplate)
+				assert.Empty(t, worker.Labels[consts.KubeLabelDynamoWorkerHash])
 			}
 			assert.Nil(t, dgd.GetComponentByName("worker").PodTemplate)
 			assert.Equal(t, before, dgd)

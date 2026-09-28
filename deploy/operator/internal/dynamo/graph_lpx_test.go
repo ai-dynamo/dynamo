@@ -144,8 +144,8 @@ func TestLPXPCSNameUsesStableMaterializationIdentity(t *testing.T) {
 	t.Log("Keep the deployment name visible with four hexadecimal identity characters")
 	require.Equal(t, "chat-3efb", name)
 	t.Log("An ordinary DGD named chat-lpx must not collide with the LPX PCS of chat")
-	require.NotEqual(t, PCSNameForDGD("chat-lpx", nil), name)
-	require.NotEqual(t, PCSNameForDGD(deployment.Name, nil), name)
+	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: "chat-lpx"}}, nil), name)
+	require.NotEqual(t, PCSNameForDGD(&v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{Name: deployment.Name}}, nil), name)
 
 	for _, test := range []struct {
 		name   string

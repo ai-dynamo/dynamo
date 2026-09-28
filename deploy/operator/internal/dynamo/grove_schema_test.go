@@ -114,13 +114,14 @@ func generateTopologyTestPodCliqueSet(t *testing.T, deploymentPack v1alpha1.Topo
 	converted := betaDGD(t, deployment)
 	pcs, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
 		&mockSecretsRetriever{},
 		&RestartState{},
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)

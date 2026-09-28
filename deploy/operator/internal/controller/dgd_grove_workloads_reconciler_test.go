@@ -48,7 +48,7 @@ import (
 
 const updatedWorkerVersion = "new"
 
-func TestGroveRenderComponentsUsesDelegationPredicate(t *testing.T) {
+func TestGroveReconcileRequestUsesDelegationPredicate(t *testing.T) {
 	dgd := newLPXHandoffSource(t, "node-local-v2-hybrid")
 	dgd.Spec.Components = append(dgd.Spec.Components, nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
 		ComponentName: "frontend",
@@ -58,18 +58,18 @@ func TestGroveRenderComponentsUsesDelegationPredicate(t *testing.T) {
 	req := groveReconcileRequest{
 		DGD: dgd,
 		IsDelegated: func(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-			return component.ComponentName != "lpx"
+			return component.ComponentName == "lpx"
 		},
 	}
 
-	t.Log("Render exactly the component selected by the delegation predicate")
-	components, err := groveRenderComponents(req, nil, false)
-	require.NoError(t, err)
+	t.Log("Select exactly the component managed by Grove")
+	components := req.ManagedComponents()
 	require.Len(t, components, 1)
-	require.Equal(t, "lpx", components[0].ComponentName)
-	require.True(t, components[0].IsLPX())
+	require.Equal(t, "frontend", components[0].ComponentName)
+	require.False(t, components[0].IsLPX())
+	require.Equal(t, []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{dgd.Spec.Components[0]}, req.DelegatedComponents())
 
-	t.Log("Keep the full DGD authoritative and isolate renderer mutations")
+	t.Log("Keep the full DGD authoritative")
 	components[0].ComponentName = "changed-copy"
 	require.Equal(t, before, dgd)
 	require.NotNil(t, req.DGD.GetComponentByName("frontend"))
@@ -168,7 +168,7 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 }
 
 func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutOrdinaryPodCliqueSet(t *testing.T) {
-	t.Log("Project an LPX-only graph without an ordinary PodCliqueSet")
+	t.Log("Use an LPX-only graph without an ordinary PodCliqueSet")
 	const dgdName = "graph"
 	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
 	source.Name, source.Namespace, source.UID = dgdName, corev1.NamespaceDefault, "dgd-uid"
@@ -236,7 +236,7 @@ func TestGroveWorkloadsReconciler_DoesNotCommitWorkerHashWhenPodCliqueSetSyncFai
 			if tt.existingPCS {
 				existingPCS = &grovev1alpha1.PodCliqueSet{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+						Name:      dynamo.PCSNameForDGD(dgd, nil),
 						Namespace: dgd.Namespace,
 						OwnerReferences: []metav1.OwnerReference{
 							*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
@@ -338,7 +338,7 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	require.NoError(t, err)
 	legacyPCS := &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Name:      dynamo.PCSNameForDGD(dgd, nil),
 			Namespace: dgd.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
@@ -677,7 +677,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 	t.Log("Seed a PCS carrying the current hash so the sync is a no-op")
 	existingPCS := &grovev1alpha1.PodCliqueSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+			Name:      dynamo.PCSNameForDGD(dgd, nil),
 			Namespace: dgd.Namespace,
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
@@ -747,7 +747,7 @@ func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testi
 			name: "legacy unsuffixed PCS — bookkeeping write defers commit, second reconcile commits",
 			existingPCS: &grovev1alpha1.PodCliqueSet{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Name:      dynamo.PCSNameForDGD(dgd, nil),
 					Namespace: dgd.Namespace,
 					OwnerReferences: []metav1.OwnerReference{
 						*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),

@@ -43,10 +43,9 @@ func (r *groveRestartProgressResolver) Resolve(
 	inProgress []string,
 ) []string {
 	logger := log.FromContext(ctx)
-	managedComponents := req.ManagedComponents()
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
-	pcsName := dynamo.PCSNameForDGD(req.DGD.Name, managedComponents)
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 	if err := r.reader.Get(ctx, types.NamespacedName{Name: pcsName, Namespace: req.DGD.Namespace}, pcs); err != nil {
 		logger.Error(err, "failed to get PodCliqueSet")
 		return inProgress

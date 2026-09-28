@@ -190,7 +190,7 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 			t.Log("Reconcile the Grove stable resources")
 			ctx := context.Background()
 			reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-			if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+			if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 				t.Fatalf("Reconcile returned an error: %v", err)
 			}
 
@@ -228,7 +228,7 @@ func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibil
 	ctx := context.Background()
 	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("first Reconcile returned an error: %v", err)
 	}
 
@@ -242,7 +242,7 @@ func TestGroveStableResourcesReconcilerDeletesElasticEPLeaderServiceWhenEligibil
 
 	t.Log("Drop elastic EP from the component and reconcile again")
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Args = []string{"python3 -m dynamo.vllm"}
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("second Reconcile returned an error: %v", err)
 	}
 
@@ -269,7 +269,7 @@ func TestGroveStableResourcesReconcilerLeavesAnUnownedNameCollisionAlone(t *test
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd, unowned)
 
 	t.Log("Reconcile a component that does not qualify, so it takes the delete path")
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
 	}
 
@@ -319,7 +319,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 		events.NewFakeRecorder(100),
 		&configv1alpha1.OperatorConfiguration{},
 	)
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
 	}
 
@@ -342,13 +342,13 @@ func TestGroveStableResourcesReconcilerConvergesLeaderServiceAnnotations(t *test
 	dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
 	dgd.Spec.Annotations = map[string]string{"example.com/note": "before"}
 	reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("first Reconcile returned an error: %v", err)
 	}
 
 	t.Log("Edit the DGD annotation and reconcile again")
 	dgd.Spec.Annotations["example.com/note"] = "after"
-	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, dgd.Spec.Components); err != nil {
+	if _, err := reconciler.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, nil); err != nil {
 		t.Fatalf("second Reconcile returned an error: %v", err)
 	}
 

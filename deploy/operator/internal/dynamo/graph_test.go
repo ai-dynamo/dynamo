@@ -1067,13 +1067,14 @@ func TestTopologyLabelMetadataFromConvertedAlphaDGD(t *testing.T) {
 
 	pcs, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		beta, beta.Spec.Components,
+		beta, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -1142,13 +1143,14 @@ func TestGenerateGrovePodCliqueSet_AddsTopologyLabelAnnotationToWorkerCliques(t 
 
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd, dgd.Spec.Components,
+		dgd, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -1203,13 +1205,14 @@ func TestGenerateGrovePodCliqueSet_ProjectsClusterTopologyDomainsToWorkerCliques
 	runtimeConfig := &controller_common.RuntimeConfig{}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd, dgd.Spec.Components,
+		dgd, nil,
 		operatorConfig,
 		runtimeConfig,
 		kubeClient,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -4409,7 +4412,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			converted := betaDGD(t, tt.args.dynamoDeployment)
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, converted, converted.Spec.Components, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, converted, nil, tt.args.controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -4511,13 +4514,14 @@ func TestGenerateGrovePodCliqueSet_DoesNotResolveUnusedContainerGPUCount(t *test
 
 			got, err := GenerateGrovePodCliqueSet(
 				t.Context(),
-				dgd, dgd.Spec.Components,
+				dgd, nil,
 				&configv1alpha1.OperatorConfiguration{},
 				&controller_common.RuntimeConfig{},
 				nil,
 				nil,
 				nil,
 				nil,
+				false,
 				nil,
 			)
 			require.NoError(t, err)
@@ -4570,13 +4574,14 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 	}
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		dgd, dgd.Spec.Components,
+		dgd, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		kubeClient,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -4643,13 +4648,14 @@ func TestGenerateGrovePodCliqueSet_TRTLLMMultinodeDRA(t *testing.T) {
 
 	got, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		dgd, dgd.Spec.Components,
+		dgd, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		kubeClient,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -4690,7 +4696,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 	}
 
 	converted := betaDGD(t, dynamoDeployment)
-	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -6010,7 +6016,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 			}
 
 			converted := betaDGD(t, dynamoDeployment)
-			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, controllerConfig, &controller_common.RuntimeConfig{}, nil, secretsRetriever, nil, nil, false, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -7774,13 +7780,14 @@ func TestGenerateGrovePodCliqueSet_ConvertedCompilationCacheMountIsNotDuplicated
 	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -8711,7 +8718,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 			}
 
 			converted := betaDGD(t, dgd)
-			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, controllerConfig, &controller_common.RuntimeConfig{}, nil, nil, tt.restartState, nil, false, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
@@ -8867,7 +8874,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsDoNotCarryDiscoveryLabels(t *testing.T
 	}
 
 	converted := betaDGD(t, dgd)
-	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -8952,7 +8959,7 @@ func TestGenerateGrovePodCliqueSet_GMSPodsAreNotCheckpointTargets(t *testing.T) 
 	}
 
 	converted := betaDGD(t, dgd)
-	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, false, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -9052,7 +9059,7 @@ func TestGenerateGrovePodCliqueSet_IntraPodFailoverCheckpointTargets(t *testing.
 	}
 
 	converted := betaDGD(t, dgd)
-	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, infoByService)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, controllerConfig, &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}}, nil, nil, nil, nil, false, infoByService)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
@@ -9108,13 +9115,14 @@ func TestGenerateGrovePodCliqueSet_WaitForCheckpointGatesPodCliqueScalingGroup(t
 	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true}},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true, DRA: true}},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		map[string]*checkpoint.CheckpointInfo{
 			"decode": {
 				Enabled:          true,
@@ -9218,10 +9226,10 @@ func TestGenerateGrovePodCliqueSet_ComponentMinAvailable(t *testing.T) {
 			converted := betaDGD(t, dgd)
 			got, err := GenerateGrovePodCliqueSet(
 				context.Background(),
-				converted, converted.Spec.Components,
+				converted, nil,
 				&configv1alpha1.OperatorConfiguration{},
 				&controller_common.RuntimeConfig{},
-				nil, nil, nil, nil, nil,
+				nil, nil, nil, nil, false, nil,
 			)
 			require.NoError(t, err)
 			require.NotNil(t, got)
@@ -9271,10 +9279,10 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 
 	got, err := GenerateGrovePodCliqueSet(
 		t.Context(),
-		beta, beta.Spec.Components,
+		beta, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, false, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -9329,13 +9337,13 @@ func TestGenerateGrovePodCliqueSet_MinAvailable_FailoverShadowsAreRedundant(t *t
 	converted := betaDGD(t, dgd)
 	got, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{
 			Discovery:      configv1alpha1.DiscoveryConfiguration{Backend: "kubernetes"},
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{ETCDAddress: "etcd-address", NATSAddress: "nats-address"},
 		},
 		&controller_common.RuntimeConfig{Gate: features.Gates{DRA: true}},
-		nil, nil, nil, nil, nil,
+		nil, nil, nil, nil, false, nil,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -10395,7 +10403,7 @@ func TestGenerateGrovePodCliqueSet_SpecMetadataPropagation(t *testing.T) {
 	}
 
 	converted := betaDGD(t, dgd)
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 
 	// PCS object-level metadata
@@ -10510,7 +10518,7 @@ func TestGenerateGrovePodCliqueSet_MetadataVolcanoQueuePropagation(t *testing.T)
 			}
 
 			converted := betaDGD(t, dgd)
-			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, nil)
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, tt.runtimeConfig, nil, nil, nil, nil, false, nil)
 			require.NoError(t, err)
 			require.NotNil(t, pcs)
 			if tt.expectQueue {
@@ -10545,13 +10553,14 @@ func TestGenerateGrovePodCliqueSet_VolcanoSchedulerInjection(t *testing.T) {
 	converted := betaDGD(t, dgd)
 	pcs, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, VolcanoScheduler: true}},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.NoError(t, err)
@@ -10579,13 +10588,14 @@ func TestGenerateGrovePodCliqueSet_SchedulerIntegrationMutualExclusion(t *testin
 	converted := betaDGD(t, dgd)
 	_, err := GenerateGrovePodCliqueSet(
 		context.Background(),
-		converted, converted.Spec.Components,
+		converted, nil,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{Gate: features.Gates{Grove: true, KaiScheduler: true, VolcanoScheduler: true}},
 		nil,
 		nil,
 		nil,
 		nil,
+		false,
 		nil,
 	)
 	require.Error(t, err)
@@ -10610,7 +10620,7 @@ func TestGenerateGrovePodCliqueSet_PriorityClassName(t *testing.T) {
 	}
 
 	converted := betaDGD(t, dgd)
-	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "high-priority", pcs.Spec.Template.PriorityClassName)
@@ -10682,7 +10692,7 @@ func TestGenerateGrovePodCliqueSet_UpdateStrategy(t *testing.T) {
 			}
 
 			converted := betaDGD(t, dgd)
-			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, converted.Spec.Components, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			pcs, err := GenerateGrovePodCliqueSet(context.Background(), converted, nil, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, false, nil)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
@@ -10941,13 +10951,14 @@ func TestGenerateGrovePodCliqueSet_TopologyConstraints(t *testing.T) {
 			converted := betaDGD(t, tt.deployment)
 			pcs, err := GenerateGrovePodCliqueSet(
 				context.Background(),
-				converted, converted.Spec.Components,
+				converted, nil,
 				operatorConfig,
 				&controller_common.RuntimeConfig{},
 				nil,
 				secretsRetriever,
 				&RestartState{},
 				nil,
+				false,
 				nil,
 			)
 			assert.NoError(t, err)
@@ -11099,7 +11110,11 @@ func TestPCSNameForDGD(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := PCSNameForDGD(tt.dgdName, tt.components)
+			dgd := &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: tt.dgdName},
+				Spec:       v1beta1.DynamoGraphDeploymentSpec{Components: tt.components},
+			}
+			got := PCSNameForDGD(dgd, nil)
 
 			if tt.want != "" {
 				if got != tt.want {
@@ -11113,7 +11128,7 @@ func TestPCSNameForDGD(t *testing.T) {
 			}
 
 			// Verify determinism
-			got2 := PCSNameForDGD(tt.dgdName, tt.components)
+			got2 := PCSNameForDGD(dgd, nil)
 			if got != got2 {
 				t.Errorf("PCSNameForDGD() not deterministic: %q != %q", got, got2)
 			}

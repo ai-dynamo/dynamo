@@ -217,7 +217,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 		oldComponents:           oldComponents,
 	}
 	if grovePathway {
-		specOpts.pcsName = dynamo.PCSNameForDGD(dgd.Name, ordinaryGroveComponents(dgd.Spec.Components))
+		specOpts.pcsName = dynamo.PCSNameForDGD(
+			dgd,
+			(*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController,
+		)
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 

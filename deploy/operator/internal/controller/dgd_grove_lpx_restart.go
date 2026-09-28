@@ -39,10 +39,10 @@ func resolveCompositeGroveRestartProgress(
 	ctx context.Context,
 	req groveReconcileRequest,
 	inProgress []string,
-	managedResolver *groveRestartProgressResolver,
+	ordinaryResolver *groveRestartProgressResolver,
 	lpxResolver *lpxRestartProgressResolver,
 ) []string {
-	managed := make([]string, 0, len(inProgress))
+	ordinary := make([]string, 0, len(inProgress))
 	delegated := make([]string, 0, len(inProgress))
 	pending := make(map[string]bool, len(inProgress))
 	delegatedNames := make(map[string]struct{})
@@ -58,7 +58,7 @@ func resolveCompositeGroveRestartProgress(
 		if _, found := delegatedNames[name]; found {
 			delegated = append(delegated, name)
 		} else {
-			managed = append(managed, name)
+			ordinary = append(ordinary, name)
 		}
 	}
 
@@ -68,8 +68,8 @@ func resolveCompositeGroveRestartProgress(
 			pending[name] = true
 		}
 	}
-	if len(managed) > 0 {
-		for _, name := range managedResolver.Resolve(ctx, req, managed) {
+	if len(ordinary) > 0 {
+		for _, name := range ordinaryResolver.Resolve(ctx, req, ordinary) {
 			pending[name] = true
 		}
 	}

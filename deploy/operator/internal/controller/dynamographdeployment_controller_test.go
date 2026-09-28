@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 
@@ -1433,22 +1432,6 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 	generatedPCS := renderedPCS.desired
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
-	prefillIndex := slices.IndexFunc(renderedPCS.renderedComponents, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return component.ComponentName == "VllmPrefillWorker"
-	})
-	g.Expect(prefillIndex).NotTo(gomega.Equal(-1))
-	prefill := &renderedPCS.renderedComponents[prefillIndex]
-	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
-	g.Expect(prefill.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
-
-	decodeIndex := slices.IndexFunc(renderedPCS.renderedComponents, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return component.ComponentName == "VllmDecodeWorker"
-	})
-	g.Expect(decodeIndex).NotTo(gomega.Equal(-1))
-	decode := &renderedPCS.renderedComponents[decodeIndex]
-	g.Expect(decode.ComponentType).To(gomega.Equal(v1beta1.ComponentTypeWorker))
-	g.Expect(decode.PodTemplate.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
-
 	g.Expect(generatedPCS.Spec.Template.Cliques[0].Name).To(gomega.Equal("vllmprefillworker"))
 
 	var prefillClique *grovev1alpha1.PodCliqueTemplateSpec
@@ -1465,16 +1448,23 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 	g.Expect(prefillClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 	g.Expect(prefillClique.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]).To(gomega.Equal("1.1.0"))
 
-	decodeService, err := dynamo.GenerateComponentService(dynamo.ComponentServiceParams{
-		ServiceName:     dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
-		Namespace:       dgd.Namespace,
-		ComponentType:   string(decode.ComponentType),
-		DynamoNamespace: dgd.GetDynamoNamespaceForComponent(decode),
-		ComponentName:   "VllmDecodeWorker",
-		Labels:          dynamo.GetDGDComponentResourceLabels(dgd, "VllmDecodeWorker", decode),
-		Annotations:     dynamo.GetDGDComponentResourceAnnotations(dgd, "VllmDecodeWorker", decode),
-		IsK8sDiscovery:  true,
-	})
+	decodeClique := podCliqueSetCliqueForComponent(generatedPCS, "VllmDecodeWorker")
+	g.Expect(decodeClique).NotTo(gomega.BeNil())
+	g.Expect(decodeClique.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
+	g.Expect(decodeClique.Labels[commonconsts.KubeLabelDynamoSubComponentType]).To(gomega.Equal(commonconsts.ComponentTypeDecode))
+
+	stableResources := newGroveStableResourcesReconciler(
+		fakeKubeClient,
+		events.NewFakeRecorder(10),
+		&configv1alpha1.OperatorConfiguration{Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes}},
+	)
+	_, err = stableResources.Reconcile(ctx, groveReconcileRequest{DGD: dgd}, generatedPCS)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	decodeService := &corev1.Service{}
+	err = fakeKubeClient.Get(ctx, types.NamespacedName{
+		Name:      dynamo.GetDCDResourceName(dgd, "VllmDecodeWorker", ""),
+		Namespace: dgd.Namespace,
+	}, decodeService)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 	g.Expect(decodeService.Spec.Selector[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypeWorker))
 }
@@ -1729,12 +1719,9 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 	)
 	renderedPCS, err := renderer.Render(ctx, groveReconcileRequest{DGD: dgd, IsDelegated: (*v1beta1.DynamoComponentDeploymentSharedSpec).ManagedByExternalController}, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	prefillIndex := slices.IndexFunc(renderedPCS.renderedComponents, func(component v1beta1.DynamoComponentDeploymentSharedSpec) bool {
-		return component.ComponentName == "prefill"
-	})
-	g.Expect(prefillIndex).NotTo(gomega.Equal(-1))
-	prefill := &renderedPCS.renderedComponents[prefillIndex]
-	g.Expect(prefill.ComponentType).To(gomega.Equal(v1beta1.ComponentTypePrefill))
+	prefill := podCliqueSetCliqueForComponent(renderedPCS.desired, "prefill")
+	g.Expect(prefill).NotTo(gomega.BeNil())
+	g.Expect(prefill.Labels[commonconsts.KubeLabelDynamoComponentType]).To(gomega.Equal(commonconsts.ComponentTypePrefill))
 }
 
 func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {

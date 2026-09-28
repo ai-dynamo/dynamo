@@ -50,7 +50,7 @@ func (s *groveScaler) Reconcile(
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
 	managedComponents := req.ManagedComponents()
-	pcsName := dynamo.PCSNameForDGD(req.DGD.Name, managedComponents)
+	pcsName := dynamo.PCSNameForDGD(req.DGD, req.IsDelegated)
 
 	for i := range managedComponents {
 		component := &managedComponents[i]

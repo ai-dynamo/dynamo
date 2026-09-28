@@ -41,12 +41,14 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
   that uses them.
 - A `DynamoGraphDeployment` value always represents the complete API object. Never
   construct or pass a copy with `spec.components` filtered.
-- When a composite program divides components between managed and delegated paths, set
-  the ownership predicate once at the program composition root and pass it with the
-  complete DGD to nested reconcilers. Nested reconcilers must not reclassify component
-  ownership or accept a redundant component slice they can derive from the request.
-  Carry a component slice separately only when it is a transformed renderer output,
-  name that distinction explicitly, and never wrap the slice in a synthetic DGD.
+- When a composite program divides workload ownership between managed and delegated
+  paths, set the ownership predicate once at the program composition root and pass it
+  with the complete DGD to nested reconcilers that select or observe provider-owned
+  workloads. Those reconcilers must not reclassify component ownership or accept a
+  redundant component slice they can derive from the request. Graph-wide reconcilers
+  consume the complete DGD directly when workload ownership is irrelevant.
+  A renderer may copy and transform one component locally while emitting provider
+  resources; it must not expose a parallel component collection as another graph view.
 - The program result contains `ctrl.Result`, the complete desired DGD status, and queued
   status-transition events.
 - Do not add speculative `Facts`, `Inputs`, `ComputedState`, `WorkloadModel`, render
