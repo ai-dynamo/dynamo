@@ -272,6 +272,17 @@ Exact Sweeper goldens require reproducible search inputs and search ordering. Un
 CI must distinguish deterministic renderer checks from end-to-end search evidence rather than make
 a stochastic search an exact-diff gate.
 
+## Live validation
+
+Live validation independently deploys each available DGD and, when eligible, the recipe source.
+Each deployment must become ready and serve a valid inference request. Failure of one variant does
+not erase evidence from another.
+
+The initial harness validates the provider-neutral DGD on a matching cluster. Provider-specific
+composition should reuse existing Recipe Components, for example AWS EFA or GKE RoCE. Hardware
+remains the profiler input; Kustomize supplies the concrete Kubernetes platform binding without a
+second provider schema in this suite.
+
 ## Non-goals
 
 The comparison does not require:

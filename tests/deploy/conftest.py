@@ -17,6 +17,8 @@ import pytest
 from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
 from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
 
+DEFAULT_SWEEPER_VARIANTS = "profiler-v1beta1,sweeper-aic,recipe"
+
 
 # Shared CLI options (--image, --namespace, --skip-service-restart) are defined in tests/conftest.py.
 # Deploy-specific options are defined here.
@@ -109,6 +111,29 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "--dgdr-hf-token-secret",
         default="",
         help="Secret containing the profiler's HF_TOKEN value.",
+    )
+    parser.addoption(
+        "--sweeper-suite",
+        type=Path,
+        default=None,
+        help="Sweeper comparison suite whose DGDs should be validated.",
+    )
+    parser.addoption(
+        "--sweeper-output-dir",
+        type=Path,
+        default=None,
+        help="Generated DGD root; defaults to the suite's checked-in generated directory.",
+    )
+    parser.addoption(
+        "--sweeper-variants",
+        default=DEFAULT_SWEEPER_VARIANTS,
+        help="Comma-separated generated or recipe DGD variants to validate.",
+    )
+    parser.addoption(
+        "--sweeper-discover-recipe-hardware",
+        action="store_true",
+        default=False,
+        help="Try recipes without a matching requirement and write successful additions to recipe.new.yaml.",
     )
 
 
