@@ -7,6 +7,8 @@
 //! used only to scope relay entries; the routing PoolId is derived separately
 //! from site ID, Kubernetes namespace, and DGD name in dynamo-kv-router.
 
+pub mod http_forward;
+
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use dynamo_kv_router::global_view::source::PoolObservation;
