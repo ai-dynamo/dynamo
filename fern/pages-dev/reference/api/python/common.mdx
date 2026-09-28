@@ -1893,7 +1893,7 @@ from dynamo.common.rl import RLRouteRegistry
 ```
 
 ```python
-RLRouteRegistry(runtime: Any, *, logger_: logging.Logger | None = None) -> None
+RLRouteRegistry(runtime: Any, *, logger_: logging.Logger | None = None, world_size: int | None = None) -> None
 ```
 
 [`components/src/dynamo/common/rl/admin.py#L88`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L88)
@@ -1903,7 +1903,7 @@ RLRouteRegistry(runtime: Any, *, logger_: logging.Logger | None = None) -> None
 <h4 id="api-dynamo-common-rl-admin-rlrouteregistry-init">__init__</h4>
 
 ```python
-__init__(runtime: Any, *, logger_: logging.Logger | None = None) -> None
+__init__(runtime: Any, *, logger_: logging.Logger | None = None, world_size: int | None = None) -> None
 ```
 
 No summary available.
@@ -1918,7 +1918,7 @@ add_route(name: str, handler: RLRouteHandler) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L101)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L109)
 
 <h4 id="api-dynamo-common-rl-admin-rlrouteregistry-add-routes">add_routes</h4>
 
@@ -1928,7 +1928,7 @@ add_routes(routes: Mapping[str, RLRouteHandler]) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L104)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L112)
 
 <h4 id="api-dynamo-common-rl-admin-rlrouteregistry-describe">describe</h4>
 
@@ -1938,7 +1938,7 @@ describe() -> dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L108)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L116)
 
 <h4 id="api-dynamo-common-rl-admin-rlrouteregistry-dispatch">dispatch</h4>
 
@@ -1948,7 +1948,7 @@ dispatch(request: Mapping[str, Any] | None = None) -> dict[str, Any]
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L122)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L133)
 
 <h4 id="api-dynamo-common-rl-admin-rlrouteregistry-dispatch-stream">dispatch_stream</h4>
 
@@ -1958,7 +1958,7 @@ dispatch_stream(request: Mapping[str, Any] | None = None) -> AsyncIterator[dict[
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L149)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L160)
 </Accordion>
 
 <Accordion id="api-dynamo-common-backend-engine-rawengine" title="RawEngine (class)">
@@ -2760,7 +2760,7 @@ from dynamo.common.rl import register_rl_routes
 register_rl_routes(runtime: Any, registry: RLRouteRegistry, routes: Mapping[str, RLRouteHandler], *, enable_dispatch: bool) -> None
 ```
 
-[`components/src/dynamo/common/rl/admin.py#L155`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L155)
+[`components/src/dynamo/common/rl/admin.py#L166`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/rl/admin.py#L166)
 </Accordion>
 
 <Accordion id="api-dynamo-common-rl-admin-require-lora-load-request" title="require_lora_load_request (function)">
