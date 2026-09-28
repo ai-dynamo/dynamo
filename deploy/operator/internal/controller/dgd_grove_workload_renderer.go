@@ -101,7 +101,7 @@ func (r *groveWorkloadRenderer) Render(
 	if err != nil {
 		return nil, err
 	}
-	// Render managed workloads and retain the observed server-owned fields.
+	// Render ordinary workloads and retain the observed server-owned fields.
 	existingRestartAnnotations := restartAnnotationsFromPodCliqueSet(existingPodCliqueSet)
 	desired, err := dynamo.GenerateGrovePodCliqueSetForComponents(
 		ctx, req.DGD, renderComponents, r.config, r.runtimeConfig, r.reader,
@@ -118,7 +118,7 @@ func (r *groveWorkloadRenderer) Render(
 		checkpointInfos,
 	)
 
-	// Resolve capacity from the same rendered managed workload.
+	// Resolve capacity from the same rendered ordinary workload.
 	gpuShapes, err := dynamo.ResolveGroveGPUShapesForComponents(ctx, r.reader, req.DGD, renderComponents, desired)
 	if err != nil {
 		return nil, err

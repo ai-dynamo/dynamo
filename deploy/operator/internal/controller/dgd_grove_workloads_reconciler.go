@@ -104,7 +104,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
 
-	// Converge the managed PCS before rollout or readiness observation.
+	// Converge the ordinary PCS before rollout or readiness observation.
 	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, req.DGD, renderedPodCliqueSet)
 	if err != nil {
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)

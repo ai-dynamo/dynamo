@@ -23,7 +23,7 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		wantCompatible           bool
 		wantErr                  string
 	}{
-		{name: "standard XT", topology: registryTestTopology, numChips: 8, devicesPerNode: 8},
+		{name: "ordinary XT", topology: registryTestTopology, numChips: 8, devicesPerNode: 8},
 		{name: "multi-node XT", topology: strings.Replace(registryTestTopology, "8C", "16C", 1), numChips: 16, devicesPerNode: 8},
 		{name: "metadata-less HX opaque topology", topology: " " + v3OpaqueTopology + " ", numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}, wantCompatible: true},
 		{name: "metadata-less HX XT-looking topology", topology: registryTestTopology, numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}, wantCompatible: true},

@@ -1546,7 +1546,7 @@ func TestPrepareGroveTopologyConstraintUpgrade(t *testing.T) {
 func TestPreserveGrovePodCliqueSetReplicas(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	t.Log("Build desired and live replica counts for standalone and grouped cliques")
+	t.Log("Build desired and live replica counts for ordinary and grouped cliques")
 	desired := &grovev1alpha1.PodCliqueSet{
 		Spec: grovev1alpha1.PodCliqueSetSpec{
 			Template: grovev1alpha1.PodCliqueSetTemplateSpec{

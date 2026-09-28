@@ -24,9 +24,9 @@ func TestResolveWorkloadDerivesRuntimeShapeFromCompilationMode(t *testing.T) {
 	t.Log("Create one LPX component beside an unrelated conventional decode")
 	dgd := newSelectedTestDGD(t, "graph", testLPXComponent("LPX", "build", v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXAgent, PodTemplate: testLPXPodTemplate("lpu-runtime")}, v1beta1.ComponentRoleSpec{Name: v1beta1.ComponentRoleLPXConductor, PodTemplate: testLPXPodTemplate("conductor-runtime")}))
 	dgd.Spec.Components = append(dgd.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-		ComponentName: "managed-decode", ComponentType: v1beta1.ComponentTypeDecode,
+		ComponentName: "ordinary-decode", ComponentType: v1beta1.ComponentTypeDecode,
 		Replicas:    ptr.To(int32(0)),
-		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "managed"}}}},
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "ordinary"}}}},
 	})
 
 	t.Log("Resolve an LPU-only workload without selecting the conventional decode")

@@ -34,7 +34,7 @@ func (r *lpxRestartProgressResolver) Resolve(
 	return nil
 }
 
-// resolveCompositeGroveRestartProgress composes external and managed Grove observations.
+// resolveCompositeGroveRestartProgress composes child-owned LPX and ordinary Grove observations.
 func resolveCompositeGroveRestartProgress(
 	ctx context.Context,
 	req groveReconcileRequest,
@@ -58,7 +58,7 @@ func resolveCompositeGroveRestartProgress(
 		}
 	}
 
-	// Observe the external child before managed Grove restart progress.
+	// Observe the shared LPX child before ordinary Grove restart progress.
 	if len(external) > 0 {
 		for _, name := range lpxResolver.Resolve(ctx, req.DGD, external) {
 			pending[name] = true

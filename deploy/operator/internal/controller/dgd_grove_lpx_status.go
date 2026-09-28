@@ -11,25 +11,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// mergeLPXChildStatus composes a current LGD observation into the managed
+// mergeLPXChildStatus composes a current LGD observation into the ordinary
 // Grove result. The outer DGD controller remains the only status writer.
 // dgd selects LPX and child is the nonnil result of a successful handoff.
 // The result reuses the child's component status.
 func mergeLPXChildStatus(
 	dgd *v1beta1.DynamoGraphDeployment,
 	child *v1alpha1.LPXGraphDeployment,
-	result ReconcileResult,
+	ordinary ReconcileResult,
 ) ReconcileResult {
 	components := lpx.Components(dgd)
-	if result.ComponentStatus == nil {
-		result.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
+	if ordinary.ComponentStatus == nil {
+		ordinary.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus)
 	}
 	current := child.DeletionTimestamp.IsZero()
 	observed := current && child.Status.ObservedGeneration == child.Generation
 	for _, component := range components {
 		if observed {
 			if observedStatus, found := child.Status.Components[component.ComponentName]; found {
-				result.ComponentStatus[component.ComponentName] = observedStatus.ComponentReplicaStatus
+				ordinary.ComponentStatus[component.ComponentName] = observedStatus.ComponentReplicaStatus
 				continue
 			}
 		}
@@ -37,32 +37,32 @@ func mergeLPXChildStatus(
 		if component.ComponentRole(v1beta1.ComponentRoleLPXConductor) == nil {
 			kind = v1beta1.ComponentKindPodClique
 		}
-		result.ComponentStatus[component.ComponentName] = v1beta1.ComponentReplicaStatus{ComponentKind: kind}
+		ordinary.ComponentStatus[component.ComponentName] = v1beta1.ComponentReplicaStatus{ComponentKind: kind}
 	}
 
 	// A current failure is actionable even if reconciliation did not finish.
 	if current {
 		ready := meta.FindStatusCondition(child.Status.Conditions, "Ready")
-		if result.State != v1beta1.DGDStateFailed && ready != nil &&
+		if ordinary.State != v1beta1.DGDStateFailed && ready != nil &&
 			ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionFalse &&
 			ready.Reason == v1alpha1.LPXReadyReasonFailed {
-			result.State = v1beta1.DGDStateFailed
-			result.Reason, result.Message = Reason(ready.Reason), Message(ready.Message)
-			return result
+			ordinary.State = v1beta1.DGDStateFailed
+			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
+			return ordinary
 		}
 		if observed && ready != nil && ready.ObservedGeneration == child.Generation && ready.Status == metav1.ConditionTrue {
-			return result
+			return ordinary
 		}
-		if observed && result.State != v1beta1.DGDStateFailed && ready != nil && ready.ObservedGeneration == child.Generation {
-			result.State = v1beta1.DGDStatePending
-			result.Reason, result.Message = Reason(ready.Reason), Message(ready.Message)
-			return result
+		if observed && ordinary.State != v1beta1.DGDStateFailed && ready != nil && ready.ObservedGeneration == child.Generation {
+			ordinary.State = v1beta1.DGDStatePending
+			ordinary.Reason, ordinary.Message = Reason(ready.Reason), Message(ready.Message)
+			return ordinary
 		}
 	}
-	if result.State != v1beta1.DGDStateFailed {
-		result.State = v1beta1.DGDStatePending
-		result.Reason = "LPXChildPending"
-		result.Message = "Waiting for the current LPX engine revision and readiness"
+	if ordinary.State != v1beta1.DGDStateFailed {
+		ordinary.State = v1beta1.DGDStatePending
+		ordinary.Reason = "LPXChildPending"
+		ordinary.Message = "Waiting for the current LPX engine revision and readiness"
 	}
-	return result
+	return ordinary
 }

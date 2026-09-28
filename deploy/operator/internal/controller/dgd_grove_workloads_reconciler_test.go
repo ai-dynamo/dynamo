@@ -162,8 +162,8 @@ func TestGroveWorkloadsReconciler_EvaluatesReadinessOnce(t *testing.T) {
 	assert.Equal(t, *wantSpec, dgd.Spec)
 }
 
-func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutManagedPodCliqueSet(t *testing.T) {
-	t.Log("Project an LPX-only graph without a managed PodCliqueSet")
+func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutOrdinaryPodCliqueSet(t *testing.T) {
+	t.Log("Project an LPX-only graph without an ordinary PodCliqueSet")
 	const dgdName = "graph"
 	source := newLPXHandoffSource(t, "node-local-v2-lpu-only")
 	source.Name, source.Namespace, source.UID = dgdName, corev1.NamespaceDefault, "dgd-uid"
@@ -191,7 +191,7 @@ func TestGroveWorkloadsReconcilerUsesStableReadinessWithoutManagedPodCliqueSet(t
 		}},
 	}
 
-	t.Log("Report stable-resource readiness without looking up a managed PodCliqueSet")
+	t.Log("Report stable-resource readiness without looking up an ordinary PodCliqueSet")
 	result, err := reconciler.newGroveProgram().workloads.Reconcile(t.Context(), testGroveReconcileRequest(source), nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, nvidiacomv1beta1.DGDStateSuccessful, result.State)
@@ -529,7 +529,7 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *
 }
 
 func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
-	t.Log("Build one Grove reconciler with an injectable managed update failure")
+	t.Log("Build one Grove reconciler with an injectable ordinary update failure")
 	ctx := context.Background()
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default", UID: types.UID("graph-uid")},
@@ -573,7 +573,7 @@ func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, updateCalls)
 
-	t.Log("Reject a managed PCS update and verify the live resource remains unchanged")
+	t.Log("Reject an ordinary PCS update and verify the live resource remains unchanged")
 	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"changed"}`)
 	rejectUpdate = true
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))

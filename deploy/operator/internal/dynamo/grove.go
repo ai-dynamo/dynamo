@@ -468,7 +468,7 @@ func observePodCliqueReadiness(ctx context.Context, reader client.Reader, resour
 		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
 		return groveComponentReadiness{}, fmt.Errorf("failed to get PodClique %s/%s: %w", namespace, resourceName, err)
 	}
-	// Only managed components publish PodClique counts and revision state.
+	// Only ordinary components publish PodClique counts and revision state.
 	componentReadiness := podCliqueReadiness(podClique, logger)
 	componentReadiness.status = v1beta1.ComponentReplicaStatus{
 		ComponentKind:   v1beta1.ComponentKindPodClique,

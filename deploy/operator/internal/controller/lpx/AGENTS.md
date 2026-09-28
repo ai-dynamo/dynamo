@@ -73,7 +73,7 @@ SPDX-License-Identifier: Apache-2.0
 - Reserve `RequeueAfter` for scheduling deadlines, bounded error retries while
   a deadline is active, and external download checks. The other deliberate use
   is the follow-up after recording `SchedulingFailed`, because status-only
-  LPXGD updates are filtered. Other errors use controller-runtime backoff.
+  LPXGD updates are filtered. Ordinary errors use controller-runtime backoff.
 - After writing a PCS, wait for its watched observation before publishing LPRs.
   An LPR `AlreadyExists` response means wait for observation, not adopt an
   unverified object. Never adopt a foreign resource with the expected name.

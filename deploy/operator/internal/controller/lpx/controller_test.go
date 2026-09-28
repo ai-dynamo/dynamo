@@ -347,7 +347,7 @@ func TestLPXWorkloadErrorDoesNotAcknowledgeGeneration(t *testing.T) {
 		failStatus       bool
 		workloadSucceeds bool
 	}{
-		{name: "managed error"},
+		{name: "ordinary error"},
 		{name: "bounded deadline retry", deadline: true},
 		{name: "status failure keeps both errors", deadline: true, failStatus: true},
 		{name: "status failure after a pending pass", deadline: true, failStatus: true, workloadSucceeds: true},
@@ -898,7 +898,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 	workloads, plans, err := r.resolveWorkloads(t.Context(), child, dgd)
 	require.NoError(t, err)
 
-	t.Log("Keep the managed model Service under the DGD's ownership")
+	t.Log("Keep the ordinary model Service under the source DGD's ownership")
 	modelService := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: dynamo.GenerateServiceName("test/model"), Namespace: dgd.Namespace,
@@ -944,7 +944,7 @@ func TestLPXServiceReconciliation(t *testing.T) {
 		require.Equal(t, version, service.ResourceVersion)
 	}
 
-	t.Log("Service reconciliation leaves the managed DGD model Service unchanged")
+	t.Log("Service reconciliation leaves the ordinary DGD model Service unchanged")
 	require.NoError(t, r.Get(t.Context(), modelKey, modelService))
 	require.Equal(t, beforeModelService, modelService)
 }
@@ -969,7 +969,7 @@ func TestLPXWorkloadOrderAndUnrelatedEditsPreservePublication(t *testing.T) {
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 	beforeChild := child.DeepCopy()
 
-	t.Log("Reorder workloads, update the frontend and enable a managed checkpoint without changing LPX")
+	t.Log("Reorder workloads, update the frontend and enable an ordinary checkpoint without changing LPX")
 	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(dgd), dgd))
 	components := dgd.Spec.Components
 	components[0], components[1] = components[1], components[0]

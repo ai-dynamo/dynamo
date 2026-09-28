@@ -2399,7 +2399,7 @@ func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, e
 		return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", p.r.Name, err)
 	}
 
-	// Decorate the completed component template through shared clique assembly.
+	// Decorate the completed ordinary template through shared clique assembly.
 	return buildCliqueFromTemplate(p, corev1.PodTemplateSpec{
 		ObjectMeta: generatePodMetadata(p.component, p.dynamoDeployment, getDGDAlphaComponent(p.dynamoDeployment, p.componentName), p.componentName, p.discoveryContext),
 		Spec:       *podSpec,
@@ -2617,7 +2617,7 @@ func GenerateGrovePodCliqueSetForComponents(
 	existingRestartAnnotations map[string]string,
 	checkpointInfoByComponent map[string]*checkpoint.CheckpointInfo,
 ) (*grovev1alpha1.PodCliqueSet, error) {
-	// Construct the common PCS envelope before rendering managed components.
+	// Construct the common PCS envelope before rendering ordinary components.
 	gangSet, err := newGrovePodCliqueSet(dynamoDeployment, operatorConfig, runtimeConfig)
 	if err != nil {
 		return nil, err

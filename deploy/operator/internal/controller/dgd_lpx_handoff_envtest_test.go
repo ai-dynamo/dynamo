@@ -64,7 +64,7 @@ func TestSetupDynamoGraphDeploymentWithoutLPXCRDs(t *testing.T) {
 		}})
 	})
 
-	t.Log("Verify a DGD without external components still creates its managed workloads")
+	t.Log("Verify an ordinary DGD still creates its component workloads")
 	golden.ApplyManifests(t, "testdata/dgd/components/input.yaml", env.Client(), env.Namespace())
 	require.EventuallyWithT(t, func(c *assert.CollectT) {
 		components := &v1beta1.DynamoComponentDeploymentList{}
@@ -368,7 +368,7 @@ func TestLPXGraphDeploymentAPIHandoff(t *testing.T) {
 	require.Equal(t, Reason(child.Status.Conditions[0].Reason), result.Reason)
 	require.Equal(t, Message(child.Status.Conditions[0].Message), result.Message)
 
-	t.Log("Unrelated source metadata does not advance the child generation or frozen source identity")
+	t.Log("Ordinary source metadata does not advance the child generation or frozen source identity")
 	source.Labels = map[string]string{"unrelated": "metadata"}
 	require.NoError(t, env.Client().Update(t.Context(), source))
 	unchanged, err := handoff.Reconcile(t.Context(), source)

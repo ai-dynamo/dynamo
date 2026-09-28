@@ -85,7 +85,7 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 			if !test.lpxOnly {
 				source.Spec.TopologyConstraint = &v1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology", PackDomain: "rack"}
 				source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
-					ComponentName: "managed-frontend", ComponentType: v1beta1.ComponentTypeFrontend,
+					ComponentName: "ordinary-frontend", ComponentType: v1beta1.ComponentTypeFrontend,
 					Replicas: ptr.To(int32(1)),
 					PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "main", Image: "frontend"}},
@@ -100,7 +100,7 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				require.NotEqual(t, lpxName, managed[i].ComponentName)
 			}
 
-			t.Log("Seed the managed PCS only for mixed graphs, including the truncated-name case")
+			t.Log("Seed the ordinary PCS only for mixed graphs, including the truncated-name case")
 			pcsName := dynamo.PCSNameForDGD(req.DGD.Name, managed)
 			if test.longNames {
 				require.NotEqual(t, source.Name, pcsName)
@@ -110,11 +110,11 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: pcsName, Namespace: source.Namespace, Generation: 1},
 				Status: grovev1alpha1.PodCliqueSetStatus{ObservedGeneration: ptr.To(int64(1)), Conditions: []metav1.Condition{{
 					Type: groveconstants.ConditionTopologyLevelsUnavailable, Status: metav1.ConditionTrue,
-					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing managed topology",
+					Reason: groveconstants.ConditionReasonClusterTopologyNotFound, Message: "missing ordinary topology",
 				}}},
 			}
 			clique := &grovev1alpha1.PodClique{
-				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceNameForComponents(req.DGD, managed, "managed-frontend"), Namespace: source.Namespace, Generation: 1},
+				ObjectMeta: metav1.ObjectMeta{Name: dynamo.GroveComponentResourceNameForComponents(req.DGD, managed, "ordinary-frontend"), Namespace: source.Namespace, Generation: 1},
 				Spec:       grovev1alpha1.PodCliqueSpec{Replicas: 1},
 				Status:     grovev1alpha1.PodCliqueStatus{ObservedGeneration: ptr.To(int64(1)), Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1},
 			}
@@ -124,7 +124,7 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 			}
 			kube := builder.Build()
 
-			t.Log("Render and observe restarts against that same managed PCS")
+			t.Log("Render and observe restarts against that same ordinary PCS")
 			if !test.lpxOnly {
 				renderer := newGroveWorkloadRenderer(kube, &configv1alpha1.OperatorConfiguration{}, &commoncontroller.RuntimeConfig{}, nil)
 				rendered, err := renderer.Render(t.Context(), req, nil, nil, false)
@@ -134,10 +134,10 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				require.Equal(t, pcsName, rendered.desired.Name)
 			}
 			remaining := resolveCompositeGroveRestartProgress(t.Context(), req,
-				[]string{lpxName, "managed-frontend"}, newGroveRestartProgressResolver(kube), newLPXRestartProgressResolver(kube))
+				[]string{lpxName, "ordinary-frontend"}, newGroveRestartProgressResolver(kube), newLPXRestartProgressResolver(kube))
 			require.Equal(t, []string{lpxName}, remaining)
 
-			t.Log("Observe the graph-level topology through the same managed PCS")
+			t.Log("Observe the graph-level topology through the same ordinary PCS")
 			result := newWorkloadProgramResult(source)
 			newDGDGroveTopologyConditionReconciler(kube).Reconcile(t.Context(), req, &result)
 			condition := meta.FindStatusCondition(result.Status.Conditions, v1beta1.ConditionTypeTopologyLevelsAvailable)
@@ -148,13 +148,13 @@ func TestManagedComponentSelectionDoesNotMutateDGD(t *testing.T) {
 				require.NotNil(t, condition)
 				require.Equal(t, metav1.ConditionFalse, condition.Status)
 				require.Equal(t, v1beta1.ConditionReasonTopologyDefinitionNotFound, condition.Reason)
-				require.Equal(t, "missing managed topology", condition.Message)
+				require.Equal(t, "missing ordinary topology", condition.Message)
 			}
 
 			t.Log("Keep the DGD unchanged after observations and managed component-slice edits")
 			require.Equal(t, before, source)
 			if len(managed) > 0 {
-				managed[0].ComponentName = "managed-copy"
+				managed[0].ComponentName = "ordinary-copy"
 			}
 			require.Equal(t, before, source)
 		})
@@ -198,7 +198,7 @@ func TestLPXHandoffCreatesOnlyAnOwnedReference(t *testing.T) {
 }
 
 func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
-	t.Log("Project exactly one complete LPX engine alongside a managed component")
+	t.Log("Project exactly one complete LPX engine alongside an ordinary component")
 	child, source, _ := newLPXHandoffFixture(t, "node-local-v2-hybrid")
 	child.Status.ObservedGeneration = child.Generation
 	child.Status.Components = map[string]v1alpha1.LPXComponentStatus{"lpx": {
@@ -244,7 +244,7 @@ func TestLPXChildStatusRequiresObservedResultsAndCompleteEngine(t *testing.T) {
 	require.Equal(t, ptr.To(int32(7)), request.Status.DeploymentInfo.Replicas)
 	require.Equal(t, ptr.To(int32(6)), request.Status.DeploymentInfo.AvailableReplicas)
 
-	t.Log("Retirement remains pending in final DGD status after managed checkpoint readiness")
+	t.Log("Retirement remains pending in final DGD status after ordinary checkpoint readiness")
 	projected := newWorkloadProgramResult(source)
 	projected.applyReconcileResult(source.Generation, result)
 	require.Equal(t, v1beta1.DGDStatePending, projected.Status.State)
@@ -267,7 +267,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 		{"old-condition", false},
 		{"cleared-condition", false},
 		{"deleting", false},
-		{"managed-failure", true},
+		{"ordinary-failure", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Log("Only a current child failure may bypass the complete-observation gate")
@@ -287,14 +287,14 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 				child.Status.Conditions[0].Reason = v1alpha1.LPXReadyReasonPending
 			case "deleting":
 				child.DeletionTimestamp = ptr.To(metav1.Now())
-			case "managed-failure":
-				result = ReconcileResult{State: v1beta1.DGDStateFailed, Reason: "ManagedFailure", Message: "Existing managed failure"}
+			case "ordinary-failure":
+				result = ReconcileResult{State: v1beta1.DGDStateFailed, Reason: "OrdinaryFailure", Message: "Existing ordinary failure"}
 			}
 			result = mergeLPXChildStatus(source, child, result)
 			require.Equal(t, test.failed, result.State == v1beta1.DGDStateFailed)
-			if test.name == "managed-failure" {
-				require.Equal(t, Reason("ManagedFailure"), result.Reason)
-				require.Equal(t, Message("Existing managed failure"), result.Message)
+			if test.name == "ordinary-failure" {
+				require.Equal(t, Reason("OrdinaryFailure"), result.Reason)
+				require.Equal(t, Message("Existing ordinary failure"), result.Message)
 			} else if test.failed {
 				require.Equal(t, Reason(child.Status.Conditions[0].Reason), result.Reason)
 				require.Equal(t, Message(child.Status.Conditions[0].Message), result.Message)
@@ -306,7 +306,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 			if test.name == "observed-result" {
 				require.Equal(t, int32(1), result.ComponentStatus["lpx"].Replicas)
 
-				t.Log("A retained managed rollout cannot hide the child failure in final DGD status")
+				t.Log("A retained ordinary rollout cannot hide the child failure in final DGD status")
 				projected := workloadProgramResult{Status: status}
 				projected.applyReconcileResult(source.Generation, result)
 				require.Equal(t, v1beta1.DGDStateFailed, projected.Status.State)
@@ -326,7 +326,7 @@ func TestLPXFailureProjectionRequiresCurrentCondition(t *testing.T) {
 func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 	for _, strategy := range []v1beta1.RestartStrategyType{v1beta1.RestartStrategyTypeParallel} {
 		t.Run(string(strategy), func(t *testing.T) {
-			t.Log("Request an LPX-only restart without requiring a managed PCS")
+			t.Log("Request an LPX-only restart without requiring an ordinary PCS")
 			_, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 			source.Spec.Restart = &v1beta1.Restart{ID: "restart-1", Strategy: &v1beta1.RestartStrategy{Type: strategy}}
 			handoff := &dgdLPXHandoff{client: kube}
@@ -387,7 +387,7 @@ func TestLPXRestartUsesPersistedSelectionAndCurrentChildStatus(t *testing.T) {
 	}
 }
 
-func TestParallelRestartStartsAllExternalAndManagedWorkloadsBeforeReadiness(t *testing.T) {
+func TestParallelRestartStartsAllLPXAndOrdinaryWorkloadsBeforeReadiness(t *testing.T) {
 	t.Log("Create two independent LPX workloads and an already-ready frontend")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 	require.NoError(t, rbacv1.AddToScheme(kube.Scheme()))
@@ -425,7 +425,7 @@ func TestParallelRestartStartsAllExternalAndManagedWorkloadsBeforeReadiness(t *t
 	}
 	require.NoError(t, kube.Create(t.Context(), frontend))
 
-	t.Log("Deliver the managed restart before persisting selection; LPX still waits for persistence")
+	t.Log("Deliver the ordinary restart before persisting selection; LPX still waits for persistence")
 	source.Spec.Restart = &v1beta1.Restart{ID: "parallel-restart", Strategy: &v1beta1.RestartStrategy{Type: v1beta1.RestartStrategyTypeParallel}}
 	require.NoError(t, kube.Update(t.Context(), source))
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
@@ -445,7 +445,7 @@ func TestParallelRestartStartsAllExternalAndManagedWorkloadsBeforeReadiness(t *t
 	frontend.Status.ReadyReplicas = 0
 	require.NoError(t, kube.Update(t.Context(), frontend))
 
-	t.Log("Deliver the same token to LPX while the managed restart is pending")
+	t.Log("Deliver the same token to LPX while the ordinary restart is pending")
 	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
@@ -468,7 +468,7 @@ func TestParallelRestartStartsAllExternalAndManagedWorkloadsBeforeReadiness(t *t
 	require.Equal(t, v1beta1.RestartPhaseRestarting, result.Status.Restart.Phase)
 	require.Contains(t, result.Status.Restart.InProgress, "second")
 
-	t.Log("Both ready LPX workloads still wait for the managed component")
+	t.Log("Both ready LPX workloads still wait for the ordinary component")
 	child.Status.Components["second"] = child.Status.Components["lpx"]
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
 		Type: v1alpha1.LPXReadyCondition, Status: metav1.ConditionTrue, ObservedGeneration: child.Generation, Reason: "Ready",
@@ -493,7 +493,7 @@ func TestParallelRestartStartsAllExternalAndManagedWorkloadsBeforeReadiness(t *t
 	require.Empty(t, result.Status.Restart.InProgress)
 }
 
-func TestLPXHandoffManagedScalingPreservesReadiness(t *testing.T) {
+func TestLPXHandoffOrdinaryScalingPreservesReadiness(t *testing.T) {
 	t.Log("Seed the shared child's current readiness")
 	child, source, kube := newLPXHandoffFixture(t, "node-local-v2-specdecode")
 	source.Spec.Components = append(source.Spec.Components, v1beta1.DynamoComponentDeploymentSharedSpec{
@@ -532,10 +532,10 @@ func TestLPXHandoffManagedScalingPreservesReadiness(t *testing.T) {
 		current, err := handoff.Reconcile(t.Context(), source)
 		require.NoError(t, err)
 		require.Equal(t, beforeChild, current)
-		managedResult := ReconcileResult{State: v1beta1.DGDStateSuccessful, Reason: "Ready"}
+		ordinary := ReconcileResult{State: v1beta1.DGDStateSuccessful, Reason: "Ready"}
 		projected := newWorkloadProgramResult(source)
-		managedResult = mergeLPXChildStatus(source, current, managedResult)
-		projected.applyReconcileResult(source.Generation, managedResult)
+		ordinary = mergeLPXChildStatus(source, current, ordinary)
+		projected.applyReconcileResult(source.Generation, ordinary)
 		require.Equal(t, v1beta1.DGDStateSuccessful, projected.Status.State)
 		require.True(t, meta.IsStatusConditionTrue(projected.Status.Conditions, "Ready"))
 		require.Equal(t, source.Generation, projected.Status.ObservedGeneration)
@@ -643,7 +643,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, v1beta1.RestartPhaseCompleted, source.Status.Restart.Phase)
 			require.Zero(t, pcsReads)
 
-			t.Log("A missing managed PCS keeps only live managed restart members pending")
+			t.Log("A missing ordinary PCS keeps only live ordinary restart members pending")
 			source.Spec.Components = append(source.Spec.Components,
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend, Replicas: ptr.To(int32(1))},
 				v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
@@ -655,7 +655,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, 1, childReads)
 			require.Equal(t, 1, pcsReads)
 
-			t.Log("An unobserved managed PCS cannot hold back either ready LPX member")
+			t.Log("An unobserved ordinary PCS cannot hold back either ready LPX member")
 			groveReq := testGroveReconcileRequest(source)
 			managed := groveReq.managedComponents()
 			pcs := &grovev1alpha1.PodCliqueSet{
@@ -668,7 +668,7 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 			require.Equal(t, 1, childReads)
 			require.Equal(t, 1, pcsReads)
 
-			t.Log("A failed child read cannot hold back a ready managed member or reorder pending members")
+			t.Log("A failed child read cannot hold back a ready ordinary member or reorder pending members")
 			pcs.Status.ObservedGeneration = ptr.To(pcs.Generation)
 			require.NoError(t, kube.Update(t.Context(), pcs))
 			prefill := &grovev1alpha1.PodClique{
@@ -688,9 +688,9 @@ func TestSpecDecodeRestartRollsTheSharedChildOnce(t *testing.T) {
 }
 
 func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
-	t.Log("Reconcile a managed-only DGD while LPX child reads would fail")
+	t.Log("Reconcile an ordinary DGD while LPX child reads would fail")
 	source := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "managed", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "ordinary", Namespace: "default"},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
 			ComponentName: "frontend", ComponentType: v1beta1.ComponentTypeFrontend,
 			PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "frontend"}}}},
@@ -714,7 +714,7 @@ func TestGroveProgramWithoutLPXDoesNotReadLPXChild(t *testing.T) {
 		RuntimeConfig: &commoncontroller.RuntimeConfig{Gate: features.Gates{Grove: true, LPX: true}},
 	}).newGroveProgram()
 
-	t.Log("Reconcile managed workloads without depending on an LPX child")
+	t.Log("Reconcile ordinary workloads without depending on an LPX child")
 	_, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Zero(t, childReads)
@@ -770,8 +770,8 @@ func TestDGDCheckpointFinalizationLeavesLPXChildToGarbageCollection(t *testing.T
 	require.Equal(t, metav1.GetControllerOf(child), metav1.GetControllerOf(stored))
 }
 
-func TestLPXPendingDownloadDoesNotBlockManagedWorkloads(t *testing.T) {
-	t.Log("Leave the child pending while the DGD desires a managed prefill workload")
+func TestLPXPendingDownloadDoesNotBlockOrdinaryWorkloads(t *testing.T) {
+	t.Log("Leave the child pending while the DGD desires an ordinary prefill workload")
 	_, source, kube := newLPXHandoffFixture(t, "node-local-v2-lpu-only")
 	require.NoError(t, rbacv1.AddToScheme(kube.Scheme()))
 	source.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = string(configv1alpha1.DiscoveryBackendKubernetes)
@@ -808,7 +808,7 @@ func TestLPXPendingDownloadDoesNotBlockManagedWorkloads(t *testing.T) {
 		},
 	})
 
-	t.Log("Publish managed resources independently of the child's pending download")
+	t.Log("Publish ordinary resources independently of the child's pending download")
 	result, err := program.Reconcile(t.Context(), workloadProgramRequest{DGD: source})
 	require.NoError(t, err)
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
@@ -835,7 +835,7 @@ func TestLPXPendingDownloadDoesNotBlockManagedWorkloads(t *testing.T) {
 	require.Equal(t, "enabled", service.Annotations["example.com/model-discovery"])
 	require.True(t, metav1.IsControlledBy(service, source))
 
-	t.Log("Observe the managed PCS from a fresh parent reconcile before committing its worker hash")
+	t.Log("Observe the ordinary PCS from a fresh parent reconcile before committing its worker hash")
 	freshSource := &v1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(source), freshSource))
 	result, err = program.Reconcile(t.Context(), workloadProgramRequest{DGD: freshSource})
@@ -843,7 +843,7 @@ func TestLPXPendingDownloadDoesNotBlockManagedWorkloads(t *testing.T) {
 	require.Equal(t, v1beta1.DGDStatePending, result.Status.State)
 	source = freshSource
 
-	t.Log("A pending managed checkpoint retains its startup and scaling gates alongside the pending child")
+	t.Log("A pending ordinary checkpoint retains its startup and scaling gates alongside the pending child")
 	prefill := source.GetComponentByName("prefill")
 	prefill.Experimental = &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
 		Enabled: true, CheckpointRef: ptr.To(friendlyCheckpointName), StartupPolicy: v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
@@ -871,7 +871,7 @@ func TestLPXPendingDownloadDoesNotBlockManagedWorkloads(t *testing.T) {
 	require.NoError(t, kube.List(t.Context(), adapters))
 	require.Empty(t, adapters.Items)
 
-	t.Log("An actionable child failure remains visible while the managed checkpoint is still pending")
+	t.Log("An actionable child failure remains visible while the ordinary checkpoint is still pending")
 	require.NoError(t, kube.Get(t.Context(), client.ObjectKeyFromObject(child), child))
 	meta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
 		Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: child.Generation,

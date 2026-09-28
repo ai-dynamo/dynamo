@@ -78,14 +78,14 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
   callbacks, patch collections, or mutation bags.
 - Queue transitions represented by returned status in the program result and emit them
   only after status persistence succeeds.
-- Emit resource-mutation events directly only after a semantic create, update,
+- Emit ordinary resource-mutation events directly only after a semantic create, update,
   patch, or delete succeeds. Do not emit them for no-ops, failed operations, ignored
   `AlreadyExists`, or ignored `NotFound`.
 
 ## Reconciler and renderer boundaries
 
 - Extract a reconciler when it owns a cohesive resource family, a distinct dependency
-  set, or an independently testable fixture contract. Keep plain calculations as
+  set, or an independently testable fixture contract. Keep ordinary calculations as
   functions; do not wrap a trivial `Get` merely to manufacture another abstraction.
 - Use `Reconcile` for external convergence, `Resolve` for read-only observation or
   derivation, and `Render` for desired-object construction without persistence.

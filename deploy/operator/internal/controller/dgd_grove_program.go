@@ -184,7 +184,7 @@ func (p *groveProgram) Reconcile(
 		return programResult, nil
 	}
 
-	// Keep LPX creation and updates after managed reconciliation and restart selection.
+	// Keep LPX creation and updates after ordinary reconciliation and restart selection.
 	if req.DGD.HasLPXComponent() {
 		child, err := p.lpx.Reconcile(ctx, req.DGD)
 		if err != nil {
