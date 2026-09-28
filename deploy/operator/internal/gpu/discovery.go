@@ -325,6 +325,8 @@ func (g *GPUDiscovery) DiscoverGPUsFromDCGMFiltered(ctx context.Context, k8sClie
 	}
 }
 
+// discoverGPUsFromDCGMFilteredUncached scrapes running DCGM exporter pods and
+// aggregates the selected GPU group without reading from or writing to cache.
 func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context, k8sClient client.Reader, filterSKU nvidiacomv1beta1.GPUSKUType) (*GPUInfo, error) {
 	// List DCGM exporter pods
 	dcgmPods, err := listDCGMExporterPods(ctx, k8sClient)
@@ -402,8 +404,7 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 		return nil, fmt.Errorf("no GPU metrics could be parsed from any DCGM pod")
 	}
 
-	// Count only nodes in the selected GPU group,
-	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// Detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
@@ -444,10 +445,10 @@ func (g *GPUDiscovery) discoverGPUsFromDCGMFilteredUncached(ctx context.Context,
 	return bestNode, nil
 }
 
-// gpuNodeGroupKey groups recognized models by their inferred SKU and unknown
-// models by their normalized product name. This keeps distinct unsupported
-// models from being counted as one SKU while preserving grouping across known
-// SKU variants.
+// gpuNodeGroupKey groups recognized models by inferred SKU, unknown models by
+// normalized product name, and empty models by node name. This keeps distinct
+// unsupported models isolated while preserving grouping across known SKU
+// variants.
 func gpuNodeGroupKey(sku nvidiacomv1beta1.GPUSKUType, model, nodeName string) string {
 	if sku != "" {
 		return "sku:" + string(sku)
@@ -882,8 +883,7 @@ func DiscoverGPUsFiltered(ctx context.Context, k8sClient client.Reader, filterSK
 			len(nodeList.Items), LabelGPUCount, LabelGPUProduct, LabelGPUMemory)
 	}
 
-	// Count only nodes in the selected GPU group,
-	// and detect RDMA on matching nodes only. On a cold cache and a no-RDMA
+	// Detect RDMA on matching nodes only. On a cold cache and a no-RDMA
 	// cluster, this performs one Node read per matching node; that keeps a
 	// single negative node from masking RDMA on another node.
 	nodesWithGPUs := 0
