@@ -48,6 +48,9 @@ pillow>=12.3.0
 # /opt/dynamo/venv copy; trtllm_runtime.Dockerfile raises the system one to the
 # same floor. Keep the two specifiers in step.
 PyNvVideoCodec>=2.2.0
+# Dynamo installs with --no-deps, so the shared image-cache client must be
+# installed explicitly even though the cache is disabled by default.
+redis>=6.2.0,<9.0.0
 soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
 tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).

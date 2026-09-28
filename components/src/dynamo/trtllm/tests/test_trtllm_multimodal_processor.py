@@ -79,10 +79,11 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
     monkeypatch.setattr(mmp, "fetch_bytes", video_fetch)
 
     request = {
+        "image_cache_scope": "session-42",
         "multi_modal_data": {
             "image_url": [{"Url": "https://example.com/x.png"}],
             "video_url": [{"Url": "https://example.com/x.mp4"}],
-        }
+        },
     }
     with pytest.raises(type(error)) as exc_info:
         await processor.process_openai_request(
@@ -90,6 +91,9 @@ async def test_client_errors_propagate(error, monkeypatch) -> None:
         )
 
     assert exc_info.value is error
+    processor.image_loader.load_image_batch.assert_awaited_once_with(
+        [{"Url": "https://example.com/x.png"}], cache_scope="session-42"
+    )
     video_validate.assert_not_awaited()
     video_fetch.assert_not_awaited()
 
