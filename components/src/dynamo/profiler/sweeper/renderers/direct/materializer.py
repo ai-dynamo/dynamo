@@ -209,6 +209,7 @@ def materialize_dgd_from_candidate(
     try:
         config = modifier.load_default_config(mode=mode)
         config = update_image(config, image)
+        config = modifier.set_config_backend_framework(config, backend=backend)
 
         if mode == "agg":
             config = _materialize_worker(

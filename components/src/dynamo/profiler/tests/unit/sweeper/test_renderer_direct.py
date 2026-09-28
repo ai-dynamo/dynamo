@@ -14,6 +14,8 @@ surfaces the real materialization gap tested below.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 pytestmark = [
@@ -137,6 +139,41 @@ def test_tp_strategy_materializes_successfully_on_all_three_backends() -> None:
         assert worker_components, f"no worker component materialized for {backend}"
         args = worker_components[0]["podTemplate"]["spec"]["containers"][0]["args"]
         assert args, f"no args materialized for {backend}"
+
+
+def test_backend_framework_is_written_into_the_dgd_spec() -> None:
+    """A real DynamoGraphDeploymentCandidate reads its Backend column from
+    .spec.backendFramework directly."""
+    for backend in ("vllm", "sglang", "trtllm"):
+        candidate = dict(REAL_CANDIDATE_TEP_TRTLLM, backend=backend, strategy="tp")
+        result = materialize_dgd_from_candidate(candidate, image=_IMAGE)
+        assert (
+            result.dgd["spec"]["backendFramework"] == backend
+        ), f"{backend}: spec.backendFramework missing or wrong: {result.dgd['spec']}"
+
+
+def test_backend_framework_set_once_per_dgd_not_per_disagg_role() -> None:
+    """The name asserts "once per DGD, not per disagg role", so the test
+    must check more than the resulting value -- a bug that called the
+    setter once per role (prefill, then decode) with the same backend would
+    produce an identical final value and pass silently. Spying on the real
+    classmethod (wraps=, so materialization still runs for real) makes the
+    test check what its name promises: exactly one call for the whole DGD,
+    regardless of how many worker roles it has.
+    """
+    from dynamo.profiler.utils.config_modifiers.vllm import VllmV1ConfigModifier
+
+    with patch.object(
+        VllmV1ConfigModifier,
+        "set_config_backend_framework",
+        wraps=VllmV1ConfigModifier.set_config_backend_framework,
+    ) as spy:
+        result = materialize_dgd_from_candidate(
+            REAL_SHAPED_DISAGG_CANDIDATE, image=_IMAGE
+        )
+
+    assert spy.call_count == 1
+    assert result.dgd["spec"]["backendFramework"] == "vllm"
 
 
 def test_evaluated_model_is_written_into_the_dgd_not_the_template_placeholder() -> None:
