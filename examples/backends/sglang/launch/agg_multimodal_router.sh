@@ -102,9 +102,8 @@ COMMON_ENV=(
 
 GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
 
-# Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} are reserved by
-# the test harness for parallel runs; fall back to script defaults (the
-# KV_EVENTS_PORT_BASE block for KV events) when run standalone.
+# Per-worker DYN_SYSTEM_PORT{i} and DYN_VLLM_KV_EVENT_PORT{i} come from the test
+# harness for parallel runs; standalone runs fall back to the script's port bases.
 WORKER_PORTS=()
 KV_EVENTS_PORTS=()
 for i in $(seq 1 "${NUM_WORKERS}"); do
