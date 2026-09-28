@@ -541,7 +541,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         # custom-policy is on by default; also lint it alongside the standalone selection
-        # service, and the build that links no worker-selection policies at all.
+        # service, and the build without the optional policy catalog.
         cargo clippy --locked --no-deps --features custom-policy,select-service --all-targets -- -D warnings
         cargo clippy --locked --no-deps --no-default-features --all-targets -- -D warnings
     - name: Lint feature-gated benchmark entrypoints

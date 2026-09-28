@@ -19,6 +19,7 @@ from dynamo.common.configuration.utils import (
     add_negatable_bool_argument,
     parse_bool,
 )
+from dynamo.common.utils.nixl_telemetry import nixl_prometheus_base_port
 
 from . import __version__
 from .benchmark_points import (
@@ -32,7 +33,6 @@ from .constants import DisaggregationMode, EmbeddingTransferMode
 logger = logging.getLogger(__name__)
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
 MAX_PORT = 65535
-DEFAULT_NIXL_PROMETHEUS_PORT = 19090
 
 
 def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int | None:
@@ -45,18 +45,6 @@ def _configured_fixed_port(env_name: str, *, default: int | None = None) -> int 
     except ValueError:
         return None
     return port if 0 < port <= MAX_PORT else None
-
-
-def _nixl_prometheus_port() -> int | None:
-    """Return the NIXL Prometheus listener port when it is enabled."""
-    enabled = os.environ.get("NIXL_TELEMETRY_ENABLE", "").strip().lower()
-    exporter = os.environ.get("NIXL_TELEMETRY_EXPORTER", "prometheus")
-    if enabled != "y" or exporter.strip().lower() != "prometheus":
-        return None
-    return _configured_fixed_port(
-        "NIXL_TELEMETRY_PROMETHEUS_PORT",
-        default=DEFAULT_NIXL_PROMETHEUS_PORT,
-    )
 
 
 def _is_intra_pod_failover_engine() -> bool:
@@ -912,7 +900,7 @@ class DynamoVllmConfig(ConfigBase):
             if fpm_port is not None:
                 reservations.append(("DYN_FORWARDPASS_METRIC_PORT", fpm_port, fpm_port))
 
-        nixl_port = _nixl_prometheus_port()
+        nixl_port = nixl_prometheus_base_port()
         if nixl_port is not None:
             reservations.append(
                 ("NIXL_TELEMETRY_PROMETHEUS_PORT", nixl_port, nixl_port)

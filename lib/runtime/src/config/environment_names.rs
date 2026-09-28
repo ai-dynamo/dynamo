@@ -109,6 +109,18 @@ pub mod logging {
     }
 }
 
+/// Request-lifecycle tracing environment variables.
+pub mod lifecycle_tracing {
+    /// Enable the native request-lifecycle OpenTelemetry span convention.
+    ///
+    /// This is independent from `DYN_LOG`: lifecycle spans are exported through
+    /// the OpenTelemetry tracing layer only.
+    pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
+
+    /// Lifecycle detail mode. Defaults to `core`.
+    pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
+}
+
 /// Runtime configuration environment variables
 ///
 /// These control the Tokio runtime, system health/metrics server, and worker behavior
@@ -355,6 +367,9 @@ pub mod llm {
 
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
+
+    /// Listen backlog of the frontend HTTP/HTTPS socket (default 4096).
+    pub const DYN_HTTP_LISTEN_BACKLOG: &str = "DYN_HTTP_LISTEN_BACKLOG";
 
     pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
         "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
@@ -1070,6 +1085,7 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
+            llm::DYN_HTTP_LISTEN_BACKLOG,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,

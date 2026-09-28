@@ -872,9 +872,7 @@ impl HttpService {
 
     /// Like [`spawn`], but uses a caller-provided pre-bound listener. Closes the TOCTOU
     /// port-allocation gap for tests that need to know the bound port up front. Not
-    /// supported in TLS mode: TLS uses `axum_server::bind_rustls`, which owns its own
-    /// bind, so a pre-bound listener cannot be threaded through and dropping it before
-    /// `bind_rustls` would just re-open the same race. Returns an error if invoked on a
+    /// supported in TLS mode, which binds internally. Returns an error if invoked on a
     /// service built with `enable_tls(true)`.
     ///
     /// [`spawn`]: HttpService::spawn
@@ -924,8 +922,7 @@ impl HttpService {
         if self.enable_tls {
             if listener.is_some() {
                 return Err(anyhow::anyhow!(
-                    "Pre-bound listener is not supported in TLS mode; \
-                     axum_server::bind_rustls owns its own bind. \
+                    "Pre-bound listener is not supported in TLS mode. \
                      Use run()/spawn() (which bind internally) when enable_tls is set."
                 ));
             }
@@ -950,7 +947,18 @@ impl HttpService {
             let config = RustlsConfig::from_config(Arc::new(server_config));
 
             let handle = tls_handle.unwrap_or_default();
-            let server = axum_server::bind_rustls(addr, config)
+            let std_listener = bind_listener(addr)
+                .and_then(|l| l.into_std())
+                .map_err(|e| {
+                    tracing::error!(
+                        protocol = %protocol,
+                        address = %address,
+                        error = %e,
+                        "Failed to bind server to address"
+                    );
+                    anyhow::anyhow!("Failed to start {} server on {}: {}", protocol, address, e)
+                })?;
+            let server = axum_server::from_tcp_rustls(std_listener, config)
                 .handle(handle.clone())
                 .serve(router.into_make_service());
 
@@ -1002,7 +1010,7 @@ impl HttpService {
                     let addr: SocketAddr = address
                         .parse()
                         .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
-                    tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                    bind_listener(addr).map_err(|e| {
                         tracing::error!(
                             protocol = %protocol,
                             address = %address,
@@ -1130,6 +1138,35 @@ fn get_graceful_shutdown_timeout() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(5)
+}
+
+const DEFAULT_LISTEN_BACKLOG: u32 = 4096;
+
+// `listen(2)` takes an `int`; anything above `i32::MAX` would go negative.
+fn parse_listen_backlog(value: Result<String, std::env::VarError>) -> u32 {
+    value
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|n| (1..=i32::MAX as u32).contains(n))
+        .unwrap_or(DEFAULT_LISTEN_BACKLOG)
+}
+
+fn listen_backlog() -> u32 {
+    parse_listen_backlog(std::env::var(env_llm::DYN_HTTP_LISTEN_BACKLOG))
+}
+
+/// `tokio::net::TcpListener::bind` listens with a backlog of 128. A few thousand
+/// clients connecting within seconds overflow that, and overflowed connections
+/// are delayed or, depending on host TCP settings, fail.
+fn bind_listener(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let socket = if addr.is_ipv4() {
+        tokio::net::TcpSocket::new_v4()?
+    } else {
+        tokio::net::TcpSocket::new_v6()?
+    };
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(listen_backlog())
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -2700,6 +2737,41 @@ mod tests {
             .checked_add(interval)
             .map(|_| interval);
         assert_eq!(parse_sse_keep_alive(Ok(u64::MAX.to_string())), expected);
+    }
+
+    #[test]
+    fn test_listen_backlog_env_var() {
+        assert_eq!(
+            parse_listen_backlog(Err(std::env::VarError::NotPresent)),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok("0".to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok("invalid".to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok((i32::MAX as u32 + 1).to_string())),
+            DEFAULT_LISTEN_BACKLOG
+        );
+        assert_eq!(
+            parse_listen_backlog(Ok(i32::MAX.to_string())),
+            i32::MAX as u32
+        );
+        assert_eq!(parse_listen_backlog(Ok(" 8192 ".to_string())), 8192);
+    }
+
+    #[tokio::test]
+    async fn test_bind_listener_accepts_connections() {
+        let listener = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_ne!(addr.port(), 0);
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (_server_side, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer, client.local_addr().unwrap());
     }
 
     #[test]

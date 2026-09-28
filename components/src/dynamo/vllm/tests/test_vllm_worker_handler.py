@@ -98,6 +98,7 @@ def _make_handler(
     # BaseWorkerHandler.__init__ is bypassed above; the decode generate path
     # registers per-request deferred-abort guards here.
     handler._deferred_aborts = {}
+    handler._weight_version = mod._WEIGHT_VERSION_UNDECLARED
     return handler
 
 
@@ -1926,6 +1927,8 @@ class TestRLAdminRouteHardening:
                 handler.resume_generation,
                 handler.flush_cache,
                 handler.abort_request,
+                handler.get_weight_version,
+                handler.set_weight_version,
             ):
                 resp = await fn(body)
                 assert resp["status"] == "error", (fn.__name__, body, resp)
@@ -1950,7 +1953,7 @@ class TestRLAdminRouteHardening:
             }
         )
 
-        assert resp == {"status": "ok", "version": 7}
+        assert resp == {"status": "ok", "version": 7, "version_declared": True}
         handler.engine_client.collective_rpc.assert_awaited_once_with(
             "update_weights",
             kwargs={"update_info": {"names": ["weight"]}},
@@ -1997,6 +2000,118 @@ class TestRLAdminRouteHardening:
             "finish_weight_update", kwargs={}
         )
         handler.engine_client.reset_prefix_cache.assert_awaited_once_with()
+
+    @staticmethod
+    def _make_rl_handler():
+        handler = _make_handler()
+        handler._pause_lock = asyncio.Lock()
+        handler._paused = False
+        handler.engine_client = MagicMock()
+        handler.engine_client.collective_rpc = AsyncMock()
+        handler.engine_client.reset_prefix_cache = AsyncMock()
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_get_weight_version_reports_undeclared_before_any_update(self):
+        config = _make_config(enable_multimodal=False)
+        config.custom_encoder_class = None
+        with patch.object(mod, "VllmEngineMonitor"):
+            handler = mod.DecodeWorkerHandler(
+                runtime=MagicMock(),
+                config=config,
+                engine=MagicMock(),
+                default_sampling_params={},
+            )
+
+        resp = await handler.get_weight_version({})
+
+        assert resp["status"] == "ok"
+        assert resp["version_declared"] is False
+        assert resp["version"] is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, 7, "policy-43"])
+    async def test_set_weight_version_declares_without_touching_the_engine(
+        self, version
+    ):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({"weight_version": version})
+
+        assert resp == {"status": "ok", "version": version}
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        handler.engine_client.collective_rpc.assert_not_awaited()
+        handler.engine_client.reset_prefix_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_weight_version_rejects_a_missing_version(self):
+        handler = self._make_rl_handler()
+
+        resp = await handler.set_weight_version({})
+
+        assert resp["status"] == "error"
+        assert (await handler.get_weight_version({}))["version_declared"] is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("version", [None, "initial", "unknown"])
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-42"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_explicit_version_is_declared(self, route, body, version):
+        handler = self._make_rl_handler()
+        handler._paused = True
+
+        response = await getattr(handler, route)({**body, "weight_version": version})
+
+        assert response == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+        assert await handler.get_weight_version({}) == {
+            "status": "ok",
+            "version": version,
+            "version_declared": True,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "version",
+        [mod._WEIGHT_VERSION_UNDECLARED, None, "policy-42"],
+        ids=["undeclared", "declared-null", "declared-string"],
+    )
+    @pytest.mark.parametrize(
+        ("route", "body"),
+        [
+            ("update_weights_from_disk", {"model_path": "/models/checkpoint-43"}),
+            ("update_weights_from_distributed", {"engine_rpc": "update_weights"}),
+        ],
+    )
+    async def test_update_without_a_version_preserves_declaration(
+        self, route, body, version
+    ):
+        handler = self._make_rl_handler()
+        handler._paused = True
+        if version is not mod._WEIGHT_VERSION_UNDECLARED:
+            await handler.set_weight_version({"weight_version": version})
+        previous = await handler.get_weight_version({})
+
+        response = await getattr(handler, route)(body)
+
+        assert response == {
+            "status": "ok",
+            "version": "unknown",
+            "version_declared": False,
+        }
+        assert await handler.get_weight_version({}) == previous
 
     @pytest.mark.asyncio
     async def test_init_weights_update_group_succeeds_within_timeout(self):

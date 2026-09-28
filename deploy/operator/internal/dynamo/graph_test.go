@@ -7695,6 +7695,65 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *te
 	}
 }
 
+func TestGenerateGrovePodCliqueSet_ConvertedCompilationCacheMountIsNotDuplicated(t *testing.T) {
+	const compilationCachePath = "/home/dynamo/.cache/vllm"
+
+	dgd := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1alpha1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(BackendFrameworkVLLM),
+			Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					VolumeMounts: []v1alpha1.VolumeMount{
+						{Name: "model-cache", MountPoint: "/home/dynamo/.cache/huggingface"},
+						{Name: "compilation-cache", MountPoint: compilationCachePath, UseAsCompilationCache: true},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("Render the reported v1alpha1 compilation-cache fixture as a Grove PodCliqueSet")
+	got, err := GenerateGrovePodCliqueSet(
+		context.Background(),
+		betaDGD(t, dgd),
+		&configv1alpha1.OperatorConfiguration{},
+		&controller_common.RuntimeConfig{},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got.Spec.Template.Cliques, 1)
+	require.Len(t, got.Spec.Template.Cliques[0].Spec.PodSpec.Containers, 1)
+
+	t.Log("Verify every rendered mount path is unique and the compilation cache appears once")
+	mainContainer := got.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0]
+	mountsByPath := make(map[string]corev1.VolumeMount, len(mainContainer.VolumeMounts))
+	for _, mount := range mainContainer.VolumeMounts {
+		require.NotContains(t, mountsByPath, mount.MountPath, "duplicate mountPath %q", mount.MountPath)
+		mountsByPath[mount.MountPath] = mount
+	}
+	assert.Equal(t, "model-cache", mountsByPath["/home/dynamo/.cache/huggingface"].Name)
+	assert.Equal(t, "compilation-cache", mountsByPath[compilationCachePath].Name)
+	assert.False(t, mountsByPath[compilationCachePath].ReadOnly)
+
+	t.Log("Verify the compilation-cache mount retains one writable PVC-backed volume")
+	var compilationCacheVolumes []corev1.Volume
+	for _, volume := range got.Spec.Template.Cliques[0].Spec.PodSpec.Volumes {
+		if volume.Name == "compilation-cache" {
+			compilationCacheVolumes = append(compilationCacheVolumes, volume)
+		}
+	}
+	require.Len(t, compilationCacheVolumes, 1)
+	require.NotNil(t, compilationCacheVolumes[0].PersistentVolumeClaim)
+	assert.Equal(t, "compilation-cache", compilationCacheVolumes[0].PersistentVolumeClaim.ClaimName)
+	assert.False(t, compilationCacheVolumes[0].PersistentVolumeClaim.ReadOnly)
+}
+
 func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testing.T) {
 	component := &v1alpha1.DynamoComponentDeploymentSharedSpec{
 		ComponentType: commonconsts.ComponentTypeFrontend,

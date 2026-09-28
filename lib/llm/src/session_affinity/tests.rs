@@ -15,7 +15,7 @@ use super::SessionAffinityMode::{Hard, Soft};
 use super::{
     AffinityCoordinator, AffinityTarget, Hold, LlmResponse, affinity_id,
     coordinator::{ReplicaApplyOutcome, tracked_stream},
-    explicit_target, to_table,
+    explicit_target, subagent_group_affinity_id, to_table,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -27,6 +27,7 @@ use crate::{
     },
     types::Annotated,
 };
+use dynamo_kv_router::services::selection::affinity::MAX_SESSION_AFFINITY_ID_BYTES;
 
 fn session_id() -> SessionAffinityId {
     SessionAffinityId::new("session-1")
@@ -874,4 +875,20 @@ async fn session_affinity_completion_restores_expired_remote_binding() {
         replica.query_target(&session_id(), None).unwrap(),
         Some(replicated_target)
     );
+}
+
+#[test]
+fn a_subagent_group_id_is_namespaced_and_fixed_size() {
+    let a = subagent_group_affinity_id("parent-1");
+    let b = subagent_group_affinity_id("parent-1");
+    let c = subagent_group_affinity_id("parent-2");
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert!(
+        a.starts_with("\u{1}sg:"),
+        "the key must be un-claimable via a header value"
+    );
+    let long = subagent_group_affinity_id(&"p".repeat(10_000));
+    assert_eq!(long.len(), a.len());
+    assert!(long.len() <= MAX_SESSION_AFFINITY_ID_BYTES);
 }

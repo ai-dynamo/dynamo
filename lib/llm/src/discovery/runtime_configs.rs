@@ -96,6 +96,7 @@ fn base_runtime_config_watch(
                     }
                 }
                 Ok(DiscoveryEvent::Removed(_)) => continue,
+                Ok(DiscoveryEvent::Resync(_)) => continue,
                 Err(error) => {
                     tracing::error!(%error, "Base model runtime-config discovery stream failed");
                     continue;

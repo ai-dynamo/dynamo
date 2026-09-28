@@ -785,7 +785,8 @@ fn update_advertisements<T: Advertisement>(
         }
         DiscoveryEvent::Added(_)
         | DiscoveryEvent::Removed(_)
-        | DiscoveryEvent::ModelTaintsUpdated(_) => Ok(false),
+        | DiscoveryEvent::ModelTaintsUpdated(_)
+        | DiscoveryEvent::Resync(_) => Ok(false),
     }
 }
 
