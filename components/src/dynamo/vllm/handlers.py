@@ -3479,7 +3479,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
-        self._multimodal_request_processor.validate_multimodal_request(request)
+        try:
+            self._multimodal_request_processor.validate_multimodal_request(request)
+        except ValueError as exc:
+            logger.error(f"Request {request_id}: {exc}")
+            raise InvalidArgument(str(exc)) from exc
         first_token = True
         first_token_output_seen = False
         with time_and_log_code_section(
@@ -4039,12 +4043,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             self._multimodal_request_processor.validate_multimodal_request(request)
         except ValueError as exc:
             logger.error("Request %s: %s", request_id, exc)
-            yield {
-                "status": "error",
-                "message": str(exc),
-                "disaggregated_params": None,
-            }
-            return
+            raise InvalidArgument(str(exc)) from exc
 
         # Token-in-token-out mode: internal protocol format
         with time_and_log_code_section(f"[PREFILL] request: {request_id} generate"):
