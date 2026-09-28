@@ -79,6 +79,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ServiceName string `json:"serviceName,omitempty"`
 
 	// ComponentType indicates the role of this component (for example, "main").
+	//
 	// The DGD-only "lpx" type is experimental, requires the operator's
 	// lpx.enabled setting, and may change incompatibly.
 	ComponentType string `json:"componentType,omitempty"`
@@ -176,6 +177,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// leader and one worker role. Admission defaults omitted replicas to 1 for
 	// leader and multinode.nodeCount minus 1 for worker. Omitting the roles list
 	// preserves the implicit multinode role layout.
+	//
 	// LPX components each require an agent role. A DGD may contain independent
 	// LPX components, each with its own conductor role, or a shared draft and
 	// target pair with a conductor role only on the target. Every LPX role
@@ -209,6 +211,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// LPX holds LPX integration configuration. Only meaningful when
 	// ComponentType is "lpx".
+	//
 	// Experimental: requires the operator's lpx.enabled setting and may change incompatibly.
 	// +optional
 	LPX *v1beta1.LPXConfig `json:"lpx,omitempty"`
