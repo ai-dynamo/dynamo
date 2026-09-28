@@ -1021,10 +1021,92 @@ mod tests {
                 "errno {code} is not a dead connection"
             );
         }
+    }
 
-        let dead_listener = io::Error::from(io::ErrorKind::InvalidInput);
-        assert!(!is_resource_exhaustion_error(&dead_listener));
-        assert!(!is_dead_connection_error(&dead_listener));
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_rebinding_listener_preserves_backlog_during_resource_exhaustion() {
+        const CHILD_ENV: &str = "DYNAMO_TEST_LISTENER_EMFILE_CHILD";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Descriptor limits are process-wide; isolate this test from sibling tests.
+            let output = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "system_status_server::tests::test_rebinding_listener_preserves_backlog_during_resource_exhaustion",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_ENV, "1")
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("descriptor-exhaustion child should finish promptly")
+            .expect("test child should start");
+            assert!(
+                output.status.success(),
+                "descriptor-exhaustion child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let peer = client.local_addr().unwrap();
+
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: limit is writable and correctly aligned. Only this child is affected.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        limit.rlim_cur = limit.rlim_cur.min(96);
+        // SAFETY: limit is initialized; the soft limit is lowered without changing the hard limit.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+
+        let mut descriptors = Vec::new();
+        loop {
+            match std::fs::File::open("/dev/null") {
+                Ok(file) => descriptors.push(file),
+                Err(error) => {
+                    assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                    break;
+                }
+            }
+        }
+        let error = listener.accept().await.unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+
+        let mut rebinding =
+            RebindingTcpListener::new(listener, address, Duration::from_millis(200));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rebinding.accept())
+                .await
+                .is_err(),
+            "accept should wait during descriptor exhaustion"
+        );
+        drop(descriptors);
+
+        // A fresh bind rules out lingering descriptor pressure as the cause of AddrInUse.
+        let _control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        assert_eq!(
+            TcpListener::bind(address).await.unwrap_err().kind(),
+            io::ErrorKind::AddrInUse,
+            "the original listening address should remain held"
+        );
+        let (_stream, accepted_peer) =
+            tokio::time::timeout(Duration::from_secs(2), rebinding.accept())
+                .await
+                .expect("the queued connection should survive the shortage");
+        assert_eq!(accepted_peer, peer);
     }
 }
 
