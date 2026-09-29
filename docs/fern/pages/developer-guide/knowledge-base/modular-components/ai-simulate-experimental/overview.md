@@ -42,15 +42,16 @@ path. They have no adapter migration.
 AISimulate requires Python 3.11 through 3.13. Dynamo itself still supports Python 3.10, but the
 `aisimulate` dependency and its CLI are not installed in a Python 3.10 environment.
 
-The `dynamo-planner` image installs the published `aisimulate==0.12.0` wheel from its local
-wheelhouse. Dynamo builds `aisimulate-core==0.12.0` from crates.io instead of vendoring the
-AISimulate source tree.
+The `dynamo-planner` image installs the published `aisimulate==0.13.0.dev202609230000000054` wheel from its
+local wheelhouse. Dynamo builds `aisimulate-core==0.13.0-dev.202609230000000054` from crates.io instead of
+vendoring the AISimulate source tree. This AISimulate build publishes Linux wheels only
+(`manylinux_2_28` x86_64 and aarch64).
 
 For Dynamo source development, install the published AISimulate wheel, Dynamo, and the Planner
 dependencies from the Dynamo repository root:
 
 ```bash
-python3 -m pip install "aisimulate==0.12.0"
+python3 -m pip install "aisimulate==0.13.0.dev202609230000000054"
 python3 -m pip install --no-deps -e .
 python3 -m pip install -r container/deps/requirements.planner.txt
 ```
