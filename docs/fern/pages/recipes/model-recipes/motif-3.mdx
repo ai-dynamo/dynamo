@@ -49,12 +49,14 @@ kubectl apply -f recipes/motif-3/model-cache/model-download.yaml -n "${NAMESPACE
 kubectl wait --for=condition=Complete job/model-download -n "${NAMESPACE}" --timeout=7200s
 ```
 
-Apply the [aggregated chat manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/deploy.yaml):
+Apply the [aggregated chat manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml):
 
 ```bash
-kubectl apply -f recipes/motif-3/vllm/agg-b200-chat/deploy.yaml -n "${NAMESPACE}"
+kubectl apply -f recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml -n "${NAMESPACE}"
 kubectl get dgd motif3-agg-b200 -n "${NAMESPACE}" -w
 ```
+
+For Nscale B200 nodes, apply the [Nscale Kustomization](https://github.com/ai-dynamo/dynamo/tree/main/recipes/motif-3/vllm/agg-b200-chat/kustomize) with `kubectl apply -k recipes/motif-3/vllm/agg-b200-chat/kustomize -n "${NAMESPACE}"`. It adds amd64 and B200 node selectors and the GPU taint toleration. Reuse an existing `shared-model-cache` PVC, or choose the `vast` storage class when creating one. See the [Nscale setup instructions](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/README.md#nscale-b200).
 
 ## Smoke Test
 
@@ -86,7 +88,7 @@ kubectl apply -f recipes/motif-3/perf/perf.yaml -n "${NAMESPACE}"
 kubectl logs -f job/motif3-aiperf-job -n "${NAMESPACE}"
 ```
 
-The deployment uses actual MTP verification by default. For benchmark-only synthetic acceptance-length trials, change the `SPECULATIVE_CONFIG` ConfigMap key in the [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/deploy.yaml) from `speculative-config` to `speculative-config-synthetic`. These acceptance lengths were calculated by running [SPEED-Bench](https://huggingface.co/blog/nvidia/speed-bench) on the coding domain:
+The deployment uses actual MTP verification by default. For benchmark-only synthetic acceptance-length trials, change the `SPECULATIVE_CONFIG` ConfigMap key in the [deployment manifest](https://github.com/ai-dynamo/dynamo/blob/main/recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml) from `speculative-config` to `speculative-config-synthetic`. These acceptance lengths were calculated by running [SPEED-Bench](https://huggingface.co/blog/nvidia/speed-bench) on the coding domain:
 
 | MTP speculative tokens | Acceptance length |
 |:---:|:---:|

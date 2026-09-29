@@ -45,7 +45,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4@sha256:cccbc4c3382c4dbfe5dce4fbf50484f8924d68910dab04befc5d36964298645e
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-ac350eb6da3b924fbc90c9ec1af5fac5b927b8fb-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -89,7 +89,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/dynamo-vllm:motif-3-4cd9eb4@sha256:cccbc4c3382c4dbfe5dce4fbf50484f8924d68910dab04befc5d36964298645e
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-ac350eb6da3b924fbc90c9ec1af5fac5b927b8fb-vllm-runtime
               imagePullPolicy: IfNotPresent
               command: [python3, -m, dynamo.vllm]
               args:

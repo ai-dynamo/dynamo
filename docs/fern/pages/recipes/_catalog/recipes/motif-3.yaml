@@ -30,7 +30,7 @@ targets:
     type: chat-trace-replay
     traffic: 8K/1K chat Mooncake trace at concurrency 11
   deploy:
-    asset: recipes/motif-3/vllm/agg-b200-chat/deploy.yaml
+    asset: recipes/motif-3/vllm/agg-b200-chat/base/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/motif-3/perf/perf.yaml

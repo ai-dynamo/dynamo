@@ -37,8 +37,8 @@ spec:
               hf download "$MODEL_NAME"
           resources:
             requests:
-              cpu: "8"
-              memory: 128Gi
+              cpu: "4"
+              memory: 16Gi
           volumeMounts:
             - name: shared-model-cache
               mountPath: /shared-model-cache
