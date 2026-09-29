@@ -132,6 +132,10 @@ fn capture_agent_headers(headers: &HeaderMap) -> Arc<BTreeMap<String, Vec<String
         if !is_agent_header(name.as_str()) || value.is_sensitive() {
             continue;
         }
+        if name == "session-id" && borrowed_header_value(headers, HEADER_CODEX_THREAD_ID).is_none()
+        {
+            continue;
+        }
         let Ok(value) = value.to_str() else {
             continue;
         };
@@ -245,6 +249,51 @@ mod tests {
             headers.insert(name, "value".parse().unwrap());
         }
         assert_eq!(capture_agent_headers(&headers).len(), 6);
+    }
+
+    #[test]
+    fn capture_session_id_requires_usable_thread_id() {
+        for thread_id in [
+            None,
+            Some(HeaderValue::from_static("")),
+            Some(HeaderValue::from_static(" \t ")),
+            Some(HeaderValue::from_bytes(&[0xff]).unwrap()),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(HEADER_CLAUDE_CODE_SESSION_ID, "root".parse().unwrap());
+            headers.insert("session-id", "unrelated".parse().unwrap());
+            headers.insert(HEADER_OPENCODE_PARENT_SESSION_ID, "parent".parse().unwrap());
+            if let Some(thread_id) = thread_id {
+                headers.insert(HEADER_CODEX_THREAD_ID, thread_id);
+            }
+            let context = agent_context_header_values(&headers).unwrap();
+            assert_eq!(context.session_id, "root");
+            assert!(!context.agent_headers.contains_key("session-id"));
+            assert_eq!(
+                context.agent_headers[HEADER_OPENCODE_PARENT_SESSION_ID],
+                ["parent"]
+            );
+        }
+    }
+
+    #[test]
+    fn capture_session_id_preserves_values_with_identity_override() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_CODEX_THREAD_ID, " thread ".parse().unwrap());
+        for value in [" cache-session ", "", "other-session"] {
+            headers.append("session-id", HeaderValue::from_static(value));
+        }
+        let context = agent_context_header_values(&headers).unwrap();
+        assert_eq!(context.session_id, "thread");
+        assert_eq!(
+            context.agent_headers["session-id"],
+            [" cache-session ", "", "other-session"]
+        );
+
+        headers.insert(HEADER_DYNAMO_SESSION_ID, "override".parse().unwrap());
+        let overridden = agent_context_header_values(&headers).unwrap();
+        assert_eq!(overridden.session_id, "override");
+        assert_eq!(overridden.agent_headers, context.agent_headers);
     }
 
     #[test]
