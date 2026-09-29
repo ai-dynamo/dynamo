@@ -17,6 +17,7 @@ use dynamo_kv_router::{
         KV_HINT_TRANSFER_WORKER_TYPE_RUNTIME_KEY,
     },
     protocols::{KvHintTransferWorkerMetadata, KvTransferEnforcement},
+    sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER,
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
@@ -32,9 +33,6 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
-
-/// Resource-safety bound for rank ranges advertised by one worker.
-pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.

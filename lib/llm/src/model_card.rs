@@ -1259,6 +1259,13 @@ impl ModelDeploymentCard {
                     bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
                 }
 
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
+                ) {
+                    bytes_to_hash
+                        .extend_from_slice(b"\0vllm_inference_v1_generate\0true");
+                }
+
                 // The Qwen video contract is resolved per cohort, not per card.
                 // Nemotron contracts still partition WorkerSets by checksum.
                 append_runtime_contract_checksum(
@@ -3239,6 +3246,26 @@ mod ownership_tests {
         let mut enabled = ModelDeploymentCard::with_name_only("model");
         enabled.runtime_config.runtime_data.insert(
             VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn vllm_generate_capability_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
             true.into(),
         );
 

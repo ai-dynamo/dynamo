@@ -3432,7 +3432,9 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
+        let message_order = self.formatter.media_message_order(request);
+        for index in 0..messages.len() {
+            let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {
                 continue;
             };
@@ -7341,11 +7343,8 @@ impl
             &self.speculative_prefill_tasks,
         );
 
-        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
-            final_stream,
-            trace_state,
-            request_id,
-        );
+        let final_stream =
+            crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -7479,11 +7478,8 @@ impl
             MultimodalCounts::default(),
         );
 
-        let stream = crate::request_trace::wrap_completion_request_end_stream(
-            Box::pin(stream),
-            trace_state,
-            request_id,
-        );
+        let stream =
+            crate::request_trace::wrap_completion_request_end_stream(Box::pin(stream), trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
@@ -7661,6 +7657,68 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_display_name_fallback_orders_tool_media() {
+        use crate::common::checked_file::CheckedFile;
+        use crate::model_card::ModelInfoType;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"architectures":[],"model_type":"","eos_token_id":128009}"#,
+        )
+        .unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&config).unwrap(),
+        ));
+        mdc.display_name = "DeepSeek-V4.1-Flash".into();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let first = inline_data_url().replacen("image/png", "image/png;name=a", 1);
+        let second = inline_data_url().replacen("image/png", "image/png;name=b", 1);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":second}}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":first}}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("alias".into())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let result = builder.build().unwrap();
+        let media = &result.multi_modal_data.unwrap()["image_url"];
+        let urls: Vec<_> = media
+            .iter()
+            .map(|image| match image {
+                MultimodalData::Url(url) => url.as_str(),
+                other => panic!("expected URL, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(urls, [first.as_str(), second.as_str()]);
     }
 
     #[tokio::test]
