@@ -26,7 +26,7 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerCandidate, WorkerCandidates, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
     WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
@@ -51,9 +51,13 @@ impl WorkerScorer for WorkerIdScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(candidate.worker().worker_id as f64)
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (candidate, cost) in candidates.iter().zip(costs) {
+            *cost = candidate.worker().worker_id as f64;
+        }
+        Ok(())
     }
 }
 
@@ -81,9 +85,13 @@ impl WorkerScorer for NonFiniteScorer {
     fn score(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        Ok(f64::NAN)
+        candidates: WorkerCandidates<'_>,
+        costs: &mut [f64],
+    ) -> Result<(), WorkerSelectionPolicyError> {
+        for (_candidate, cost) in candidates.iter().zip(costs) {
+            *cost = f64::NAN;
+        }
+        Ok(())
     }
 }
 
@@ -105,7 +113,7 @@ impl WorkerFilter for RejectAllFilter {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        _candidate: &WorkerCandidate,
+        _candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(false)
     }
@@ -117,7 +125,7 @@ impl WorkerFilter for RejectWorker {
     fn keep(
         &mut self,
         _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
+        candidate: WorkerCandidate<'_>,
     ) -> Result<bool, WorkerSelectionPolicyError> {
         Ok(candidate.worker().worker_id != self.0)
     }
@@ -1783,7 +1791,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         config_a
             .service_builder(
                 crate::WorkerType::Aggregated,
-                WorkerSelectionPolicyRegistry::default(),
+                WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                    |config, role, _| {
+                        crate::WorkerSelectionPolicy::reference(
+                            config.clone(),
+                            role.default_selector_label(),
+                        )
+                    },
+                )),
             )
             .build()
             .await
@@ -1793,7 +1808,14 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         SelectionServiceBuilder::new(
             test_config(),
             crate::WorkerType::Aggregated,
-            WorkerSelectionPolicyRegistry::default(),
+            WorkerSelectionPolicyRegistry::default().with_default_factory(Arc::new(
+                |config, role, _| {
+                    crate::WorkerSelectionPolicy::reference(
+                        config.clone(),
+                        role.default_selector_label(),
+                    )
+                },
+            )),
         )
         .indexer_threads(1)
         .replica_sync(port_b, Vec::new())
@@ -1993,4 +2015,41 @@ fn empty_raw_tokens_win_over_supplied_hashes() {
     let normalized = normalize_prompt(&request);
     assert!(normalized.block_hashes.is_empty());
     assert_eq!(normalized.isl_tokens, 0);
+}
+
+#[tokio::test]
+async fn select_accepts_empty_token_ids() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    for _ in 0..2 {
+        let response = post(
+            app.clone(),
+            "/select",
+            r#"{"model_name":"model","token_ids":[]}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn register_rejects_oversized_dp_range() {
+    let response = post(
+        app(),
+        "/workers",
+        &serde_json::json!({
+            "worker_id": 1,
+            "model_name": "model",
+            "endpoint": "http://worker-1:8000",
+            "block_size": 4,
+            "data_parallel_size": crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

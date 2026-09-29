@@ -1459,6 +1459,25 @@ fn attach_agent_context_from_context(
     }
 }
 
+fn attach_image_cache_scope_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    use crate::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+
+    if let Ok(session_affinity) = context.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        request.image_cache_scope = Some(session_affinity.as_str().to_owned());
+    }
+}
+
+fn attach_request_context_metadata(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    attach_agent_context_from_context(request, context);
+    attach_image_cache_scope_from_context(request, context);
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
@@ -3066,11 +3085,7 @@ impl OpenAIPreprocessor {
         request: &R,
         hidden_stop_token_ids: &mut Vec<TokenIdType>,
     ) -> Result<Vec<TokenIdType>> {
-        let has_tools = request
-            .tools()
-            .as_ref()
-            .and_then(|tools| tools.len())
-            .is_some_and(|len| len > 0);
+        let has_tools = Self::request_has_effective_tools(request);
         let tool_choice_none = request
             .tool_choice()
             .as_ref()
@@ -3118,6 +3133,26 @@ impl OpenAIPreprocessor {
         }
 
         Ok(visible_stop_token_ids)
+    }
+
+    fn request_has_effective_tools<R: OAIChatLikeRequest>(request: &R) -> bool {
+        // `OAIChatLikeRequest` has no equivalent method, so this generic path mirrors
+        // `CreateChatCompletionRequest::has_effective_tools`;
+        // `effective_tool_predicates_match_protocol_definition` pins parity.
+        request
+            .tools()
+            .as_ref()
+            .and_then(|tools| tools.len())
+            .is_some_and(|len| len > 0)
+            || request.typed_messages().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    matches!(
+                        message,
+                        dynamo_protocols::types::ChatCompletionRequestMessage::System(system)
+                            if system.tools.as_ref().is_some_and(|tools| !tools.is_empty())
+                    )
+                })
+            })
     }
 
     fn should_keep_tool_parser_end_tokens_visible(has_tools: bool, tool_choice_none: bool) -> bool {
@@ -3362,7 +3397,9 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
+        let message_order = self.formatter.media_message_order(request);
+        for index in 0..messages.len() {
+            let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {
                 continue;
             };
@@ -4792,11 +4829,7 @@ impl OpenAIPreprocessor {
             .as_deref()
             .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
-        let has_tools = request
-            .inner
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty());
+        let has_tools = request.inner.has_effective_tools();
         let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
             Self::should_apply_tool_jail(
                 effective_tool_call_parser.as_ref(),
@@ -4903,16 +4936,9 @@ impl OpenAIPreprocessor {
         // it does not need the same entry gate.
         //
         if let ToolProcessingRoute::MuseUnified(family) = &tool_processing_route {
-            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                        name: tool.function.name.clone(),
-                        parameters: tool.function.parameters.clone(),
-                        strict: tool.function.strict,
-                    })
-                    .collect()
-            });
+            let tool_definitions =
+                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+            let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(tool_parser_v2::apply_unified_stream(
                     stream,
@@ -4928,16 +4954,9 @@ impl OpenAIPreprocessor {
         }
 
         if let ToolProcessingRoute::Unified(family) = &tool_processing_route {
-            let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-                tools
-                    .iter()
-                    .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                        name: tool.function.name.clone(),
-                        parameters: tool.function.parameters.clone(),
-                        strict: tool.function.strict,
-                    })
-                    .collect()
-            });
+            let tool_definitions =
+                crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+            let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
             let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
                 Box::pin(unified_parser::apply_stream_with_constraint(
                     stream,
@@ -5061,16 +5080,9 @@ impl OpenAIPreprocessor {
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
-        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
-            tools
-                .iter()
-                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
-                    name: tool.function.name.clone(),
-                    parameters: tool.function.parameters.clone(),
-                    strict: tool.function.strict,
-                })
-                .collect()
-        });
+        let tool_definitions =
+            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner)?;
+        let tool_definitions = (!tool_definitions.is_empty()).then_some(tool_definitions);
 
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
             match tool_processing_route {
@@ -7163,7 +7175,7 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
@@ -7286,11 +7298,8 @@ impl
             &self.speculative_prefill_tasks,
         );
 
-        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
-            final_stream,
-            trace_state,
-            request_id,
-        );
+        let final_stream =
+            crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -7372,7 +7381,7 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -7424,11 +7433,8 @@ impl
             MultimodalCounts::default(),
         );
 
-        let stream = crate::request_trace::wrap_completion_request_end_stream(
-            Box::pin(stream),
-            trace_state,
-            request_id,
-        );
+        let stream =
+            crate::request_trace::wrap_completion_request_end_stream(Box::pin(stream), trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
@@ -7606,6 +7612,68 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_display_name_fallback_orders_tool_media() {
+        use crate::common::checked_file::CheckedFile;
+        use crate::model_card::ModelInfoType;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"architectures":[],"model_type":"","eos_token_id":128009}"#,
+        )
+        .unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&config).unwrap(),
+        ));
+        mdc.display_name = "DeepSeek-V4.1-Flash".into();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let first = inline_data_url().replacen("image/png", "image/png;name=a", 1);
+        let second = inline_data_url().replacen("image/png", "image/png;name=b", 1);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":second}}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":first}}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("alias".into())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let result = builder.build().unwrap();
+        let media = &result.multi_modal_data.unwrap()["image_url"];
+        let urls: Vec<_> = media
+            .iter()
+            .map(|image| match image {
+                MultimodalData::Url(url) => url.as_str(),
+                other => panic!("expected URL, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(urls, [first.as_str(), second.as_str()]);
     }
 
     #[tokio::test]
@@ -8185,6 +8253,188 @@ mod tests {
         );
     }
 
+    #[test]
+    fn effective_tool_predicates_match_protocol_definition() {
+        let cases = [
+            (
+                "no tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}]
+                }),
+            ),
+            (
+                "empty top-level tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "tools": []
+                }),
+            ),
+            (
+                "top-level tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "tools": [{
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {"type": "object"}
+                        }
+                    }]
+                }),
+            ),
+            (
+                "empty system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": []},
+                        {"role": "user", "content": "test"}
+                    ]
+                }),
+            ),
+            (
+                "system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                        {"role": "user", "content": "test"}
+                    ]
+                }),
+            ),
+            (
+                "later system tools",
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [
+                        {"role": "system", "content": "", "tools": []},
+                        {"role": "user", "content": "test"},
+                        {"role": "system", "content": "", "tools": [{"name": "lookup"}]}
+                    ]
+                }),
+            ),
+        ];
+
+        for (case, value) in cases {
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(value).expect("request must deserialize");
+            assert_eq!(
+                OpenAIPreprocessor::request_has_effective_tools(&request),
+                request.inner.has_effective_tools(),
+                "effective-tool predicates diverged for {case}"
+            );
+        }
+
+        let developer_tools =
+            serde_json::from_value::<NvCreateChatCompletionRequest>(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "developer", "content": "policy", "tools": [{"name": "lookup"}]},
+                    {"role": "user", "content": "test"}
+                ]
+            }));
+        match developer_tools {
+            Ok(request) => assert_eq!(
+                OpenAIPreprocessor::request_has_effective_tools(&request),
+                request.inner.has_effective_tools(),
+                "generic predicate must track newly supported developer tools"
+            ),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .contains("`tools` is only accepted on system messages, not on role developer"),
+                "unexpected developer-tools rejection: {error}"
+            ),
+        }
+    }
+
+    const HARMONY_CALL_TOKEN_ID: TokenIdType = 42;
+
+    struct HiddenStopTokenizer;
+
+    impl crate::tokenizers::traits::Encoder for HiddenStopTokenizer {
+        fn encode(&self, input: &str) -> anyhow::Result<Encoding> {
+            if input != "<|call|>" {
+                anyhow::bail!("unexpected Harmony tool-call end token {input:?}");
+            }
+            Ok(Encoding::Sp(vec![HARMONY_CALL_TOKEN_ID]))
+        }
+
+        fn encode_batch(&self, inputs: &[&str]) -> anyhow::Result<Vec<Encoding>> {
+            inputs.iter().map(|input| self.encode(input)).collect()
+        }
+    }
+
+    impl crate::tokenizers::traits::Decoder for HiddenStopTokenizer {
+        fn decode(
+            &self,
+            _token_ids: &[TokenIdType],
+            _skip_special_tokens: bool,
+        ) -> anyhow::Result<crate::tokenizers::traits::DecodeResult> {
+            Ok(crate::tokenizers::traits::DecodeResult::Complete(
+                String::new(),
+            ))
+        }
+    }
+
+    impl Tokenizer for HiddenStopTokenizer {}
+
+    fn hidden_stop_preprocessor() -> OpenAIPreprocessor {
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.tool_call_parser = Some("harmony".to_string());
+        preprocessor.tokenizer = Arc::new(HiddenStopTokenizer);
+        preprocessor
+    }
+
+    #[test]
+    fn hidden_stop_path_recognizes_dynamic_system_tools_and_tool_choice_none() {
+        let dynamic: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "test"}
+            ]
+        }))
+        .unwrap();
+        let none: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "system", "content": "", "tools": [{"name": "lookup"}]},
+                {"role": "user", "content": "test"}
+            ],
+            "tool_choice": "none"
+        }))
+        .unwrap();
+        assert!(dynamic.inner.tools.is_none());
+        assert!(none.inner.tools.is_none());
+
+        let preprocessor = hidden_stop_preprocessor();
+        let mut dynamic_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let dynamic_visible = preprocessor
+            .remove_tool_parser_end_tokens_from_hidden_stops(&dynamic, &mut dynamic_hidden)
+            .unwrap();
+        assert_eq!(dynamic_visible, [HARMONY_CALL_TOKEN_ID]);
+        assert_eq!(dynamic_hidden, [7]);
+
+        let mut none_hidden = vec![HARMONY_CALL_TOKEN_ID, 7];
+        let none_visible = preprocessor
+            .remove_tool_parser_end_tokens_from_hidden_stops(&none, &mut none_hidden)
+            .unwrap();
+        assert!(none_visible.is_empty());
+        assert_eq!(none_hidden, [HARMONY_CALL_TOKEN_ID, 7]);
+    }
+
     async fn apply_kimi_k3_no_tools(
         leaked_reasoning: &str,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -8202,6 +8452,53 @@ mod tests {
             None,
             false,
             // No tools and no forced choice, so no JSON grammar was installed.
+            false,
+            stream::iter(vec![
+                kimi_k3_reasoning_chunk(leaked_reasoning),
+                terminal_chat_stream_chunk(),
+            ]),
+        );
+
+        OpenAIPreprocessor::apply_tool_call_response_policy(jailed, tool_call_parsing_enabled)
+            .collect()
+            .await
+    }
+
+    async fn apply_kimi_k3_dynamic_tools(
+        leaked_reasoning: &str,
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "",
+                    "tools": [{
+                        "name": "lookup",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"]
+                        }
+                    }]
+                },
+                {"role": "user", "content": "test"}
+            ]
+        }))
+        .unwrap();
+        let tool_call_parsing_enabled = OpenAIPreprocessor::tool_call_parsing_enabled(&request);
+        assert!(
+            tool_call_parsing_enabled,
+            "dynamic system tools grant tool-call response permission"
+        );
+        let tool_definitions =
+            crate::preprocessor::tool_choice::effective_tool_definitions(&request.inner).unwrap();
+
+        let jailed = OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("kimi_k3".to_string()),
+            request.inner.tool_choice.clone(),
+            Some(tool_definitions),
+            false,
             false,
             stream::iter(vec![
                 kimi_k3_reasoning_chunk(leaked_reasoning),
@@ -8324,6 +8621,57 @@ mod tests {
             choice.message.reasoning_content.as_deref(),
             Some("Use the calculator.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_kimi_k3_dynamic_only_tools_survive_stream_and_batch_response_policy() {
+        let responses = apply_kimi_k3_dynamic_tools(concat!(
+            "Use the dynamic lookup tool.",
+            "<|open|>tools<|sep|>",
+            "<|open|>call tool=\"lookup\" index=\"1\"<|sep|>",
+            "<|open|>argument key=\"query\" type=\"string\"<|sep|>weather",
+            "<|close|>argument<|sep|>",
+            "<|close|>call<|sep|>",
+            "<|close|>tools<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        ))
+        .await;
+
+        let choices: Vec<_> = responses
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .collect();
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.delta.tool_calls.is_some()),
+            "streaming output must retain a dynamically declared tool call"
+        );
+        assert!(
+            choices
+                .iter()
+                .any(|choice| choice.finish_reason == Some(FinishReason::ToolCalls)),
+            "streaming finish reason must remain tool_calls"
+        );
+
+        let response =
+            crate::protocols::openai::chat_completions::aggregator::DeltaAggregator::apply(
+                stream::iter(responses),
+                crate::protocols::openai::ParsingOptions::new(None, None),
+            )
+            .await
+            .unwrap();
+        let choice = &response.inner.choices[0];
+        let calls = choice
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("batch output must retain the dynamic call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "lookup");
+        assert_eq!(choice.finish_reason, Some(FinishReason::ToolCalls));
     }
 
     #[test]
@@ -10359,6 +10707,52 @@ mod tests {
         assert_eq!(
             wire["agent_context"]["compaction"]["trigger"],
             serde_json::json!("manual")
+        );
+    }
+
+    #[test]
+    fn attach_request_context_metadata_keeps_affinity_separate_from_agent_context() {
+        use crate::protocols::common::extensions::{
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        };
+
+        let agent_context = AgentContext {
+            session_id: "agent-session".to_string(),
+            parent_session_id: Some("agent-parent".to_string()),
+            session_final: None,
+            compaction: None,
+            input_trigger: None,
+        };
+        let mut context = PipelineContext::new(());
+        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
+        context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-session"),
+        );
+        let mut request = preprocessed_budget_request(None);
+
+        attach_request_context_metadata(&mut request, &context);
+
+        assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
+        assert_eq!(
+            request.image_cache_scope.as_deref(),
+            Some("routing-session")
+        );
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["agent_context"]["session_id"], "agent-session");
+        assert_eq!(wire["image_cache_scope"], "routing-session");
+
+        let mut affinity_only_context = PipelineContext::new(());
+        affinity_only_context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-only"),
+        );
+        let mut affinity_only_request = preprocessed_budget_request(None);
+        attach_request_context_metadata(&mut affinity_only_request, &affinity_only_context);
+        assert!(affinity_only_request.agent_context.is_none());
+        assert_eq!(
+            affinity_only_request.image_cache_scope.as_deref(),
+            Some("routing-only")
         );
     }
 

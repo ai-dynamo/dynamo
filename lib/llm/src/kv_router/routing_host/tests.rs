@@ -41,7 +41,7 @@ use crate::{
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
     protocols::common::{
-        extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
+        extensions::{AgentContextBuilder, SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         preprocessor::{MmRoutingInfo, RoutingHints},
         timing::RequestTracker,
     },
@@ -3967,5 +3967,197 @@ async fn explicit_worker_disappearing_after_preview_is_not_revalidated() {
         &[]
     ));
     drop(host);
+    runtime.shutdown();
+}
+
+fn subagent_request(
+    session_id: &str,
+    parent_session_id: Option<&str>,
+) -> SingleIn<PreprocessedRequest> {
+    let mut agent_context = AgentContextBuilder::default();
+    agent_context.session_id(session_id.to_string());
+    if let Some(parent_session_id) = parent_session_id {
+        agent_context.parent_session_id(parent_session_id.to_string());
+    }
+    let mut content = request();
+    content.agent_context = Some(agent_context.build().unwrap());
+    let mut request = Context::new(content);
+    request.insert(
+        SESSION_AFFINITY_CONTEXT_KEY,
+        SessionAffinityId::new(session_id),
+    );
+    request
+}
+
+fn parent_group_id(parent_session_id: &str) -> SessionAffinityId {
+    SessionAffinityId::new(crate::session_affinity::subagent_group_affinity_id(
+        parent_session_id,
+    ))
+}
+
+async fn affinity_mode_host(namespace: &str) -> (Runtime, RoutingHost) {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let endpoint = distributed
+        .namespace(namespace.to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap()
+        .endpoint("generate".to_string());
+    let client = endpoint.client().await.unwrap();
+    endpoint.register_endpoint_instance().await.unwrap();
+    client.wait_for_instances().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    let coordinator = AffinityCoordinator::new(
+        Duration::from_secs(60),
+        crate::session_affinity::SessionAffinityMode::Hard,
+    )
+    .unwrap();
+    let host =
+        RoutingHost::new_builtin_with_coordinator(inner, load_context, Some(coordinator)).unwrap();
+    (runtime, host)
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn parent_group_binding_resolves_siblings_to_one_key() {
+    let (runtime, host) = affinity_mode_host("subagent-group-binding").await;
+
+    let key = |request: &SingleIn<PreprocessedRequest>| {
+        host.group_binding_id(request, None)
+            .unwrap_or_else(|| {
+                crate::session_affinity::affinity_id(request)
+                    .unwrap()
+                    .unwrap()
+            })
+            .as_str()
+            .to_string()
+    };
+
+    let sibling_a = key(&subagent_request("child-1", Some("parent-1")));
+    let sibling_b = key(&subagent_request("child-2", Some("parent-1")));
+    let other_parent = key(&subagent_request("child-3", Some("parent-2")));
+    let main_agent = key(&subagent_request("parent-1", None));
+
+    assert_eq!(sibling_a, sibling_b);
+    assert_ne!(sibling_a, other_parent);
+    assert_ne!(sibling_a, main_agent);
+    assert_eq!(main_agent, "parent-1");
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn parent_group_binding_offers_siblings_the_committed_worker() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+
+    let offered = async |request: &SingleIn<PreprocessedRequest>| {
+        router
+            .select_with_session_affinity(
+                request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default(),
+                |target| std::future::ready(Ok(target)),
+            )
+            .await
+            .unwrap()
+    };
+
+    let first = subagent_request("child-1", Some("parent-1"));
+    let (offered_first, hold) = offered(&first).await;
+    assert_eq!(offered_first, None, "a new group starts unbound");
+    let mut stream = router
+        .bind_affinity(
+            hold,
+            AffinityTarget::new(7, Some(0)),
+            ResponseStream::new(
+                Box::pin(stream::iter([Annotated::from_data(
+                    LLMEngineOutput::default(),
+                )])),
+                first.context(),
+            ),
+        )
+        .unwrap();
+    while stream.next().await.is_some() {}
+
+    let sibling = subagent_request("child-2", Some("parent-1"));
+    let (offered_sibling, _) = offered(&sibling).await;
+    assert_eq!(offered_sibling, Some(AffinityTarget::new(7, Some(0))));
+
+    let other_parent = subagent_request("child-3", Some("parent-2"));
+    let (offered_other, _) = offered(&other_parent).await;
+    assert_eq!(
+        offered_other, None,
+        "a different parent is a different group"
+    );
+
+    runtime.shutdown();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn hard_parent_group_recovers_when_the_bound_worker_leaves() {
+    let workers = [7u64, 9]
+        .into_iter()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    let (router, runtime) =
+        router_with_worker_configs(Some(Duration::from_secs(60)), workers).await;
+    let affinity = router.affinity.as_ref().unwrap();
+    let group = parent_group_id("parent-1");
+
+    let Hold::Initialize(initializer) = affinity.acquire(&group, None).await.unwrap() else {
+        panic!("the first subagent must initialize the group");
+    };
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(AffinityTarget::new(
+                7,
+                Some(0),
+            )))
+            .unwrap(),
+    );
+    assert_eq!(
+        affinity.query_target(&group, None).unwrap(),
+        Some(AffinityTarget::new(7, Some(0)))
+    );
+
+    // Worker 7 leaves the pool. Hard mode must invalidate the dead pin and retry unbound rather
+    // than fail every sibling until the TTL expires.
+    router.inner.client.override_discovered_instances(vec![9]);
+    router.inner.client.override_instance_avail(vec![9]);
+    let sibling = subagent_request("child-2", Some("parent-1"));
+    let (selected, operation) = router
+        .select_with_session_affinity(
+            &sibling,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+            |target: Option<AffinityTarget>| {
+                // The dead pin is rejected at dispatch time; the unbound retry is accepted.
+                std::future::ready(match target {
+                    Some(target) if target.worker_id == 7 => Err(anyhow::anyhow!("worker gone")),
+                    other => Ok(other),
+                })
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(selected, None, "the retry runs unbound");
+    assert!(matches!(operation, Some(Hold::Initialize(_))));
+    assert_eq!(affinity.query_target(&group, None).unwrap(), None);
+
     runtime.shutdown();
 }

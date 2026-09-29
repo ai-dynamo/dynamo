@@ -198,7 +198,7 @@ def test_endpoint_overrides_with_prefill_worker(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.namespace == "custom"
@@ -296,7 +296,7 @@ def _make_engine_cfg(kv_connector=None, extra_config=None):
 _PD_KVBM_NIXL = {
     "connectors": [
         {"kv_connector": "DynamoConnector", "kv_role": "kv_both"},
-        {"kv_connector": "NixlConnector", "kv_role": "kv_both"},
+        {"kv_connector": "NixlConnector", "kv_role": "kv_producer"},
     ]
 }
 
@@ -636,7 +636,7 @@ def test_disaggregation_mode_prefill(mock_vllm_cli):
         "--disaggregation-mode",
         "prefill",
         "--kv-transfer-config",
-        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
     )
     config = parse_args()
     assert config.disaggregation_mode == DisaggregationMode.PREFILL
@@ -2023,7 +2023,7 @@ class TestEmbeddingWorkerFlag:
             "--disaggregation-mode",
             "prefill",
             "--kv-transfer-config",
-            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+            '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}',
         )
         with pytest.raises(ValueError, match="--embedding-worker is only valid"):
             parse_args()
