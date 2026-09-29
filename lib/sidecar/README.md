@@ -31,6 +31,9 @@ waiting for engine metadata:
   timeout; NATS readiness follows the client connection state. Neither check
   issues inference requests.
 
+The distributed runtime owns the listener. Sidecar launchers select runtime-only
+probes; integrated workers retain their existing worker-health probe behavior.
+
 The existing `DYN_SYSTEM_LIVE_PATH` and `DYN_SYSTEM_HEALTH_PATH` settings also
 apply. Metrics, metadata, and engine routes become available on the same listener
 once the runtime connects. Keep a separate engine startup/readiness probe: a
@@ -40,7 +43,6 @@ Shutdown withdraws sidecar readiness immediately. Metadata discovery before
 `Worker.start()` is cancelled; once engine startup has begun, the existing Worker
 startup, drain, and cleanup ordering remains in effect.
 
-This implements the probe portion of [DEP #14897](https://github.com/ai-dynamo/dynamo/issues/14897).
 Continuous engine health reconciliation, engine replacement and KV recovery, and
 changes to shutdown drain policy remain separate work. The synchronous engine
 constructors used by embedded callers retain their existing behavior.

@@ -81,9 +81,12 @@ impl TrtllmSidecarEngine {
     }
 
     /// Parse CLI arguments before starting the sidecar runtime.
-    pub fn from_cli() -> impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>
-    {
-        std::future::ready(Self::from_parsed(<Args as clap::Parser>::parse()))
+    pub fn from_cli() -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        DynamoError,
+    > {
+        let parsed = Self::from_parsed(<Args as clap::Parser>::parse())?;
+        Ok(std::future::ready(Ok(parsed)))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the

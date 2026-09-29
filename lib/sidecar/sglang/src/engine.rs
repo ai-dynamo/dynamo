@@ -73,9 +73,13 @@ impl SglangSidecarEngine {
     }
 
     /// Parse CLI arguments without connecting; discovery runs after probe startup.
-    pub fn from_cli() -> impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>
-    {
-        Self::from_parsed_async(<Args as clap::Parser>::parse())
+    pub fn from_cli() -> Result<
+        impl std::future::Future<Output = Result<(Self, WorkerConfig), DynamoError>>,
+        DynamoError,
+    > {
+        let args = <Args as clap::Parser>::parse();
+        Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the

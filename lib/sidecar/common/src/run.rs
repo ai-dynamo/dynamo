@@ -4,7 +4,7 @@
 use std::{future::Future, sync::Arc};
 
 use dynamo_backend_common::{DynamoError, LLMEngine, Worker, WorkerConfig};
-use dynamo_runtime::system_status_server::SidecarStatusServer;
+use dynamo_runtime::system_status_server::SystemProbePolicy;
 use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig, logging};
 use tokio_util::sync::CancellationToken;
 
@@ -25,11 +25,13 @@ pub fn run<E: LLMEngine + 'static>(
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
         let signal_token = shutdown.clone();
+        let signal_runtime = runtime.clone();
         let signal_handle = tokio::spawn(async move {
             tokio::select! {
                 _ = sigterm.recv() => tracing::info!("SIGTERM received"),
                 _ = sigint.recv() => tracing::info!("SIGINT received"),
             }
+            signal_runtime.mark_shutting_down();
             signal_token.cancel();
         });
 
@@ -47,15 +49,14 @@ async fn run_until_shutdown<E: LLMEngine + 'static>(
     runtime: &Runtime,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let config = dynamo_runtime::config::RuntimeConfig::from_settings()?;
-    let status = SidecarStatusServer::start(&config, shutdown.clone()).await?;
     let startup = async {
         let distributed = DistributedConfig::try_from_settings()?;
-        let drt = DistributedRuntime::new(runtime.clone(), distributed).await?;
-        if let Some(ref server) = status {
-            server.attach(Arc::new(drt.clone()), drt.discovery_metadata())?;
-            drt.set_system_status_server_info(server.info())?;
-        }
+        let drt = DistributedRuntime::new_with_probe_policy(
+            runtime.clone(),
+            distributed,
+            SystemProbePolicy::RuntimeOnly,
+        )
+        .await?;
         tracing::info!("Sidecar runtime connected; discovering engine metadata");
         // Keep engine discovery failures distinct from runtime/Worker failures
         // for embedded launchers' existing error contracts.

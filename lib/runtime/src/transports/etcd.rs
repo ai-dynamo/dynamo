@@ -231,7 +231,10 @@ impl Client {
     /// reads will time out.
     pub(crate) async fn check_connection(&self) -> anyhow::Result<()> {
         let resp = self.etcd_client().maintenance_client().status().await?;
-        anyhow::ensure!(resp.leader() != 0, "etcd has no elected leader (quorum lost)");
+        anyhow::ensure!(
+            resp.leader() != 0,
+            "etcd has no elected leader (quorum lost)"
+        );
         Ok(())
     }
 

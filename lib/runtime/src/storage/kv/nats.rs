@@ -54,9 +54,7 @@ impl Store for NATSStore {
     }
 
     async fn check_connection(&self) -> Result<(), StoreError> {
-        if self.client.client().connection_state()
-            != async_nats::connection::State::Connected
-        {
+        if self.client.client().connection_state() != async_nats::connection::State::Connected {
             return Err(StoreError::NATSError("NATS is disconnected".into()));
         }
         Ok(())

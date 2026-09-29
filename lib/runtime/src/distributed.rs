@@ -27,7 +27,7 @@ use crate::runtime::Runtime;
 use async_once_cell::OnceCell;
 
 use std::fmt;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
 
@@ -102,7 +102,7 @@ pub struct DistributedRuntime {
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
     quic_response_server:
         Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
-    system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
+    system_status_server: Option<Arc<system_status_server::SystemStatusServerInfo>>,
     request_plane: RequestPlaneMode,
     response_plane: ResponsePlaneMode,
 
@@ -170,10 +170,34 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        Self::build(runtime, config).await
+        Self::new_with_probe_policy(
+            runtime,
+            config,
+            system_status_server::SystemProbePolicy::Worker,
+        )
+        .await
     }
 
-    async fn build(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
+    /// Bind runtime HTTP before connecting dependencies, using the selected probe policy.
+    /// Dropping this future or shutting down the runtime closes an unfinished listener.
+    pub async fn new_with_probe_policy(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
+        let shutdown = runtime.shutdown_started_token();
+        tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => anyhow::bail!("runtime shut down during initialization"),
+            result = Self::build(runtime, config, policy) => result,
+        }
+    }
+
+    async fn build(
+        runtime: Runtime,
+        config: DistributedConfig,
+        policy: system_status_server::SystemProbePolicy,
+    ) -> Result<Self> {
         let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
         let response_plane = match response_plane {
@@ -181,19 +205,13 @@ impl DistributedRuntime {
             None => ResponsePlaneMode::configured()?,
         };
 
-        let nats_client = match nats_config {
-            Some(nc) => Some(nc.connect().await?),
-            None => None,
-        };
-
-        // Start system status server for health and metrics if enabled in configuration
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
-        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
-        let cancel_token = if config.system_server_enabled() {
-            Some(runtime.clone().child_token())
-        } else {
-            None
+        let config = match policy {
+            system_status_server::SystemProbePolicy::Worker => {
+                crate::config::RuntimeConfig::from_settings().unwrap_or_default()
+            }
+            system_status_server::SystemProbePolicy::RuntimeOnly => {
+                crate::config::RuntimeConfig::from_settings()?
+            }
         };
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
@@ -206,6 +224,32 @@ impl DistributedRuntime {
             health_endpoint_path,
             live_endpoint_path,
         )));
+
+        let status_server = if config.system_server_enabled() {
+            match system_status_server::PendingSystemStatusServer::start(
+                &config,
+                &runtime,
+                system_health.clone(),
+                policy,
+            )
+            .await
+            {
+                Ok(server) => Some(server),
+                // Preserve ordinary workers' optional-HTTP failure behavior.
+                Err(error) if policy == system_status_server::SystemProbePolicy::Worker => {
+                    tracing::error!(%error, "System status server startup failed");
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        };
+
+        let nats_client = match nats_config {
+            Some(nc) => Some(nc.connect().await?),
+            None => None,
+        };
 
         // Initialize discovery client based on backend configuration
         let (discovery_client, discovery_metadata) = match discovery_backend {
@@ -266,7 +310,7 @@ impl DistributedRuntime {
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
             quic_response_server: Arc::new(OnceCell::new()),
-            system_status_server: Arc::new(OnceLock::new()),
+            system_status_server: status_server.as_ref().map(|server| server.info()),
             discovery_client,
             endpoint_registrations,
             discovery_metadata,
@@ -345,49 +389,6 @@ impl DistributedRuntime {
             }
         }
 
-        // Handle system status server initialization
-        if let Some(cancel_token) = cancel_token {
-            // System server is enabled - start both the state and HTTP server
-            let host = config.system_host.clone();
-            let port = config.system_port as u16;
-
-            // Start system status server (it creates SystemStatusState internally)
-            match crate::system_status_server::spawn_system_status_server(
-                &host,
-                port,
-                cancel_token,
-                Arc::new(distributed_runtime.clone()),
-                distributed_runtime.discovery_metadata.clone(),
-            )
-            .await
-            {
-                Ok((addr, handle)) => {
-                    tracing::info!("System status server started successfully on {addr}");
-
-                    // Store system status server information
-                    let system_status_server_info =
-                        crate::system_status_server::SystemStatusServerInfo::new(
-                            addr,
-                            Some(handle),
-                        );
-
-                    // Initialize the system_status_server field
-                    distributed_runtime
-                        .system_status_server
-                        .set(Arc::new(system_status_server_info))
-                        .expect("System status server info should only be set once");
-                }
-                Err(e) => {
-                    tracing::error!("System status server startup failed: {e}");
-                }
-            }
-        } else {
-            // System server HTTP is disabled, but uptime metrics are still being tracked via SystemHealth
-            tracing::debug!(
-                "System status server HTTP endpoints disabled, but uptime metrics are being tracked"
-            );
-        }
-
         // Start health check manager if enabled
         if config.health_check_enabled {
             let health_check_config = crate::health_check::HealthCheckConfig {
@@ -413,31 +414,22 @@ impl DistributedRuntime {
             }
         }
 
+        anyhow::ensure!(
+            !distributed_runtime.runtime.is_shutting_down(),
+            "runtime shut down during initialization"
+        );
+        if let Some(server) = status_server {
+            server.attach(
+                distributed_runtime.clone(),
+                distributed_runtime.discovery_metadata.clone(),
+            )?;
+        }
         Ok(distributed_runtime)
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
         let config = DistributedConfig::try_from_settings()?;
         Self::new(runtime, config).await
-    }
-
-    /// Discovery metadata shared with the status server for the /metadata endpoint.
-    /// Only present when the Kubernetes discovery backend is active.
-    pub fn discovery_metadata(
-        &self,
-    ) -> Option<Arc<tokio::sync::RwLock<discovery::DiscoveryMetadata>>> {
-        self.discovery_metadata.clone()
-    }
-
-    /// Register a pre-started sidecar status server's info so other components can
-    /// locate the listener address. Call this after [`SidecarStatusServer::attach`].
-    pub fn set_system_status_server_info(
-        &self,
-        info: Arc<system_status_server::SystemStatusServerInfo>,
-    ) -> anyhow::Result<()> {
-        self.system_status_server
-            .set(info)
-            .map_err(|_| anyhow::anyhow!("system status server already initialized"))
     }
 
     /// Check configured runtime dependencies, independently of model registration.
@@ -624,7 +616,7 @@ impl DistributedRuntime {
     pub fn system_status_server_info(
         &self,
     ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
-        self.system_status_server.get().cloned()
+        self.system_status_server.clone()
     }
 
     /// How the frontend should talk to the backend.

@@ -4,14 +4,14 @@
 // TODO: (DEP-635) this file should be renamed to system_http_server.rs
 //  it is being used not just for status, health, but others like loras management.
 
-mod sidecar;
-pub use sidecar::SidecarStatusServer;
+mod startup;
+pub(crate) use startup::PendingSystemStatusServer;
+pub use startup::SystemProbePolicy;
 
 use crate::config::HealthStatus;
 use crate::config::environment_names::logging as env_logging;
 use crate::config::environment_names::runtime::canary as env_canary;
 use crate::config::environment_names::runtime::system as env_system;
-use crate::logging::make_system_request_span;
 use crate::metrics::MetricsHierarchy;
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::ip_resolver::{
@@ -34,7 +34,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tower_http::trace::TraceLayer;
 
 /// System status server information containing socket address and handle
 #[derive(Debug)]
@@ -178,56 +177,18 @@ pub struct LoraResponse {
     pub count: Option<usize>,
 }
 
-/// Start system status server with metrics support
-pub async fn spawn_system_status_server(
-    host: &str,
-    port: u16,
-    cancel_token: CancellationToken,
-    drt: Arc<crate::DistributedRuntime>,
-    discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
-) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    let app = system_status_router(drt, discovery_metadata)?;
-    serve_system_status(host, port, cancel_token, app).await
-}
-
+/// Runtime routes attached after initialization; probes are owned by the listener.
 fn system_status_router(
     drt: Arc<crate::DistributedRuntime>,
     discovery_metadata: Option<Arc<tokio::sync::RwLock<crate::discovery::DiscoveryMetadata>>>,
 ) -> anyhow::Result<Router> {
     // Create system status server state with the provided distributed runtime
     let server_state = Arc::new(SystemStatusState::new(drt, discovery_metadata)?);
-    let health_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .health_path()
-        .to_string();
-    let live_path = server_state
-        .drt()
-        .system_health()
-        .lock()
-        .live_path()
-        .to_string();
-
     // Check if LoRA feature is enabled
     let lora_enabled =
         crate::config::env_is_truthy(crate::config::environment_names::llm::DYN_LORA_ENABLED);
 
     let mut app = Router::new()
-        .route(
-            &health_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
-        .route(
-            &live_path,
-            get({
-                let state = Arc::clone(&server_state);
-                move || health_handler(state)
-            }),
-        )
         .route(
             "/metrics",
             get({
@@ -285,12 +246,10 @@ fn system_status_router(
         }),
     );
 
-    let app = app
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
-        })
-        .layer(TraceLayer::new_for_http().make_span_with(make_system_request_span));
+    let app = app.fallback(|| async {
+        tracing::info!("[fallback handler] called");
+        (StatusCode::NOT_FOUND, "Route not found").into_response()
+    });
 
     Ok(app)
 }
@@ -337,9 +296,10 @@ async fn serve_system_status(
 
 /// Health handler with optional active health checking
 #[tracing::instrument(skip_all, level = "trace")]
-async fn health_handler(state: Arc<SystemStatusState>) -> impl IntoResponse {
+async fn health_handler(
+    system_health: Arc<parking_lot::Mutex<crate::SystemHealth>>,
+) -> impl IntoResponse {
     // Get basic health status
-    let system_health = state.drt().system_health();
     let system_health_lock = system_health.lock();
     let (healthy, endpoints) = system_health_lock.get_health_status();
     let uptime = Some(system_health_lock.uptime());
