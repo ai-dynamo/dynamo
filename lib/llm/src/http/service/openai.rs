@@ -4170,6 +4170,10 @@ async fn responses(
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
     let response_params = ResponseParams {
+        tool_names: Some(crate::protocols::openai::responses::ToolNameMap::new(
+            request.inner.tools.as_deref().unwrap_or_default(),
+            Some(&request.inner.input),
+        )),
         model: request.inner.model.clone(),
         temperature: request.inner.temperature,
         top_p: request.inner.top_p,
