@@ -994,7 +994,7 @@ func TestNativeRoleRuntimeVersionsAndKVTransferPolicy(t *testing.T) {
 
 	t.Log("KV transfer policy belongs to runtime and does not create a worker runtime")
 	originalWorker := component.Roles[1].PodTemplate.DeepCopy()
-	applyKvTransferPolicyToWorkerComponent(component, &v1beta1.KvTransferPolicy{LabelKey: "topology.kubernetes.io/zone"}, nil, true)
+	applyKvTransferPolicyToWorkerComponent(component, &v1beta1.KvTransferPolicy{LabelKey: "topology.kubernetes.io/zone"}, nil, true, nil)
 	require.Equal(t, originalWorker.Spec, component.Roles[1].PodTemplate.Spec)
 	require.Empty(t, component.Roles[0].PodTemplate.Spec.Containers[0].Env)
 	require.NotEmpty(t, component.Roles[0].PodTemplate.Spec.InitContainers[0].Env)

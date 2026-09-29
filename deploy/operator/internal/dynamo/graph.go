@@ -766,7 +766,23 @@ func applyDynDeploymentResources(container *corev1.Container, resources *Resourc
 	return nil
 }
 
-func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+// MergeEnvs composes system and user environment variables without changing
+// their order. Kubernetes expands references in EnvVar values from earlier to
+// later entries, so the list must not be sorted or de-duplicated.
+func MergeEnvs(system, user []corev1.EnvVar) []corev1.EnvVar {
+	return slices.Concat(system, user)
+}
+
+// MergeEnvsForOrigin preserves the legacy sorted and de-duplicated output for
+// DGDs created before ordered environment composition was introduced.
+func MergeEnvsForOrigin(annotations map[string]string, system, user []corev1.EnvVar) []corev1.EnvVar {
+	if compatibility.OrderedEnvironmentVariables.Enabled(annotations) {
+		return MergeEnvs(system, user)
+	}
+	return mergeEnvsLegacy(system, user)
+}
+
+func mergeEnvsLegacy(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	envMap := make(map[string]corev1.EnvVar)
 
 	// Add all common environment variables.
@@ -1602,7 +1618,7 @@ func addMultinodeTopologyEnvVars(
 		{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: multinodeDeployer.GetLeaderHostname(serviceName)},
 		{Name: commonconsts.DynamoRankEnvVar, Value: multinodeDeployer.GetPodRank()},
 	}
-	container.Env = MergeEnvs(container.Env, topologyEnvVars)
+	container.Env = mergeEnvsLegacy(container.Env, topologyEnvVars)
 }
 
 // applyDefaultSecurityContext sets secure defaults for pod security context.
@@ -1804,7 +1820,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		if err := mergo.Merge(&container, *main, mergo.WithOverride); err != nil {
 			return nil, fmt.Errorf("failed to merge podTemplate main container: %w", err)
 		}
-		container.Env = MergeEnvs(baseEnv, main.Env)
+		container.Env = MergeEnvsForOrigin(annotations, baseEnv, main.Env)
 
 		// An explicitly empty port list clears generated ports as well.
 		if main.Ports != nil {
@@ -1831,7 +1847,7 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 	}
 
 	// Preserve legacy environment rendering before backend-specific additions.
-	container.Env = MergeEnvs(nil, container.Env)
+	container.Env = MergeEnvsForOrigin(annotations, nil, container.Env)
 	frontendSidecarMounts := append([]corev1.VolumeMount(nil), container.VolumeMounts...)
 
 	// Apply backend-specific container modifications
@@ -2009,7 +2025,7 @@ func validateContainerVolumeMounts(volumeMounts []corev1.VolumeMount) error {
 	return nil
 }
 
-func mergeContainerByName(base *corev1.Container, override *corev1.Container) error {
+func mergeContainerByName(base *corev1.Container, override *corev1.Container, annotations map[string]string) error {
 	if override == nil {
 		return nil
 	}
@@ -2019,7 +2035,7 @@ func mergeContainerByName(base *corev1.Container, override *corev1.Container) er
 	if err := mergo.Merge(base, *user, mergo.WithOverride); err != nil {
 		return err
 	}
-	base.Env = MergeEnvs(baseEnv, user.Env)
+	base.Env = MergeEnvsForOrigin(annotations, baseEnv, user.Env)
 	if user.LivenessProbe != nil {
 		base.LivenessProbe = user.LivenessProbe.DeepCopy()
 	}
@@ -2197,7 +2213,7 @@ func mergeFrontendSidecarDefaults(podSpec *corev1.PodSpec, sidecarName string, p
 		if err := mergo.Merge(&base, *user, mergo.WithOverride); err != nil {
 			return fmt.Errorf("failed to merge frontend sidecar %q: %w", sidecarName, err)
 		}
-		base.Env = MergeEnvs(baseEnv, user.Env)
+		base.Env = MergeEnvsForOrigin(parentContext.Annotations, baseEnv, user.Env)
 
 		// Replace complete probes so handlers cannot merge with the defaults.
 		if user.LivenessProbe != nil {
@@ -2390,13 +2406,13 @@ func applyDGDTemplateDefaults(
 	if len(dynamoDeployment.Spec.Env) > 0 {
 		for _, podTemplate := range EnsureComponentPodTemplates(component) {
 			main := ensureMainContainer(podTemplate)
-			main.Env = MergeEnvs(dynamoDeployment.Spec.Env, main.Env)
+			main.Env = MergeEnvsForOrigin(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env, main.Env)
 
 			// When configured, apply global env to the Dynamo sidecar as well as main.
 			for i := range podTemplate.Spec.InitContainers {
 				runtime := &podTemplate.Spec.InitContainers[i]
 				if runtime.Name == commonconsts.RuntimeContainerName {
-					runtime.Env = MergeEnvs(dynamoDeployment.Spec.Env, runtime.Env)
+					runtime.Env = MergeEnvsForOrigin(dynamoDeployment.Annotations, dynamoDeployment.Spec.Env, runtime.Env)
 				}
 			}
 		}
@@ -2407,7 +2423,7 @@ func applyDGDTemplateDefaults(
 	// lacks the parent DGD). Workers publish these in their MDC so the router
 	// reads policy per-worker.
 	if shouldApplyKvTransferPolicyToWorkerComponent(component, dynamoDeployment) {
-		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains, sidecarMode)
+		applyKvTransferPolicyToWorkerComponent(component, dynamoDeployment.Spec.Experimental.KvTransferPolicy, groveClusterTopologyDomains, sidecarMode, dynamoDeployment.Annotations)
 	}
 
 	propagateDGDSpecMetadata(dynamoDeployment, component)
@@ -2444,6 +2460,7 @@ func applyKvTransferPolicyToWorkerComponent(
 	kvt *v1beta1.KvTransferPolicy,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	sidecarMode bool,
+	annotations map[string]string,
 ) {
 	if component == nil || kvt == nil {
 		return
@@ -2457,7 +2474,7 @@ func applyKvTransferPolicyToWorkerComponent(
 		if sidecarMode && runtime.Name != commonconsts.RuntimeContainerName {
 			continue
 		}
-		runtime.Env = MergeEnvs(removeWorkerKvTransferPolicyEnvVars(runtime.Env), workerKvTransferPolicyEnvVars(kvt))
+		runtime.Env = MergeEnvsForOrigin(annotations, workerKvTransferPolicyEnvVars(kvt), removeWorkerKvTransferPolicyEnvVars(runtime.Env))
 		runtime.VolumeMounts = appendTopologyLabelVolumeMount(runtime.VolumeMounts, TopologyLabelVolumeMount())
 		podTemplate.Spec.Volumes = appendTopologyLabelVolume(podTemplate.Spec.Volumes, TopologyLabelVolume(kvt, groveClusterTopologyDomains))
 	}
