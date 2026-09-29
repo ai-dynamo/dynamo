@@ -135,6 +135,8 @@ runs:
           TEST_NAME="${FRAMEWORK:-unknown}_${PROFILE:-unknown}"
         fi
 
+        nohup bash .github/scripts/watch-checkpoint.sh > checkpoint-diagnostics/collector.log 2>&1 < /dev/null &
+        echo "$!" > checkpoint-diagnostics/collector.pid
         python -m pytest "${TEST_FILE}" \
           --namespace="${NAMESPACE}" \
           ${PYTEST_ARGS} \

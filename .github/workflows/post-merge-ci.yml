@@ -55,8 +55,6 @@ jobs:
             kubectl --request-timeout=10s -n default exec "$agent" -c agent -- test -f /usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03
           done
           mkdir -p checkpoint-diagnostics
-          nohup bash .github/scripts/watch-checkpoint.sh > checkpoint-diagnostics/collector.log 2>&1 < /dev/null &
-          echo "$!" > checkpoint-diagnostics/collector.pid
       - name: Test original checkpoint, restore, and inference on host driver
         timeout-minutes: 9
         uses: ./.github/actions/dynamo-deploy-test

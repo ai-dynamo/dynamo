@@ -71,8 +71,8 @@ CHECKPOINT_READY_TIMEOUT = 300
 RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
-# Temporary diagnostic branch: cap readiness at five minutes, test at seven.
-DEPLOYMENT_READY_TIMEOUT = 300
+# Temporary diagnostic branch: cap the entire comparison at seven minutes.
+DEPLOYMENT_READY_TIMEOUT = 420
 IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 300
 TEST_TIMEOUT = 420
 
@@ -178,7 +178,31 @@ CHECKPOINT_BACKENDS = {
         # pods keep weights without a model-cache PVC; when CI passes
         # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
         # shared cache mount can own it (same as regular deploy tests).
-        env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
+        env=(
+            ("UCX_TLS", "tcp,self"),
+            ("HF_HOME", TRTLLM_HF_HOME),
+            # Diagnostic only: retain the pinned image's MPI/Torch/NIXL paths
+            # while preferring host595. Admission requires direct python -m.
+            (
+                "LD_LIBRARY_PATH",
+                (
+                    "/opt/dynamo/mpi/lib:/usr/lib/x86_64-linux-gnu:"
+                    "/usr/local/lib/python3.12/dist-packages/torch/lib:"
+                    "/usr/local/lib/python3.12/dist-packages/torch_tensorrt/lib:"
+                    "/usr/local/cuda/compat/lib:"
+                    "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
+                ),
+            ),
+            (
+                "LD_PRELOAD",
+                (
+                    "/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03:"
+                    "/opt/dynamo/libstdc++.so.6:"
+                    "/usr/local/lib/python3.12/dist-packages/"
+                    "tensorrt_llm/libs/nixl/libnixl.so"
+                ),
+            ),
+        ),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
         checkpoint_startup_policy="WaitForCheckpoint",
@@ -266,26 +290,6 @@ def _new_checkpoint_spec(
         pod_spec.update(copy.deepcopy(backend.pod_spec_updates))
     container = containers[0]
     container["args"] = list(backend.args)
-    if backend.name == "trtllm":
-        # Keep links in the captured rootfs, not an emptyDir lost on restore.
-        # Positional parameters preserve the recipe command and backend args.
-        container["command"] = [
-            "/bin/bash",
-            "-ec",
-            (
-                "checkpoint_driver=/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03\n"
-                'test -r "$checkpoint_driver"\n'
-                "driver_dir=$(mktemp -d /opt/dynamo/checkpoint-host-driver.XXXXXX)\n"
-                'ln -s "$checkpoint_driver" "$driver_dir/libcuda.so.1"\n'
-                'ln -s libcuda.so.1 "$driver_dir/libcuda.so"\n'
-                'export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
-                'export LD_PRELOAD="$checkpoint_driver${LD_PRELOAD:+:$LD_PRELOAD}"\n'
-                'printf "checkpoint host driver: %s directory: %s\\n" "$checkpoint_driver" "$driver_dir"\n'
-                'exec "$@"'
-            ),
-            "checkpoint-host-driver",
-            *container["command"],
-        ]
     if backend.container_resources:
         container["resources"] = copy.deepcopy(backend.container_resources)
 

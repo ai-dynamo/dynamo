@@ -36,6 +36,8 @@ while :; do
     mkdir -p "$sample"
     kube get pods -o json > "$sample/pods.json" || { sleep 5; continue; }
     kube get podsnapshotcontents,snapshotjobs,podsnapshots -o json > "$sample/checkpoint-status.json" 2> "$sample/status-errors.log" || true
+    # Successful CRIU capture kills its source with SIGKILL; bind that exception to the captured source UID.
+    captured_uids=$(jq -c '[.items[] | select(.kind == "SnapshotJob" and any(.status.conditions[]?; .type == "Captured" and .status == "True")) | .status.podSnapshotUID] as $snapshots | [.items[] | select(.kind == "PodSnapshot" and (.metadata.uid as $uid | $snapshots | index($uid)) != null) | .spec.source.podRef.uid | select(type == "string" and length > 0)]' "$sample/checkpoint-status.json" 2>/dev/null) || captured_uids='[]'
     while IFS=$'\t' read -r target node failure; do
         [[ -n $target ]] || continue
         agent=$(jq -r --arg node "$node" '[.items[] | select(.spec.nodeName == $node and .metadata.labels["app.kubernetes.io/component"] == "snapshot-agent" and .status.phase == "Running") | .metadata.name][0] // empty' "$sample/pods.json")
@@ -75,6 +77,8 @@ done
 PROBE
         timed_out=$(grep '^HELPER_TIMEOUT ' "$sample/$agent-helpers.log" | head -1 || true)
         [[ -z $timed_out ]] || stop_test "$agent: $timed_out"
-    done < <(jq -r '.items[] | select(.metadata.deletionTimestamp == null and ((.metadata.name | startswith("checkpoint-")) or .metadata.annotations["nvidia.com/restore-from"] != null)) | ([.status.containerStatuses[]? | select(.name == "main") | if (.restartCount // 0) > 0 then "main restarted" elif (.state.terminated.exitCode // 0) != 0 then "main terminated: \(.state.terminated.reason) exit=\(.state.terminated.exitCode)" elif ((.state.waiting.reason // "") | test("^(CrashLoopBackOff|CreateContainerConfigError|CreateContainerError|RunContainerError|InvalidImageName)$")) then .state.waiting.reason else empty end][0] // (if .status.phase == "Failed" then "pod failed: \(.status.reason // "unknown")" else "" end)) as $failure | [.metadata.name, (.spec.nodeName // "-"), $failure] | @tsv' "$sample/pods.json")
+    done < <(jq -r --argjson captured "$captured_uids" '.items[] | select(.metadata.deletionTimestamp == null and ((.metadata.name | startswith("checkpoint-")) or .metadata.annotations["nvidia.com/restore-from"] != null))
+        | select((.metadata.annotations["nvidia.com/restore-from"] == null and (.metadata.uid as $uid | $captured | index($uid)) != null and any(.status.containerStatuses[]?; .name == "main" and (.restartCount // 0) == 0 and .state.terminated.exitCode == 137 and .state.terminated.reason == "Error")) | not)
+        | ([.status.containerStatuses[]? | select(.name == "main") | if (.restartCount // 0) > 0 then "main restarted" elif (.state.terminated.exitCode // 0) != 0 then "main terminated: \(.state.terminated.reason) exit=\(.state.terminated.exitCode)" elif ((.state.waiting.reason // "") | test("^(CrashLoopBackOff|CreateContainerConfigError|CreateContainerError|RunContainerError|InvalidImageName)$")) then .state.waiting.reason else empty end][0] // (if .status.phase == "Failed" then "pod failed: \(.status.reason // "unknown")" else "" end)) as $failure | [.metadata.name, (.spec.nodeName // "-"), $failure] | @tsv' "$sample/pods.json")
     sleep 5
 done
