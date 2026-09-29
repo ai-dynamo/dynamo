@@ -1072,7 +1072,7 @@ func TestLegacyGoEPPUpgradeDoesNotChangePodContract(t *testing.T) {
 	t.Log("clear eppConfig to start explicit Rust-EPP migration and assert the Pod contract switches")
 	migrated := dcd.DeepCopy()
 	migrated.Spec.EPPConfig = nil
-	migrated.Spec.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0"
+	migrated.Spec.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.1"
 	migratedReconciler := newUpgradeDCDReconciler(t, migrated)
 	migratedDeployment, toDelete, err := migratedReconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: migrated})
 	require.NoError(t, err)
