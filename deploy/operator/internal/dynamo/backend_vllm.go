@@ -638,21 +638,43 @@ var vllmValueFlags = map[string]bool{
 // the engine only ever sees "ray" in "--data-parallel-backend=ray;".
 const shellControlChars = ";&|<>()"
 
-// vllmStringValueFlags is the subset of vllmValueFlags whose value hasArg compares as a
-// string, and is the only place a shell terminator is trimmed.
+// normalizeVLLMValue returns the value the engine actually receives for a vllmValueFlags
+// flag, undoing the two things a manifest author writes that the operator would otherwise
+// read literally.
 //
-// Trimming is kept to these two because they are the two whose values were previously
-// matched by substring, which tolerated a terminator glued to the value; the numeric flags
-// have always gone through strconv.ParseInt, which does not. Restricting the trim the same
-// way leaves every numeric flag resolving exactly as it does today.
+// Quoting is checked first and suppresses trimming, because a control character inside
+// quotes is data, not an operator: the shell passes "ray;" through as ray; and argparse
+// then rejects it, so truncating to ray would invent a value nobody asked for.
 //
-// It is safe here because every legal value of these two is a backend name (ray, mp, uni,
-// external_launcher) or a Python dotted import path, none of which can contain a shell
-// control character. This is deliberately not a shell parser: a quoted value ("ray") or
-// one built by expansion ($(BACKEND)) reads the same as it does today.
-var vllmStringValueFlags = map[string]bool{
-	dataParallelBackendFlag: true,
-	distributedExecutorFlag: true,
+// This is still not a shell parser. A value built by expansion ($(BACKEND), ${TP}) is left
+// exactly as written, because its real value does not exist until the container runs; a
+// mixed form such as "ray"; is left to the trim branch and will not resolve. Both are
+// reported by the caller's validation rather than guessed at here.
+func normalizeVLLMValue(value string) string {
+	if unquoted, ok := stripMatchingQuotes(value); ok {
+		return unquoted
+	}
+	// An expansion legitimately contains characters that are control operators
+	// anywhere else, so trimming would leave "$" behind. Keep it whole: the
+	// value does not exist until the container runs, and the caller's
+	// validation reports it far better as written than as a fragment.
+	if strings.Contains(value, "$") {
+		return value
+	}
+	return trimShellTerminator(value)
+}
+
+// stripMatchingQuotes removes one layer of matching single or double quotes, reporting
+// whether the value was quoted at all.
+func stripMatchingQuotes(value string) (string, bool) {
+	if len(value) < 2 {
+		return value, false
+	}
+	quote := value[0]
+	if (quote != '"' && quote != '\'') || value[len(value)-1] != quote {
+		return value, false
+	}
+	return value[1 : len(value)-1], true
 }
 
 // trimShellTerminator returns the part of value that the shell would actually pass to the
@@ -670,18 +692,18 @@ func trimShellTerminator(value string) string {
 // underscore spellings of the flags this package reads to their dashed
 // form (e.g., "--tensor_parallel_size" to "--tensor-parallel-size"), splits
 // combined pairs (e.g., "--flag=value") for the flags that take a value, and
-// drops a shell control operator a manifest glued to the value of a
-// vllmStringValueFlags flag.
+// resolves each of those values the way the shell would -- see
+// normalizeVLLMValue.
 func normalizeVLLMFlags(expanded []string) []string {
 	normalized := make([]string, 0, len(expanded))
-	trimNextValue := false
+	inValueSlot := false
 	for _, arg := range expanded {
-		if trimNextValue {
-			trimNextValue = false
+		if inValueSlot {
+			inValueSlot = false
 			// A token starting with "-" is the next flag, not the previous
 			// flag's value, so let it fall through and be canonicalized.
 			if !strings.HasPrefix(arg, "-") {
-				normalized = append(normalized, trimShellTerminator(arg))
+				normalized = append(normalized, normalizeVLLMValue(arg))
 				continue
 			}
 		}
@@ -691,14 +713,21 @@ func normalizeVLLMFlags(expanded []string) []string {
 		} else if dashed := strings.ReplaceAll(flag, "_", "-"); vllmNormalizedFlags[dashed] {
 			flag = dashed
 		}
+		// A terminator glued to a flag that takes no value ends the word just as
+		// it does after a value, so "--enable-elastic-ep;" is a request for
+		// elastic EP. Only rewrite when trimming yields a flag this package
+		// reads, so an unrelated token keeps its exact spelling.
+		if !hasEquals && !vllmNormalizedFlags[flag] {
+			if trimmed := trimShellTerminator(flag); vllmNormalizedFlags[trimmed] {
+				flag = trimmed
+			}
+		}
 		if hasEquals && !vllmValueFlags[flag] {
 			normalized = append(normalized, arg)
 			continue
 		}
 		if hasEquals {
-			if vllmStringValueFlags[flag] {
-				value = trimShellTerminator(value)
-			}
+			value = normalizeVLLMValue(value)
 			// No legal value of these flags begins with "--", so a value that
 			// does is not a value. Keeping the token whole stops it becoming a
 			// standalone flag that an exact-match reader would honor.
@@ -710,11 +739,7 @@ func normalizeVLLMFlags(expanded []string) []string {
 			continue
 		}
 		normalized = append(normalized, flag)
-		// Only --distributed-executor-backend is trimmed in the separated form.
-		// It is the one flag whose space-separated spelling was previously read
-		// off the unsplit command string, where the substring match spanned the
-		// space and tolerated a terminator on the value.
-		trimNextValue = flag == distributedExecutorFlag
+		inValueSlot = vllmValueFlags[flag]
 	}
 	return normalized
 }
