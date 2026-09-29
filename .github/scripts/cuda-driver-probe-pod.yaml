@@ -8,6 +8,10 @@ spec:
   serviceAccountName: cuda-driver-probe
   automountServiceAccountToken: false
   restartPolicy: Never
+  runtimeClassName: nvidia
+  tolerations:
+    - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+    - {key: dedicated, operator: Exists, effect: NoSchedule}
   activeDeadlineSeconds: 180
   terminationGracePeriodSeconds: 5
   nodeSelector:
