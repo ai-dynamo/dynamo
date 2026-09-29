@@ -200,7 +200,10 @@ pub fn project(request: &PreprocessedRequest, projection: Projection) -> Preproc
         mm_routing_info: multimodal.then(|| mm_routing_info.clone()).flatten(),
         mm_processor_kwargs: multimodal.then(|| mm_processor_kwargs.clone()).flatten(),
         media_io_kwargs: multimodal.then(|| media_io_kwargs.clone()).flatten(),
-        image_cache_scope: multimodal.then(|| image_cache_scope.clone()).flatten(),
+        // The image cache scope is the agent session id, so both groups own it.
+        image_cache_scope: (multimodal && agent)
+            .then(|| image_cache_scope.clone())
+            .flatten(),
         extra_args: keep(Projection::EXTRA_ARGS)
             .then(|| extra_args.clone())
             .flatten(),
@@ -295,6 +298,7 @@ mod tests {
         request.extra_args = Some(serde_json::json!({"k": "v"}));
         request.mm_processor_kwargs = Some(serde_json::json!({"fps": 1}));
         request.annotations = vec!["a".to_string()];
+        request.image_cache_scope = Some("sess-1".to_string());
         request.mdc_sum = Some("sum".to_string());
         request.bootstrap_info = None;
         request.encoder_result = Some(serde_json::json!({"x": 1}));
@@ -332,6 +336,7 @@ mod tests {
         assert_eq!(copy.prompt_embeds.as_deref(), Some("embeds"));
         assert_eq!(copy.extra_args, source.extra_args);
         assert_eq!(copy.mdc_sum.as_deref(), Some("sum"));
+        assert_eq!(copy.image_cache_scope.as_deref(), Some("sess-1"));
     }
 
     #[test]
@@ -381,11 +386,16 @@ mod tests {
         assert!(copy.prompt_embeds.is_some());
 
         let agent = FilterSet::resolve(&names(&[STRIP_AGENT_CONTEXT]), &[]).unwrap();
-        assert!(project(&source, agent.projection).annotations.is_empty());
+        let copy = project(&source, agent.projection);
+        assert!(copy.annotations.is_empty());
+        // The image cache scope carries the agent session id.
+        assert!(copy.image_cache_scope.is_none());
+        assert!(copy.prompt_embeds.is_some());
 
         let multimodal = FilterSet::resolve(&names(&[STRIP_MULTIMODAL]), &[]).unwrap();
         let copy = project(&source, multimodal.projection);
         assert!(copy.mm_processor_kwargs.is_none());
+        assert!(copy.image_cache_scope.is_none());
         assert!(copy.prompt_embeds.is_some());
     }
 
