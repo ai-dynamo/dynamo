@@ -32,10 +32,15 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.frontend.vllm_protocol import DeltaFunctionCall, DeltaMessage, DeltaToolCall
 from dynamo.llm.exceptions import InvalidArgument
 
-from .structural_tag_policy import effective_tool_strict, should_attempt_structural_tag
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
 
+get_model_structural_tag: Any
 try:
     from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
 except ImportError:  # Older supported vLLM releases do not expose this registry.
@@ -216,7 +221,7 @@ def _should_build_tool_call_guidance(
         "parallel_tool_calls" in request.model_fields_set
         and request.parallel_tool_calls is False
     )
-    tool_choice_kind = (
+    tool_choice_kind: ToolChoiceKind = (
         "required"
         if tool_choice == "required"
         else "named"

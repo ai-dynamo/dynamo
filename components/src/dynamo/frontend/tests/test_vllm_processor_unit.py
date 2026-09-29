@@ -1686,8 +1686,6 @@ class TestRoutedEnginePath:
 
         chunks = await _run_generate(processor, _base_preproc())
 
-        # One annotated envelope per iteration carries both data and the
-        # llm_metrics annotation; observer strips the annotation before SSE.
         assert len(chunks) == 1
         envelope = chunks[0]
 
@@ -1704,16 +1702,15 @@ class TestRoutedEnginePath:
             "created": envelope["data"]["created"],
             "model": MODEL,
             "object": "chat.completion.chunk",
+            "llm_metrics": {
+                "input_tokens": 3,
+                "output_tokens": 1,
+                "chunk_tokens": 1,
+            },
         }
 
-        assert envelope["event"] == "llm_metrics"
-        assert len(envelope["comment"]) == 1
-        # Zero counts are omitted (text-only request), mirroring the Rust skip-zero behavior.
-        assert json.loads(envelope["comment"][0]) == {
-            "input_tokens": 3,
-            "output_tokens": 1,
-            "chunk_tokens": 1,
-        }
+        assert "event" not in envelope
+        assert "comment" not in envelope
 
     @pytest.mark.asyncio
     async def test_routed_stream_emits_multimodal_counts(self, vllm_processor_module):
@@ -1757,7 +1754,7 @@ class TestRoutedEnginePath:
             )
         ]
 
-        metrics = json.loads(chunks[0]["comment"][0])
+        metrics = chunks[0]["data"]["llm_metrics"]
         assert metrics["image_count"] == 2
         assert metrics["video_count"] == 1
         # audio has zero parts, so the key is omitted from the emitted metrics.
@@ -2482,8 +2479,9 @@ class TestToolCallGuidedDecoding:
         assert guided is not None
         assert set(guided) == {"json"}
 
-    def test_declared_model_uses_registry_without_vllm_env_gate(
-        self, tokenizer, monkeypatch
+    @pytest.mark.parametrize("strict, expects_tag", [(True, True), (False, False)])
+    def test_declared_model_registry_matches_pinned_vllm_auto_floor(
+        self, tokenizer, monkeypatch, strict, expects_tag
     ):
         seen = {}
 
@@ -2493,6 +2491,8 @@ class TestToolCallGuidedDecoding:
             def get_structural_tag(self, request):
                 raise AssertionError(f"unexpected parser-level env gate: {request}")
 
+        # vLLM 0.29.0 has no strict_level argument and returns no auto tag
+        # when every tool is explicitly non-strict.
         def fake_get_model_structural_tag(*, model, tools, tool_choice, reasoning):
             seen.update(
                 model=model,
@@ -2500,7 +2500,7 @@ class TestToolCallGuidedDecoding:
                 tool_choice=tool_choice,
                 reasoning=reasoning,
             )
-            return _FakeStructuralTag({"format": {"type": "tag"}})
+            return _FakeStructuralTag({"format": {"type": "tag"}}) if strict else None
 
         monkeypatch.setattr(
             prepost_module,
@@ -2508,17 +2508,31 @@ class TestToolCallGuidedDecoding:
             fake_get_model_structural_tag,
         )
 
+        request = self._request(
+            tokenizer,
+            tools=[
+                {
+                    **TOOL_REQUEST["tools"][0],
+                    "function": {
+                        **TOOL_REQUEST["tools"][0]["function"],
+                        "strict": strict,
+                    },
+                }
+            ],
+        )
         guided = build_tool_call_guided_decoding(
-            self._request(tokenizer),
+            request,
             RegistryParser(),
             structural_tag_mode="on",
             structural_tag_scope="always",
         )
 
-        assert guided == {"structural_tag": {"format": {"type": "tag"}}}
+        assert guided == (
+            {"structural_tag": {"format": {"type": "tag"}}} if expects_tag else None
+        )
         assert seen == {
             "model": "qwen_3_coder",
-            "strict": True,
+            "strict": strict,
             "tool_choice": "auto",
             "reasoning": False,
         }

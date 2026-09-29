@@ -16,6 +16,7 @@ import sys
 import types
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
+from enum import IntEnum
 
 import pytest
 from _routed_engine_fakes import FakeRoutedEngine, FakeRoutedItem
@@ -1153,6 +1154,73 @@ def test_structured_response_requires_effective_reasoning():
     )
 
 
+@pytest.mark.parametrize(
+    ("request_fields", "force_reasoning", "expected"),
+    [
+        ({}, True, True),
+        ({"response_format": {"type": "text"}}, True, True),
+        # A structural_tag response_format keeps the gpt-oss exception.
+        ({"response_format": {"type": "structural_tag"}}, True, False),
+    ],
+)
+def test_auto_tool_structural_tag_requires_effective_reasoning(
+    request_fields, force_reasoning, expected
+):
+    request = {"tool_choice": "auto", **request_fields}
+    guided_decoding = {"structural_tag": {}}
+    assert (
+        _guided_output_requires_reasoning(
+            request, force_reasoning, "gpt-oss", guided_decoding
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize("thinking", [True, False])
+def test_kimi_k3_auto_tool_sets_reasoning_gate_pool(thinking, monkeypatch):
+    """Kimi K3's auto tool grammar forbids <|close|>think<|sep|>, so it must
+    only apply after thinking ends."""
+
+    class StubTokenizer:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, **kwargs):
+            return [1, 2, 3]
+
+    monkeypatch.setattr(sglang_processor_module, "_w_tokenizer", StubTokenizer())
+    monkeypatch.setattr(sglang_processor_module, "_w_tool_call_parser_name", "kimi_k3")
+    monkeypatch.setattr(sglang_processor_module, "_w_reasoning_parser_name", "kimi_k3")
+    monkeypatch.setattr(
+        sglang_processor_module, "_w_exclude_tools_when_tool_choice_none", True
+    )
+    monkeypatch.setattr(sglang_processor_module, "_w_template_force_reasoning", False)
+
+    request = {
+        "model": "moonshotai/Kimi-K3",
+        "messages": [{"role": "user", "content": "Weather in San Francisco?"}],
+        "chat_template_kwargs": {"thinking": thinking},
+        "tool_choice": "auto",
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+    }
+    result = _preprocess_worker(request, MODEL, eos_token_ids=None)
+
+    guided_decoding = result.dynamo_preproc["sampling_options"]["guided_decoding"]
+    assert "structural_tag" in guided_decoding
+    assert result.dynamo_preproc["require_reasoning"] is thinking
+
+
 @pytest.mark.core
 @pytest.mark.parametrize(
     ("legacy_constraint", "expected"),
@@ -1735,16 +1803,22 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         raw_tools = [{"type": "function", "function": function}]
         seen = {}
 
+        class FakeToolStrictLevel(IntEnum):
+            AUTO = 0
+            FUNCTION = 1
+
         class CapturingFunctionCallParser:
             def __init__(self, *, tools, tool_call_parser):
                 del tool_call_parser
                 seen["strict"] = tools[0].function.strict
+                self.tool_strict_level = FakeToolStrictLevel.AUTO
 
             def get_structure_constraint(
                 self, tool_choice, *, parallel_tool_calls=None, thinking_mode=False
             ):
                 del tool_choice, parallel_tool_calls
                 seen["thinking_mode"] = thinking_mode
+                seen["strict_level"] = self.tool_strict_level.name
                 return "structural_tag", {"type": "object"}
 
         monkeypatch.setattr(
@@ -1764,7 +1838,11 @@ class TestBuildToolCallGuidedDecoding:  # FRONTEND.3 — guided-decoding setup f
         )
 
         assert guided == {"structural_tag": {"type": "object"}}
-        assert seen == {"strict": expected_strict, "thinking_mode": True}
+        assert seen == {
+            "strict": expected_strict,
+            "thinking_mode": True,
+            "strict_level": "FUNCTION",
+        }
         assert function.get("strict") is request_strict
 
     def test_mode_off_does_not_probe_auto_structural_tag(self, monkeypatch):

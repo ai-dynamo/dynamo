@@ -84,6 +84,37 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 | `--dyn-structural-tag-scope` | `auto`, `always` | `always` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
 | `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
 
+## Preserve Previous Behavior
+
+To disable structural tags, pass the negated flag to the worker:
+
+```bash
+python3 -m dynamo.vllm ... --no-dyn-enable-structural-tag
+python3 -m dynamo.sglang ... --no-dyn-enable-structural-tag
+```
+
+Or set the equivalent environment variable before starting the worker:
+
+```bash
+export DYN_ENABLE_STRUCTURAL_TAG=false
+```
+
+To keep structural tags enabled but preserve the previous conditional activation
+policy, set the scope to `auto`:
+
+```bash
+export DYN_STRUCTURAL_TAG_SCOPE=auto
+```
+
+With this scope, required and named tool choices remain eligible. Automatic tool
+choice uses structural tags only when a tool sets `strict: true` or the request
+sets `parallel_tool_calls` to `false`.
+
+Setting `strict: false` on a tool relaxes its argument schema. On pinned vLLM
+0.29.0, auto choice with every tool explicitly non-strict also gets no
+structural tag from the registry; see [Schema Modes](#schema-modes). Use the
+global opt-out above to disable structural tags for all requests.
+
 ## Supported Parsers
 
 Not all parsers support structural tags. Parsers without a structural-tag
@@ -121,7 +152,7 @@ based on the request's `tool_choice`:
 | `tool_choice` | Structural tag? |
 |---|---|
 | `required` / `named` | Always |
-| `auto` | Always |
+| `auto` | Always attempted; the parser may return no tag |
 | `none` | Exclusion tag on the Rust path only |
 
 ### `auto` (legacy conditional activation)
@@ -141,8 +172,8 @@ tool arguments inside the structural tag:
 
 - Tools with omitted `strict` or `strict: true` — their declared parameter
   schema is used.
-- Tools with `strict: false` — the native tool envelope remains constrained,
-  but argument content is schema-relaxed.
+- Tools with `strict: false` — argument content is schema-relaxed when the
+  parser builds a structural tag.
 
 ### `strict`
 
@@ -154,6 +185,11 @@ the strongest safe tool envelope and relaxes that argument section. If the
 builder cannot produce a structural tag at all, Dynamo uses the existing
 compatibility path rather than introducing a new request error; automatic tool
 choice may therefore remain unconstrained for that parser/schema combination.
+In the vLLM 0.29.0 version pinned by Dynamo, `tool_choice="auto"` returns no
+structural tag when every tool is explicitly `strict: false`. The `always`
+activation scope still attempts the tag, but cannot enforce the native tool
+envelope for that request. Set schema mode to `strict` to override the opt-out
+and let vLLM build the tag.
 
 ## `tool_choice="none"` and Token Banning
 
@@ -191,7 +227,8 @@ KV cache reuse.
 
 ## Example
 
-To pin the scope and schema, add `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema` to the worker `args:` alongside the parser and master switch:
+To pin the enabled state, scope, and schema explicitly, add the following flags
+to the worker `args:` alongside the parser:
 
 ```yaml
   - name: SGLangWorker

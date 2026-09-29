@@ -32,7 +32,11 @@ from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
-from .structural_tag_policy import effective_tool_strict, should_attempt_structural_tag
+from .structural_tag_policy import (
+    ToolChoiceKind,
+    effective_tool_strict,
+    should_attempt_structural_tag,
+)
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
 
@@ -363,6 +367,7 @@ def _guided_output_requires_reasoning(
     request: dict[str, Any],
     force_reasoning: bool,
     reasoning_parser_name: str | None = None,
+    guided_decoding: dict[str, Any] | None = None,
 ) -> bool:
     """Return whether SGLang should reason before guided output."""
     if not force_reasoning:
@@ -377,9 +382,12 @@ def _guided_output_requires_reasoning(
         return False
 
     response_format = request.get("response_format")
-    if not isinstance(response_format, dict) or reasoning_parser_name == "gpt-oss":
-        return False
-    return response_format.get("type") != "text"
+    if isinstance(response_format, dict) and response_format.get("type") != "text":
+        return reasoning_parser_name != "gpt-oss"
+
+    # An auto tool-call grammar forbids the end-of-thinking marker, so it must
+    # also wait for thinking to finish.
+    return guided_decoding is not None and "structural_tag" in guided_decoding
 
 
 def _normalize_deepseek_v4_hint(value: Any) -> str:
@@ -602,6 +610,14 @@ def _call_structure_constraint(
     return func(*args, **kwargs)
 
 
+def _enforce_function_strict_level(parser: FunctionCallParser) -> None:
+    """Keep SGLang's native tool envelope active for policy-selected requests."""
+    current_level = getattr(parser, "tool_strict_level", None)
+    function_level = getattr(type(current_level), "FUNCTION", None)
+    if function_level is not None and current_level < function_level:
+        parser.tool_strict_level = function_level
+
+
 def build_tool_call_guided_decoding(
     request: dict[str, Any],
     *,
@@ -633,7 +649,7 @@ def build_tool_call_guided_decoding(
                 name=tool_choice["function"]["name"],
             ),
         )
-    tool_choice_kind = (
+    tool_choice_kind: ToolChoiceKind = (
         "required"
         if tool_choice == "required"
         else "named"
@@ -667,6 +683,10 @@ def build_tool_call_guided_decoding(
                 tools=guidance_tools,
                 tool_call_parser=tool_call_parser_name,
             )
+            # SGLang's AUTO level returns no structural tag when every tool is
+            # strict:false. Dynamo's policy still requires the function envelope;
+            # per-tool strict flags continue to control argument enforcement.
+            _enforce_function_strict_level(parser)
             constraint = _call_structure_constraint(
                 parser.get_structure_constraint,
                 sglang_tool_choice,

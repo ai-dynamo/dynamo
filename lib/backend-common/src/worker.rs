@@ -2131,7 +2131,7 @@ async fn build_local_model(
         );
     }
 
-    let rt_cfg = ModelRuntimeConfig {
+    let mut rt_cfg = ModelRuntimeConfig {
         context_length: llm.context_length,
         total_kv_blocks: llm.total_kv_blocks,
         max_num_seqs: llm.max_num_seqs,
@@ -2152,6 +2152,8 @@ async fn build_local_model(
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
+
+    crate::topology::apply_topology_config(&mut rt_cfg).await?;
 
     let mut builder = LocalModelBuilder::default();
     builder

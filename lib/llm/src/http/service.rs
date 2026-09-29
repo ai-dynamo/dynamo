@@ -158,6 +158,7 @@ mod tests {
     fn kimi_k3_named_dynamic_tool_uses_structural_tag_policy() {
         let parsing_options = ParsingOptions {
             tool_call_parser: Some("kimi_k3".to_string()),
+            structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::On,
             ..Default::default()
         };
         let result = apply_request_tool_call_parsing_options(

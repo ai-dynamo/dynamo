@@ -1459,6 +1459,25 @@ fn attach_agent_context_from_context(
     }
 }
 
+fn attach_image_cache_scope_from_context(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    use crate::protocols::common::extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId};
+
+    if let Ok(session_affinity) = context.get::<SessionAffinityId>(SESSION_AFFINITY_CONTEXT_KEY) {
+        request.image_cache_scope = Some(session_affinity.as_str().to_owned());
+    }
+}
+
+fn attach_request_context_metadata(
+    request: &mut PreprocessedRequest,
+    context: &PipelineContext<()>,
+) {
+    attach_agent_context_from_context(request, context);
+    attach_image_cache_scope_from_context(request, context);
+}
+
 /// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
 /// `function.arguments` when the model opts in (GLM-5.2), and appends
 /// HuggingFace's unique continue-final-message marker when that flag is set.
@@ -3378,7 +3397,9 @@ impl OpenAIPreprocessor {
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
+        let message_order = self.formatter.media_message_order(request);
+        for index in 0..messages.len() {
+            let message = &messages[message_order.as_ref().map_or(index, |order| order[index])];
             let Some(content_parts) = multimodal_content_parts(message) else {
                 continue;
             };
@@ -7154,7 +7175,7 @@ impl
             )
             .instrument(preprocessing.clone())
             .await?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
             &request,
@@ -7277,11 +7298,8 @@ impl
             &self.speculative_prefill_tasks,
         );
 
-        let final_stream = crate::request_trace::wrap_chat_request_end_stream(
-            final_stream,
-            trace_state,
-            request_id,
-        );
+        let final_stream =
+            crate::request_trace::wrap_chat_request_end_stream(final_stream, trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(final_stream);
@@ -7363,7 +7381,7 @@ impl
 
         let mut common_request = builder.build()?;
         Self::validate_preprocessed_token_budget(&common_request, self.token_budget.as_ref())?;
-        attach_agent_context_from_context(&mut common_request, &context);
+        attach_request_context_metadata(&mut common_request, &context);
 
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
@@ -7415,11 +7433,8 @@ impl
             MultimodalCounts::default(),
         );
 
-        let stream = crate::request_trace::wrap_completion_request_end_stream(
-            Box::pin(stream),
-            trace_state,
-            request_id,
-        );
+        let stream =
+            crate::request_trace::wrap_completion_request_end_stream(Box::pin(stream), trace_state);
 
         // prepend the annotations to the response stream
         let stream = annotations_stream.chain(stream);
@@ -7597,6 +7612,68 @@ mod extra_args_media_copy_tests {
     fn inline_data_url() -> String {
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn deepseek_v41_display_name_fallback_orders_tool_media() {
+        use crate::common::checked_file::CheckedFile;
+        use crate::model_card::ModelInfoType;
+
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(
+            &config,
+            r#"{"architectures":[],"model_type":"","eos_token_id":128009}"#,
+        )
+        .unwrap();
+        mdc.model_info = Some(ModelInfoType::HfConfigJson(
+            CheckedFile::from_disk(&config).unwrap(),
+        ));
+        mdc.display_name = "DeepSeek-V4.1-Flash".into();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let first = inline_data_url().replacen("image/png", "image/png;name=a", 1);
+        let second = inline_data_url().replacen("image/png", "image/png;name=b", 1);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model":"alias", "messages":[
+                {"role":"assistant","tool_calls":[
+                    {"id":"a","type":"function","function":{"name":"image","arguments":"{}"}},
+                    {"id":"b","type":"function","function":{"name":"image","arguments":"{}"}}
+                ]},
+                {"role":"tool","tool_call_id":"b","content":[
+                    {"type":"image_url","image_url":{"url":second}}
+                ]},
+                {"role":"tool","tool_call_id":"a","content":[
+                    {"type":"image_url","image_url":{"url":first}}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequestBuilder::default();
+        builder
+            .model("alias".into())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+        preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let result = builder.build().unwrap();
+        let media = &result.multi_modal_data.unwrap()["image_url"];
+        let urls: Vec<_> = media
+            .iter()
+            .map(|image| match image {
+                MultimodalData::Url(url) => url.as_str(),
+                other => panic!("expected URL, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(urls, [first.as_str(), second.as_str()]);
     }
 
     #[tokio::test]
@@ -10630,6 +10707,52 @@ mod tests {
         assert_eq!(
             wire["agent_context"]["compaction"]["trigger"],
             serde_json::json!("manual")
+        );
+    }
+
+    #[test]
+    fn attach_request_context_metadata_keeps_affinity_separate_from_agent_context() {
+        use crate::protocols::common::extensions::{
+            SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId,
+        };
+
+        let agent_context = AgentContext {
+            session_id: "agent-session".to_string(),
+            parent_session_id: Some("agent-parent".to_string()),
+            session_final: None,
+            compaction: None,
+            input_trigger: None,
+        };
+        let mut context = PipelineContext::new(());
+        context.insert(AGENT_CONTEXT_CONTEXT_KEY, agent_context.clone());
+        context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-session"),
+        );
+        let mut request = preprocessed_budget_request(None);
+
+        attach_request_context_metadata(&mut request, &context);
+
+        assert_eq!(request.agent_context.as_ref(), Some(&agent_context));
+        assert_eq!(
+            request.image_cache_scope.as_deref(),
+            Some("routing-session")
+        );
+        let wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(wire["agent_context"]["session_id"], "agent-session");
+        assert_eq!(wire["image_cache_scope"], "routing-session");
+
+        let mut affinity_only_context = PipelineContext::new(());
+        affinity_only_context.insert(
+            SESSION_AFFINITY_CONTEXT_KEY,
+            SessionAffinityId::new("routing-only"),
+        );
+        let mut affinity_only_request = preprocessed_budget_request(None);
+        attach_request_context_metadata(&mut affinity_only_request, &affinity_only_context);
+        assert!(affinity_only_request.agent_context.is_none());
+        assert_eq!(
+            affinity_only_request.image_cache_scope.as_deref(),
+            Some("routing-only")
         );
     }
 

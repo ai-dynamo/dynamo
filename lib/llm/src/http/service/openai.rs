@@ -6148,6 +6148,104 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_completion_stream_options_null_flags() {
+        for (options, expected) in [
+            (serde_json::json!(null), None),
+            (serde_json::json!({}), Some((false, false))),
+            (
+                serde_json::json!({"continuous_usage_stats": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+            (
+                serde_json::json!({"include_usage": null}),
+                Some((false, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": true, "continuous_usage_stats": null}),
+                Some((true, false)),
+            ),
+            (
+                serde_json::json!({"include_usage": null, "continuous_usage_stats": true}),
+                Some((false, true)),
+            ),
+        ] {
+            let mut payload = serde_json::json!({
+                "model": "test-model", "stream": true, "stream_options": options,
+                "messages": [{"role": "user", "content": "hello"}],
+            });
+            let chat: NvCreateChatCompletionRequest =
+                parse_json_request("chat completions", &serde_json::to_vec(&payload).unwrap())
+                    .unwrap();
+            payload.as_object_mut().unwrap().remove("messages");
+            payload["prompt"] = serde_json::json!("hello");
+            let completion: NvCreateCompletionRequest =
+                parse_json_request("completions", &serde_json::to_vec(&payload).unwrap()).unwrap();
+            crate::engines::ValidateRequest::validate(&chat).unwrap();
+            crate::engines::ValidateRequest::validate(&completion).unwrap();
+            for parsed in [chat.inner.stream_options, completion.inner.stream_options] {
+                assert_eq!(
+                    parsed.map(|opts| (opts.include_usage, opts.continuous_usage_stats)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_rejects_invalid_types() {
+        for options in [
+            serde_json::json!(false),
+            serde_json::json!({"include_usage": "true", "continuous_usage_stats": null}),
+            serde_json::json!({"include_usage": null, "continuous_usage_stats": 0}),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "test-model", "messages": [{"role": "user", "content": "hello"}],
+                "prompt": "hello", "stream_options": options,
+            }))
+            .unwrap();
+            assert_eq!(
+                parse_json_request::<NvCreateChatCompletionRequest>("chat completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                parse_json_request::<NvCreateCompletionRequest>("completions", &body)
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let body =
+            br#"{"model":"test-model","messages":42,"stream_options":{"include_usage":null}}"#;
+        assert_eq!(
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", body)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn test_parse_completion_stream_options_preserves_duplicate_field_errors() {
+        let chat_body = br#"{
+            "model":"first-model",
+            "model":"second-model",
+            "messages":[{"role":"user","content":"hello"}],
+            "stream_options":{"include_usage":null}
+        }"#;
+        let chat_error =
+            parse_json_request::<NvCreateChatCompletionRequest>("chat completions", chat_body)
+                .unwrap_err();
+        assert_eq!(chat_error.0, StatusCode::BAD_REQUEST);
+        assert!(chat_error.1.message.contains("duplicate field `model`"));
+    }
+
+    #[test]
     fn test_parse_chat_completion_request_escapes_control_chars_in_strings() {
         let body = b"{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"log \x1b[33mPK\x03\x04\"}]}";
 
