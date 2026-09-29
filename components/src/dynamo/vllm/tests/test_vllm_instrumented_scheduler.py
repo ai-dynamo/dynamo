@@ -2516,6 +2516,33 @@ def test_prefill_grid_uses_total_tokens_and_piecewise_boundaries():
     assert engine_limit.sample_reasons == ["eager_tail", "engine_limit"]
 
 
+def test_prefill_grid_applies_the_sample_limit_after_block_alignment():
+    """Hybrid align mode adds whole-block totals to the new-token axis; the
+    configured sample limit bounds the combined axis, so the aligned candidates
+    cannot grow the grid past ``prefill_max_new_token_samples``."""
+    stub = _prefill_grid_stub(num_gpu_blocks=512)
+    stub.max_num_scheduled_tokens = 40
+    stub._bench_prefill_capture_sizes = list(range(1, 41))
+    stub._bench_config.prefill_max_new_token_samples = 4
+    stub._bench_config.prefill_max_kv_read_token_samples = 3
+    stub._bench_config.prefix_max_batch_size_samples = 1
+    stub.need_mamba_block_aligned_split = True
+    stub.cache_config.block_size = stub.block_size
+    # whole-block chunks pass the align-mode split unchanged
+    stub._mamba_block_aligned_split = lambda request, new_tokens, **_: new_tokens
+    block_size = int(stub.block_size)
+    aligned = list(range(2 * block_size, 41, block_size))
+    assert aligned, "fixture must leave room for whole-block totals"
+    assert InstrumentedScheduler._bench_block_aligned_prefill_axis(
+        stub, [1, 40], 40
+    ) == sorted({1, 40, *aligned})
+
+    InstrumentedScheduler._bench_generate_prefill_grid(stub)
+
+    totals = sorted({point.total_prefill_tokens for point in stub._bench_grid})
+    assert len(totals) <= 4
+
+
 def test_prefill_grid_uniformly_limits_new_tokens_batch_and_kv_axes():
     stub = _prefill_grid_stub(num_gpu_blocks=512)
     stub.max_num_scheduled_tokens = 40
@@ -5898,7 +5925,49 @@ def test_kvwarm_dp_filter_counts_only_real_points(monkeypatch):
     kept = list(stub._bench_grid)
     assert [(p.batch_size, p.total_kv_read_tokens) for p in kept] == [(1, 16), (1, 16)]
     assert stub._bench_expected_points == 1
-    assert [p.benchmark_id for p in kept] == [1, 2]
+    # IDs are left to ``_bench_build_grid``, which numbers the final order.
+    assert {p.benchmark_id for p in kept} == {1, 3}
+
+
+def test_kvwarm_dp_filter_marks_decode_missing_when_nothing_is_covered(monkeypatch):
+    """Attention-DP keeps real-KV decode points only. When the plan covers none of
+    them the decode phase is gone, and the artifact must not report a complete,
+    usable run with zero decode measurements."""
+    deep = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=3, total_kv_read_tokens=1500
+    )
+    stub = _dp_planner_stub(monkeypatch, [deep])
+    stub._bench_missing_phases = []
+    stub._kvwarm_prepare("decode")
+    assert list(stub._bench_grid) == []
+    assert stub._bench_expected_points == 0
+    assert stub._bench_missing_phases == ["decode"]
+
+
+def test_giant_fake_off_by_batch_correction_requires_a_steady_sample():
+    """The admission step also measures ``declared - batch``; only the steady-step
+    median (``kvwarm_giant_median_of``) may be accepted at the measured coordinate.
+    A giant fake point that reached its deadline with the admission FPM alone is a
+    validation skip, not a decode measurement."""
+    stub = SimpleNamespace(_kvwarm_giant_threshold=lambda: 1000)
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=2,
+        total_kv_read_tokens=2000,
+        sample_reasons=["kvwarm_fake_fallback"],
+    )
+    scheduled = {"num_decode_requests": 2, "sum_decode_kv_tokens": 1998}
+    admission_only = {"scheduled_requests": scheduled}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, admission_only)
+        == "measured_decode_context_mismatch"
+    )
+    steady_median = {"scheduled_requests": scheduled, "kvwarm_giant_median_of": 3}
+    assert (
+        InstrumentedScheduler._bench_fpm_validation_failure(stub, point, steady_median)
+        is None
+    )
 
 
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():
