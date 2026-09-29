@@ -66,7 +66,8 @@ cold NFS results. `sglang-evidence-image.patch` is an **image-specific experimen
 it maps DSA index-buffer hooks to this image's older SGLang method names, disables
 its stalled multimem logits path, and trims unused libc pages at release. The
 source manifest also disables FlashInfer allreduce fusion. These changes retain
-CUDA graphs and use NCCL for the affected collectives.
+CUDA graphs. The logits fallback uses NCCL; disabling FlashInfer fusion does not
+by itself establish the backend selected for every replacement allreduce.
 
 For the corrected capture and tuned loader, pass:
 

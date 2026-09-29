@@ -70,8 +70,9 @@ continuation as the source, with CUDA graphs enabled. Each rank's 28 matching
 | Fused, in-pod gate | 7.840 s | 14.802 s | 30.536 s |
 | Default NIXL, in-pod gate | 10.329 s | 14.712 s | 34.005 s |
 
-Preload span starts at the first GMS Python process and ends at the last rank's
-publication. Pod timing includes scheduling, init/container startup, publication,
+Preload span starts at the first GMS script timer and ends at the last rank's
+publication. The timer follows interpreter startup and the initial standard-library
+imports; pod timing includes that earlier startup. Pod timing includes scheduling, init/container startup, publication,
 validation, restoration and the first generation. The last two trials perform
 claim/artifact/server checks in the placeholder before exposing the publication
 gate; they still have about 1.4 s of orchestration between observing the gate and
@@ -101,7 +102,10 @@ PyTorch symmetric-memory rendezvous, first for the logits multimem gather and
 then for FlashInfer allreduce fusion. Python stack sampling identified the call
 sites. An experimental plugin patch forces the logits gather to NCCL; the third
 configuration also sets `enforce_disable_flashinfer_allreduce_fusion=True` while
-retaining CUDA graphs. These are communication-layout changes from the baseline.
+retaining CUDA graphs. This second switch disables the fused implementation; it
+is not evidence that every replacement allreduce used NCCL. The exact fallback
+backend for each operation was not instrumented. These are communication-layout
+changes from the baseline, and the underlying rendezvous hang was not root-caused.
 
 When a stalled source pod released its claim, another namespace allocated all
 8 source-node GPUs. No foreign workloads or agents were changed. The large-model
@@ -137,6 +141,22 @@ runs inside the placeholder; no CUDA initialization is needed for that gate.
 The three four-worker NUMA trials averaged **28.627 s** pod-to-readiness
 (range 28.407–28.875 s), with mean preload
 5.987 s and mean agent restore 14.115 s.
+
+For the 24 rank instances in the three four-worker NUMA trials:
+
+| Boundary | Mean | Range |
+|---|---:|---:|
+| Script timer to both GMS sockets bound | 0.270 s | 0.193–0.411 s |
+| Sockets bound to loader return/publication record | 4.077 s | 2.826–4.839 s |
+
+The fused prototype runs server and loader in one process. The latter duration
+is derived from the two logged boundaries and includes allocation, artifact
+reads, CUDA copies, cleanup and V1 commit, plus the small serving-thread/backend
+setup gap; it is not a pure DMA duration. Each rank loads 56 GiB. Rank script
+starts were staggered by 1.69–1.73 s, explaining why the all-rank span is longer
+than individual rank load times. "Published" means the matching allocation set
+has completed loading and its V1 write session has committed, making the weights
+available to readers. All eight such completions precede engine restoration.
 
 These are warm-node, pre-staged-weight trials. The first two revised-capture
 trials used `Always` image pulls; subsequent trials use `IfNotPresent` with the
