@@ -659,9 +659,8 @@ runs:
         set -euo pipefail
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
 
-        # Restrict every host-namespace Pod lookup below to this run's vCluster.
-        # A shared host namespace holds identically named operator Pods from
-        # concurrent runs.
+        # Scoped as in the readiness gate above; applies to every
+        # host-namespace Pod lookup in this step.
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
 
         # Skip Pods in a terminal phase: selecting one would report the image
