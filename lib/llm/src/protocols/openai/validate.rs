@@ -116,6 +116,22 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "logprob_token_ids",
 ];
 
+/// Treat null passthrough fields as omitted while preserving unknown fields for validation.
+pub(super) fn deserialize_extra_fields<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    let mut fields =
+        std::collections::HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    fields
+        .retain(|key, value| !value.is_null() || !PASSTHROUGH_EXTRA_FIELDS.contains(&key.as_str()));
+    Ok(fields)
+}
+
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
     LazyLock::new(|| env_is_truthy(DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS));
 
@@ -1070,6 +1086,88 @@ mod tests {
 
         let err = validate_response_format(&Some(response_format)).unwrap_err();
         assert!(err.to_string().contains("schema` is required"));
+    }
+
+    #[test]
+    fn null_passthrough_fields_are_omitted_from_chat_and_completion_requests() {
+        use crate::engines::ValidateRequest;
+        use crate::protocols::common::extensions::request_cache_salt;
+        use crate::protocols::openai::{
+            OpenAIStopConditionsProvider, chat_completions::NvCreateChatCompletionRequest,
+            completions::NvCreateCompletionRequest,
+        };
+
+        let mut payload = json!({"model": "test-model"});
+        for field in PASSTHROUGH_EXTRA_FIELDS {
+            payload[field] = serde_json::Value::Null;
+        }
+
+        let mut chat_payload = payload.clone();
+        chat_payload["messages"] = json!([{"role": "user", "content": "hello"}]);
+        let chat: NvCreateChatCompletionRequest = serde_json::from_value(chat_payload).unwrap();
+        ValidateRequest::validate(&chat).unwrap();
+        assert!(chat.unsupported_fields.is_empty());
+        assert_eq!(chat.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&chat), None);
+
+        payload["prompt"] = json!("hello");
+        let completion: NvCreateCompletionRequest = serde_json::from_value(payload).unwrap();
+        ValidateRequest::validate(&completion).unwrap();
+        assert!(completion.unsupported_fields.is_empty());
+        assert_eq!(completion.get_stop_token_ids(), None);
+        assert_eq!(request_cache_salt(&completion), None);
+
+        let unknown_null: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "experimental_field": null,
+        }))
+        .unwrap();
+        assert_eq!(
+            unknown_null.unsupported_fields.get("experimental_field"),
+            Some(&serde_json::Value::Null)
+        );
+        let err = ValidateRequest::validate(&unknown_null).unwrap_err();
+        assert!(err.to_string().contains("experimental_field"));
+    }
+
+    #[test]
+    fn extra_field_deserialization_preserves_non_null_values() {
+        #[derive(serde::Deserialize)]
+        struct ExtraFields {
+            #[serde(flatten, deserialize_with = "deserialize_extra_fields")]
+            fields: HashMap<String, serde_json::Value>,
+        }
+
+        let fields: ExtraFields = serde_json::from_value(json!({
+            "cache_salt": "tenant",
+            "stop_token_ids": [],
+            "detokenize": false,
+            "allowed_token_ids": [1],
+            "bad_words_token_ids": [[2]],
+            "logprob_token_ids": [3],
+        }))
+        .unwrap();
+        validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap();
+        assert_eq!(fields.fields.len(), PASSTHROUGH_EXTRA_FIELDS.len());
+        assert_eq!(fields.fields["detokenize"], json!(false));
+        assert_eq!(fields.fields["stop_token_ids"], json!([]));
+
+        for (field, bad) in [
+            ("cache_salt", json!(7)),
+            ("stop_token_ids", json!([null])),
+            ("detokenize", json!(0)),
+            ("allowed_token_ids", json!([-1])),
+            ("bad_words_token_ids", json!([1])),
+            ("logprob_token_ids", json!(["1"])),
+            ("experimental_field", json!({"nested": null})),
+        ] {
+            let fields: ExtraFields = serde_json::from_value(json!({field: bad})).unwrap();
+            assert_eq!(fields.fields[field], bad);
+            let err =
+                validate_no_unsupported_fields_with_ignore(&fields.fields, false).unwrap_err();
+            assert!(err.to_string().contains(field), "{err}");
+        }
     }
 
     #[test]
