@@ -12,8 +12,9 @@ spec:
     create: false
   services:
     Frontend:
-      annotations:
-        nvidia.com/disable-image-pull-secret-discovery: "true"
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
       volumeMounts:
       - name: shared-model-cache
         mountPoint: /opt/models
@@ -44,8 +45,9 @@ spec:
                   operator: In
                   values: [customer-gpu-o7v, customer-gpu-w0e]
     worker:
-      annotations:
-        nvidia.com/disable-image-pull-secret-discovery: "true"
+      extraPodMetadata:
+        annotations:
+          nvidia.com/disable-image-pull-secret-discovery: "true"
       envs:
       # Match the upstream perf request timeout for long prefills and cold JIT.
       - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
