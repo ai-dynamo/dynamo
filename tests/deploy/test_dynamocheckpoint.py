@@ -181,27 +181,7 @@ CHECKPOINT_BACKENDS = {
         env=(
             ("UCX_TLS", "tcp,self"),
             ("HF_HOME", TRTLLM_HF_HOME),
-            # Diagnostic only: retain the pinned image's MPI/Torch/NIXL paths
-            # while preferring host595. Admission requires direct python -m.
-            (
-                "LD_LIBRARY_PATH",
-                (
-                    "/opt/dynamo/mpi/lib:/usr/lib/x86_64-linux-gnu:"
-                    "/usr/local/lib/python3.12/dist-packages/torch/lib:"
-                    "/usr/local/lib/python3.12/dist-packages/torch_tensorrt/lib:"
-                    "/usr/local/cuda/compat/lib:"
-                    "/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
-                ),
-            ),
-            (
-                "LD_PRELOAD",
-                (
-                    "/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03:"
-                    "/opt/dynamo/libstdc++.so.6:"
-                    "/usr/local/lib/python3.12/dist-packages/"
-                    "tensorrt_llm/libs/nixl/libnixl.so"
-                ),
-            ),
+            ("LD_PRELOAD", "/usr/$LIB/libcuda.so.1"),
         ),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.

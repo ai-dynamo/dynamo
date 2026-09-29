@@ -49,10 +49,10 @@ jobs:
         run: |
           set -euo pipefail
           kubectl --request-timeout=10s -n default set env daemonset/snapshot-agent \
-            SNAPSHOT_LOG_LEVEL=debug LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03
+            SNAPSHOT_LOG_LEVEL=debug LD_PRELOAD='/usr/$LIB/libcuda.so.1'
           kubectl -n default rollout status daemonset/snapshot-agent --timeout=90s
           for agent in $(kubectl --request-timeout=10s -n default get pods -l app.kubernetes.io/component=snapshot-agent -o jsonpath='{.items[*].metadata.name}'); do
-            kubectl --request-timeout=10s -n default exec "$agent" -c agent -- test -f /usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03
+            kubectl --request-timeout=10s -n default exec "$agent" -c agent -- test -f /usr/lib/x86_64-linux-gnu/libcuda.so.1
           done
           mkdir -p checkpoint-diagnostics
       - name: Test original checkpoint, restore, and inference on host driver
