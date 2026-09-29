@@ -4923,7 +4923,7 @@ impl OpenAIPreprocessor {
             return Ok(ToolProcessingRoute::PassThrough);
         }
 
-        if selected_version == dynamo_runtime::config::ParserVersion::V2
+        if selected_version == tool_parser_v2::ParserVersion::V2
             && effective_tool_call_parser.is_none()
         {
             anyhow::bail!(
@@ -4935,46 +4935,27 @@ impl OpenAIPreprocessor {
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
             && tool_parser_v2::enabled()
             && tool_parser_v2::supports_family(parser_name)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-            )
         {
-            if selected_version == dynamo_runtime::config::ParserVersion::V2
-                && effective_tool_call_parser.is_none()
+            if !uses_tool_call_structural_tag
+                && matches!(
+                    request.inner.tool_choice.as_ref(),
+                    None | Some(ChatCompletionToolChoiceOption::Auto)
+                )
             {
-                anyhow::bail!(
-                    "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
-                    env_llm::DYN_PARSER_VERSION
-                );
+                let parser_name = match parser_name {
+                    "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+                    parser_name => parser_name,
+                };
+                return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
             }
-
-            if let Some(parser_name) = effective_tool_call_parser.as_deref()
-                && tool_parser_v2::enabled()
-                && tool_parser_v2::supports_family(parser_name)
-            {
-                if !uses_tool_call_structural_tag
-                    && matches!(
-                        request.inner.tool_choice.as_ref(),
-                        None | Some(ChatCompletionToolChoiceOption::Auto)
-                    )
-                {
-                    let parser_name = match parser_name {
-                        "deepseek-v4" | "deepseekv4" => "deepseek_v4",
-                        parser_name => parser_name,
-                    };
-                    return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
-                }
-                if selected_version == dynamo_runtime::config::ParserVersion::V2 {
-                    anyhow::bail!(
-                        "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
-                        env_llm::DYN_PARSER_VERSION
-                    );
-                }
-            }
-            Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
         }
+        if selected_version == tool_parser_v2::ParserVersion::V2 {
+            anyhow::bail!(
+                "{}=v2 was requested, but this tool choice requires the v1 tool-call jail",
+                env_llm::DYN_PARSER_VERSION
+            );
+        }
+        Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
     }
 
     pub fn postprocessor_parsing_stream<S>(

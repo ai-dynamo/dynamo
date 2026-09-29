@@ -84,7 +84,7 @@ async fn parse_complete_tool_output(
         parser => parser,
     };
     let version = super::tool_parser_v2::selected_version()?;
-    if version == dynamo_runtime::config::ParserVersion::V2
+    if version == super::tool_parser_v2::ParserVersion::V2
         && !super::tool_parser_v2::supports_family(parser)
     {
         anyhow::bail!(
@@ -111,7 +111,7 @@ async fn parse_complete_tool_output(
 
     let result = if matches!(
         version,
-        dynamo_runtime::config::ParserVersion::Auto | dynamo_runtime::config::ParserVersion::V2
+        super::tool_parser_v2::ParserVersion::Auto | super::tool_parser_v2::ParserVersion::V2
     ) && super::tool_parser_v2::supports_family(parser)
     {
         super::tool_parser_v2::parse_complete(content, Some(tools), parser)
