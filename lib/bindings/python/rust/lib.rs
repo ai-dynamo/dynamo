@@ -1902,7 +1902,7 @@ impl Client {
         let inner = self.router.client.clone();
         crate::future_into_py(py, async move {
             inner
-                .wait_for_instances()
+                .wait_for_routable_instances()
                 .await
                 .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
