@@ -12,7 +12,7 @@ spec:
   tolerations:
     - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
     - {key: dedicated, operator: Exists, effect: NoSchedule}
-  activeDeadlineSeconds: 180
+  activeDeadlineSeconds: 300
   terminationGracePeriodSeconds: 5
   nodeSelector:
     nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
@@ -25,7 +25,7 @@ spec:
   containers:
     - name: probe
       image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
-      command: ["/bin/sleep", "180"]
+      command: ["/bin/sleep", "300"]
       securityContext:
         runAsUser: 0
         capabilities:
@@ -33,8 +33,8 @@ spec:
         seccompProfile:
           type: Unconfined
       resources:
-        requests: {cpu: "1", memory: 1Gi}
-        limits: {nvidia.com/gpu: "1", memory: 1Gi}
+        requests: {cpu: "4", memory: 8Gi}
+        limits: {nvidia.com/gpu: "1", memory: 8Gi}
       volumeMounts:
         - {name: helpers, mountPath: /helpers, readOnly: true}
         - {name: probe, mountPath: /probe, readOnly: true}

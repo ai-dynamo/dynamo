@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-name: Bounded CUDA driver diagnostic
+name: Bounded TRTLLM host-driver diagnostic
 on:
   workflow_dispatch:
 permissions:
@@ -22,19 +22,19 @@ jobs:
           kubectl --request-timeout=10s create namespace "$PROBE_NAMESPACE"
           kubectl --request-timeout=10s label namespace "$PROBE_NAMESPACE" nscleanup/enabled=true nscleanup/ttl=900 dynamo.github/run-id="${{ github.run_id }}"
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create serviceaccount cuda-driver-probe
-          kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-driver-probe --from-file=.github/scripts/cuda-driver-probe.py
+          kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-driver-probe --from-file=.github/scripts/trtllm-host-driver-probe.py
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" apply -f .github/scripts/cuda-driver-probe-pod.yaml
           timeout --signal=TERM --kill-after=5s 120s kubectl -n "$PROBE_NAMESPACE" wait pod/cuda-driver-probe --for=condition=Ready --timeout=115s
-      - name: Run entire CUDA probe (hard limit 60 seconds)
+      - name: Test TRTLLM on host driver (hard limit 90 seconds)
         timeout-minutes: 2
         run: |
           set -euo pipefail
           mkdir -p cuda-probe-evidence
-          timeout --signal=TERM --kill-after=5s 70s kubectl -n "$PROBE_NAMESPACE" exec cuda-driver-probe -c probe -- \
-            timeout --signal=TERM --kill-after=5s 60s python3 -S /probe/cuda-driver-probe.py \
-              --helper /helpers/cuda-checkpoint-helper \
-              --driver-595 /usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03 \
-              --driver-615 /usr/local/cuda-13.4/compat/lib.real/libcuda.so.615.65.02 \
+          # Expand LD_PRELOAD inside the workload image, preserving its defaults.
+          # shellcheck disable=SC2016
+          timeout --signal=TERM --kill-after=5s 100s kubectl -n "$PROBE_NAMESPACE" exec cuda-driver-probe -c probe -- \
+            timeout --signal=TERM --kill-after=5s 90s bash -c \
+              'export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03:${LD_PRELOAD:-}"; exec python3 -u /probe/trtllm-host-driver-probe.py --mpi' \
             2>&1 | tee cuda-probe-evidence/result.log
       - name: Save pod state and events
         if: always()
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         if: always()
         with:
-          name: cuda-probe-${{ github.run_id }}
+          name: trtllm-host-driver-${{ github.run_id }}
           path: cuda-probe-evidence/
           retention-days: 7
   cleanup:
