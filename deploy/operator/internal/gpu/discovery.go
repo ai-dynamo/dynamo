@@ -1016,10 +1016,6 @@ func containsModelToken(input, token string) bool {
 }
 
 func containsB300ModelToken(input string) bool {
-	if containsModelToken(input, tokenB300) {
-		return true
-	}
-
 	upper := strings.ToUpper(input)
 	for start := 0; start < len(upper); {
 		idx := strings.Index(upper[start:], tokenB300)
@@ -1028,7 +1024,8 @@ func containsB300ModelToken(input string) bool {
 		}
 		idx += start
 		end := idx + len(tokenB300)
-		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) && strings.HasPrefix(upper[end:], tokenSXM) {
+		if (idx == 0 || !isASCIIAlphaNum(upper[idx-1])) &&
+			(end == len(upper) || !isASCIIAlphaNum(upper[end]) || strings.HasPrefix(upper[end:], tokenSXM)) {
 			return true
 		}
 		start = idx + 1
