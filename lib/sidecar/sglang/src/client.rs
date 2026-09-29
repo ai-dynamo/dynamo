@@ -327,6 +327,15 @@ pub fn invalid_arg(message: impl Into<String>) -> DynamoError {
     backend(BackendError::InvalidArgument, message)
 }
 
+/// The frontend returns `message` to the client, so it takes only fixed request-validation text.
+pub(crate) fn invalid_request(message: &'static str) -> DynamoError {
+    DynamoError::builder()
+        .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+        .message(message)
+        .public_message(message)
+        .build()
+}
+
 pub fn engine_shutdown(message: impl Into<String>) -> DynamoError {
     backend(BackendError::EngineShutdown, message)
 }

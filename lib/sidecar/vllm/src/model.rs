@@ -6,6 +6,7 @@ use std::ops::Range;
 use dynamo_backend_common::{
     DynamoError, EngineConfig, LlmRegistration, RlAdminBaseUrl, RlWorkerMetadata,
 };
+use dynamo_llm::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 
 use crate::client;
 use crate::proto as pb;
@@ -21,6 +22,7 @@ struct ModelIdentity {
     tool_call_parser: Option<String>,
     supports_lora: bool,
     max_loras: u32,
+    supports_multimodal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -31,7 +33,6 @@ pub(crate) struct DiscoveredModel {
     identity: ModelIdentity,
     server: pb::ServerInfo,
     data_parallel_range: Range<u32>,
-    kv_cache_block_size: Option<u32>,
 }
 
 impl DiscoveredModel {
@@ -54,13 +55,6 @@ impl DiscoveredModel {
         } else {
             0..1
         };
-        let kv_cache_block_size = server
-            .effective_attention_block_size
-            .filter(|&size| size != 0)
-            .map(u32::try_from)
-            .transpose()
-            .map_err(|_| client::protocol_error("effective attention block size exceeds u32"))?
-            .or_else(|| nonzero(server.kv_block_size));
         let source = required("model_id", model.model_id)?;
         let served_name = required("served_model_name", model.served_model_name)?;
         if !model.supports_token_ids_input {
@@ -80,6 +74,7 @@ impl DiscoveredModel {
             tool_call_parser: tool_call_parser.clone(),
             supports_lora,
             max_loras,
+            supports_multimodal: model.supports_multimodal,
         };
         Ok(Self {
             source,
@@ -88,7 +83,6 @@ impl DiscoveredModel {
             identity,
             server,
             data_parallel_range,
-            kv_cache_block_size,
         })
     }
 
@@ -178,22 +172,38 @@ impl DiscoveredModel {
             .map_err(|error| client::protocol_error(error.to_string()))
     }
 
-    pub(crate) fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(
+        &self,
+        enable_kv_routing: bool,
+    ) -> Result<EngineConfig, DynamoError> {
         let parallelism = self.server.parallelism.as_ref();
-        EngineConfig {
+        let kv_cache_block_size = if enable_kv_routing {
+            self.kv_cache_block_size()?
+        } else {
+            None
+        };
+        Ok(EngineConfig {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            runtime_data: [(
-                dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
-                serde_json::Value::Bool(true),
-            )]
+            runtime_data: [
+                (
+                    dynamo_llm::lora::LORA_REQUIRES_REGISTRATION.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+                (
+                    VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                    serde_json::Value::Bool(true),
+                ),
+            ]
             .into_iter()
             .collect(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
-                kv_cache_block_size: self.kv_cache_block_size,
-                total_kv_blocks: self.total_kv_blocks_per_rank(),
+                kv_cache_block_size,
+                total_kv_blocks: enable_kv_routing
+                    .then(|| self.total_kv_blocks_per_rank())
+                    .flatten(),
                 max_num_seqs: nonzero(self.server.max_running_requests),
                 max_num_batched_tokens: nonzero(self.server.max_batched_tokens),
                 max_gpu_lora_count: self.supports_lora().then_some(self.max_loras()),
@@ -201,7 +211,22 @@ impl DiscoveredModel {
                 data_parallel_start_rank: parallelism.map(|_| self.data_parallel_range.start),
                 ..Default::default()
             }),
-        }
+        })
+    }
+
+    fn kv_cache_block_size(&self) -> Result<Option<u32>, DynamoError> {
+        let Some(block_size) = self.server.effective_attention_block_size else {
+            return Ok(nonzero(self.server.kv_block_size));
+        };
+        let block_size = u32::try_from(block_size)
+            .ok()
+            .and_then(nonzero)
+            .ok_or_else(|| {
+                client::protocol_error(format!(
+                    "invalid effective_attention_block_size {block_size}; KV routing requires a nonzero size that fits u32"
+                ))
+            })?;
+        Ok(Some(block_size))
     }
 
     pub(crate) fn data_parallel_range(&self) -> &Range<u32> {
@@ -323,15 +348,18 @@ mod tests {
     fn engine_config_advertises_supported_capabilities() {
         let model =
             DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
-        assert!(
-            !model
-                .engine_config()
+        assert_eq!(
+            model
+                .engine_config(true)
+                .unwrap()
                 .runtime_data
-                .contains_key("vllm_inference_v1_generate")
+                .get("vllm_inference_v1_generate"),
+            Some(&json!(true))
         );
         assert_eq!(
             model
-                .engine_config()
+                .engine_config(true)
+                .unwrap()
                 .runtime_data
                 .get(dynamo_llm::lora::LORA_REQUIRES_REGISTRATION),
             Some(&json!(true))
@@ -439,7 +467,11 @@ mod tests {
 
             let model = DiscoveredModel::from_proto(model_info(), server)
                 .expect("valid discovery metadata");
-            let registration = model.engine_config().llm.expect("LLM registration");
+            let registration = model
+                .engine_config(true)
+                .unwrap()
+                .llm
+                .expect("LLM registration");
 
             assert_eq!(
                 registration.total_kv_blocks, expected_per_rank_blocks,
@@ -451,7 +483,7 @@ mod tests {
     #[test]
     fn discovered_aliases_lora_and_legacy_parallelism_are_preserved() {
         let model = DiscoveredModel::from_proto(model_info(), server_info()).unwrap();
-        let config = model.engine_config();
+        let config = model.engine_config(true).unwrap();
         assert_eq!(config.model_aliases, vec!["model-alias"]);
         for name in ["model-source", "served-model", "model-alias"] {
             assert!(model.is_base_model_name(name));
@@ -467,7 +499,7 @@ mod tests {
             ..Default::default()
         };
         let model = DiscoveredModel::from_proto(info, server).unwrap();
-        let llm = model.engine_config().llm.unwrap();
+        let llm = model.engine_config(true).unwrap().llm.unwrap();
         assert_eq!(llm.max_gpu_lora_count, None);
         assert_eq!(
             (llm.data_parallel_size, llm.data_parallel_start_rank),
@@ -512,36 +544,6 @@ mod tests {
     }
 
     #[test]
-    fn absent_effective_attention_block_size_uses_legacy_fallback() {
-        for (effective, physical, expected) in [
-            (None, 16, Some(16)),
-            (Some(0), 16, Some(16)),
-            (None, 0, None),
-        ] {
-            let mut server = server_info();
-            server.effective_attention_block_size = effective;
-            server.kv_block_size = physical;
-            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
-            assert_eq!(
-                model.engine_config().llm.unwrap().kv_cache_block_size,
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn unrepresentable_effective_block_size_is_rejected_without_truncation() {
-        let mut server = server_info();
-        server.effective_attention_block_size = Some(u64::from(u32::MAX) + 1);
-        let error = DiscoveredModel::from_proto(model_info(), server).unwrap_err();
-        assert_eq!(
-            error.error_type(),
-            dynamo_backend_common::ErrorType::Backend(dynamo_backend_common::BackendError::Unknown)
-        );
-        assert!(error.to_string().contains("effective attention block size"));
-    }
-
-    #[test]
     fn missing_model_identity_is_rejected() {
         assert!(
             DiscoveredModel::from_proto(
@@ -583,7 +585,8 @@ mod tests {
     fn model_identity_and_limits_are_preserved() {
         let config = DiscoveredModel::from_proto(model_info(), server_info())
             .unwrap()
-            .engine_config();
+            .engine_config(true)
+            .unwrap();
         assert_eq!(config.model, "model-source");
         assert_eq!(config.served_model_name.as_deref(), Some("served-model"));
         let llm = config.llm.expect("LLM registration");
@@ -603,7 +606,8 @@ mod tests {
             },
         )
         .unwrap()
-        .engine_config()
+        .engine_config(true)
+        .unwrap()
         .llm
         .expect("LLM registration");
         assert_eq!(
@@ -623,12 +627,63 @@ mod tests {
         server.effective_attention_block_size = Some(64);
         let llm = DiscoveredModel::from_proto(model_info(), server)
             .unwrap()
-            .engine_config()
+            .engine_config(true)
+            .unwrap()
             .llm
             .expect("LLM registration");
         assert_eq!(llm.kv_cache_block_size, Some(64));
         assert_eq!(llm.total_kv_blocks, Some(2048));
         assert_eq!(llm.data_parallel_size, Some(2));
         assert_eq!(llm.data_parallel_start_rank, Some(0));
+    }
+
+    #[test]
+    fn engine_config_uses_effective_attention_block_size() {
+        for (case, dcp, physical, reported, expected) in [
+            ("DCP=1", 1, 16, Some(16), Ok(Some(16))),
+            ("DCP=2", 2, 16, Some(32), Ok(Some(32))),
+            ("engine is authoritative", 2, 16, Some(64), Ok(Some(64))),
+            ("legacy DCP=1", 1, 16, None, Ok(Some(16))),
+            ("legacy DCP=2", 2, 16, None, Ok(Some(16))),
+            ("legacy unknown size", 1, 0, None, Ok(None)),
+            ("zero", 1, 16, Some(0), Err("nonzero size")),
+            (
+                "overflow",
+                1,
+                16,
+                Some(u64::from(u32::MAX) + 1),
+                Err("fits u32"),
+            ),
+        ] {
+            let mut server = server_info();
+            server
+                .parallelism
+                .as_mut()
+                .unwrap()
+                .decode_context_parallel_size = dcp;
+            server.kv_block_size = physical;
+            server.effective_attention_block_size = reported;
+            let model = DiscoveredModel::from_proto(model_info(), server).unwrap();
+            let result = model.engine_config(true);
+            match expected {
+                Ok(size) => {
+                    let registration = result.unwrap().llm.unwrap();
+                    assert_eq!(registration.kv_cache_block_size, size, "{case}");
+                    assert_eq!(registration.total_kv_blocks, Some(2048), "{case}");
+                }
+                Err(message) => {
+                    assert!(result.unwrap_err().to_string().contains(message), "{case}")
+                }
+            }
+            let registration = model.engine_config(false).unwrap().llm.unwrap();
+            assert_eq!(
+                registration.kv_cache_block_size, None,
+                "{case}: KV routing disabled"
+            );
+            assert_eq!(
+                registration.total_kv_blocks, None,
+                "{case}: KV routing disabled"
+            );
+        }
     }
 }

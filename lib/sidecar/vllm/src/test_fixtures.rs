@@ -7,6 +7,7 @@ use dynamo_backend_common::{
     MultimodalData, OutputOptions, PrefillResult, PreprocessedRequest, SamplingOptions,
     StopConditions,
 };
+use dynamo_llm::protocols::common::preprocessed_mm_routing_hash;
 use prost_types_v14 as prost_types;
 use serde_json::json;
 
@@ -32,6 +33,14 @@ pub(crate) fn model_info() -> pb::ModelInfo {
         supports_multimodal: false,
         reasoning_parser: "deepseek_r1".to_string(),
         tool_call_parser: "hermes".to_string(),
+    }
+}
+
+pub(crate) fn multimodal_model_info() -> pb::ModelInfo {
+    pb::ModelInfo {
+        model_id: env!("CARGO_MANIFEST_DIR").to_string(),
+        supports_multimodal: true,
+        ..model_info()
     }
 }
 
@@ -265,4 +274,41 @@ pub(crate) fn prompt_logprob_response(
             .collect(),
     });
     response
+}
+
+pub(crate) const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+pub(crate) const ALTERNATE_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgSlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+pub(crate) fn request_with_preprocessed_features(
+    features: serde_json::Value,
+) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+pub(crate) fn image_features(kwargs: &str) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["producer-image-hash"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+pub(crate) fn image_routing_marker(encoded_kwargs: &str) -> String {
+    use base64::Engine as _;
+    let kwargs = base64::engine::general_purpose::STANDARD
+        .decode(encoded_kwargs)
+        .expect("valid test kwargs");
+    preprocessed_mm_routing_hash("image", &kwargs)
 }

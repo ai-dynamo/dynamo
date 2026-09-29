@@ -16,6 +16,8 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
+from tests.wheels.smoke_install import AISIMULATE_FIND_LINKS
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -148,7 +150,8 @@ def test_container_stages_the_published_aisimulate_wheel() -> None:
     assert "--only-binary=:all:" in wheel_builder
     assert "--no-deps" in wheel_builder
     assert "--no-index" in wheel_builder
-    assert "--find-links https://pypi.nvidia.com/aisimulate/" in wheel_builder
+    assert AISIMULATE_FIND_LINKS == "https://pypi.nvidia.com/aisimulate/"
+    assert f"--find-links {AISIMULATE_FIND_LINKS}" in wheel_builder
     assert "COPY aisimulate" not in wheel_builder
     assert "/opt/dynamo/aisimulate" not in wheel_builder
     assert not (ROOT / "aisimulate").exists()

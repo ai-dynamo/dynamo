@@ -17,17 +17,28 @@
 
 import asyncio
 import base64
+import logging
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pytest
 from PIL import Image
+from redis.exceptions import RedisClusterException, RedisError
 
 from dynamo.common.http import HttpConnectionError, HttpStatusError, HttpTimeoutError
 from dynamo.common.http.media_reference import DYN_MM_MAX_FILE_SIZE_MB
 from dynamo.common.http.url_validator import UrlValidationError, UrlValidationPolicy
-from dynamo.common.multimodal.image_loader import URL_VARIANT_KEY, ImageLoader
+from dynamo.common.multimodal.image_loader import (
+    URL_VARIANT_KEY,
+    ImageLoader,
+    image_cache_scope_from_request,
+)
+from dynamo.common.multimodal.shared_image_cache import (
+    SharedImageCache,
+    _RateLimitedErrorWarnings,
+    _size_bucket,
+)
 
 pytestmark = [
     pytest.mark.asyncio,
@@ -37,6 +48,9 @@ pytestmark = [
 ]
 
 _FETCH_BYTES_PATH = "dynamo.common.multimodal.image_loader.fetch_bytes"
+_REDIS_CLUSTER_FACTORY_PATH = (
+    "dynamo.common.multimodal.shared_image_cache.RedisCluster.from_url"
+)
 
 
 def _make_png_bytes() -> bytes:
@@ -538,3 +552,448 @@ async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:
     assert "https://example.com/b.png" not in loader._image_cache
     assert "https://example.com/c.png" in loader._image_cache
     assert "https://example.com/d.png" in loader._image_cache
+
+
+# --- Shared encoded-image cache ---
+
+
+def _enable_shared_image_cache(monkeypatch, ttl_seconds: int = 3600) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "1")
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_URL", "redis://dragonfly.invalid")
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_TTL_SECS", str(ttl_seconds))
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "expected_bucket"),
+    [
+        (10 * 1024, "le_64kib"),
+        (30 * 1024 * 1024, "le_32mib"),
+        (33 * 1024 * 1024, "gt_32mib"),
+        (None, "unknown"),
+    ],
+)
+async def test_shared_cache_size_buckets(
+    size_bytes: int | None, expected_bucket: str
+) -> None:
+    assert _size_bucket(size_bytes) == expected_bucket
+
+
+async def test_shared_cache_disabled_does_not_create_client(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    with patch(_REDIS_CLUSTER_FACTORY_PATH) as client_factory:
+        ImageLoader(cache_size=4, url_policy=_permissive_policy())
+
+    client_factory.assert_not_called()
+
+
+async def test_shared_cache_requires_url_when_enabled(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "1")
+    monkeypatch.delenv("DYN_MM_SHARED_IMAGE_CACHE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="DYN_MM_SHARED_IMAGE_CACHE_URL"):
+        ImageLoader(cache_size=4, url_policy=_permissive_policy())
+
+
+async def test_shared_cache_uses_split_timeouts(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_CONNECT_TIMEOUT_SECS", "0.25")
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_IO_TIMEOUT_SECS", "3.5")
+
+    with patch(_REDIS_CLUSTER_FACTORY_PATH) as client_factory:
+        ImageLoader(cache_size=4, url_policy=_permissive_policy())
+
+    client_factory.assert_called_once()
+    args, kwargs = client_factory.call_args
+    retry = kwargs.pop("retry")
+    assert args == ("redis://dragonfly.invalid",)
+    assert kwargs == {
+        "decode_responses": False,
+        "socket_connect_timeout": 0.25,
+        "socket_timeout": 3.5,
+        "dynamic_startup_nodes": False,
+    }
+    # Retry has no __eq__ at the redis-py 6.2 floor; check the behavior instead.
+    assert retry.get_retries() == 0
+
+
+async def test_shared_cache_hit_skips_origin_fetch(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = PNG_BYTES
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png?sig=one")
+
+    assert image.size == (2, 2)
+    origin_fetch.assert_not_awaited()
+    client.get.assert_awaited_once()
+    client.set.assert_not_awaited()
+
+
+async def test_shared_cache_miss_writes_validated_origin_bytes(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch, ttl_seconds=123)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png?sig=one")
+
+    assert image.size == (2, 2)
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+    _, stored_content = client.set.await_args.args
+    assert stored_content == PNG_BYTES
+    assert client.set.await_args.kwargs == {"ex": 123}
+
+
+async def test_shared_cache_does_not_write_invalid_origin_bytes(monkeypatch) -> None:
+    """Origin bytes must decode successfully before they enter the shared cache."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes(content=b"not an image")
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        with pytest.raises(HttpStatusError) as exc_info:
+            await shared_loader.load_image("https://example.com/img.png")
+
+    assert exc_info.value.status == 415
+    origin_fetch.assert_awaited_once()
+    client.set.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("session_scoped_cache", "cache_scope"),
+    [(False, None), (True, "session-a"), (True, None)],
+    ids=["unscoped", "scoped", "missing-scope-cache-bypass"],
+)
+async def test_shared_cache_enabled_origin_fetch_uses_media_size_limit(
+    monkeypatch,
+    session_scoped_cache: bool,
+    cache_scope: str | None,
+) -> None:
+    """Shared-cache configuration must cap even cache-bypassed downloads."""
+    _enable_shared_image_cache(monkeypatch)
+    monkeypatch.setenv("DYN_MM_MAX_FILE_SIZE_MB", "7")
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=session_scoped_cache,
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope=cache_scope
+        )
+
+    assert origin_fetch.await_args.kwargs["max_bytes"] == 7 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "cache_error",
+    [
+        RedisError("cache unavailable"),
+        RedisClusterException("Timeout connecting to server"),
+    ],
+    ids=["redis-error", "redis-cluster-error"],
+)
+async def test_shared_cache_errors_fall_back_to_origin(
+    monkeypatch, cache_error: Exception
+) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.side_effect = cache_error
+    client.set.side_effect = cache_error
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_shared_cache_outage_warnings_are_rate_limited(caplog) -> None:
+    client = AsyncMock()
+    client.get.side_effect = RedisError("read unavailable")
+    client.set.side_effect = RedisError("write unavailable")
+    client.delete.side_effect = RedisError("delete unavailable")
+    cache = SharedImageCache(client, ttl_seconds=3600)
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="dynamo.common.multimodal.shared_image_cache",
+    ):
+        assert await cache.get("image") is None
+        await cache.put("image", PNG_BYTES)
+        await cache.delete("image")
+
+    warning_records = [
+        record for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    ]
+    assert len(warning_records) == 1
+    assert (
+        "Requests continue without the shared cache" in warning_records[0].getMessage()
+    )
+    assert any("read failed" in message for message in debug_messages)
+    assert any("write failed" in message for message in debug_messages)
+    assert any("delete failed" in message for message in debug_messages)
+
+
+async def test_shared_cache_outage_warning_repeats_periodically() -> None:
+    warnings = _RateLimitedErrorWarnings(interval_seconds=60.0)
+
+    assert warnings.record(100.0) == 1
+    assert warnings.record(101.0) is None
+    assert warnings.record(159.9) is None
+    assert warnings.record(160.0) == 3
+
+
+async def test_shared_cache_delete_cluster_error_falls_back_to_origin(
+    monkeypatch,
+) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = b"not an image"
+    client.delete.side_effect = RedisClusterException("Timeout connecting to server")
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    client.delete.assert_awaited_once()
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_invalid_shared_cache_entry_is_deleted_and_refetched(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = b"not an image"
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    client.delete.assert_awaited_once()
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_truncated_shared_cache_entry_is_deleted_and_refetched(
+    monkeypatch,
+) -> None:
+    """Pillow reports some recognized-but-truncated images as plain OSError."""
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = PNG_BYTES[:-30]
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        image = await shared_loader.load_image("https://example.com/img.png")
+
+    assert image.size == (2, 2)
+    client.delete.assert_awaited_once()
+    origin_fetch.assert_awaited_once()
+    client.set.assert_awaited_once()
+
+
+async def test_cache_key_preserves_url_path_and_query_case(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+        await shared_loader.load_image("https://example.com/Image.png?sig=AbC")
+        await shared_loader.load_image("https://example.com/image.png?sig=abc")
+
+    assert origin_fetch.await_count == 2
+    assert client.get.await_count == 2
+    assert (
+        client.get.await_args_list[0].args[0] != client.get.await_args_list[1].args[0]
+    )
+
+
+# --- Session-scoped image cache ---
+
+
+async def test_session_scoped_cache_partitions_local_and_shared_keys(
+    monkeypatch,
+) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    client.get.return_value = None
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=True,
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+
+    assert origin_fetch.await_count == 2
+    assert client.get.await_count == 2
+    assert client.set.await_count == 2
+    assert (
+        client.get.await_args_list[0].args[0] != client.get.await_args_list[1].args[0]
+    )
+
+
+async def test_session_scoped_cache_partitions_inflight_dedup(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    origin_fetch = _mock_fetch_bytes(delay=0.05)
+    shared_loader = ImageLoader(
+        cache_size=4,
+        url_policy=_permissive_policy(),
+        session_scoped_cache=True,
+    )
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await asyncio.gather(
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-a"
+            ),
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-a"
+            ),
+            shared_loader.load_image(
+                "https://example.com/img.png", cache_scope="session-b"
+            ),
+        )
+
+    assert origin_fetch.await_count == 2
+
+
+async def test_session_scope_is_ignored_when_flag_is_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    origin_fetch = _mock_fetch_bytes()
+    shared_loader = ImageLoader(
+        cache_size=4,
+        url_policy=_permissive_policy(),
+        session_scoped_cache=False,
+    )
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+
+    origin_fetch.assert_awaited_once()
+
+
+async def test_session_scoped_cache_can_be_enabled_by_env(monkeypatch) -> None:
+    monkeypatch.setenv("DYN_MM_SHARED_IMAGE_CACHE_ENABLED", "0")
+    monkeypatch.setenv("DYN_MM_IMAGE_CACHE_SESSION_SCOPED", "1")
+    origin_fetch = _mock_fetch_bytes()
+    shared_loader = ImageLoader(cache_size=4, url_policy=_permissive_policy())
+
+    with patch(_FETCH_BYTES_PATH, origin_fetch):
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-a"
+        )
+        await shared_loader.load_image(
+            "https://example.com/img.png", cache_scope="session-b"
+        )
+
+    assert origin_fetch.await_count == 2
+
+
+async def test_session_scoped_cache_bypasses_when_scope_is_missing(monkeypatch) -> None:
+    _enable_shared_image_cache(monkeypatch)
+    client = AsyncMock()
+    origin_fetch = _mock_fetch_bytes()
+
+    with (
+        patch(_REDIS_CLUSTER_FACTORY_PATH, return_value=client),
+        patch(_FETCH_BYTES_PATH, origin_fetch),
+    ):
+        shared_loader = ImageLoader(
+            cache_size=4,
+            url_policy=_permissive_policy(),
+            session_scoped_cache=True,
+        )
+        await shared_loader.load_image("https://example.com/img.png")
+        await shared_loader.load_image("https://example.com/img.png")
+
+    assert origin_fetch.await_count == 2
+    assert shared_loader.cache_entries == 0
+    client.get.assert_not_awaited()
+    client.set.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"image_cache_scope": " session-a "}, "session-a"),
+        ({"image_cache_scope": ""}, None),
+        ({"image_cache_scope": 123}, None),
+        ({}, None),
+    ],
+)
+async def test_image_cache_scope_from_request(payload, expected) -> None:
+    assert image_cache_scope_from_request(payload) == expected

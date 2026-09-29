@@ -26,7 +26,6 @@ pub mod worker_type;
 pub mod zmq_wire;
 
 // Backward-compat re-exports: old top-level module paths still work
-pub use indexer::concurrent_radix_tree;
 pub use indexer::concurrent_radix_tree_compressed;
 pub use indexer::positional as nested_map;
 pub use indexer::pruning as approx;
@@ -48,7 +47,6 @@ pub use self::multi_worker_sequence::{
 };
 pub use self::sequence::{ActiveSequences, RequestId};
 pub use self::sequences::{PrefillTokenDeltas, WorkerLoadProjection};
-pub use concurrent_radix_tree::ConcurrentRadixTree;
 pub use concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 pub use config::{
     ConditionalDisaggPolicyKind, KvRouterConfig, RouterConfigOverride, RouterPrefillLoadModel,
@@ -76,12 +74,14 @@ pub use scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,
     WorkerSelectionInputTrigger, WorkerSelectionPolicyError,
 };
-pub use selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
+#[cfg(any(test, feature = "bench"))]
+pub use selector::DefaultWorkerSelector;
+pub use selector::{WorkerSelectionInput, WorkerSelector};
 // TODO(v1.7): Remove these compatibility re-exports; use crate::plugins instead.
 pub use plugins::worker_selection::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    ScoredWorkerCandidate, WorkerCacheInput, WorkerCacheInputs, WorkerCandidate, WorkerCandidates,
+    WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 pub use session_prefix_index::{
     LogicalNode, NodeId, SessionId, SessionPrefixIndexError, SessionPrefixIndexer,

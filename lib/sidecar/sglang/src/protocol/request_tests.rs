@@ -133,9 +133,46 @@ fn prefill_handoff_round_trips_to_decode_request() {
 
 #[test]
 fn decode_requires_rendezvous_params() {
-    assert!(
-        build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None,)
-            .is_err()
+    let error = build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None)
+        .unwrap_err();
+    assert_eq!(error.public_message(), None);
+}
+
+#[test]
+fn request_refusal_is_public() {
+    let mut refused = request();
+    refused.mm_processor_kwargs = Some(json!({}));
+    let error = build_generate_request(
+        &refused,
+        "rid-5",
+        DisaggregationMode::Aggregated,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        Some("multimodal payloads are not supported by SGLang's native Generate RPC")
+    );
+
+    let mut embeds = request();
+    embeds.token_ids = Vec::new().into();
+    embeds.prompt_embeds = Some("embeds".to_string());
+    let error =
+        build_generate_request(&embeds, "rid-6", DisaggregationMode::Aggregated, None, None)
+            .unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        Some("prompt_embeds are not supported by SGLang's native gRPC proto")
+    );
+
+    let mut stop = request();
+    stop.stop_conditions.stop_token_ids = Some(vec![u32::MAX]);
+    let error = build_generate_request(&stop, "rid-7", DisaggregationMode::Aggregated, None, None)
+        .unwrap_err();
+    assert_eq!(
+        error.public_message(),
+        Some("stop token ids must fit in i32")
     );
 }
 
@@ -290,15 +327,15 @@ fn logprob_requests_preserve_selected_only_and_prompt_opt_in() {
 
 #[test]
 fn values_outside_native_signed_fields_are_rejected() {
-    for field in [
-        "token",
-        "stop",
-        "hidden_stop",
-        "max_tokens",
-        "min_tokens",
-        "logprobs",
-        "prompt_logprobs",
-        "dp_rank",
+    for (field, message) in [
+        ("token", "token ids must fit in i32"),
+        ("stop", "stop token ids must fit in i32"),
+        ("hidden_stop", "stop token ids must fit in i32"),
+        ("max_tokens", "max_tokens does not fit in i32"),
+        ("min_tokens", "min_tokens does not fit in i32"),
+        ("logprobs", "requested logprobs does not fit in i32"),
+        ("prompt_logprobs", "requested logprobs does not fit in i32"),
+        ("dp_rank", "routed dp_rank does not fit in i32"),
     ] {
         let mut request = request();
         let overflow = i32::MAX as u32 + 1;
@@ -321,7 +358,8 @@ fn values_outside_native_signed_fields_are_rejected() {
         let error =
             build_generate_request(&request, field, DisaggregationMode::Aggregated, None, None)
                 .unwrap_err();
-        assert_invalid(error, "does not fit in i32");
+        assert_eq!(error.public_message(), Some(message));
+        assert_invalid(error, message);
     }
 }
 
