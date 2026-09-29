@@ -1510,6 +1510,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.vllm-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.vllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1529,6 +1531,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.sglang-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.sglang == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1548,6 +1552,8 @@ jobs:
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.trtllm-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.trtllm == 'true' ||
        needs.changed-files.outputs.deploy == 'true' ||
        needs.changed-files.outputs.operator == 'true')
@@ -1566,6 +1572,8 @@ jobs:
     needs: [changed-files, deploy-operator, planner-copy-to-acr]
     if: |
       !cancelled() && !failure() &&
+      needs.deploy-operator.result == 'success' &&
+      needs.planner-copy-to-acr.result == 'success' &&
       (needs.changed-files.outputs.operator == 'true' ||
        needs.changed-files.outputs.dgdr == 'true')
     uses: $/.github/workflows/shared-dgdr-deploy-test.yml
