@@ -106,7 +106,6 @@ worker_selection:
         };
 
         for parameter in [
-            "",
             "      parameters:\n        respect_soft_affinity: false",
             "      parameters:\n        respect_soft_affinity: true",
         ] {
