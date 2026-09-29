@@ -86,6 +86,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		}
 		return ctrl.Result{}, err
 	}
+	// Ensure GVK is set which is required for unstructured SSA
 	gvks, _, err := r.Scheme.ObjectKinds(dgd)
 	if err == nil && len(gvks) == 1 {
 		dgd.SetGroupVersionKind(gvks[0])
@@ -125,6 +126,7 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 				"metadata": map[string]any{
 					"name":      dgd.GetName(),
 					"namespace": dgd.GetNamespace(),
+					"uid":       dgd.GetUID(),
 				},
 				"spec": map[string]any{
 					"components": []any{
