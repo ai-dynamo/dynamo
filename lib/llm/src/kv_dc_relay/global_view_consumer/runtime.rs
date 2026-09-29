@@ -28,8 +28,7 @@ use super::coordinator::run_relay_view_with_stats;
 use super::scorer::RelayCkfOverlapStore;
 use crate::global_view::RelayPoolScope;
 
-/// The deployment resolves channels to the Relay WAN service and to the
-/// co-located proxy for PR #13187's loopback-only stats listener.
+/// The deployment resolves channels to the Relay WAN and stats services.
 #[derive(Clone)]
 pub struct RelayDgdSource {
     pub key: PoolKey,

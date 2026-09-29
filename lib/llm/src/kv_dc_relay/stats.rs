@@ -52,6 +52,11 @@ const FRONTEND_EVENT_CAPACITY: usize = 64;
 const CKF_POOL_EVENT_CAPACITY: usize = 1;
 const CKF_OUTPUT_CAPACITY: usize = 1;
 
+pub(super) struct StatsListenConfig {
+    pub(super) address: SocketAddr,
+    pub(super) allow_non_loopback: bool,
+}
+
 pub(super) struct RelayStatsRuntime {
     cancel: CancellationToken,
     supervisor: JoinHandle<()>,
@@ -63,13 +68,13 @@ impl RelayStatsRuntime {
         statuses: EndpointStatuses,
         pools: Arc<PoolRegistry>,
         publication_source: Arc<dyn RelayPublicationSource>,
-        listen_address: SocketAddr,
+        listen: StatsListenConfig,
         fatal_cancel: CancellationToken,
         terminal: Arc<HostTerminalState>,
     ) -> anyhow::Result<Self> {
         let identity = publication_source.relay_identity();
-        validate_listen_address(listen_address)?;
-        let listener = tokio::net::TcpListener::bind(listen_address).await?;
+        validate_listen_address(listen.address, listen.allow_non_loopback)?;
+        let listener = tokio::net::TcpListener::bind(listen.address).await?;
         let cancel = fatal_cancel.child_token();
         let metadata = relay_metadata(identity);
         let (usage_tx, usage_rx) = watch::channel(proto::KvUsageSnapshot {
@@ -196,10 +201,10 @@ async fn supervise_stats_tasks(
     }
 }
 
-fn validate_listen_address(address: SocketAddr) -> anyhow::Result<()> {
+fn validate_listen_address(address: SocketAddr, allow_non_loopback: bool) -> anyhow::Result<()> {
     anyhow::ensure!(
-        address.ip().is_loopback(),
-        "KV DC Relay gRPC must bind to a loopback address"
+        allow_non_loopback || address.ip().is_loopback(),
+        "KV DC Relay stats gRPC requires loopback unless non-loopback binding is explicitly enabled"
     );
     Ok(())
 }
@@ -1653,11 +1658,12 @@ mod tests {
     }
 
     #[test]
-    fn grpc_listener_accepts_only_loopback_addresses() {
-        assert!(validate_listen_address("127.0.0.1:50051".parse().unwrap()).is_ok());
-        assert!(validate_listen_address("[::1]:50051".parse().unwrap()).is_ok());
-        assert!(validate_listen_address("0.0.0.0:50051".parse().unwrap()).is_err());
-        assert!(validate_listen_address("192.0.2.10:50051".parse().unwrap()).is_err());
+    fn grpc_listener_requires_explicit_non_loopback_opt_in() {
+        assert!(validate_listen_address("127.0.0.1:50051".parse().unwrap(), false).is_ok());
+        assert!(validate_listen_address("[::1]:50051".parse().unwrap(), false).is_ok());
+        assert!(validate_listen_address("0.0.0.0:50051".parse().unwrap(), false).is_err());
+        assert!(validate_listen_address("192.0.2.10:50051".parse().unwrap(), false).is_err());
+        assert!(validate_listen_address("0.0.0.0:50051".parse().unwrap(), true).is_ok());
     }
 
     #[tokio::test]

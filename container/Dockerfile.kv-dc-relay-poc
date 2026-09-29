@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CPU-only Relay for the regional Global Router POC.
+FROM rust:1.96.1-trixie AS builder
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    build-essential cmake pkg-config protobuf-compiler libclang-dev libssl-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/workspace/target,sharing=locked \
+    cargo build --locked --release -p dynamo-llm --bin kv-dc-relay-poc --no-default-features \
+    && install -m 0755 /workspace/target/release/kv-dc-relay-poc /usr/local/bin/kv-dc-relay-poc
+
+FROM debian:trixie-slim AS kv-dc-relay-poc
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/kv-dc-relay-poc /usr/local/bin/kv-dc-relay-poc
+USER 10001:0
+EXPOSE 50051 50052
+ENTRYPOINT ["/usr/local/bin/kv-dc-relay-poc"]

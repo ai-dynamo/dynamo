@@ -105,7 +105,7 @@ impl PocRouterConfig {
                 subscriber_id: pool.subscriber_id,
                 relay_channel: channel(&pool.relay_grpc_url).context("configure Relay channel")?,
                 stats_channel: channel(&pool.stats_grpc_url)
-                    .context("configure Relay stats proxy channel")?,
+                    .context("configure Relay stats channel")?,
             });
         }
         let view = Arc::new(GlobalViewRuntime::new(

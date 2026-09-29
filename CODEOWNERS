@@ -296,6 +296,8 @@
 /container/Dockerfile.test                                                                              @ai-dynamo/dynamo-ops-codeowners
 /container/launch_message/                                                                              @ai-dynamo/dynamo-ops-codeowners
 /container/Dockerfile.template                                                                          @ai-dynamo/dynamo-ops-codeowners
+/container/Dockerfile.kv-dc-relay-poc                                                                   @ai-dynamo/dynamo-ops-codeowners
+/container/validate-kv-dc-relay-poc.sh                                                                  @ai-dynamo/dynamo-ops-codeowners
 /container/validate-global-router-poc.sh                                                                @ai-dynamo/dynamo-ops-codeowners
 
 # === docs  (@ai-dynamo/dynamo-docs-codeowners) ===
