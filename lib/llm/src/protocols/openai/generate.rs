@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
+use base64::Engine as _;
 use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorType};
 use futures::{Stream, StreamExt, pin_mut};
 use serde::de::DeserializeOwned;
@@ -367,6 +368,57 @@ where
         .map_err(|error| format!("sampling_params.{name}: {error}"))
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum GenerateRoutedExperts {
+    Legacy(String),
+    Tensor(GenerateRoutedExpertsTensor),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct GenerateRoutedExpertsTensor {
+    pub data: String,
+    pub shape: Vec<usize>,
+    pub start: usize,
+    pub dtype: String,
+}
+
+impl GenerateRoutedExperts {
+    fn validate(&self) -> Result<()> {
+        let Self::Tensor(tensor) = self else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            tensor.shape.len() == 3 && tensor.shape.iter().all(|dimension| *dimension > 0),
+            "structured routed_experts shape must contain three positive dimensions"
+        );
+        let width = match tensor.dtype.as_str() {
+            "uint8" | "int8" => 1,
+            "uint16" | "int16" => 2,
+            "uint32" | "int32" => 4,
+            "uint64" | "int64" => 8,
+            other => anyhow::bail!("unsupported routed_experts dtype {other:?}"),
+        };
+        let elements = tensor.shape.iter().try_fold(1usize, |total, dimension| {
+            total
+                .checked_mul(*dimension)
+                .ok_or_else(|| anyhow::anyhow!("routed_experts shape overflows"))
+        })?;
+        let expected_bytes = elements
+            .checked_mul(width)
+            .ok_or_else(|| anyhow::anyhow!("routed_experts byte count overflows"))?;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&tensor.data)
+            .map_err(|error| anyhow::anyhow!("invalid routed_experts base64 data: {error}"))?;
+        anyhow::ensure!(
+            decoded.len() == expected_bytes,
+            "routed_experts decoded byte count {} does not match shape and dtype ({expected_bytes})",
+            decoded.len()
+        );
+        Ok(())
+    }
+}
+
 /// A single choice in a `GenerateResponse`.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct GenerateResponseChoice {
@@ -378,7 +430,7 @@ pub struct GenerateResponseChoice {
 
     pub finish_reason: Option<String>,
 
-    pub routed_experts: Option<String>,
+    pub routed_experts: Option<GenerateRoutedExperts>,
 
     pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
@@ -408,7 +460,7 @@ struct GenerateChoiceAcc {
     token_ids: Vec<crate::protocols::TokenIdType>,
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
-    routed_experts: Option<String>,
+    routed_experts: Option<GenerateRoutedExperts>,
     sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
@@ -645,11 +697,14 @@ impl GenerateAggregator {
         });
         if let Some(engine_data) = output.engine_data.as_ref() {
             if let Some(routed_experts) = engine_data.get("routed_experts") {
-                choice.routed_experts = Some(
+                let routed_experts: GenerateRoutedExperts =
                     serde_json::from_value(routed_experts.clone()).map_err(|error| {
                         anyhow::anyhow!("invalid generate routed_experts payload: {error}")
-                    })?,
-                );
+                    })?;
+                routed_experts.validate().map_err(|error| {
+                    anyhow::anyhow!("invalid generate routed_experts payload: {error}")
+                })?;
+                choice.routed_experts = Some(routed_experts);
             }
             if let Some(sampling_mask) = engine_data.get("sampling_mask") {
                 choice.sampling_mask = Some(
@@ -1195,8 +1250,10 @@ mod tests {
         assert_eq!(response.choices[0].token_ids, Some(vec![100, 101]));
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("encoded-experts")
+            response.choices[0].routed_experts.as_ref(),
+            Some(&GenerateRoutedExperts::Legacy(
+                "encoded-experts".to_string()
+            ))
         );
         assert_eq!(
             response.choices[0].sampling_mask,
@@ -1264,14 +1321,71 @@ mod tests {
 
         assert_eq!(response.choices[0].index, 0);
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("experts-0")
+            response.choices[0].routed_experts.as_ref(),
+            Some(&GenerateRoutedExperts::Legacy("experts-0".to_string()))
         );
         assert_eq!(response.choices[1].index, 1);
         assert_eq!(
-            response.choices[1].routed_experts.as_deref(),
-            Some("experts-1")
+            response.choices[1].routed_experts.as_ref(),
+            Some(&GenerateRoutedExperts::Legacy("experts-1".to_string()))
         );
+    }
+
+    #[tokio::test]
+    async fn generate_response_accepts_structured_routed_experts() {
+        let payload = json!({
+            "data": "AQI=",
+            "shape": [2, 1, 1],
+            "start": 3,
+            "dtype": "uint8"
+        });
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({"routed_experts": payload})),
+            ..Default::default()
+        })]);
+
+        let response =
+            GenerateResponse::from_annotated_stream(stream, "req-routed-structured".to_string())
+                .await
+                .expect("aggregate structured routed experts");
+
+        assert_eq!(
+            response.choices[0].routed_experts,
+            Some(GenerateRoutedExperts::Tensor(GenerateRoutedExpertsTensor {
+                data: "AQI=".to_string(),
+                shape: vec![2, 1, 1],
+                start: 3,
+                dtype: "uint8".to_string(),
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_structured_routed_expert_byte_mismatch() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            index: Some(0),
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({
+                "routed_experts": {
+                    "data": "AQI=",
+                    "shape": [3, 1, 1],
+                    "start": 0,
+                    "dtype": "uint8"
+                }
+            })),
+            ..Default::default()
+        })]);
+
+        let error =
+            GenerateResponse::from_annotated_stream(stream, "req-routed-structured".to_string())
+                .await
+                .expect_err("routed expert byte mismatch must fail");
+
+        assert!(error.to_string().contains("decoded byte count"));
     }
 
     #[tokio::test]

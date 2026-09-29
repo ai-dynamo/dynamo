@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import pytest
 
-from dynamo.experimental.endpoint import UnaryClient, serve_unary_endpoint
+from dynamo.runtime import UnaryClient, serve_unary_endpoint
 
 pytestmark = [
     pytest.mark.asyncio,

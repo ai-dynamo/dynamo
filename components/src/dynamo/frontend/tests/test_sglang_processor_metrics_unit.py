@@ -168,7 +168,7 @@ def _load_processor_module(module_stubs):
         ToolCallParserType=object,
         _client_wants_separate_reasoning=lambda *_args, **_kwargs: False,
         _get_history_tool_calls_count=lambda *_args, **_kwargs: 0,
-        _guided_tool_choice_requires_reasoning=lambda *_args, **_kwargs: False,
+        _guided_output_requires_reasoning=lambda *_args, **_kwargs: False,
         convert_tools=lambda *_args, **_kwargs: None,
         create_parsers=lambda *_args, **_kwargs: (None, None),
         detect_force_reasoning_from_template=lambda *_args, **_kwargs: False,

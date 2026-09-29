@@ -27,6 +27,7 @@ from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
+    register_image_loader_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime, Endpoint
@@ -53,6 +54,37 @@ from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
 from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
+
+
+def _register_request_cache_metrics(
+    endpoint: Endpoint,
+    handler: Any,
+    config: Config,
+) -> None:
+    """Register cache metrics owned by a vLLM request handler."""
+    model_name = config.served_model_name or config.model
+
+    embedding_cache = getattr(handler, "embedding_cache_manager", None)
+    if embedding_cache is not None:
+        register_embedding_cache_metrics(
+            endpoint=endpoint,
+            cache=embedding_cache,
+            model_name=model_name,
+            component_name=config.component,
+        )
+
+    if not config.enable_multimodal:
+        return
+    request_processor = getattr(handler, "_multimodal_request_processor", None)
+    image_loader = getattr(request_processor, "image_loader", None)
+    if image_loader is not None:
+        register_image_loader_metrics(
+            endpoint=endpoint,
+            loader=image_loader,
+            model_name=model_name,
+            component_name=config.component,
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -897,6 +929,12 @@ class WorkerFactory:
             embedding_cache_capacity_gb=config.multimodal_embedding_cache_capacity_gb,
         )
         await handler.async_init(runtime)
+        register_image_loader_metrics(
+            endpoint=generate_endpoint,
+            loader=handler.image_loader,
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+        )
 
         # Encode workers register a model card so the frontend's
         # serving-readiness gate can count them. The card carries no OpenAI
@@ -1348,14 +1386,7 @@ class WorkerFactory:
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        embedding_cache = getattr(handler, "embedding_cache_manager", None)
-        if embedding_cache is not None:
-            register_embedding_cache_metrics(
-                endpoint=generate_endpoint,
-                cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
-                component_name=config.component,
-            )
+        _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
         self.register_engine_routes(
@@ -1652,14 +1683,7 @@ class WorkerFactory:
 
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
-        embedding_cache = getattr(handler, "embedding_cache_manager", None)
-        if embedding_cache is not None:
-            register_embedding_cache_metrics(
-                endpoint=generate_endpoint,
-                cache=embedding_cache,
-                model_name=config.served_model_name or config.model,
-                component_name=config.component,
-            )
+        _register_request_cache_metrics(generate_endpoint, handler, config)
 
         # Register engine routes
         self.register_engine_routes(
