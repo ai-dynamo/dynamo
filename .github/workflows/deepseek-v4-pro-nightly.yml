@@ -92,6 +92,12 @@ jobs:
           ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
+          if [[ "$DRY_RUN" == none ]]; then
+            # Runs are serialized, so remove fixed-name resources left by an interrupted run.
+            "${k[@]}" delete --request-timeout=0 \
+              job/dsv4-bench dgd/dsv4-pro-agg computedomain/dsv4-pro-agg-compute-domain \
+              --ignore-not-found --cascade=foreground --wait=true --timeout=5m
+          fi
           [[ "$("${k[@]}" get pvc shared-model-cache -o jsonpath='{.status.phase}')" == Bound ]]
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/deploy.yaml" > "$ARTIFACTS/deploy-dry-run.txt"
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/perf.yaml" > "$ARTIFACTS/perf-dry-run.txt"
@@ -145,7 +151,12 @@ jobs:
             "${k[@]}" logs job/dsv4-bench --all-containers > "$ARTIFACTS/perf.log" 2>&1 || true
           fi
           if [[ -n "$FRONTEND" ]]; then
-            "${k[@]}" cp -c main "$FRONTEND:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
+            frontend=$("${k[@]}" get pods \
+              -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o json |
+              jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
+            if [[ -n "$frontend" ]]; then
+              "${k[@]}" cp -c main "$frontend:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
+            fi
           fi
       - name: Verify AIPerf results
         if: ${{ success() && !inputs.preflight_only }}
