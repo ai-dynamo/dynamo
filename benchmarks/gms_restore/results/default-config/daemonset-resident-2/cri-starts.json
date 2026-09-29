@@ -1,0 +1,30 @@
+[
+  {
+    "id": "4e281710c910e214d20f87a465c79af74251ed860ac71fba48b5e3a74d778a70",
+    "metadata": {
+      "attempt": 0,
+      "name": "main"
+    },
+    "state": "CONTAINER_RUNNING",
+    "createdAt": "2026-09-29T05:51:41.857298034Z",
+    "startedAt": "2026-09-29T05:51:42.115276605Z",
+    "finishedAt": "0001-01-01T00:00:00Z",
+    "exitCode": 0,
+    "reason": "",
+    "name": "main"
+  },
+  {
+    "id": "38360d425898fd3957970d155d48d9635235b096f3017ee2340faee1bac4c137",
+    "metadata": {
+      "attempt": 0,
+      "name": "snapshot-cuda-install"
+    },
+    "state": "CONTAINER_EXITED",
+    "createdAt": "2026-09-29T05:51:40.308263146Z",
+    "startedAt": "2026-09-29T05:51:40.573393302Z",
+    "finishedAt": "2026-09-29T05:51:40.912388578Z",
+    "exitCode": 0,
+    "reason": "Completed",
+    "name": "snapshot-cuda-install"
+  }
+]

@@ -1,0 +1,107 @@
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import time
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--root', type=Path, required=True)
+parser.add_argument('--agent', required=True)
+parser.add_argument('--namespace', default='schwinns-vcluster')
+parser.add_argument('--timeout', type=float, default=600)
+parser.add_argument('cases', nargs='+')
+args = parser.parse_args()
+keys = ['vcluster.loft.sh/object-name', 'vcluster.loft.sh/object-namespace',
+        'vcluster.loft.sh/object-uid', 'vcluster.loft.sh/object-kind',
+        'vcluster.loft.sh/object-host-name', 'vcluster.loft.sh/object-host-namespace']
+base = ['kubectl', '-n', args.namespace]
+
+def pod_identity(path):
+    for filename in ('operator-created-pod.json', 'ready-pod.json'):
+        if (path / filename).exists():
+            metadata = json.loads((path / filename).read_text())['metadata']
+            return {k: metadata[k] for k in ('name', 'namespace', 'uid')}
+    return None
+
+def collect(path, identity, target):
+    cid = target['container_id']
+    assert len(cid) == 64 and all(x in '0123456789abcdef' for x in cid)
+    code = r'''
+import json, subprocess
+cid = CID
+keys = KEYS
+cmd = ['crictl', '--runtime-endpoint', 'unix:///run/containerd/containerd.sock']
+container = json.loads(subprocess.check_output(cmd + ['inspect', cid]))
+sid = container.get('info', {}).get('sandboxID')
+if not sid:
+    listed = json.loads(subprocess.check_output(cmd + ['ps', '-a', '-o', 'json']))
+    matches = [x for x in listed['containers'] if x['id'] == cid]
+    assert len(matches) == 1
+    sid = matches[0]['podSandboxId']
+sandbox = json.loads(subprocess.check_output(cmd + ['inspectp', sid]))['status']
+status = container['status']
+print(json.dumps({
+    'container': {k: status.get(k) for k in ['id', 'metadata', 'state', 'createdAt', 'startedAt']},
+    'container_sandbox_id': sid,
+    'sandbox': {k: sandbox.get(k) for k in ['id', 'metadata', 'state', 'createdAt', 'network']},
+    'sandbox_identity_annotations': {k: sandbox.get('annotations', {}).get(k) for k in keys},
+}))
+'''.replace('CID', repr(cid)).replace('KEYS', repr(keys))
+    command = base + ['exec', args.agent, '-c', 'agent', '--', 'nsenter', '-t', '1', '-m', '-n', '-r', '-w', '--', 'python3', '-c', code]
+    result = json.loads(subprocess.check_output(command, text=True, timeout=20))
+    result.update({'collected_epoch': time.time(), 'expected_virtual_pod': identity,
+                   'agent_target': {k: target.get(k) for k in ['pod_uid', 'container_id', 'sandbox_id', 'target_pod_ip', 'source', 'at_unix_nano']}})
+    assert result['container']['id'] == cid
+    assert result['container_sandbox_id'] == result['sandbox']['id']
+    annotations = result['sandbox_identity_annotations']
+    assert annotations[keys[0]] == identity['name']
+    assert annotations[keys[1]] == identity['namespace']
+    assert annotations[keys[2]] == identity['uid']
+    assert annotations[keys[3]] == '/v1, Kind=Pod'
+    assert annotations[keys[4]] == result['sandbox']['metadata']['name']
+    assert annotations[keys[5]] == result['sandbox']['metadata']['namespace']
+    if target.get('sandbox_id'):
+        assert target['sandbox_id'] == result['sandbox']['id']
+    if target.get('target_pod_ip'):
+        assert target['target_pod_ip'] == result['sandbox']['network']['ip']
+    dest = path / 'cri-network.json'
+    tmp = dest.with_suffix('.tmp')
+    tmp.write_text(json.dumps(result, indent=2) + '\n')
+    tmp.replace(dest)
+    print(json.dumps({'case': path.name, 'collected': str(dest), 'ip': result['sandbox']['network']['ip'], 'state': result['sandbox']['state']}), flush=True)
+
+pending = set(args.cases)
+deadline = time.monotonic() + args.timeout
+while pending and time.monotonic() < deadline:
+    identities = {case: pod_identity(args.root / case) for case in pending}
+    if not any(identities.values()):
+        time.sleep(2)
+        continue
+    try:
+        logs = subprocess.check_output(base + ['logs', args.agent, '-c', 'agent', '--since=15m'], text=True, timeout=15)
+    except subprocess.SubprocessError as exc:
+        print(type(exc).__name__, flush=True)
+        time.sleep(2)
+        continue
+    for case, identity in identities.items():
+        if not identity:
+            continue
+        matches = []
+        for line in logs.splitlines():
+            if 'Restore startup milestone' not in line or '{' not in line:
+                continue
+            record = json.loads(line[line.index('{'):])
+            if record.get('pod_uid') == identity['uid'] and record.get('stage') in ('network_resolution_done', 'handler_entry'):
+                matches.append(record)
+        if not matches:
+            continue
+        target = next((x for x in matches if x['stage'] == 'network_resolution_done'), matches[-1])
+        try:
+            collect(args.root / case, identity, target)
+            pending.remove(case)
+        except Exception as exc:
+            print(json.dumps({'case': case, 'error_type': type(exc).__name__}), flush=True)
+    if pending:
+        time.sleep(2)
+if pending:
+    raise SystemExit('Collection deadline: ' + ', '.join(sorted(pending)))

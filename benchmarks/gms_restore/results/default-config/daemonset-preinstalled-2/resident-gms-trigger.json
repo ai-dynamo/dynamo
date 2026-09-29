@@ -1,0 +1,10 @@
+{
+  "request_epoch": 1790661751.5454326,
+  "trigger_written_epoch": 1790661752.0140746,
+  "return_epoch": 1790661752.1121757,
+  "response": {
+    "capture_id": "gms-v1-glm-default-0929",
+    "generation": "f1527a05-a8eb-40b1-a097-99ad473f4f19",
+    "trigger_written_epoch": 1790661752.0140746
+  }
+}

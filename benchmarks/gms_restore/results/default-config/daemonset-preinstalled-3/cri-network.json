@@ -1,0 +1,50 @@
+{
+  "container": {
+    "id": "5bb01425416ce41c55d5feac9d127ef2b5d01478b1746650b536c25561fd1ff3",
+    "metadata": {
+      "attempt": 0,
+      "name": "main"
+    },
+    "state": "CONTAINER_RUNNING",
+    "createdAt": "2026-09-29T06:15:34.729363071Z",
+    "startedAt": "2026-09-29T06:15:35.110714022Z"
+  },
+  "container_sandbox_id": "9f2d1ed74809735420daf817ff187e39ba1285def000ffab6a0c62f61cf56746",
+  "sandbox": {
+    "id": "9f2d1ed74809735420daf817ff187e39ba1285def000ffab6a0c62f61cf56746",
+    "metadata": {
+      "attempt": 0,
+      "name": "gms-v1-glm-dgd-0929-engine-dc940b80-8767fbddb-wq6tn--8150b8cabd",
+      "namespace": "schwinns-vcluster",
+      "uid": "9c9988b6-3368-4615-b9f0-1ef205b71204"
+    },
+    "state": "SANDBOX_READY",
+    "createdAt": "2026-09-29T06:15:34.566790725Z",
+    "network": {
+      "additionalIps": [],
+      "ip": "10.0.17.36"
+    }
+  },
+  "sandbox_identity_annotations": {
+    "vcluster.loft.sh/object-name": "gms-v1-glm-dgd-0929-engine-dc940b80-8767fbddb-wq6tn",
+    "vcluster.loft.sh/object-namespace": "schwinns-vcluster",
+    "vcluster.loft.sh/object-uid": "79274bb5-0532-4720-82e5-c5b41556ce67",
+    "vcluster.loft.sh/object-kind": "/v1, Kind=Pod",
+    "vcluster.loft.sh/object-host-name": "gms-v1-glm-dgd-0929-engine-dc940b80-8767fbddb-wq6tn--8150b8cabd",
+    "vcluster.loft.sh/object-host-namespace": "schwinns-vcluster"
+  },
+  "collected_epoch": 1790662564.6187131,
+  "expected_virtual_pod": {
+    "name": "gms-v1-glm-dgd-0929-engine-dc940b80-8767fbddb-wq6tn",
+    "namespace": "schwinns-vcluster",
+    "uid": "79274bb5-0532-4720-82e5-c5b41556ce67"
+  },
+  "agent_target": {
+    "pod_uid": "79274bb5-0532-4720-82e5-c5b41556ce67",
+    "container_id": "5bb01425416ce41c55d5feac9d127ef2b5d01478b1746650b536c25561fd1ff3",
+    "sandbox_id": null,
+    "target_pod_ip": null,
+    "source": null,
+    "at_unix_nano": 1790662536186289765
+  }
+}

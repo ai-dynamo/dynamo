@@ -1,0 +1,1468 @@
+{
+  "capture_id": "gms-v1-glm-default-0929",
+  "layout": {
+    "tp": 8,
+    "pp": 1,
+    "dp": 1
+  },
+  "claim_uid": "0e005bf8-1a19-4a2d-be32-31241631d11f",
+  "ranks": [
+    {
+      "rank": 0,
+      "source_uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "captured_ordinal": 0,
+      "socket_device": 0,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-0",
+      "manifest_sha256": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+      "allocations": [
+        {
+          "allocation_id": "allocation-1e02d3ff-af19-46a9-b3b2-edc1f7d94e27",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6ab66c3b-2aa2-43f6-8b07-c8f95a227c6d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-988876b8-c968-4f6f-8656-2a924bfc6628",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8c960a8c-f435-4b66-aaa1-b0863372e297",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-b855a3fd-ed12-4349-838b-391acea388f0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-23f8fb36-214c-4976-bfc0-0a4bdf1af592",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-e08d68c9-ad0f-45b9-b2d6-2167bf3ebe0f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-890614dc-6af5-4476-8c46-9d295593cafc",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-6177aed0-f8de-4e83-a017-6e0de1fb5277",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-f726a701-d78a-47b9-89ca-b8afc3efcf8d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-2fa25751-e4f6-4645-a7c0-055c7ab8502d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-036bf384-4ee3-4647-9e6a-b07ff5801ec2",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-99a6ebe6-4645-4a3a-a4be-a96b3c31aeb9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8cff25b0-28dc-441e-8794-d51448a6600f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-e8190656-4fe4-44fa-8e39-ec424d7032d1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6cb0362d-1528-4214-8bfd-5067188911c6",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-ad1cf444-4fec-487b-a047-fdcbdf768323",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-835626a2-258f-4acd-9753-a67b43a00b71",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-fd3cd862-1bba-4dd2-bd4b-1b0d4ceda96c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-1c42342d-29b2-44c6-bc24-0361383bdab8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-7307b812-ca90-4dc3-b272-663465cb3288",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-7f384e64-7f06-41fd-93ce-46302b4a6400",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-c0d2b948-f82f-46ba-a948-781288015713",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-035a7bdb-cef2-430d-842b-1258b62b5a93",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-7097b3e8-9491-4286-af53-b1d54e9ca0e8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-3afbadcf-9cca-4b0c-8d0c-a0a9356e5388",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-1c01c3ca-712b-4c7b-91a5-abd22d1a19e3",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-497a2245-6f60-4b62-96a4-2460d3818233",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-0",
+      "destination_uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "local_device": 0
+    },
+    {
+      "rank": 1,
+      "source_uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "captured_ordinal": 1,
+      "socket_device": 1,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-1",
+      "manifest_sha256": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+      "allocations": [
+        {
+          "allocation_id": "allocation-1d857743-7442-4200-b524-7142d35f8b20",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-c0004e1d-18db-4518-a7ce-36267446bc33",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-672f6119-93d9-454a-9c3d-5aa22d85e4ae",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d5401d5a-4815-4fe0-8411-d840c83af677",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-630fe58a-f3b7-42fc-9691-bd2ccbd23190",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-3377504c-8308-4e28-85a7-3c354c4e02af",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-b9850929-7889-4a8c-9f86-5cc24133ab43",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-08635899-88c2-4400-9c73-4cbc9233c9dc",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-eb17faea-8fa8-4522-bff1-805dad281f4e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-08cac1fc-a8ec-455f-b300-744dd4c1871e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-9e49fbc7-ad53-48d6-b8b3-afc1a5affd59",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-ed749e8e-5f93-44cf-a5b0-6a5b818bb0cc",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-20aed177-9187-4fe8-a4f1-6df33d497419",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-9eb15ff4-6325-4598-8147-9f7537155ba6",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-0d313fa3-f257-47ab-b724-981ae7c06440",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-4c7dff16-c97d-4edb-b76e-a518d39d8690",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-af16fb91-792a-4b6f-b093-2f6f59919bed",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-78c97659-5c9c-494c-8505-9d1b87c14822",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-bb69e4ba-5402-47ff-aba2-8bff4f662638",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d58d7ec4-28d4-4ca8-be21-35e58ee0af95",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-9677893d-ef6e-4e9c-b97c-84af50caedd5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-a43dc475-daae-435a-a29d-f6a10cac7156",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-a0177601-d30a-45cc-b49c-d331f7730ddd",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-0f3a0039-f8f2-403b-aa44-ee56f6c0377c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-8410ea01-1a4e-49e4-8760-a6f0f16b11e0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-79f8928b-00c5-48ba-988a-b3d7122494ea",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-a637a95a-ea0c-4705-ab66-feb4b0403295",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-416e7b09-52ff-4f59-9776-17c80b7a102e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-1",
+      "destination_uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "local_device": 0
+    },
+    {
+      "rank": 2,
+      "source_uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "captured_ordinal": 2,
+      "socket_device": 2,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-2",
+      "manifest_sha256": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+      "allocations": [
+        {
+          "allocation_id": "allocation-b1f60746-907e-4ffa-826e-3d1113fcce74",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-cfed36be-b3bb-4663-a392-29f67023f46f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-fe38275f-2134-450b-b388-cc31bf8786a0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6bdaeab4-85cd-4f6a-a5bd-d3bddd21b28d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-f25148d0-2557-4f25-97af-33c0dc0977e2",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-f4c1328c-69a5-4bf4-9b14-8fc32f14491a",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-cc54380b-c7d8-4999-9cdd-be86772dbf7c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-7e6c0b77-ebab-46bd-90e4-335daacc92b8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-550aaeed-054e-4c97-a978-5143ad781d99",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-dc38b94d-127f-4ade-bfa6-25dd7aac4a45",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-89040547-7f0b-4258-bd7e-85ba4610bdd4",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-2371d1b4-730e-4e55-894c-7dfa44bd3808",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-dacc4b10-077d-4831-bad8-b00684eff263",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-3a3719c2-03a5-4b9d-bb82-6614280a6dc8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-8c09144e-b45f-4c82-827f-1b6d8c9dea16",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6a603cc3-02ee-4824-8d83-62959cdd1811",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-af970be5-d64e-4c73-8ffc-5f5048166833",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-2e916374-f309-4971-bc96-e848cb954db5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-53792a9e-a48b-4b5d-bad5-e0067791a630",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8b041945-91a9-47cf-80f0-5b6f1260f8a6",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-54f08322-0496-4214-a2de-f614ff539f87",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-0f739222-b066-42b9-accf-a62808c79da5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-83823620-1560-4762-99be-b21f57f3884a",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-a982d634-c333-4bbd-97c1-39b79dbf2dc6",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-4e340a56-18de-4fcd-bd54-333e8aa437f9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-3b1c302e-af47-416d-9626-5fafe30c607d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5142c3c6-ca13-40de-9be9-e02a86bee750",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-2235a7ff-0e0c-4bbd-a06f-af807e418369",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-2",
+      "destination_uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "local_device": 0
+    },
+    {
+      "rank": 3,
+      "source_uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "captured_ordinal": 3,
+      "socket_device": 3,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-3",
+      "manifest_sha256": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+      "allocations": [
+        {
+          "allocation_id": "allocation-3d094b11-e722-47b4-8f23-f1b5c68c7eec",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-c545e693-b60d-47d6-96f9-2cceddaeba16",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-fa1fb080-84e2-4a66-a19e-7e49e31335f1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d4efcf42-9bab-4b0e-88d4-c7e0fdfae870",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-08e7e8ec-66f4-4764-8e3e-70ef29b5cb9e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d1a98261-20fd-4b5b-a34e-f9e16605b4a7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-bc670a5c-1c75-47a9-92cb-7e2bc5d7a4f1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-142e548d-edca-4dba-b05e-04c7e52c77ab",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-0194516d-1fae-4ff4-a150-7f5e8c7f686c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-e7aa7d94-ae7c-439f-8bdb-3573ba089b87",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-40a9cba0-a489-4386-980a-9c1d6e1aac2b",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6f7c2eda-c0a9-4bc4-9878-58d04171cc7f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-fc660e41-63c1-4063-b509-dcbd7b42ba70",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-dd41c0f5-0a01-4601-9723-95a41cfb2ded",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-f1729b89-59c1-4ed2-b518-ea8f41c59bb1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-53f3eefc-e833-4355-9bbf-8433430afdc5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5954c2d4-b121-49c2-b7bb-7dda1de9146a",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-eadb9568-2192-4762-ac8e-3119de21b13f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-b020f505-128d-478a-8555-9d6add38ae17",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6fc43e82-0dd1-4cf4-b036-5589ace5b242",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-e6051f0f-c575-418e-89db-267ccfba3d9f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-708429f8-78a9-4b11-8e2d-11fc18232a17",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-589d64e5-c6b8-4690-bda0-38bdddc935ec",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-7e95e0be-65ae-4e4f-868d-48de48fcfe67",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-4612ecc1-f52d-46b7-b46b-018b7eace6d1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-56cce3a2-e12a-4a99-9944-92974e6813de",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-67513685-505c-4096-805b-771910d7098f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d059ad7f-1988-420e-bc1b-1edb974d2682",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-3",
+      "destination_uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "local_device": 0
+    },
+    {
+      "rank": 4,
+      "source_uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "captured_ordinal": 4,
+      "socket_device": 4,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-4",
+      "manifest_sha256": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+      "allocations": [
+        {
+          "allocation_id": "allocation-7455c7c4-b89f-4b4f-9aa8-c2483e05f52f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-0b77aa67-0fda-4ea9-a577-4ffffc38685a",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-3d111189-6239-4e84-8154-e561be87d3a0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-f4bf3636-857a-4b5e-8ab1-f315c92ef5d9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-078d0d60-f5a1-429b-9692-12bc11e51cb7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-c957d171-de47-4e86-89d4-ef1a59afeebb",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-4532bded-57f6-46a3-abe6-d3de5a0e47cd",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-f97d264e-556c-4262-aeaa-b2b21ffba582",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-29a72f1f-decd-4f5b-9048-b3793fa489a2",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-b8c6c468-8fd2-4397-a182-ea34330ce863",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5d50b370-1b1d-494c-ac9f-864f19755c3e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-36738efc-c3a8-4b38-b488-37aa98613df0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5de78b8f-2373-42e0-b236-68f7e59848c8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6ca44c81-5dd3-4a14-89e6-334de92d1741",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-9bf64ba6-1735-44d2-af50-af1368ddfe96",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-91c367ad-c530-45d5-bcb0-8947de87049e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-ad9139f2-6f48-4bc4-a914-a0cb9e54d53d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-a12551a1-52a9-4224-a2b7-bb6702ca2866",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-25c27235-e9f6-415c-86eb-d97c1f6000b0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-5a1b06ef-7250-4e4a-b0d1-188899420453",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-bd05de58-0996-495a-b2b4-85dc1cd3e045",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-aed94954-b347-4316-a71d-95615e829e83",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-c3eb11c9-5c06-4879-9f5e-da363352b165",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6c2da05d-d017-4bab-9ad6-f115f0ff1355",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-08d3adc7-7ddd-44f9-8e7e-19cdec704a0f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-f54673a9-3112-40b3-85df-0f4a8305e910",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-3ec19b11-2340-4374-812d-b7b970340b42",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-5c6c47ce-06ff-4d05-a7eb-8853c9347e4c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-4",
+      "destination_uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "local_device": 0
+    },
+    {
+      "rank": 5,
+      "source_uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "captured_ordinal": 5,
+      "socket_device": 5,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-5",
+      "manifest_sha256": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+      "allocations": [
+        {
+          "allocation_id": "allocation-ea402e03-22c7-49d7-8760-06f6da5fa20c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-9db26985-613a-4293-93df-9a7071286ad1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-aeb3c41a-408b-4d33-8cc0-60a9652da826",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-2dd607e2-f0ea-4465-b182-5682a3c74fee",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5a8d5bb0-78aa-410c-b8ff-432f2d6d7959",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-150fbbee-e57f-47a7-94cf-7d18f5699e7d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-2170d63d-080c-4631-8854-9a6030f4ef05",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-799be082-105a-4d95-8f1e-27f2975316b7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-a820bd7d-f14b-4b85-9188-abcd3bc9fe2f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-c5a12a6b-f6e3-46ac-8513-1dceb07289d0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-cce2e431-b075-43be-81bc-5ee3a7c75023",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-7f312ea1-2f0a-4969-9dbc-ca43adb241e2",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-87fe1a0a-e879-4312-b90c-1b103a1ed517",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-426ddf72-3d14-45fc-bc75-8c1fd7c34418",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-b8b9cb87-d49e-4a46-a24c-e6f1e4b6c4f0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-898ce915-b065-4aa5-a700-537464696b16",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-7754856f-2b7e-46a5-a561-8cb99e3593d5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-890fa9a7-8271-43e3-a190-0ee1e625c0bc",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-81bb6fb1-92c0-4650-b6e8-b1fedd3e7877",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-7dec528c-83c8-4052-9e5d-e83b65a1ebf9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-a9fb25a3-e63f-4c57-aa45-864860bdfd96",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-80b6da76-f1af-41d6-8788-e4d010e3224e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5f14bc60-b06a-4e5a-aa70-998e895044bb",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-fb2640f0-7ac4-45e4-93cc-8c5e13795d95",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-4299db53-c3b7-4cd0-8e69-1e16b696c983",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-6e720778-c9bc-4272-b50d-c777bcc63da4",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-248b34ea-2807-492a-ba6d-efd2f9093b4f",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8f39e41d-e838-4927-87fd-3c5460f22d0e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-5",
+      "destination_uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "local_device": 0
+    },
+    {
+      "rank": 6,
+      "source_uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "captured_ordinal": 6,
+      "socket_device": 6,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-6",
+      "manifest_sha256": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+      "allocations": [
+        {
+          "allocation_id": "allocation-b1898952-6463-425f-9f9a-656987e7b0bd",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8fa6c46b-f360-446c-87ac-c539dccd8a76",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-927213ed-0591-4138-8a77-1a67bc0f5e55",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d352aa5d-3765-4678-92bf-a1771c65f520",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-388f59ec-53b2-4af6-bfa6-fbeb504b4154",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-0c6c8d24-696d-482b-93a3-137deab871f3",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-45dc95e1-b3e5-4a49-bfba-61b8feb53b95",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-564b49e5-852f-43b1-98fc-532197c6a4b8",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-551ef47a-d493-4a22-8614-fae675e425d7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-9db48be9-c547-4a0e-9edc-8532bc466239",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-60b1d9bb-2da0-4f1f-9f8e-d10769304df1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-84778d10-3fbb-495d-973e-3e378c24684e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-b729e0de-3563-4bd7-8bde-56274fb9db7b",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-5a889ee5-1dae-431a-80f7-d64d5548a44b",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-5fa64df4-f932-4dcf-830e-94d15bb095a7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-ebf36745-0b27-4dd3-9305-5d98162ccae5",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-aa8eb171-0ef6-4923-b438-197c8e440593",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-e8d6b27b-594a-4459-ab42-72b10c7dc9de",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-33ca7c25-f207-4734-86f6-2b0f5e49b573",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-543952a7-376c-4267-b9aa-26d0a719a4c4",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-1a3e7fd6-5c02-4e1c-8651-077f7c1e7b16",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-a50cc33a-71db-40a3-8030-fe469bd2228c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-a38b65b7-284e-40d2-ba8b-17e0457ad5f0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-3abfefe0-7a5f-4bc4-84c7-74b8fd9f8354",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-f39f2495-4f5d-4f3a-958e-e786028edcc4",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-85a779ba-49d4-4a2c-a132-09892ed138ba",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-2a1684e1-31cf-4bad-af2f-9fb8ce4658d7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-2f59bd49-e9bd-43d2-9141-11d46bcb69bc",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-6",
+      "destination_uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "local_device": 0
+    },
+    {
+      "rank": 7,
+      "source_uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "captured_ordinal": 7,
+      "socket_device": 7,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0929/default-capture-2/device-7",
+      "manifest_sha256": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb",
+      "allocations": [
+        {
+          "allocation_id": "allocation-e143f58d-3ce1-48d8-b89f-4afccc132bdb",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-0ed9c383-f0ff-44bf-9396-4534217bd29c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-328ec226-b1ff-43c2-8f79-94798dac310a",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-d947a105-2702-4222-8b58-a2eb0284fffa",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0001.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-67694ad8-c417-4f42-94bd-e799a3c206e9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-1bda7b8d-0ad1-43e5-a417-a4bb9e0787d1",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0002.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-d29bef61-90fb-4da7-a5aa-ac339ecc679c",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-ce7b7725-8149-48b0-9852-e390f09d6f6b",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0003.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-d2d1b8cc-25b3-4c14-b6c9-54bdbb85a88d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-b6540524-29af-4c5b-83d7-43dd2ae3a5c7",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0004.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-840f25ec-1ca1-49b8-be5f-997b24094aac",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-52009145-2c4f-4bd3-bf0c-433e076d9155",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0005.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-047c0444-7f8b-47bc-a058-6d730fd4819d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-c047a77d-ff9f-4c79-9acd-11c40ca3d0a0",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0006.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-05887d8c-30fd-4ee8-a765-82dba05c1991",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-b2871ebd-3400-4f09-bbcc-ba1ffc6b8b0d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0007.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-10fd26f5-531d-43f9-946d-4ccbfaabad4d",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-8e1a5397-c523-4339-b05d-a49397f02b32",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0008.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-ef4083a8-a10f-42b5-ad8e-38ef81ed77bf",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-9739c255-4431-4ec3-bbde-3c6ec8480313",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0009.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-fb81fe4b-b33b-4c3d-9138-4a6c9687cc20",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-ba2a89e0-a5fb-4045-838a-0410abb85b7e",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0010.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-c8bdd5b3-b0c4-4df8-b04a-961809827206",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-34e914ba-f212-4300-97e6-28d307a2f26b",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0011.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-e2390c53-51cb-4b3f-bb07-f89055853f28",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-4004634c-fe7e-4c55-b442-271ddd3afae9",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0012.bin",
+          "offset": 2147483648
+        },
+        {
+          "allocation_id": "allocation-45702ebe-550a-4f19-aadb-e7d24fdaffb2",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 0
+        },
+        {
+          "allocation_id": "allocation-9e9278d2-c3df-4e77-8715-4272e28d5154",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0013.bin",
+          "offset": 2147483648
+        }
+      ],
+      "request": "tp-7",
+      "destination_uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "local_device": 0
+    }
+  ],
+  "cuda_device_map": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f=GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f,GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51=GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51,GPU-02ff0cc1-647f-dee7-8365-921738e945a6=GPU-02ff0cc1-647f-dee7-8365-921738e945a6,GPU-0d5ad102-eb8f-922a-173e-e91033320e0f=GPU-0d5ad102-eb8f-922a-173e-e91033320e0f,GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa=GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa,GPU-4fba7684-5a96-6280-91ff-b41f7484564c=GPU-4fba7684-5a96-6280-91ff-b41f7484564c,GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683=GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683,GPU-32a6c51c-d07d-7513-86b5-813b64e452d2=GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+}

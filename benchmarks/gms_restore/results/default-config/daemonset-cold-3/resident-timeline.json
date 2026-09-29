@@ -1,0 +1,4300 @@
+{
+  "case": "daemonset-cold-3",
+  "origin_epoch": 1790661284.6992233,
+  "ready_epoch": 1790661309.1818573,
+  "handler_epoch": 1790661286.9564621,
+  "metrics": {
+    "case": "daemonset-cold-3",
+    "group": "cold",
+    "cohort": "primary",
+    "preinstalled_cuda_host_path": null,
+    "runtime_network_discovery": false,
+    "agent_revision": "d1bb736d31d00db15643759f2e40ebf062288c71",
+    "dgd_to_ready_s": 24.4826340675354,
+    "dgd_to_handler_s": 2.2572388648986816,
+    "main_start_offset_s": 2.2420740127563477,
+    "main_start_precision": "CRI nanoseconds",
+    "main_start_to_handler_s": 0.015164852142333984,
+    "main_running_host_observed_offset_s": 5.26849365234375,
+    "restore_operation_s": 17.347335614,
+    "criu_s": 4.546412077,
+    "cuda_s": 10.516335566,
+    "all_published_offset_s": 21.51806092262268,
+    "first_read_offset_s": 3.3972373008728027,
+    "wake_gate_wait_s": 1.5229551792144775,
+    "gate_passed_to_ready_s": 2.885115385055542,
+    "gms_wake_logged_durations_s": [
+      0.351,
+      0.356,
+      0.362,
+      0.364,
+      0.368,
+      0.372,
+      0.372,
+      0.373
+    ],
+    "rank_metrics": [
+      {
+        "rank": 0,
+        "detailed": true,
+        "load_started_offset_s": 2.516883134841919,
+        "publication_offset_s": 19.02470850944519,
+        "daemon_started_offset_s": 2.516883134841919,
+        "transfer_complete_offset_s": 18.9951012134552,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.027585268020629883,
+        "loader_context_s": 0.2542147636413574,
+        "imports_s": 0.11203622817993164,
+        "pin_rings_s": 1.9690594673156738,
+        "allocation_import_s": 0.3045072555541992,
+        "metadata_s": 0.011993169784545898,
+        "transfer_s": 15.597863912582397,
+        "transfer_to_publication_s": 0.029607295989990234,
+        "active_start_to_first_read_s": 0.8803541660308838,
+        "dgd_to_first_read_s": 3.3972373008728027,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 1,
+        "detailed": true,
+        "load_started_offset_s": 2.772146224975586,
+        "publication_offset_s": 20.08829927444458,
+        "daemon_started_offset_s": 2.772146224975586,
+        "transfer_complete_offset_s": 20.075669288635254,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.09512853622436523,
+        "loader_context_s": 0.36626267433166504,
+        "imports_s": 0.07778120040893555,
+        "pin_rings_s": 1.8908638954162598,
+        "allocation_import_s": 0.7714312076568604,
+        "metadata_s": 0.009557723999023438,
+        "transfer_s": 15.735803842544556,
+        "transfer_to_publication_s": 0.012629985809326172,
+        "active_start_to_first_read_s": 1.5677192211151123,
+        "dgd_to_first_read_s": 4.339865446090698,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 2,
+        "detailed": true,
+        "load_started_offset_s": 3.015871047973633,
+        "publication_offset_s": 20.250157594680786,
+        "daemon_started_offset_s": 3.015871047973633,
+        "transfer_complete_offset_s": 20.245805025100708,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.08992552757263184,
+        "loader_context_s": 0.47937798500061035,
+        "imports_s": 0.08810734748840332,
+        "pin_rings_s": 1.3770978450775146,
+        "allocation_import_s": 0.7504563331604004,
+        "metadata_s": 0.009697914123535156,
+        "transfer_s": 15.544517278671265,
+        "transfer_to_publication_s": 0.004352569580078125,
+        "active_start_to_first_read_s": 1.6854166984558105,
+        "dgd_to_first_read_s": 4.701287746429443,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 3,
+        "detailed": true,
+        "load_started_offset_s": 3.243989944458008,
+        "publication_offset_s": 20.819775104522705,
+        "daemon_started_offset_s": 3.243989944458008,
+        "transfer_complete_offset_s": 20.815686464309692,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.07100248336791992,
+        "loader_context_s": 0.640805721282959,
+        "imports_s": 0.08246016502380371,
+        "pin_rings_s": 1.3091840744018555,
+        "allocation_import_s": 0.835540771484375,
+        "metadata_s": 0.0510709285736084,
+        "transfer_s": 15.553254842758179,
+        "transfer_to_publication_s": 0.004088640213012695,
+        "active_start_to_first_read_s": 2.018441677093506,
+        "dgd_to_first_read_s": 5.262431621551514,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 4,
+        "detailed": true,
+        "load_started_offset_s": 3.473029613494873,
+        "publication_offset_s": 20.466105461120605,
+        "daemon_started_offset_s": 3.473029613494873,
+        "transfer_complete_offset_s": 20.461843013763428,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.14105510711669922,
+        "loader_context_s": 0.5590746402740479,
+        "imports_s": 0.10027265548706055,
+        "pin_rings_s": 1.2257158756256104,
+        "allocation_import_s": 0.8075764179229736,
+        "metadata_s": 0.011011362075805664,
+        "transfer_s": 14.673955917358398,
+        "transfer_to_publication_s": 0.004262447357177734,
+        "active_start_to_first_read_s": 2.3148574829101562,
+        "dgd_to_first_read_s": 5.787887096405029,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 5,
+        "detailed": true,
+        "load_started_offset_s": 3.7918293476104736,
+        "publication_offset_s": 20.790445566177368,
+        "daemon_started_offset_s": 3.7918293476104736,
+        "transfer_complete_offset_s": 20.785542964935303,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.1993730068206787,
+        "loader_context_s": 0.6011579036712646,
+        "imports_s": 0.08074045181274414,
+        "pin_rings_s": 1.174137830734253,
+        "allocation_import_s": 0.42072057723999023,
+        "metadata_s": 0.10149693489074707,
+        "transfer_s": 14.264370203018188,
+        "transfer_to_publication_s": 0.00490260124206543,
+        "active_start_to_first_read_s": 2.7293434143066406,
+        "dgd_to_first_read_s": 6.521172761917114,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 6,
+        "detailed": true,
+        "load_started_offset_s": 4.0588157176971436,
+        "publication_offset_s": 21.502652406692505,
+        "daemon_started_offset_s": 4.0588157176971436,
+        "transfer_complete_offset_s": 21.498656511306763,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.1794605255126953,
+        "loader_context_s": 0.71108078956604,
+        "imports_s": 0.10738039016723633,
+        "pin_rings_s": 1.8719580173492432,
+        "allocation_import_s": 0.0932474136352539,
+        "metadata_s": 1.822648048400879,
+        "transfer_s": 14.172644853591919,
+        "transfer_to_publication_s": 0.0039958953857421875,
+        "active_start_to_first_read_s": 3.2671959400177,
+        "dgd_to_first_read_s": 7.326011657714844,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0013.bin"
+        ]
+      },
+      {
+        "rank": 7,
+        "detailed": true,
+        "load_started_offset_s": 4.33908748626709,
+        "publication_offset_s": 21.51806092262268,
+        "daemon_started_offset_s": 4.33908748626709,
+        "transfer_complete_offset_s": 21.514127492904663,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.256671667098999,
+        "loader_context_s": 0.5530767440795898,
+        "imports_s": 0.08827710151672363,
+        "pin_rings_s": 2.1175146102905273,
+        "allocation_import_s": 0.20833301544189453,
+        "metadata_s": 2.221041440963745,
+        "transfer_s": 12.534689903259277,
+        "transfer_to_publication_s": 0.003933429718017578,
+        "active_start_to_first_read_s": 4.640350103378296,
+        "dgd_to_first_read_s": 8.979437589645386,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0013.bin"
+        ]
+      }
+    ],
+    "startup_stages": [
+      {
+        "stage": "preflight",
+        "start_offset_s": 0.8379833698272705,
+        "end_offset_s": 0.847327709197998,
+        "duration_s": 0.009344339370727539,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "preflight_done",
+          "at_unix_nano": 1790661285546550969,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.009344482,
+          "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+        }
+      },
+      {
+        "stage": "preflight",
+        "start_offset_s": 0.867363452911377,
+        "end_offset_s": 0.8765552043914795,
+        "duration_s": 0.009191751480102539,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "preflight_done",
+          "at_unix_nano": 1790661285575778571,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.009191938,
+          "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+        }
+      },
+      {
+        "stage": "preflight",
+        "start_offset_s": 0.9064769744873047,
+        "end_offset_s": 0.9175779819488525,
+        "duration_s": 0.011101007461547852,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "preflight_done",
+          "at_unix_nano": 1790661285616801309,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.011101178,
+          "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+        }
+      },
+      {
+        "stage": "preflight",
+        "start_offset_s": 1.1259517669677734,
+        "end_offset_s": 1.1363856792449951,
+        "duration_s": 0.01043391227722168,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "preflight_done",
+          "at_unix_nano": 1790661285835609036,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.01043396,
+          "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+        }
+      },
+      {
+        "stage": "preflight",
+        "start_offset_s": 2.0524682998657227,
+        "end_offset_s": 2.0635478496551514,
+        "duration_s": 0.011079549789428711,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "preflight_done",
+          "at_unix_nano": 1790661286762771064,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.011079487
+        }
+      },
+      {
+        "stage": "finalizer",
+        "start_offset_s": 2.063552141189575,
+        "end_offset_s": 2.077988386154175,
+        "duration_s": 0.01443624496459961,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "finalizer_done",
+          "at_unix_nano": 1790661286777211723,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.014436394
+        }
+      },
+      {
+        "stage": "snapshot_get",
+        "start_offset_s": 0.8379912376403809,
+        "end_offset_s": 0.8416500091552734,
+        "duration_s": 0.003658771514892578,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "snapshot_get_done",
+          "at_unix_nano": 1790661285540873338,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.003658939
+        }
+      },
+      {
+        "stage": "snapshot_get",
+        "start_offset_s": 0.8673708438873291,
+        "end_offset_s": 0.8710634708404541,
+        "duration_s": 0.003692626953125,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "snapshot_get_done",
+          "at_unix_nano": 1790661285570286770,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.003692782
+        }
+      },
+      {
+        "stage": "snapshot_get",
+        "start_offset_s": 0.906487226486206,
+        "end_offset_s": 0.9115419387817383,
+        "duration_s": 0.0050547122955322266,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "snapshot_get_done",
+          "at_unix_nano": 1790661285610765302,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.005054862
+        }
+      },
+      {
+        "stage": "snapshot_get",
+        "start_offset_s": 1.1259558200836182,
+        "end_offset_s": 1.1302878856658936,
+        "duration_s": 0.004332065582275391,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "snapshot_get_done",
+          "at_unix_nano": 1790661285829511092,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.004332124
+        }
+      },
+      {
+        "stage": "snapshot_get",
+        "start_offset_s": 2.0524725914001465,
+        "end_offset_s": 2.057953119277954,
+        "duration_s": 0.005480527877807617,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "snapshot_get_done",
+          "at_unix_nano": 1790661286757176487,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.005480682
+        }
+      },
+      {
+        "stage": "content_get",
+        "start_offset_s": 0.8416824340820312,
+        "end_offset_s": 0.8450658321380615,
+        "duration_s": 0.0033833980560302734,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "content_get_done",
+          "at_unix_nano": 1790661285544289172,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.00338339
+        }
+      },
+      {
+        "stage": "content_get",
+        "start_offset_s": 0.8710896968841553,
+        "end_offset_s": 0.8744971752166748,
+        "duration_s": 0.0034074783325195312,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "content_get_done",
+          "at_unix_nano": 1790661285573720441,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.003407539
+        }
+      },
+      {
+        "stage": "content_get",
+        "start_offset_s": 0.911566972732544,
+        "end_offset_s": 0.9157137870788574,
+        "duration_s": 0.0041468143463134766,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "content_get_done",
+          "at_unix_nano": 1790661285614937077,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.004146754
+        }
+      },
+      {
+        "stage": "content_get",
+        "start_offset_s": 1.1303153038024902,
+        "end_offset_s": 1.134211540222168,
+        "duration_s": 0.0038962364196777344,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "content_get_done",
+          "at_unix_nano": 1790661285833434736,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.003896071
+        }
+      },
+      {
+        "stage": "content_get",
+        "start_offset_s": 2.057981491088867,
+        "end_offset_s": 2.0616109371185303,
+        "duration_s": 0.003629446029663086,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "content_get_done",
+          "at_unix_nano": 1790661286760834293,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.003629447
+        }
+      },
+      {
+        "stage": "target_validation",
+        "start_offset_s": 0.845116138458252,
+        "end_offset_s": 0.8451604843139648,
+        "duration_s": 4.4345855712890625e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "target_validation_done",
+          "at_unix_nano": 1790661285544383873,
+          "pod_ip_present": false,
+          "elapsed_seconds": 4.4417e-05
+        }
+      },
+      {
+        "stage": "target_validation",
+        "start_offset_s": 0.8745245933532715,
+        "end_offset_s": 0.8745434284210205,
+        "duration_s": 1.8835067749023438e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "target_validation_done",
+          "at_unix_nano": 1790661285573766825,
+          "pod_ip_present": false,
+          "elapsed_seconds": 1.8925e-05
+        }
+      },
+      {
+        "stage": "target_validation",
+        "start_offset_s": 0.9157450199127197,
+        "end_offset_s": 0.9157638549804688,
+        "duration_s": 1.8835067749023438e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "target_validation_done",
+          "at_unix_nano": 1790661285614987106,
+          "pod_ip_present": false,
+          "elapsed_seconds": 1.8768e-05
+        }
+      },
+      {
+        "stage": "target_validation",
+        "start_offset_s": 1.1342377662658691,
+        "end_offset_s": 1.1342582702636719,
+        "duration_s": 2.0503997802734375e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "target_validation_done",
+          "at_unix_nano": 1790661285833481546,
+          "pod_ip_present": false,
+          "elapsed_seconds": 2.0646e-05
+        }
+      },
+      {
+        "stage": "target_validation",
+        "start_offset_s": 2.0616328716278076,
+        "end_offset_s": 2.0616543292999268,
+        "duration_s": 2.1457672119140625e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "target_validation_done",
+          "at_unix_nano": 1790661286760877718,
+          "pod_ip_present": true,
+          "elapsed_seconds": 2.1719e-05
+        }
+      },
+      {
+        "stage": "artifact_validation",
+        "start_offset_s": 0.845167875289917,
+        "end_offset_s": 0.8451993465423584,
+        "duration_s": 3.147125244140625e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "artifact_validation_done",
+          "at_unix_nano": 1790661285544422693,
+          "pod_ip_present": false,
+          "elapsed_seconds": 3.1597e-05
+        }
+      },
+      {
+        "stage": "artifact_validation",
+        "start_offset_s": 0.8745503425598145,
+        "end_offset_s": 0.8745732307434082,
+        "duration_s": 2.288818359375e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "artifact_validation_done",
+          "at_unix_nano": 1790661285573796533,
+          "pod_ip_present": false,
+          "elapsed_seconds": 2.2908e-05
+        }
+      },
+      {
+        "stage": "artifact_validation",
+        "start_offset_s": 0.915769100189209,
+        "end_offset_s": 0.9157884120941162,
+        "duration_s": 1.9311904907226562e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "artifact_validation_done",
+          "at_unix_nano": 1790661285615011701,
+          "pod_ip_present": false,
+          "elapsed_seconds": 1.9242e-05
+        }
+      },
+      {
+        "stage": "artifact_validation",
+        "start_offset_s": 1.1342637538909912,
+        "end_offset_s": 1.1342902183532715,
+        "duration_s": 2.6464462280273438e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "artifact_validation_done",
+          "at_unix_nano": 1790661285833513470,
+          "pod_ip_present": false,
+          "elapsed_seconds": 2.6538e-05
+        }
+      },
+      {
+        "stage": "artifact_validation",
+        "start_offset_s": 2.061659812927246,
+        "end_offset_s": 2.0616841316223145,
+        "duration_s": 2.4318695068359375e-05,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "artifact_validation_done",
+          "at_unix_nano": 1790661286760907456,
+          "pod_ip_present": true,
+          "elapsed_seconds": 2.439e-05
+        }
+      },
+      {
+        "stage": "compatibility",
+        "start_offset_s": 0.8452060222625732,
+        "end_offset_s": 0.8472950458526611,
+        "duration_s": 0.0020890235900878906,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "compatibility_done",
+          "at_unix_nano": 1790661285546518437,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.002089166
+        }
+      },
+      {
+        "stage": "compatibility",
+        "start_offset_s": 0.8745877742767334,
+        "end_offset_s": 0.8765223026275635,
+        "duration_s": 0.0019345283508300781,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "compatibility_done",
+          "at_unix_nano": 1790661285575745669,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.001934714
+        }
+      },
+      {
+        "stage": "compatibility",
+        "start_offset_s": 0.9157931804656982,
+        "end_offset_s": 0.9175477027893066,
+        "duration_s": 0.0017545223236083984,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "compatibility_done",
+          "at_unix_nano": 1790661285616770885,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.001754498
+        }
+      },
+      {
+        "stage": "compatibility",
+        "start_offset_s": 1.1342957019805908,
+        "end_offset_s": 1.1363525390625,
+        "duration_s": 0.0020568370819091797,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "compatibility_done",
+          "at_unix_nano": 1790661285835575864,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.002057044
+        }
+      },
+      {
+        "stage": "compatibility",
+        "start_offset_s": 2.061689615249634,
+        "end_offset_s": 2.0635263919830322,
+        "duration_s": 0.0018367767333984375,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "compatibility_done",
+          "at_unix_nano": 1790661286762749733,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.001836785
+        }
+      },
+      {
+        "stage": "container_resolution",
+        "start_offset_s": 2.099398612976074,
+        "end_offset_s": 2.2514498233795166,
+        "duration_s": 0.15205121040344238,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "container_resolution_done",
+          "at_unix_nano": 1790661286950673051,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.152051253,
+          "destination": "main",
+          "source": "runtime",
+          "container_id": "36de6612a3ae00be7b0fde5201e5689692cfdd3e73672dd9f55419631c414d47",
+          "attempts": 4,
+          "runtime_seconds": 0.008156537
+        }
+      },
+      {
+        "stage": "status_apply",
+        "start_offset_s": 0.8473424911499023,
+        "end_offset_s": 0.8625121116638184,
+        "duration_s": 0.015169620513916016,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535569",
+          "stage": "status_apply_done",
+          "at_unix_nano": 1790661285561735417,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.015169732,
+          "reason": "PodIPPending"
+        }
+      },
+      {
+        "stage": "status_apply",
+        "start_offset_s": 0.8765659332275391,
+        "end_offset_s": 0.8986022472381592,
+        "duration_s": 0.022036314010620117,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535570",
+          "stage": "status_apply_done",
+          "at_unix_nano": 1790661285597825627,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.022036541,
+          "reason": "PodIPPending"
+        }
+      },
+      {
+        "stage": "status_apply",
+        "start_offset_s": 0.9175939559936523,
+        "end_offset_s": 0.9389641284942627,
+        "duration_s": 0.02137017250061035,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535572",
+          "stage": "status_apply_done",
+          "at_unix_nano": 1790661285638187417,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.021370619,
+          "reason": "PodIPPending"
+        }
+      },
+      {
+        "stage": "status_apply",
+        "start_offset_s": 1.1363964080810547,
+        "end_offset_s": 1.1545064449310303,
+        "duration_s": 0.018110036849975586,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535576",
+          "stage": "status_apply_done",
+          "at_unix_nano": 1790661285853729686,
+          "pod_ip_present": false,
+          "elapsed_seconds": 0.018110059,
+          "reason": "PodIPPending"
+        }
+      },
+      {
+        "stage": "status_apply",
+        "start_offset_s": 2.078017234802246,
+        "end_offset_s": 2.0993638038635254,
+        "duration_s": 0.021346569061279297,
+        "metadata": {
+          "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+          "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+          "resource_version": "11535583",
+          "stage": "status_apply_done",
+          "at_unix_nano": 1790661286798587189,
+          "pod_ip_present": true,
+          "elapsed_seconds": 0.021346706,
+          "reason": "RestoreInProgress"
+        }
+      }
+    ],
+    "startup_milestones": [
+      {
+        "offset_s": 0.8377957344055176,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661285537019074,
+        "pod_ip_present": false,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.8379464149475098,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "queue_process",
+        "at_unix_nano": 1790661285537169747,
+        "pod_ip_present": false,
+        "elapsed_seconds": 6.0688e-05,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.8379721641540527,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "restore_eligible",
+        "at_unix_nano": 1790661285537195396,
+        "pod_ip_present": false,
+        "elapsed_seconds": 8.634e-05
+      },
+      {
+        "offset_s": 0.8379833698272705,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "preflight_start",
+        "at_unix_nano": 1790661285537206553,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8379912376403809,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "snapshot_get_start",
+        "at_unix_nano": 1790661285537214447,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8416500091552734,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "snapshot_get_done",
+        "at_unix_nano": 1790661285540873338,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.003658939
+      },
+      {
+        "offset_s": 0.8416824340820312,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "content_get_start",
+        "at_unix_nano": 1790661285540905817,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8450658321380615,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "content_get_done",
+        "at_unix_nano": 1790661285544289172,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.00338339
+      },
+      {
+        "offset_s": 0.845116138458252,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "target_validation_start",
+        "at_unix_nano": 1790661285544339488,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8451604843139648,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "target_validation_done",
+        "at_unix_nano": 1790661285544383873,
+        "pod_ip_present": false,
+        "elapsed_seconds": 4.4417e-05
+      },
+      {
+        "offset_s": 0.845167875289917,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "artifact_validation_start",
+        "at_unix_nano": 1790661285544391127,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8451993465423584,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "artifact_validation_done",
+        "at_unix_nano": 1790661285544422693,
+        "pod_ip_present": false,
+        "elapsed_seconds": 3.1597e-05
+      },
+      {
+        "offset_s": 0.8452060222625732,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "compatibility_start",
+        "at_unix_nano": 1790661285544429316,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8472950458526611,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "compatibility_done",
+        "at_unix_nano": 1790661285546518437,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.002089166
+      },
+      {
+        "offset_s": 0.8473193645477295,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "pod_ip_gate",
+        "at_unix_nano": 1790661285546542568,
+        "pod_ip_present": false,
+        "required": true
+      },
+      {
+        "offset_s": 0.847327709197998,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "preflight_done",
+        "at_unix_nano": 1790661285546550969,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.009344482,
+        "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+      },
+      {
+        "offset_s": 0.8473424911499023,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "status_apply_start",
+        "at_unix_nano": 1790661285546565806,
+        "pod_ip_present": false,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 0.8625121116638184,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535569",
+        "stage": "status_apply_done",
+        "at_unix_nano": 1790661285561735417,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.015169732,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 0.8666589260101318,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661285565882143,
+        "pod_ip_present": false,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.8673183917999268,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "queue_process",
+        "at_unix_nano": 1790661285566541705,
+        "pod_ip_present": false,
+        "elapsed_seconds": 4.8892e-05,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.8673555850982666,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "restore_eligible",
+        "at_unix_nano": 1790661285566578804,
+        "pod_ip_present": false,
+        "elapsed_seconds": 8.5991e-05
+      },
+      {
+        "offset_s": 0.867363452911377,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "preflight_start",
+        "at_unix_nano": 1790661285566586664,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8673708438873291,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "snapshot_get_start",
+        "at_unix_nano": 1790661285566594023,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8710634708404541,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "snapshot_get_done",
+        "at_unix_nano": 1790661285570286770,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.003692782
+      },
+      {
+        "offset_s": 0.8710896968841553,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "content_get_start",
+        "at_unix_nano": 1790661285570312935,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8744971752166748,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "content_get_done",
+        "at_unix_nano": 1790661285573720441,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.003407539
+      },
+      {
+        "offset_s": 0.8745245933532715,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "target_validation_start",
+        "at_unix_nano": 1790661285573747935,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8745434284210205,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "target_validation_done",
+        "at_unix_nano": 1790661285573766825,
+        "pod_ip_present": false,
+        "elapsed_seconds": 1.8925e-05
+      },
+      {
+        "offset_s": 0.8745503425598145,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "artifact_validation_start",
+        "at_unix_nano": 1790661285573773655,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8745732307434082,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "artifact_validation_done",
+        "at_unix_nano": 1790661285573796533,
+        "pod_ip_present": false,
+        "elapsed_seconds": 2.2908e-05
+      },
+      {
+        "offset_s": 0.8745877742767334,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "compatibility_start",
+        "at_unix_nano": 1790661285573811001,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.8765223026275635,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "compatibility_done",
+        "at_unix_nano": 1790661285575745669,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.001934714
+      },
+      {
+        "offset_s": 0.8765466213226318,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "pod_ip_gate",
+        "at_unix_nano": 1790661285575769875,
+        "pod_ip_present": false,
+        "required": true
+      },
+      {
+        "offset_s": 0.8765552043914795,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "preflight_done",
+        "at_unix_nano": 1790661285575778571,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.009191938,
+        "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+      },
+      {
+        "offset_s": 0.8765659332275391,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "status_apply_start",
+        "at_unix_nano": 1790661285575789230,
+        "pod_ip_present": false,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 0.8986022472381592,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535570",
+        "stage": "status_apply_done",
+        "at_unix_nano": 1790661285597825627,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.022036541,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 0.9062345027923584,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661285605457867,
+        "pod_ip_present": false,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.9064280986785889,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "queue_process",
+        "at_unix_nano": 1790661285605651316,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.00011162,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 0.9064626693725586,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "restore_eligible",
+        "at_unix_nano": 1790661285605686042,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.000146341
+      },
+      {
+        "offset_s": 0.9064769744873047,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "preflight_start",
+        "at_unix_nano": 1790661285605700169,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.906487226486206,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "snapshot_get_start",
+        "at_unix_nano": 1790661285605710490,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.9115419387817383,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "snapshot_get_done",
+        "at_unix_nano": 1790661285610765302,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.005054862
+      },
+      {
+        "offset_s": 0.911566972732544,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "content_get_start",
+        "at_unix_nano": 1790661285610790358,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.9157137870788574,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "content_get_done",
+        "at_unix_nano": 1790661285614937077,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.004146754
+      },
+      {
+        "offset_s": 0.9157450199127197,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "target_validation_start",
+        "at_unix_nano": 1790661285614968388,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.9157638549804688,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "target_validation_done",
+        "at_unix_nano": 1790661285614987106,
+        "pod_ip_present": false,
+        "elapsed_seconds": 1.8768e-05
+      },
+      {
+        "offset_s": 0.915769100189209,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "artifact_validation_start",
+        "at_unix_nano": 1790661285614992491,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.9157884120941162,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "artifact_validation_done",
+        "at_unix_nano": 1790661285615011701,
+        "pod_ip_present": false,
+        "elapsed_seconds": 1.9242e-05
+      },
+      {
+        "offset_s": 0.9157931804656982,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "compatibility_start",
+        "at_unix_nano": 1790661285615016435,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 0.9175477027893066,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "compatibility_done",
+        "at_unix_nano": 1790661285616770885,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.001754498
+      },
+      {
+        "offset_s": 0.9175705909729004,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "pod_ip_gate",
+        "at_unix_nano": 1790661285616793866,
+        "pod_ip_present": false,
+        "required": true
+      },
+      {
+        "offset_s": 0.9175779819488525,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "preflight_done",
+        "at_unix_nano": 1790661285616801309,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.011101178,
+        "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+      },
+      {
+        "offset_s": 0.9175939559936523,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "status_apply_start",
+        "at_unix_nano": 1790661285616817174,
+        "pod_ip_present": false,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 0.9389641284942627,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535572",
+        "stage": "status_apply_done",
+        "at_unix_nano": 1790661285638187417,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.021370619,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 1.1258647441864014,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661285825088074,
+        "pod_ip_present": false,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 1.1259305477142334,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "queue_process",
+        "at_unix_nano": 1790661285825153888,
+        "pod_ip_present": false,
+        "elapsed_seconds": 3.7248e-05,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 1.1259455680847168,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "restore_eligible",
+        "at_unix_nano": 1790661285825168900,
+        "pod_ip_present": false,
+        "elapsed_seconds": 5.2261e-05
+      },
+      {
+        "offset_s": 1.1259517669677734,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "preflight_start",
+        "at_unix_nano": 1790661285825175112,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.1259558200836182,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "snapshot_get_start",
+        "at_unix_nano": 1790661285825179002,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.1302878856658936,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "snapshot_get_done",
+        "at_unix_nano": 1790661285829511092,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.004332124
+      },
+      {
+        "offset_s": 1.1303153038024902,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "content_get_start",
+        "at_unix_nano": 1790661285829538700,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.134211540222168,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "content_get_done",
+        "at_unix_nano": 1790661285833434736,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.003896071
+      },
+      {
+        "offset_s": 1.1342377662658691,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "target_validation_start",
+        "at_unix_nano": 1790661285833460941,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.1342582702636719,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "target_validation_done",
+        "at_unix_nano": 1790661285833481546,
+        "pod_ip_present": false,
+        "elapsed_seconds": 2.0646e-05
+      },
+      {
+        "offset_s": 1.1342637538909912,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "artifact_validation_start",
+        "at_unix_nano": 1790661285833486966,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.1342902183532715,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "artifact_validation_done",
+        "at_unix_nano": 1790661285833513470,
+        "pod_ip_present": false,
+        "elapsed_seconds": 2.6538e-05
+      },
+      {
+        "offset_s": 1.1342957019805908,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "compatibility_start",
+        "at_unix_nano": 1790661285833518867,
+        "pod_ip_present": false
+      },
+      {
+        "offset_s": 1.1363525390625,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "compatibility_done",
+        "at_unix_nano": 1790661285835575864,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.002057044
+      },
+      {
+        "offset_s": 1.1363778114318848,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "pod_ip_gate",
+        "at_unix_nano": 1790661285835600976,
+        "pod_ip_present": false,
+        "required": true
+      },
+      {
+        "offset_s": 1.1363856792449951,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "preflight_done",
+        "at_unix_nano": 1790661285835609036,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.01043396,
+        "error": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address"
+      },
+      {
+        "offset_s": 1.1363964080810547,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "status_apply_start",
+        "at_unix_nano": 1790661285835619689,
+        "pod_ip_present": false,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 1.1545064449310303,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535576",
+        "stage": "status_apply_done",
+        "at_unix_nano": 1790661285853729686,
+        "pod_ip_present": false,
+        "elapsed_seconds": 0.018110059,
+        "reason": "PodIPPending"
+      },
+      {
+        "offset_s": 2.0523152351379395,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661286751538475,
+        "pod_ip_present": true,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 2.0524375438690186,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "queue_process",
+        "at_unix_nano": 1790661286751660824,
+        "pod_ip_present": true,
+        "elapsed_seconds": 5.7901e-05,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 2.0524613857269287,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "restore_eligible",
+        "at_unix_nano": 1790661286751684586,
+        "pod_ip_present": true,
+        "elapsed_seconds": 8.1663e-05
+      },
+      {
+        "offset_s": 2.0524682998657227,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "preflight_start",
+        "at_unix_nano": 1790661286751691610,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.0524725914001465,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "snapshot_get_start",
+        "at_unix_nano": 1790661286751695859,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.057953119277954,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "snapshot_get_done",
+        "at_unix_nano": 1790661286757176487,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.005480682
+      },
+      {
+        "offset_s": 2.057981491088867,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "content_get_start",
+        "at_unix_nano": 1790661286757204881,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.0616109371185303,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "content_get_done",
+        "at_unix_nano": 1790661286760834293,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.003629447
+      },
+      {
+        "offset_s": 2.0616328716278076,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "target_validation_start",
+        "at_unix_nano": 1790661286760856038,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.0616543292999268,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "target_validation_done",
+        "at_unix_nano": 1790661286760877718,
+        "pod_ip_present": true,
+        "elapsed_seconds": 2.1719e-05
+      },
+      {
+        "offset_s": 2.061659812927246,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "artifact_validation_start",
+        "at_unix_nano": 1790661286760883096,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.0616841316223145,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "artifact_validation_done",
+        "at_unix_nano": 1790661286760907456,
+        "pod_ip_present": true,
+        "elapsed_seconds": 2.439e-05
+      },
+      {
+        "offset_s": 2.061689615249634,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "compatibility_start",
+        "at_unix_nano": 1790661286760912980,
+        "pod_ip_present": true
+      },
+      {
+        "offset_s": 2.0635263919830322,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "compatibility_done",
+        "at_unix_nano": 1790661286762749733,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.001836785
+      },
+      {
+        "offset_s": 2.0635409355163574,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "pod_ip_gate",
+        "at_unix_nano": 1790661286762764309,
+        "pod_ip_present": true,
+        "required": true
+      },
+      {
+        "offset_s": 2.0635478496551514,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "preflight_done",
+        "at_unix_nano": 1790661286762771064,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.011079487
+      },
+      {
+        "offset_s": 2.063552141189575,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "finalizer_start",
+        "at_unix_nano": 1790661286762775387,
+        "pod_ip_present": true,
+        "already_present": false
+      },
+      {
+        "offset_s": 2.077988386154175,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "finalizer_done",
+        "at_unix_nano": 1790661286777211723,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.014436394
+      },
+      {
+        "offset_s": 2.078017234802246,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "status_apply_start",
+        "at_unix_nano": 1790661286777240550,
+        "pod_ip_present": true,
+        "reason": "RestoreInProgress"
+      },
+      {
+        "offset_s": 2.082202434539795,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535585",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661286781425648,
+        "pod_ip_present": true,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 2.0993638038635254,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "status_apply_done",
+        "at_unix_nano": 1790661286798587189,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.021346706,
+        "reason": "RestoreInProgress"
+      },
+      {
+        "offset_s": 2.099398612976074,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "container_resolution_start",
+        "at_unix_nano": 1790661286798621864,
+        "pod_ip_present": true,
+        "destination": "main"
+      },
+      {
+        "offset_s": 2.0994114875793457,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "runtime_poll_start",
+        "at_unix_nano": 1790661286798634778,
+        "pod_ip_present": true,
+        "destination": "main",
+        "identity_discovery": true
+      },
+      {
+        "offset_s": 2.101991653442383,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535586",
+        "stage": "queue_add",
+        "at_unix_nano": 1790661286801214859,
+        "pod_ip_present": true,
+        "phase": "Pending",
+        "deleting": false
+      },
+      {
+        "offset_s": 2.2514498233795166,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "container_resolution_done",
+        "at_unix_nano": 1790661286950673051,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.152051253,
+        "destination": "main",
+        "source": "runtime",
+        "container_id": "36de6612a3ae00be7b0fde5201e5689692cfdd3e73672dd9f55419631c414d47",
+        "attempts": 4,
+        "runtime_seconds": 0.008156537
+      },
+      {
+        "offset_s": 2.257192373275757,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "restore_event_done",
+        "at_unix_nano": 1790661286956415693,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.005699863,
+        "destination": "main"
+      },
+      {
+        "offset_s": 2.2572290897369385,
+        "pod": "schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+        "pod_uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+        "resource_version": "11535583",
+        "stage": "handler_entry",
+        "at_unix_nano": 1790661286956452378,
+        "pod_ip_present": true,
+        "elapsed_seconds": 0.005736543,
+        "destination": "main",
+        "container_id": "36de6612a3ae00be7b0fde5201e5689692cfdd3e73672dd9f55419631c414d47"
+      }
+    ],
+    "unique_direct_payload_files": 112,
+    "payload_transfer_bytes": 481036337152,
+    "all_transfer_complete_offset_s": 21.514127492904663,
+    "aggregate_read_to_transfer_complete_s": 18.11689019203186,
+    "effective_payload_GBps": 26.551816125902697,
+    "effective_payload_GiBps": 24.72830575509248,
+    "rank_mean_prewarm_s": null,
+    "rank_mean_cuinit_s": 0.1325252652168274,
+    "rank_mean_loader_context_s": 0.5206314027309418,
+    "rank_mean_imports_s": 0.09213194251060486,
+    "rank_mean_pin_rings_s": 1.6169414520263672,
+    "rank_mean_allocation_import_s": 0.5239766240119934,
+    "rank_mean_metadata_s": 0.5298146903514862,
+    "rank_mean_transfer_s": 14.759637594223022,
+    "rank_mean_transfer_to_publication_s": 0.00847160816192627,
+    "rank_mean_active_start_to_first_read_s": 2.387959837913513
+  },
+  "rows": [
+    {
+      "label": "Snapshot agent: request \u2192 restore handler",
+      "segments": [
+        {
+          "start": 1790661284.6992233,
+          "end": 1790661286.9564621,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: main start \u2192 handler (CRI nanoseconds)",
+      "segments": [
+        {
+          "start": 1790661286.9412973,
+          "end": 1790661286.9564621,
+          "kind": "discovery",
+          "detail": "Container discovery"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 0",
+      "segments": [
+        {
+          "start": 1790661287.2161064,
+          "end": 1790661287.6863694,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661287.6863694,
+          "end": 1790661287.9908767,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661287.9908767,
+          "end": 1790661288.0964606,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661288.0964606,
+          "end": 1790661303.6943245,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661303.6943245,
+          "end": 1790661303.7239318,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 1",
+      "segments": [
+        {
+          "start": 1790661287.4713695,
+          "end": 1790661288.0773528,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661288.0773528,
+          "end": 1790661288.848784,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661288.848784,
+          "end": 1790661289.0390887,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661289.0390887,
+          "end": 1790661304.7748926,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661304.7748926,
+          "end": 1790661304.7875226,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 2",
+      "segments": [
+        {
+          "start": 1790661287.7150943,
+          "end": 1790661288.4884167,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661288.4884167,
+          "end": 1790661289.238873,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661289.238873,
+          "end": 1790661289.400511,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661289.400511,
+          "end": 1790661304.9450283,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661304.9450283,
+          "end": 1790661304.9493809,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 3",
+      "segments": [
+        {
+          "start": 1790661287.9432132,
+          "end": 1790661288.8739686,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661288.8739686,
+          "end": 1790661289.7095094,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661289.7095094,
+          "end": 1790661289.961655,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661289.961655,
+          "end": 1790661305.5149097,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661305.5149097,
+          "end": 1790661305.5189984,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 4",
+      "segments": [
+        {
+          "start": 1790661288.172253,
+          "end": 1790661289.0863194,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661289.0863194,
+          "end": 1790661289.8938959,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661289.8938959,
+          "end": 1790661290.4871104,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661290.4871104,
+          "end": 1790661305.1610663,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661305.1610663,
+          "end": 1790661305.1653287,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 5",
+      "segments": [
+        {
+          "start": 1790661288.4910526,
+          "end": 1790661289.6095505,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661289.6095505,
+          "end": 1790661290.030271,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661290.030271,
+          "end": 1790661291.220396,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661291.220396,
+          "end": 1790661305.4847662,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661305.4847662,
+          "end": 1790661305.4896688,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 6",
+      "segments": [
+        {
+          "start": 1790661288.758039,
+          "end": 1790661291.6753492,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661291.6753492,
+          "end": 1790661291.7685966,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661291.7685966,
+          "end": 1790661292.025235,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661292.025235,
+          "end": 1790661306.1978798,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661306.1978798,
+          "end": 1790661306.2018757,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "DGD Pod \u2014 GMS rank 7",
+      "segments": [
+        {
+          "start": 1790661289.0383108,
+          "end": 1790661292.2663405,
+          "kind": "init",
+          "detail": "Imports / server"
+        },
+        {
+          "start": 1790661292.2663405,
+          "end": 1790661292.4746735,
+          "kind": "allocation",
+          "detail": "Allocate / map"
+        },
+        {
+          "start": 1790661292.4746735,
+          "end": 1790661293.6786609,
+          "kind": "buffers",
+          "detail": "Pinned buffers"
+        },
+        {
+          "start": 1790661293.6786609,
+          "end": 1790661306.2133508,
+          "kind": "read",
+          "detail": "Payload load window"
+        },
+        {
+          "start": 1790661306.2133508,
+          "end": 1790661306.2172842,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "GMS publication gate: verify all eight artifacts",
+      "segments": [
+        {
+          "start": 1790661306.2172842,
+          "end": 1790661306.2900016,
+          "kind": "publication",
+          "detail": "Publish / validate"
+        }
+      ]
+    },
+    {
+      "label": "Resident Snapshot/PageBroker services",
+      "segments": [
+        {
+          "start": 1790661286.9564621,
+          "end": 1790661304.3038197,
+          "kind": "operation",
+          "detail": "Snapshot operation"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: CRIU (placement approximate)",
+      "segments": [
+        {
+          "start": 1790661287.2448652,
+          "end": 1790661291.7912772,
+          "kind": "criu",
+          "detail": "CRIU"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 212 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661291.7913644,
+          "end": 1790661292.897752,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661292.8979208,
+          "end": 1790661293.5411708,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.2626314,
+          "end": 1790661302.3012202,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 213 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661292.8979,
+          "end": 1790661294.6730914,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661294.6732311,
+          "end": 1790661295.2947068,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.2322745,
+          "end": 1790661302.2626112,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 214 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661294.6731627,
+          "end": 1790661295.4378703,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661295.4379568,
+          "end": 1790661296.185695,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.1988387,
+          "end": 1790661302.2322526,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 215 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661295.4379032,
+          "end": 1790661296.1969285,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661296.197003,
+          "end": 1790661296.792,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.1674528,
+          "end": 1790661302.1987913,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 216 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661296.1969624,
+          "end": 1790661296.9371338,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661296.9372342,
+          "end": 1790661297.610282,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.1367488,
+          "end": 1790661302.1674306,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 217 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661296.9371903,
+          "end": 1790661297.6681938,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661297.6682606,
+          "end": 1790661298.3813207,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.1057026,
+          "end": 1790661302.136711,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 218 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661297.6682262,
+          "end": 1790661298.6602097,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661298.6603599,
+          "end": 1790661299.2712617,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.070728,
+          "end": 1790661302.1056807,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 219 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661298.6603146,
+          "end": 1790661299.4808936,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661299.48101,
+          "end": 1790661300.176988,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.03259,
+          "end": 1790661302.0707054,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 1 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661299.4809692,
+          "end": 1790661301.6184251,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661301.6185372,
+          "end": 1790661301.61867,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.0308945,
+          "end": 1790661302.0325782,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "Engine CUDA process 220 (Snapshot/PageBroker)",
+      "segments": [
+        {
+          "start": 1790661301.618503,
+          "end": 1790661302.0288916,
+          "kind": "prepare",
+          "detail": "CUDA PREPARE"
+        },
+        {
+          "start": 1790661302.0289845,
+          "end": 1790661302.0291388,
+          "kind": "transfer",
+          "detail": "Residual transfer"
+        },
+        {
+          "start": 1790661302.0291705,
+          "end": 1790661302.0308616,
+          "kind": "complete",
+          "detail": "CUDA COMPLETE"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: restore return \u2192 app gate",
+      "segments": [
+        {
+          "start": 1790661304.3038197,
+          "end": 1790661304.7737868,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: waits for GMS weights",
+      "segments": [
+        {
+          "start": 1790661304.7737868,
+          "end": 1790661306.296742,
+          "kind": "wait",
+          "detail": "Wait for weights"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: wake / generation / Ready",
+      "segments": [
+        {
+          "start": 1790661306.296742,
+          "end": 1790661309.1818573,
+          "kind": "inference",
+          "detail": "Wake / inference / readiness"
+        }
+      ]
+    }
+  ],
+  "hot_path": [
+    {
+      "label": "DGD request \u2192 child Pod observed",
+      "segments": [
+        {
+          "start": 1790661284.6992233,
+          "end": 1790661285.42929,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "Request \u2192 agent informer event",
+      "segments": [
+        {
+          "start": 1790661284.6992233,
+          "end": 1790661285.537019,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "Informer event \u2192 queue processing",
+      "segments": [
+        {
+          "start": 1790661285.537019,
+          "end": 1790661285.5371697,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "Preflight",
+      "segments": [
+        {
+          "start": 1790661285.5372066,
+          "end": 1790661285.546551,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285546550969, \"elapsed_seconds\": 0.009344482, \"error\": \"Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address\", \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"preflight_done\"}"
+        },
+        {
+          "start": 1790661285.5665867,
+          "end": 1790661285.5757785,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285575778571, \"elapsed_seconds\": 0.009191938, \"error\": \"Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address\", \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"preflight_done\"}"
+        },
+        {
+          "start": 1790661285.6057003,
+          "end": 1790661285.6168013,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285616801309, \"elapsed_seconds\": 0.011101178, \"error\": \"Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address\", \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"preflight_done\"}"
+        },
+        {
+          "start": 1790661285.825175,
+          "end": 1790661285.835609,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285835609036, \"elapsed_seconds\": 0.01043396, \"error\": \"Waiting for restore Pod schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt to receive an IP address\", \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"preflight_done\"}"
+        },
+        {
+          "start": 1790661286.7516916,
+          "end": 1790661286.7627711,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286762771064, \"elapsed_seconds\": 0.011079487, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"preflight_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Pod finalizer API update",
+      "segments": [
+        {
+          "start": 1790661286.7627754,
+          "end": 1790661286.7772117,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286777211723, \"elapsed_seconds\": 0.014436394, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"finalizer_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Snapshot API/cache lookup",
+      "segments": [
+        {
+          "start": 1790661285.5372145,
+          "end": 1790661285.5408733,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285540873338, \"elapsed_seconds\": 0.003658939, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"snapshot_get_done\"}"
+        },
+        {
+          "start": 1790661285.5665941,
+          "end": 1790661285.5702868,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285570286770, \"elapsed_seconds\": 0.003692782, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"snapshot_get_done\"}"
+        },
+        {
+          "start": 1790661285.6057105,
+          "end": 1790661285.6107652,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285610765302, \"elapsed_seconds\": 0.005054862, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"snapshot_get_done\"}"
+        },
+        {
+          "start": 1790661285.825179,
+          "end": 1790661285.8295112,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285829511092, \"elapsed_seconds\": 0.004332124, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"snapshot_get_done\"}"
+        },
+        {
+          "start": 1790661286.7516959,
+          "end": 1790661286.7571764,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286757176487, \"elapsed_seconds\": 0.005480682, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"snapshot_get_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Content API/cache lookup",
+      "segments": [
+        {
+          "start": 1790661285.5409057,
+          "end": 1790661285.544289,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285544289172, \"elapsed_seconds\": 0.00338339, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"content_get_done\"}"
+        },
+        {
+          "start": 1790661285.570313,
+          "end": 1790661285.5737205,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285573720441, \"elapsed_seconds\": 0.003407539, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"content_get_done\"}"
+        },
+        {
+          "start": 1790661285.6107903,
+          "end": 1790661285.614937,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285614937077, \"elapsed_seconds\": 0.004146754, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"content_get_done\"}"
+        },
+        {
+          "start": 1790661285.8295386,
+          "end": 1790661285.8334348,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285833434736, \"elapsed_seconds\": 0.003896071, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"content_get_done\"}"
+        },
+        {
+          "start": 1790661286.7572048,
+          "end": 1790661286.7608342,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286760834293, \"elapsed_seconds\": 0.003629447, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"content_get_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Restore-target validation",
+      "segments": [
+        {
+          "start": 1790661285.5443394,
+          "end": 1790661285.5443838,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285544383873, \"elapsed_seconds\": 4.4417e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"target_validation_done\"}"
+        },
+        {
+          "start": 1790661285.5737479,
+          "end": 1790661285.5737667,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285573766825, \"elapsed_seconds\": 1.8925e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"target_validation_done\"}"
+        },
+        {
+          "start": 1790661285.6149683,
+          "end": 1790661285.6149871,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285614987106, \"elapsed_seconds\": 1.8768e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"target_validation_done\"}"
+        },
+        {
+          "start": 1790661285.833461,
+          "end": 1790661285.8334816,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285833481546, \"elapsed_seconds\": 2.0646e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"target_validation_done\"}"
+        },
+        {
+          "start": 1790661286.7608562,
+          "end": 1790661286.7608776,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286760877718, \"elapsed_seconds\": 2.1719e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"target_validation_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Checkpoint artifact validation",
+      "segments": [
+        {
+          "start": 1790661285.5443912,
+          "end": 1790661285.5444226,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285544422693, \"elapsed_seconds\": 3.1597e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"artifact_validation_done\"}"
+        },
+        {
+          "start": 1790661285.5737736,
+          "end": 1790661285.5737965,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285573796533, \"elapsed_seconds\": 2.2908e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"artifact_validation_done\"}"
+        },
+        {
+          "start": 1790661285.6149924,
+          "end": 1790661285.6150117,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285615011701, \"elapsed_seconds\": 1.9242e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"artifact_validation_done\"}"
+        },
+        {
+          "start": 1790661285.833487,
+          "end": 1790661285.8335135,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285833513470, \"elapsed_seconds\": 2.6538e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"artifact_validation_done\"}"
+        },
+        {
+          "start": 1790661286.760883,
+          "end": 1790661286.7609074,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286760907456, \"elapsed_seconds\": 2.439e-05, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"artifact_validation_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "GPU / driver compatibility",
+      "segments": [
+        {
+          "start": 1790661285.5444293,
+          "end": 1790661285.5465183,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285546518437, \"elapsed_seconds\": 0.002089166, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535569\", \"stage\": \"compatibility_done\"}"
+        },
+        {
+          "start": 1790661285.573811,
+          "end": 1790661285.5757456,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285575745669, \"elapsed_seconds\": 0.001934714, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535570\", \"stage\": \"compatibility_done\"}"
+        },
+        {
+          "start": 1790661285.6150165,
+          "end": 1790661285.616771,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285616770885, \"elapsed_seconds\": 0.001754498, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535572\", \"stage\": \"compatibility_done\"}"
+        },
+        {
+          "start": 1790661285.833519,
+          "end": 1790661285.8355758,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285835575864, \"elapsed_seconds\": 0.002057044, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535576\", \"stage\": \"compatibility_done\"}"
+        },
+        {
+          "start": 1790661286.760913,
+          "end": 1790661286.7627497,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286762749733, \"elapsed_seconds\": 0.001836785, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"stage\": \"compatibility_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Find running main container",
+      "segments": [
+        {
+          "start": 1790661286.798622,
+          "end": 1790661286.950673,
+          "kind": "discovery",
+          "detail": "{\"at_unix_nano\": 1790661286950673051, \"attempts\": 4, \"container_id\": \"36de6612a3ae00be7b0fde5201e5689692cfdd3e73672dd9f55419631c414d47\", \"destination\": \"main\", \"elapsed_seconds\": 0.152051253, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"resource_version\": \"11535583\", \"runtime_seconds\": 0.008156537, \"source\": \"runtime\", \"stage\": \"container_resolution_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Restore status API update",
+      "segments": [
+        {
+          "start": 1790661285.5465658,
+          "end": 1790661285.5617354,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285561735417, \"elapsed_seconds\": 0.015169732, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"reason\": \"PodIPPending\", \"resource_version\": \"11535569\", \"stage\": \"status_apply_done\"}"
+        },
+        {
+          "start": 1790661285.5757892,
+          "end": 1790661285.5978255,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285597825627, \"elapsed_seconds\": 0.022036541, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"reason\": \"PodIPPending\", \"resource_version\": \"11535570\", \"stage\": \"status_apply_done\"}"
+        },
+        {
+          "start": 1790661285.6168172,
+          "end": 1790661285.6381874,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285638187417, \"elapsed_seconds\": 0.021370619, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"reason\": \"PodIPPending\", \"resource_version\": \"11535572\", \"stage\": \"status_apply_done\"}"
+        },
+        {
+          "start": 1790661285.8356197,
+          "end": 1790661285.8537297,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661285853729686, \"elapsed_seconds\": 0.018110059, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": false, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"reason\": \"PodIPPending\", \"resource_version\": \"11535576\", \"stage\": \"status_apply_done\"}"
+        },
+        {
+          "start": 1790661286.7772405,
+          "end": 1790661286.798587,
+          "kind": "orchestration",
+          "detail": "{\"at_unix_nano\": 1790661286798587189, \"elapsed_seconds\": 0.021346706, \"pod\": \"schwinns-vcluster/gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt\", \"pod_ip_present\": true, \"pod_uid\": \"fecb37f0-a5f9-4889-97c1-1288d4abf9a1\", \"reason\": \"RestoreInProgress\", \"resource_version\": \"11535583\", \"stage\": \"status_apply_done\"}"
+        }
+      ]
+    },
+    {
+      "label": "Container found \u2192 handler",
+      "segments": [
+        {
+          "start": 1790661286.950673,
+          "end": 1790661286.9564621,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "Event emitted \u2192 handler",
+      "segments": [
+        {
+          "start": 1790661286.9564157,
+          "end": 1790661286.9564621,
+          "kind": "orchestration",
+          "detail": "Orchestration"
+        }
+      ]
+    },
+    {
+      "label": "DGD engine Pod: main start \u2192 handler (CRI nanoseconds)",
+      "segments": [
+        {
+          "start": 1790661286.9412973,
+          "end": 1790661286.9564621,
+          "kind": "discovery",
+          "detail": "Container discovery"
+        }
+      ]
+    },
+    {
+      "label": "Main start \u2192 host status observed",
+      "segments": [
+        {
+          "start": 1790661286.9412973,
+          "end": 1790661289.967717,
+          "kind": "observation",
+          "detail": "API status observation"
+        }
+      ]
+    },
+    {
+      "label": "Main start \u2192 virtual status observed",
+      "segments": [
+        {
+          "start": 1790661286.9412973,
+          "end": 1790661289.975703,
+          "kind": "observation",
+          "detail": "API status observation"
+        }
+      ]
+    }
+  ],
+  "prewarm": [],
+  "ranks": [
+    {
+      "rank": 0,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 0",
+        "segments": [
+          {
+            "start": 1790661287.2161064,
+            "end": 1790661287.6863694,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661287.6863694,
+            "end": 1790661287.9908767,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661287.9908767,
+            "end": 1790661288.0964606,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661288.0964606,
+            "end": 1790661303.6943245,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661303.6943245,
+            "end": 1790661303.7239318,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661287.2188623,
+              "end": 1790661287.3308985,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661287.3309443,
+              "end": 1790661287.3585296,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661287.4193234,
+              "end": 1790661287.41958,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661287.420127,
+              "end": 1790661287.6743417,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661287.9916298,
+              "end": 1790661289.9606893,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661287.6743762,
+              "end": 1790661287.6863694,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661287.6863694,
+              "end": 1790661287.9908767,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661288.0964606,
+              "end": 1790661303.6943245,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661303.6943245,
+              "end": 1790661303.7239318,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 0,
+        "detailed": true,
+        "load_started_offset_s": 2.516883134841919,
+        "publication_offset_s": 19.02470850944519,
+        "daemon_started_offset_s": 2.516883134841919,
+        "transfer_complete_offset_s": 18.9951012134552,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.027585268020629883,
+        "loader_context_s": 0.2542147636413574,
+        "imports_s": 0.11203622817993164,
+        "pin_rings_s": 1.9690594673156738,
+        "allocation_import_s": 0.3045072555541992,
+        "metadata_s": 0.011993169784545898,
+        "transfer_s": 15.597863912582397,
+        "transfer_to_publication_s": 0.029607295989990234,
+        "active_start_to_first_read_s": 0.8803541660308838,
+        "dgd_to_first_read_s": 3.3972373008728027,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-0/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 1,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 1",
+        "segments": [
+          {
+            "start": 1790661287.4713695,
+            "end": 1790661288.0773528,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661288.0773528,
+            "end": 1790661288.848784,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661288.848784,
+            "end": 1790661289.0390887,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661289.0390887,
+            "end": 1790661304.7748926,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661304.7748926,
+            "end": 1790661304.7875226,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661287.474654,
+              "end": 1790661287.5524352,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661287.5524807,
+              "end": 1790661287.6476092,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661287.7005064,
+              "end": 1790661287.7009678,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661287.7014751,
+              "end": 1790661288.0677378,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661288.8497357,
+              "end": 1790661290.7405996,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661288.067795,
+              "end": 1790661288.0773528,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661288.0773528,
+              "end": 1790661288.848784,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661289.0390887,
+              "end": 1790661304.7748926,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661304.7748926,
+              "end": 1790661304.7875226,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 1,
+        "detailed": true,
+        "load_started_offset_s": 2.772146224975586,
+        "publication_offset_s": 20.08829927444458,
+        "daemon_started_offset_s": 2.772146224975586,
+        "transfer_complete_offset_s": 20.075669288635254,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.09512853622436523,
+        "loader_context_s": 0.36626267433166504,
+        "imports_s": 0.07778120040893555,
+        "pin_rings_s": 1.8908638954162598,
+        "allocation_import_s": 0.7714312076568604,
+        "metadata_s": 0.009557723999023438,
+        "transfer_s": 15.735803842544556,
+        "transfer_to_publication_s": 0.012629985809326172,
+        "active_start_to_first_read_s": 1.5677192211151123,
+        "dgd_to_first_read_s": 4.339865446090698,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-1/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 2,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 2",
+        "segments": [
+          {
+            "start": 1790661287.7150943,
+            "end": 1790661288.4884167,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661288.4884167,
+            "end": 1790661289.238873,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661289.238873,
+            "end": 1790661289.400511,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661289.400511,
+            "end": 1790661304.9450283,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661304.9450283,
+            "end": 1790661304.9493809,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661287.717957,
+              "end": 1790661287.8060644,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661287.8061147,
+              "end": 1790661287.8960402,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661287.9983726,
+              "end": 1790661287.9987183,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661287.9992814,
+              "end": 1790661288.4786594,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661289.2397537,
+              "end": 1790661290.6168516,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661288.4787188,
+              "end": 1790661288.4884167,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661288.4884167,
+              "end": 1790661289.238873,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661289.400511,
+              "end": 1790661304.9450283,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661304.9450283,
+              "end": 1790661304.9493809,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 2,
+        "detailed": true,
+        "load_started_offset_s": 3.015871047973633,
+        "publication_offset_s": 20.250157594680786,
+        "daemon_started_offset_s": 3.015871047973633,
+        "transfer_complete_offset_s": 20.245805025100708,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.08992552757263184,
+        "loader_context_s": 0.47937798500061035,
+        "imports_s": 0.08810734748840332,
+        "pin_rings_s": 1.3770978450775146,
+        "allocation_import_s": 0.7504563331604004,
+        "metadata_s": 0.009697914123535156,
+        "transfer_s": 15.544517278671265,
+        "transfer_to_publication_s": 0.004352569580078125,
+        "active_start_to_first_read_s": 1.6854166984558105,
+        "dgd_to_first_read_s": 4.701287746429443,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 3,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 3",
+        "segments": [
+          {
+            "start": 1790661287.9432132,
+            "end": 1790661288.8739686,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661288.8739686,
+            "end": 1790661289.7095094,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661289.7095094,
+            "end": 1790661289.961655,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661289.961655,
+            "end": 1790661305.5149097,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661305.5149097,
+            "end": 1790661305.5189984,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661287.9461043,
+              "end": 1790661288.0285645,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661288.0286376,
+              "end": 1790661288.0996401,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661288.1813252,
+              "end": 1790661288.181642,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661288.1820464,
+              "end": 1790661288.8228521,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661289.7102993,
+              "end": 1790661291.0194833,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661288.8228977,
+              "end": 1790661288.8739686,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661288.8739686,
+              "end": 1790661289.7095094,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661289.961655,
+              "end": 1790661305.5149097,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661305.5149097,
+              "end": 1790661305.5189984,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 3,
+        "detailed": true,
+        "load_started_offset_s": 3.243989944458008,
+        "publication_offset_s": 20.819775104522705,
+        "daemon_started_offset_s": 3.243989944458008,
+        "transfer_complete_offset_s": 20.815686464309692,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.07100248336791992,
+        "loader_context_s": 0.640805721282959,
+        "imports_s": 0.08246016502380371,
+        "pin_rings_s": 1.3091840744018555,
+        "allocation_import_s": 0.835540771484375,
+        "metadata_s": 0.0510709285736084,
+        "transfer_s": 15.553254842758179,
+        "transfer_to_publication_s": 0.004088640213012695,
+        "active_start_to_first_read_s": 2.018441677093506,
+        "dgd_to_first_read_s": 5.262431621551514,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-3/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 4,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 4",
+        "segments": [
+          {
+            "start": 1790661288.172253,
+            "end": 1790661289.0863194,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661289.0863194,
+            "end": 1790661289.8938959,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661289.8938959,
+            "end": 1790661290.4871104,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661290.4871104,
+            "end": 1790661305.1610663,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661305.1610663,
+            "end": 1790661305.1653287,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661288.1752315,
+              "end": 1790661288.275504,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661288.2755802,
+              "end": 1790661288.4166353,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661288.5152822,
+              "end": 1790661288.5156543,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661288.5161834,
+              "end": 1790661289.075258,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661289.8946164,
+              "end": 1790661291.1203322,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661289.075308,
+              "end": 1790661289.0863194,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661289.0863194,
+              "end": 1790661289.8938959,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661290.4871104,
+              "end": 1790661305.1610663,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661305.1610663,
+              "end": 1790661305.1653287,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 4,
+        "detailed": true,
+        "load_started_offset_s": 3.473029613494873,
+        "publication_offset_s": 20.466105461120605,
+        "daemon_started_offset_s": 3.473029613494873,
+        "transfer_complete_offset_s": 20.461843013763428,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.14105510711669922,
+        "loader_context_s": 0.5590746402740479,
+        "imports_s": 0.10027265548706055,
+        "pin_rings_s": 1.2257158756256104,
+        "allocation_import_s": 0.8075764179229736,
+        "metadata_s": 0.011011362075805664,
+        "transfer_s": 14.673955917358398,
+        "transfer_to_publication_s": 0.004262447357177734,
+        "active_start_to_first_read_s": 2.3148574829101562,
+        "dgd_to_first_read_s": 5.787887096405029,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-4/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 5,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 5",
+        "segments": [
+          {
+            "start": 1790661288.4910526,
+            "end": 1790661289.6095505,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661289.6095505,
+            "end": 1790661290.030271,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661290.030271,
+            "end": 1790661291.220396,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661291.220396,
+            "end": 1790661305.4847662,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661305.4847662,
+            "end": 1790661305.4896688,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661288.4947987,
+              "end": 1790661288.575539,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661288.5755877,
+              "end": 1790661288.7749608,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661288.906247,
+              "end": 1790661288.9065099,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661288.906858,
+              "end": 1790661289.5080159,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661290.031206,
+              "end": 1790661291.2053437,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661289.5080535,
+              "end": 1790661289.6095505,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661289.6095505,
+              "end": 1790661290.030271,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661291.220396,
+              "end": 1790661305.4847662,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661305.4847662,
+              "end": 1790661305.4896688,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 5,
+        "detailed": true,
+        "load_started_offset_s": 3.7918293476104736,
+        "publication_offset_s": 20.790445566177368,
+        "daemon_started_offset_s": 3.7918293476104736,
+        "transfer_complete_offset_s": 20.785542964935303,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.1993730068206787,
+        "loader_context_s": 0.6011579036712646,
+        "imports_s": 0.08074045181274414,
+        "pin_rings_s": 1.174137830734253,
+        "allocation_import_s": 0.42072057723999023,
+        "metadata_s": 0.10149693489074707,
+        "transfer_s": 14.264370203018188,
+        "transfer_to_publication_s": 0.00490260124206543,
+        "active_start_to_first_read_s": 2.7293434143066406,
+        "dgd_to_first_read_s": 6.521172761917114,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 6,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 6",
+        "segments": [
+          {
+            "start": 1790661288.758039,
+            "end": 1790661291.6753492,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661291.6753492,
+            "end": 1790661291.7685966,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661291.7685966,
+            "end": 1790661292.025235,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661292.025235,
+            "end": 1790661306.1978798,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661306.1978798,
+            "end": 1790661306.2018757,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661288.7610028,
+              "end": 1790661288.8683832,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661288.868434,
+              "end": 1790661289.0478945,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661289.1403356,
+              "end": 1790661289.1408584,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661289.1415613,
+              "end": 1790661289.852642,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661291.769766,
+              "end": 1790661293.641724,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661289.8527012,
+              "end": 1790661291.6753492,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661291.6753492,
+              "end": 1790661291.7685966,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661292.025235,
+              "end": 1790661306.1978798,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661306.1978798,
+              "end": 1790661306.2018757,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 6,
+        "detailed": true,
+        "load_started_offset_s": 4.0588157176971436,
+        "publication_offset_s": 21.502652406692505,
+        "daemon_started_offset_s": 4.0588157176971436,
+        "transfer_complete_offset_s": 21.498656511306763,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.1794605255126953,
+        "loader_context_s": 0.71108078956604,
+        "imports_s": 0.10738039016723633,
+        "pin_rings_s": 1.8719580173492432,
+        "allocation_import_s": 0.0932474136352539,
+        "metadata_s": 1.822648048400879,
+        "transfer_s": 14.172644853591919,
+        "transfer_to_publication_s": 0.0039958953857421875,
+        "active_start_to_first_read_s": 3.2671959400177,
+        "dgd_to_first_read_s": 7.326011657714844,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-6/shards/shard_0013.bin"
+        ]
+      }
+    },
+    {
+      "rank": 7,
+      "overview": {
+        "label": "DGD Pod \u2014 GMS rank 7",
+        "segments": [
+          {
+            "start": 1790661289.0383108,
+            "end": 1790661292.2663405,
+            "kind": "init",
+            "detail": "Imports / server"
+          },
+          {
+            "start": 1790661292.2663405,
+            "end": 1790661292.4746735,
+            "kind": "allocation",
+            "detail": "Allocate / map"
+          },
+          {
+            "start": 1790661292.4746735,
+            "end": 1790661293.6786609,
+            "kind": "buffers",
+            "detail": "Pinned buffers"
+          },
+          {
+            "start": 1790661293.6786609,
+            "end": 1790661306.2133508,
+            "kind": "read",
+            "detail": "Payload load window"
+          },
+          {
+            "start": 1790661306.2133508,
+            "end": 1790661306.2172842,
+            "kind": "publication",
+            "detail": "Publish / validate"
+          }
+        ]
+      },
+      "prewarm": null,
+      "detail": [
+        {
+          "label": "Python / backend imports",
+          "segments": [
+            {
+              "start": 1790661289.041462,
+              "end": 1790661289.129739,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Driver cuInit",
+          "segments": [
+            {
+              "start": 1790661289.1297877,
+              "end": 1790661289.3864594,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "GMS server setup",
+          "segments": [
+            {
+              "start": 1790661289.4907782,
+              "end": 1790661289.491462,
+              "kind": "init",
+              "detail": "Imports / server"
+            }
+          ]
+        },
+        {
+          "label": "Loader primary context",
+          "segments": [
+            {
+              "start": 1790661289.4921436,
+              "end": 1790661290.0452204,
+              "kind": "context",
+              "detail": "CUDA context"
+            }
+          ]
+        },
+        {
+          "label": "Pinned rings (all lanes)",
+          "segments": [
+            {
+              "start": 1790661292.475938,
+              "end": 1790661294.5934527,
+              "kind": "buffers",
+              "detail": "Pinned buffers"
+            }
+          ]
+        },
+        {
+          "label": "V1 metadata / session",
+          "segments": [
+            {
+              "start": 1790661290.045299,
+              "end": 1790661292.2663405,
+              "kind": "orchestration",
+              "detail": "Orchestration"
+            }
+          ]
+        },
+        {
+          "label": "Exact IDs: allocate / import",
+          "segments": [
+            {
+              "start": 1790661292.2663405,
+              "end": 1790661292.4746735,
+              "kind": "allocation",
+              "detail": "Allocate / map"
+            }
+          ]
+        },
+        {
+          "label": "First read \u2192 transfer routine done",
+          "segments": [
+            {
+              "start": 1790661293.6786609,
+              "end": 1790661306.2133508,
+              "kind": "read",
+              "detail": "Payload load window"
+            }
+          ]
+        },
+        {
+          "label": "Unmap / commit / publication",
+          "segments": [
+            {
+              "start": 1790661306.2133508,
+              "end": 1790661306.2172842,
+              "kind": "publication",
+              "detail": "Publish / validate"
+            }
+          ]
+        }
+      ],
+      "metrics": {
+        "rank": 7,
+        "detailed": true,
+        "load_started_offset_s": 4.33908748626709,
+        "publication_offset_s": 21.51806092262268,
+        "daemon_started_offset_s": 4.33908748626709,
+        "transfer_complete_offset_s": 21.514127492904663,
+        "transfer_bytes": 60129542144,
+        "prewarm_s": null,
+        "cuinit_s": 0.256671667098999,
+        "loader_context_s": 0.5530767440795898,
+        "imports_s": 0.08827710151672363,
+        "pin_rings_s": 2.1175146102905273,
+        "allocation_import_s": 0.20833301544189453,
+        "metadata_s": 2.221041440963745,
+        "transfer_s": 12.534689903259277,
+        "transfer_to_publication_s": 0.003933429718017578,
+        "active_start_to_first_read_s": 4.640350103378296,
+        "dgd_to_first_read_s": 8.979437589645386,
+        "direct_files": [
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0000.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0001.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0002.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0003.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0004.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0005.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0006.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0007.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0008.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0009.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0010.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0011.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0012.bin",
+          "/checkpoints/gms-restore-0929/default-capture-2/device-7/shards/shard_0013.bin"
+        ]
+      }
+    }
+  ],
+  "ownership": {
+    "mode": "cold",
+    "dgd": "Dynamo operator \u2192 DGD \u2192 engine Pod",
+    "gms": "DGD Pod \u2192 engine plus eight GMS rank containers",
+    "loader": "Each GMS rank container runs the V1 server and fused Python loader in one process; no separate loader containers.",
+    "restore": "Resident Snapshot/PageBroker services \u2192 CRIU/CUDA restoration of the DGD engine Pod",
+    "relationship": "In this cold control, GMS containers start in the DGD Pod after t0, then initialize and load the same PVC artifacts."
+  },
+  "notes": [
+    "Resident mode has independent owners: Dynamo operator \u2192 DGD \u2192 engine Pod; a separate node DaemonSet owns eight GMS rank containers, each fusing the V1 server and Python loader in one process. Existing Snapshot/PageBroker services restore the engine. A shared timeline does not imply GMS belongs to the DGD. The cold control instead places GMS rank containers inside the DGD Pod.",
+    "Primary cold/resident groups contain trials 1\u20133 only. Preinstalled CUDA 1/2 use resident 3/4 as a separate followup; network 1/2 use preinstalled 3 with the same new agent as a third followup. Additional controls and treatments are never pooled into the primary means.",
+    "t0 is the client DGD creation request. Ready means workload Pod readiness after coherent generation; it is not DGD Ready.",
+    "Resident GMS initialization occurs before t0. The prewarm panel shows its cost separately; payload reads and weight allocations begin only after the load trigger.",
+    "Main container start uses CRI nanoseconds where available. Kubernetes startedAt fallback has one-second precision. API-watch receipt is an observation, not the container start or agent input time.",
+    "Agent startup milestones use at_unix_nano from the node. Cross-machine clocks and remote watch receipt introduce uncertainty; durations within one process are preferable.",
+    "CRIU placement ends at Native restore order and is approximate; its measured duration is exact to the logged precision. CUDA bars are PageBroker request intervals, not just driver-call time.",
+    "Per-rank spans are not aggregate throughput: concurrent rank starts redistribute shared bandwidth. Compare earliest read across all ranks to the latest transfer-routine completion, using the same total payload bytes.",
+    "Active start means Python worker startup for a cold rank, and trigger observation for an already-online resident rank; these intentionally measure the initialization moved outside the request timer.",
+    "The payload load window begins at the first O_DIRECT read and ends when every transfer lane returns. Cold lanes close/free their pinned slots and FDs before returning; resident lanes drain copies and retain their rings. Thus 448 GiB/window is an effective load rate, not raw storage bandwidth or an exact last-GPU-copy timestamp. Allocation/import and pinned-buffer setup are distinct; setup can overlap early reads.",
+    "The final wake/inference/readiness segment includes correctness generation and readiness observation. Native GMS wake logs have only coarse wall-clock timestamps, so their durations are reported without invented exact placement."
+  ]
+}

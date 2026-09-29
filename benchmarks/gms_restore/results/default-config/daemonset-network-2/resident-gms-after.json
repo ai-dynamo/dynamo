@@ -1,0 +1,2515 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "creationTimestamp": "2026-09-29T06:16:49+00:00",
+    "generateName": "gms-v1-resident-0929-",
+    "generation": 1,
+    "labels": {
+      "app": "gms-v1-resident-0929",
+      "controller-revision-hash": "67766f756",
+      "pod-template-generation": "1",
+      "topology.kubernetes.io/zone": "nova"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:generateName": {},
+            "f:labels": {
+              ".": {},
+              "f:app": {},
+              "f:controller-revision-hash": {},
+              "f:pod-template-generation": {}
+            },
+            "f:ownerReferences": {
+              ".": {},
+              "k:{\"uid\":\"3afc5b63-e30b-4094-bf30-221b8d279355\"}": {}
+            }
+          },
+          "f:spec": {
+            "f:affinity": {
+              ".": {},
+              "f:nodeAffinity": {
+                ".": {},
+                "f:requiredDuringSchedulingIgnoredDuringExecution": {}
+              }
+            },
+            "f:containers": {
+              "k:{\"name\":\"coordinator\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"SNAPSHOT_CUDA_DEVICE_MAP\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:failureThreshold": {},
+                  "f:httpGet": {
+                    ".": {},
+                    "f:path": {},
+                    "f:port": {},
+                    "f:scheme": {}
+                  },
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-0\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-1\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-2\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-3\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-4\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-5\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-6\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"gms-7\"}": {
+                ".": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"DYN_GMS_USE_V1\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"GMS_SOCKET_DIR\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"PYTHONPATH\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:readinessProbe": {
+                  ".": {},
+                  "f:exec": {
+                    ".": {},
+                    "f:command": {}
+                  },
+                  "f:failureThreshold": {},
+                  "f:periodSeconds": {},
+                  "f:successThreshold": {},
+                  "f:timeoutSeconds": {}
+                },
+                "f:resources": {
+                  ".": {},
+                  "f:claims": {
+                    ".": {},
+                    "k:{\"name\":\"gpus\"}": {
+                      ".": {},
+                      "f:name": {},
+                      "f:request": {}
+                    }
+                  },
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-app\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              }
+            },
+            "f:dnsPolicy": {},
+            "f:enableServiceLinks": {},
+            "f:imagePullSecrets": {
+              ".": {},
+              "k:{\"name\":\"acr-token-secret\"}": {},
+              "k:{\"name\":\"nvcr-secret\"}": {}
+            },
+            "f:nodeSelector": {},
+            "f:resourceClaims": {
+              ".": {},
+              "k:{\"name\":\"gpus\"}": {
+                ".": {},
+                "f:name": {},
+                "f:resourceClaimName": {}
+              }
+            },
+            "f:restartPolicy": {},
+            "f:runtimeClassName": {},
+            "f:schedulerName": {},
+            "f:securityContext": {
+              ".": {},
+              "f:seccompProfile": {
+                ".": {},
+                "f:localhostProfile": {},
+                "f:type": {}
+              }
+            },
+            "f:terminationGracePeriodSeconds": {},
+            "f:tolerations": {},
+            "f:volumes": {
+              ".": {},
+              "k:{\"name\":\"app\"}": {
+                ".": {},
+                "f:configMap": {
+                  ".": {},
+                  "f:defaultMode": {},
+                  "f:name": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"artifacts\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"gms\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              }
+            }
+          }
+        },
+        "manager": "kube-controller-manager",
+        "operation": "Update",
+        "time": "2026-09-29T06:16:49+00:00"
+      },
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            "f:conditions": {
+              "k:{\"type\":\"ContainersReady\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"Initialized\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodReadyToStartContainers\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodScheduled\"}": {
+                "f:observedGeneration": {}
+              },
+              "k:{\"type\":\"Ready\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              }
+            },
+            "f:containerStatuses": {},
+            "f:hostIP": {},
+            "f:hostIPs": {},
+            "f:observedGeneration": {},
+            "f:phase": {},
+            "f:podIP": {},
+            "f:podIPs": {
+              ".": {},
+              "k:{\"ip\":\"10.0.17.160\"}": {
+                ".": {},
+                "f:ip": {}
+              }
+            },
+            "f:startTime": {}
+          }
+        },
+        "manager": "vcluster",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T06:16:55+00:00"
+      }
+    ],
+    "name": "gms-v1-resident-0929-2lzxz",
+    "namespace": "schwinns-vcluster",
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "DaemonSet",
+        "name": "gms-v1-resident-0929",
+        "uid": "3afc5b63-e30b-4094-bf30-221b8d279355"
+      }
+    ],
+    "resourceVersion": "11539999",
+    "uid": "2deb982a-604c-4253-a640-f3991be53500"
+  },
+  "spec": {
+    "affinity": {
+      "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+          "nodeSelectorTerms": [
+            {
+              "matchFields": [
+                {
+                  "key": "metadata.name",
+                  "operator": "In",
+                  "values": [
+                    "cluster-0967a26d-pool-14bee067-prctr-s2877"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "containers": [
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "0",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-0",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-0.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-0"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "1",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-1",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-1.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-1"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "2",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-02ff0cc1-647f-dee7-8365-921738e945a6"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-2",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-2.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-2"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "3",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-3",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-3.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-3"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "4",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-4",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-4.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-4"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "5",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-4fba7684-5a96-6280-91ff-b41f7484564c"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-5",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-5.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-5"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "6",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-6",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-6.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-6"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_server.py",
+          "--rank",
+          "7",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128",
+          "--numa",
+          "--artifact-root",
+          "/checkpoints/gms-restore-0929/default-capture-2",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--expected-uuid",
+          "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "gms-7",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "test",
+              "-f",
+              "/gms/online-7.json"
+            ]
+          },
+          "failureThreshold": 3,
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-7"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "command": [
+          "python3",
+          "-u",
+          "/snapshot-app/resident_coordinator.py",
+          "--capture-id",
+          "gms-v1-glm-default-0929",
+          "--generation",
+          "ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d",
+          "--workers",
+          "16",
+          "--chunk-mib",
+          "128"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "SNAPSHOT_CUDA_DEVICE_MAP",
+            "value": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f=GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f,GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51=GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51,GPU-02ff0cc1-647f-dee7-8365-921738e945a6=GPU-02ff0cc1-647f-dee7-8365-921738e945a6,GPU-0d5ad102-eb8f-922a-173e-e91033320e0f=GPU-0d5ad102-eb8f-922a-173e-e91033320e0f,GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa=GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa,GPU-4fba7684-5a96-6280-91ff-b41f7484564c=GPU-4fba7684-5a96-6280-91ff-b41f7484564c,GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683=GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683,GPU-32a6c51c-d07d-7513-86b5-813b64e452d2=GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "coordinator",
+        "readinessProbe": {
+          "failureThreshold": 3,
+          "httpGet": {
+            "path": "/healthz",
+            "port": 18081,
+            "scheme": "HTTP"
+          },
+          "periodSeconds": 1,
+          "successThreshold": 1,
+          "timeoutSeconds": 1
+        },
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": true,
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      },
+      {
+        "name": "acr-token-secret"
+      }
+    ],
+    "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+    "nodeSelector": {
+      "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "resourceClaims": [
+      {
+        "name": "gpus",
+        "resourceClaimName": "gms-v1-glm-source-0928"
+      }
+    ],
+    "restartPolicy": "Always",
+    "runtimeClassName": "nvidia",
+    "schedulerName": "default-scheduler",
+    "securityContext": {
+      "seccompProfile": {
+        "localhostProfile": "profiles/block-iouring.json",
+        "type": "Localhost"
+      }
+    },
+    "serviceAccount": "default",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 5,
+    "tolerations": [
+      {
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/disk-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/memory-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/pid-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/unschedulable",
+        "operator": "Exists"
+      }
+    ],
+    "volumes": [
+      {
+        "configMap": {
+          "defaultMode": 420,
+          "name": "gms-v1-resident-0929-ff5cee8b"
+        },
+        "name": "app"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-daemonset-0929/ff5cee8b-c8aa-48cf-a4a1-6997c8a1758d/gms",
+          "type": "DirectoryOrCreate"
+        },
+        "name": "gms"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/gms-pvc-nfs",
+          "type": "Directory"
+        },
+        "name": "artifacts"
+      },
+      {
+        "name": "kube-api-access-qh6wl",
+        "projected": {
+          "defaultMode": 420,
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "expirationSeconds": 3607,
+                "path": "token"
+              }
+            },
+            {
+              "configMap": {
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "name": "kube-root-ca.crt"
+              }
+            },
+            {
+              "downwardAPI": {
+                "items": [
+                  {
+                    "fieldRef": {
+                      "apiVersion": "v1",
+                      "fieldPath": "metadata.namespace"
+                    },
+                    "path": "namespace"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T06:16:53+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T06:16:49+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T06:16:55+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T06:16:55+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "ContainersReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T06:16:49+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "allocatedResources": {
+          "cpu": "100m",
+          "memory": "128Mi"
+        },
+        "containerID": "containerd://d9c22961aca52645b84d3c66fe425c8cb196b313f378916f3102a5e4c86c356e",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "coordinator",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:52+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://a9984d35461b292de2d600deed1e0ba96dd633af0dffdffdf2b831c10f626b87",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-0",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-0"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:50+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://69271be6ed24d4bcfdddb4d64c28f8d825beab6050c36099791fcf61d5ea1dd6",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-1",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-1"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:51+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://dc21e626a8e9b7e09ffbe2c62980fb9980d577c32c2b2f6a45d536276dd9d093",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-2",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-2"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:51+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://6560195e5f7d4c03a8d02367cb57a6fded7c58b026661aabfde5ce0a0501817b",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-3",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-3"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:51+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://8f7b4457e0998102bac1a9e157a9746455084c64b3f44cadb91298e87e90f193",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-4",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-4"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:51+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://54f8d13ef930b39e610b151635effdde24348597d544089df54370bfd52ce1ee",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-5",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-5"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:52+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://1c50527a36c3c9341fa1674e07346ed1eefae4988af2c0cc86207dcb9322cb65",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-6",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-6"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:52+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "1",
+          "memory": "2Gi"
+        },
+        "containerID": "containerd://1f4bbe1c8b9f3f0eb6dfe7ba96f2e767dd736240a5f2dd02d768bce7d12c3f2b",
+        "image": "sha256:e5d19ec8acf7eab826dd5021965dc957e00929dba8705e6d279ca15efa4fd7d3",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "lastState": {},
+        "name": "gms-7",
+        "ready": true,
+        "resources": {
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-7"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "16Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T06:16:52+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-app",
+            "name": "app",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "gms"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-qh6wl",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.0.161",
+    "hostIPs": [
+      {
+        "ip": "192.168.0.161"
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Running",
+    "podIP": "10.0.17.160",
+    "podIPs": [
+      {
+        "ip": "10.0.17.160"
+      }
+    ],
+    "qosClass": "Burstable",
+    "startTime": "2026-09-29T06:16:49+00:00"
+  }
+}

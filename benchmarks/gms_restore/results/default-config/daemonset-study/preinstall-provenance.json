@@ -1,0 +1,56 @@
+{
+  "source_pod_name": "gms-v1-glm-source-0928",
+  "source_installer": {
+    "name": "snapshot-cuda-install",
+    "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+    "command": [
+      "/bin/sh",
+      "-c"
+    ],
+    "args": [
+      "cp /usr/local/sbin/cuda-checkpoint /usr/local/lib/snapshot/libcuinterpose.so /snapshot-cuda/ && cp /checkpoints/gms-restore-0928/libcuinterpose_core.so /snapshot-cuda/"
+    ],
+    "resources": {},
+    "volumeMounts": [
+      {
+        "name": "snapshot-cuda",
+        "mountPath": "/snapshot-cuda"
+      },
+      {
+        "name": "artifacts",
+        "mountPath": "/checkpoints",
+        "readOnly": true
+      }
+    ],
+    "imagePullPolicy": "IfNotPresent",
+    "securityContext": {
+      "capabilities": {
+        "drop": [
+          "ALL"
+        ]
+      },
+      "readOnlyRootFilesystem": true,
+      "allowPrivilegeEscalation": false,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    }
+  },
+  "source_installer_sha256": "8380292c7b9e4139b401f130c572f8c343235d41cb3ac65eabd0459da6eb36ba",
+  "source_artifacts_volume": {
+    "name": "artifacts",
+    "persistentVolumeClaim": {
+      "claimName": "snapshot-pvc"
+    }
+  },
+  "bundle_files": [
+    "cuda-checkpoint",
+    "libcuinterpose.so",
+    "libcuinterpose_core.so"
+  ],
+  "bundle_host_path": "/var/lib/schwinns-gms-daemonset-0929/cuda-bundle-e021a725",
+  "node_name": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+  "checksum_file": "/snapshot-cuda/SHA256SUMS",
+  "limitation": "PVC source bytes must be compared to the qualified bundle after staging; the installer image digest alone does not pin the PVC shim.",
+  "source_manifest_sha256": "4fdaaa22a23da2749d09f6bb1f45f9c5be3a2e4ec87084ce92b5f46d4141ef27"
+}

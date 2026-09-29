@@ -1,0 +1,424 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "annotations": {
+      "nvidia.com/gms-prototype-cuda-installer-sha256": "8380292c7b9e4139b401f130c572f8c343235d41cb3ac65eabd0459da6eb36ba"
+    },
+    "creationTimestamp": "2026-09-29T05:57:54+00:00",
+    "generation": 1,
+    "labels": {
+      "experiment": "gms-v1-cuda-preinstall-0929",
+      "topology.kubernetes.io/zone": "nova"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:annotations": {
+              ".": {},
+              "f:nvidia.com/gms-prototype-cuda-installer-sha256": {}
+            },
+            "f:labels": {
+              ".": {},
+              "f:experiment": {}
+            }
+          },
+          "f:spec": {
+            "f:containers": {
+              "k:{\"name\":\"snapshot-cuda-install\"}": {
+                ".": {},
+                "f:args": {},
+                "f:command": {},
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:resources": {},
+                "f:securityContext": {
+                  ".": {},
+                  "f:allowPrivilegeEscalation": {},
+                  "f:capabilities": {
+                    ".": {},
+                    "f:drop": {}
+                  },
+                  "f:readOnlyRootFilesystem": {},
+                  "f:seccompProfile": {
+                    ".": {},
+                    "f:type": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-cuda\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  }
+                }
+              }
+            },
+            "f:dnsPolicy": {},
+            "f:enableServiceLinks": {},
+            "f:imagePullSecrets": {
+              ".": {},
+              "k:{\"name\":\"acr-token-secret\"}": {},
+              "k:{\"name\":\"nvcr-secret\"}": {}
+            },
+            "f:nodeSelector": {},
+            "f:restartPolicy": {},
+            "f:runtimeClassName": {},
+            "f:schedulerName": {},
+            "f:securityContext": {
+              ".": {},
+              "f:seccompProfile": {
+                ".": {},
+                "f:localhostProfile": {},
+                "f:type": {}
+              }
+            },
+            "f:terminationGracePeriodSeconds": {},
+            "f:tolerations": {},
+            "f:volumes": {
+              ".": {},
+              "k:{\"name\":\"artifacts\"}": {
+                ".": {},
+                "f:name": {},
+                "f:persistentVolumeClaim": {
+                  ".": {},
+                  "f:claimName": {}
+                }
+              },
+              "k:{\"name\":\"snapshot-cuda\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              }
+            }
+          }
+        },
+        "manager": "OpenAPI-Generator",
+        "operation": "Update",
+        "time": "2026-09-29T05:57:54+00:00"
+      },
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            "f:conditions": {
+              "k:{\"type\":\"ContainersReady\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:reason": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"Initialized\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:reason": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodReadyToStartContainers\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodScheduled\"}": {
+                "f:observedGeneration": {}
+              },
+              "k:{\"type\":\"Ready\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:reason": {},
+                "f:status": {},
+                "f:type": {}
+              }
+            },
+            "f:containerStatuses": {},
+            "f:hostIP": {},
+            "f:hostIPs": {},
+            "f:observedGeneration": {},
+            "f:phase": {},
+            "f:podIP": {},
+            "f:podIPs": {
+              ".": {},
+              "k:{\"ip\":\"10.0.17.186\"}": {
+                ".": {},
+                "f:ip": {}
+              }
+            },
+            "f:startTime": {}
+          }
+        },
+        "manager": "vcluster",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T05:57:56+00:00"
+      }
+    ],
+    "name": "gms-v1-cuda-preinstall-0929",
+    "namespace": "schwinns-vcluster",
+    "resourceVersion": "11536217",
+    "uid": "ba498cee-e865-4b64-a0f4-1223e6ccc9d5"
+  },
+  "spec": {
+    "containers": [
+      {
+        "args": [
+          "cp /usr/local/sbin/cuda-checkpoint /usr/local/lib/snapshot/libcuinterpose.so /snapshot-cuda/ && cp /checkpoints/gms-restore-0928/libcuinterpose_core.so /snapshot-cuda/ && cd /snapshot-cuda && sha256sum cuda-checkpoint libcuinterpose.so libcuinterpose_core.so > SHA256SUMS && cat SHA256SUMS"
+        ],
+        "command": [
+          "/bin/sh",
+          "-c"
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "snapshot-cuda-install",
+        "resources": {},
+        "securityContext": {
+          "allowPrivilegeEscalation": false,
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-cuda",
+            "name": "snapshot-cuda"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-crfp9",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": true,
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      },
+      {
+        "name": "acr-token-secret"
+      }
+    ],
+    "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+    "nodeSelector": {
+      "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "restartPolicy": "Never",
+    "runtimeClassName": "nvidia",
+    "schedulerName": "default-scheduler",
+    "securityContext": {
+      "seccompProfile": {
+        "localhostProfile": "profiles/block-iouring.json",
+        "type": "Localhost"
+      }
+    },
+    "serviceAccount": "default",
+    "serviceAccountName": "default",
+    "terminationGracePeriodSeconds": 1,
+    "tolerations": [
+      {
+        "operator": "Exists"
+      }
+    ],
+    "volumes": [
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-daemonset-0929/cuda-bundle-e021a725",
+          "type": "DirectoryOrCreate"
+        },
+        "name": "snapshot-cuda"
+      },
+      {
+        "name": "artifacts",
+        "persistentVolumeClaim": {
+          "claimName": "snapshot-pvc"
+        }
+      },
+      {
+        "name": "kube-api-access-crfp9",
+        "projected": {
+          "defaultMode": 420,
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "expirationSeconds": 3607,
+                "path": "token"
+              }
+            },
+            {
+              "configMap": {
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "name": "kube-root-ca.crt"
+              }
+            },
+            {
+              "downwardAPI": {
+                "items": [
+                  {
+                    "fieldRef": {
+                      "apiVersion": "v1",
+                      "fieldPath": "metadata.namespace"
+                    },
+                    "path": "namespace"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T05:57:56+00:00",
+        "observedGeneration": 1,
+        "status": "False",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T05:57:54+00:00",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T05:57:54+00:00",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T05:57:54+00:00",
+        "observedGeneration": 1,
+        "reason": "PodCompleted",
+        "status": "False",
+        "type": "ContainersReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T05:57:54+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "containerID": "containerd://5088d24f946413dc9b065286e8510657754fb76159f075819bdcd7531409146b",
+        "image": "sha256:a444484af16081419ec4877a7e94235b254c5140332b676ffd9c3325bd028fca",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "lastState": {},
+        "name": "snapshot-cuda-install",
+        "ready": false,
+        "resources": {},
+        "restartCount": 0,
+        "started": false,
+        "state": {
+          "terminated": {
+            "containerID": "containerd://5088d24f946413dc9b065286e8510657754fb76159f075819bdcd7531409146b",
+            "exitCode": 0,
+            "finishedAt": "2026-09-29T05:57:55+00:00",
+            "reason": "Completed",
+            "startedAt": "2026-09-29T05:57:55+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/snapshot-cuda",
+            "name": "snapshot-cuda"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "artifacts",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-crfp9",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.0.161",
+    "hostIPs": [
+      {
+        "ip": "192.168.0.161"
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Succeeded",
+    "podIP": "10.0.17.186",
+    "podIPs": [
+      {
+        "ip": "10.0.17.186"
+      }
+    ],
+    "qosClass": "BestEffort",
+    "startTime": "2026-09-29T05:57:54+00:00"
+  }
+}

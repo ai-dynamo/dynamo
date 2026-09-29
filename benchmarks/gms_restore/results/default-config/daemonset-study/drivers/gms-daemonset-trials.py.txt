@@ -1,0 +1,120 @@
+import sys,json,time,subprocess,os,threading
+from pathlib import Path
+from kubernetes import client,config,watch
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-daemonset-restore-20260929');out=root/'benchmarks/gms_restore/results/default-config';meta=out/'daemonset-study';prep=json.loads((meta/'prepared.json').read_text());agent=prep['agent'];host_agent=prep['host_agent'];dgdname='gms-v1-glm-dgd-0929'
+uid=json.loads((out/'snapshot-content.json').read_text())['metadata']['uid']
+os.environ['GMS_VCLUSTER_KUBECONFIG']=str(c.ROOT/'qualification-private/kubeconfig.json')
+host_api=client.CoreV1Api(config.new_client_from_config(context=c.HOST))
+def observe(api,dest,w):
+ with dest.open('w') as log:
+  try:
+   for e in w.stream(api.list_namespaced_pod,c.NS,timeout_seconds=150):
+    p=e['object'];status=p.status
+    if not p.metadata.name.startswith(dgdname):continue
+    if 'main' not in {x.name for x in p.spec.containers}:continue
+    log.write(json.dumps({'observed_epoch':time.time(),'name':p.metadata.name,'type':e['type'],'uid':p.metadata.uid,'rv':p.metadata.resource_version,'created':p.metadata.creation_timestamp.isoformat(),'phase':status.phase,'node':p.spec.node_name,'ip':status.pod_ip,'containers':c.api.sanitize_for_serialization(status.container_statuses),'init':c.api.sanitize_for_serialization(status.init_container_statuses)})+'\n');log.flush()
+  except Exception as e:log.write(json.dumps({'watch_error':str(e),'epoch':time.time()})+'\n')
+def observe_dgd(dest,w):
+ with dest.open('w') as log:
+  try:
+   for e in w.stream(c.custom.list_namespaced_custom_object,'nvidia.com','v1beta1',c.NS,'dynamographdeployments',field_selector='metadata.name='+dgdname,timeout_seconds=150):
+    obj=e['object'];log.write(json.dumps({'observed_epoch':time.time(),'type':e['type'],'metadata':{k:obj['metadata'].get(k) for k in ['name','uid','creationTimestamp','generation','resourceVersion']},'status':obj.get('status')})+'\n');log.flush()
+  except Exception as e:log.write(json.dumps({'watch_error':str(e),'epoch':time.time()})+'\n')
+def cpu(container,pod):
+ return subprocess.check_output(['kubectl','-n',c.NS,'exec',pod,'-c',container,'--','sh','-c','p=/sys/fs/cgroup; rel=$(sed -n "s/^0:://p" /proc/self/cgroup); if [ -f "$p$rel/cpu.max" ]; then p="$p$rel"; fi; date -u +%s.%N; echo "$p"; cat "$p/cpu.max" "$p/cpu.weight" "$p/cpu.stat" "$p/cpu.pressure"'],text=True)
+def cleanup_trial():
+ try:c.custom.delete_namespaced_custom_object('nvidia.com','v1beta1',c.NS,'dynamographdeployments',dgdname)
+ except client.ApiException as e:
+  if e.status!=404:raise
+ for _ in range(180):
+  try:c.custom.get_namespaced_custom_object('nvidia.com','v1beta1',c.NS,'dynamographdeployments',dgdname);exists=True
+  except client.ApiException as e:
+   if e.status!=404:raise
+   exists=False
+  if not exists and not any(p.metadata.name.startswith(dgdname) for p in c.core.list_namespaced_pod(c.NS).items):return
+  time.sleep(.5)
+ raise TimeoutError('DGD/pod deletion')
+
+import uuid,urllib.request
+sys.path.insert(0,str(root/'benchmarks/gms_restore'))
+from resident_daemonset import render
+apps=client.AppsV1Api()
+def make_resident(path):
+ generation=str(uuid.uuid4()); hostpath='/var/lib/schwinns-gms-daemonset-0929/'+generation+'/gms'
+ source=json.loads((out/'source-manifest-nccl.json').read_text()); capture=json.loads((out/'capture.json').read_text())
+ claim=c.custom.get_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims','gms-v1-glm-source-0928')
+ slices=json.loads(subprocess.check_output(['kubectl','get','resourceslices','-o','json']))
+ cm,ds=render(root/'benchmarks/gms_restore',source,capture,claim,slices,generation,hostpath)
+ (path/'resident-manifest.json').write_text(json.dumps({'items':[cm,ds]},indent=2))
+ c.core.create_namespaced_config_map(c.NS,cm); apps.create_namespaced_daemon_set(c.NS,ds)
+ for _ in range(180):
+  pods=c.core.list_namespaced_pod(c.NS,label_selector='app='+ds['metadata']['name']).items
+  if len(pods)==1 and any(x.type=='Ready' and x.status=='True' for x in pods[0].status.conditions or []):break
+  time.sleep(1)
+ else:raise TimeoutError('resident DS readiness')
+ pod=pods[0].metadata.name; host=c.host_name(pod)
+ pf=subprocess.Popen(['kubectl','--context='+c.HOST,'-n',c.NS,'port-forward','pod/'+host,'28445:18081'],stdout=(path/'coordinator-port-forward.txt').open('w'),stderr=subprocess.STDOUT)
+ for _ in range(60):
+  try:
+   with urllib.request.urlopen('http://127.0.0.1:28445/ready',timeout=2) as response:ready=json.load(response)
+   assert ready['ready'];break
+  except Exception:time.sleep(.5)
+ else:raise TimeoutError('resident coordinator ready')
+ return {'generation':generation,'hostpath':hostpath,'pod':pod,'host':host,'pf':pf,'cm':cm['metadata']['name']}
+def delete_resident(state):
+ if state:state['pf'].terminate();state['pf'].wait(timeout=5)
+ try:apps.delete_namespaced_daemon_set('gms-v1-resident-0929',c.NS,propagation_policy='Foreground')
+ except client.ApiException as e:
+  if e.status!=404:raise
+ for _ in range(90):
+  if not c.core.list_namespaced_pod(c.NS,label_selector='app=gms-v1-resident-0929').items:break
+  time.sleep(.5)
+ else:raise TimeoutError('resident deletion')
+ if state:c.core.delete_namespaced_config_map(state['cm'],c.NS)
+def collect_cri(path,host_name):
+ hp=host_api.read_namespaced_pod(host_name,c.NS)
+ records=[]
+ for status in (hp.status.container_statuses or [])+(hp.status.init_container_statuses or []):
+  if not status.container_id:continue
+  cid=status.container_id.split('://')[-1]
+  code="import json,subprocess; x=json.loads(subprocess.check_output(['crictl','--runtime-endpoint','unix:///run/containerd/containerd.sock','inspect','"+cid+"'])); s=x['status']; print(json.dumps({k:s.get(k) for k in ['id','metadata','state','createdAt','startedAt','finishedAt','exitCode','reason']}))"
+  data=json.loads(subprocess.check_output(['kubectl','-n',c.NS,'exec',host_agent,'-c','agent','--','nsenter','-t','1','-m','-n','-r','-w','--','python3','-c',code],text=True))
+  data['name']=status.name; records.append(data)
+ (path/'cri-starts.json').write_text(json.dumps(records,indent=2))
+
+for token in sys.argv[1:]:
+ label,index=token.split(':');case=f'daemonset-{label}-{index}';path=out/case;path.mkdir(exist_ok=False)
+ ap=c.core.read_namespaced_pod(agent,c.NS);assert all(s.ready for s in ap.status.container_statuses)
+ (path/'resident-agent-before.json').write_text(json.dumps(c.api.sanitize_for_serialization(ap),indent=2))
+ resident=None
+ if label=='resident':resident=make_resident(path)
+ for container in ['agent','pagebroker']:(path/f'cpu-{container}-before.txt').write_text(cpu(container,host_agent))
+ code="import os,glob,json; files=glob.glob('/var/lib/snapshot-restore-perf-nfs/artifacts/"+uid+"/containers/main/pages-*.img')+glob.glob('/var/lib/snapshot-restore-perf-nfs/artifacts/"+uid+"/containers/main/ghost-file-*.img'); [(lambda fd:(os.posix_fadvise(fd,0,0,os.POSIX_FADV_DONTNEED),os.close(fd)))(os.open(f,os.O_RDONLY)) for f in files]; print(json.dumps({'advised_cpu_files':len(files),'content_uid':'"+uid+"'})); assert files"
+ (path/'cpu-eviction.json').write_text(subprocess.check_output(['kubectl','-n',c.NS,'exec',host_agent,'-c','agent','--','nsenter','-t','1','-m','-n','-r','-w','--','python3','-c',code],text=True))
+ observers=[]
+ for api,kind in [(c.core,'virtual'),(host_api,'host')]:
+  w=watch.Watch();thread=threading.Thread(target=observe,args=(api,path/f'{kind}-watch.jsonl',w),daemon=True);thread.start();observers.append((w,thread))
+ w=watch.Watch();thread=threading.Thread(target=observe_dgd,args=(path/'dgd-watch.jsonl',w),daemon=True);thread.start();observers.append((w,thread))
+ command=[sys.executable,str(root/'benchmarks/gms_restore/run_glm_restore.py'),'--case',case,'--capture-dir',str(out),'--backend','fused','--workers','16','--chunk-mib','128','--gms-cpu-request','1','--gms-cpu-limit','8','--qualified-pvc-mount','--isolated-pvc-transport','--storage','pvc','--same-claim','--fast-gate','--overlap','--numa','--early-trigger','--dgd','--runtime-discovery']
+ if resident:command+=['--resident-gms','--resident-gms-pod',resident['pod'],'--resident-gms-host-path',resident['hostpath'],'--resident-gms-url','http://127.0.0.1:28445','--resident-gms-generation',resident['generation']]
+ try:
+  with (path/'harness.log').open('w') as log:subprocess.run(command,check=True,stdout=log,stderr=subprocess.STDOUT)
+  t=json.loads((path/'timing.json').read_text());t['agent_revision']=prep['agent_revision'];t['resident_services_ready_verified_epoch']=prep['ready_verified_epoch'];(path/'timing.json').write_text(json.dumps(t,indent=2))
+  podname=t['pod_name'];host_name=c.host_name(podname)
+  collect_cri(path,host_name)
+  for container in ['agent','pagebroker']:
+   (path/f'{container}.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',host_agent,'-c',container],text=True))
+   (path/f'cpu-{container}-after.txt').write_text(cpu(container,host_agent))
+  (path/'main.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',host_name,'-c','main'],text=True))
+  (path/'cpu-main-after.txt').write_text(cpu('main',host_name))
+  if resident:(path/'coordinator.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',resident['host'],'-c','coordinator'],text=True))
+  from datetime import datetime,timezone
+  since=datetime.fromtimestamp(t['create_epoch']-1,timezone.utc).isoformat().replace('+00:00','Z')
+  op=next(p for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith('dynamo-platform-dynamo-operator-controller-manager-') and not p.metadata.deletion_timestamp)
+  (path/'dynamo-operator.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',c.host_name(op.metadata.name),'-c','manager','--since-time='+since],text=True))
+  print(case,t['dgd_create_to_ready_s'],flush=True)
+ finally:
+  cleanup_trial()
+  for w,thread in observers:w.stop();thread.join(timeout=3)
+  if resident:delete_resident(resident)

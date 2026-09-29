@@ -161,22 +161,203 @@ index c51fa755..4acce3f3 100644
              phase: Phase::Active,
              arena: None,
 diff --git a/agent/internal/controller/controller.go b/agent/internal/controller/controller.go
-index 3ffb5e8e..9bc66963 100644
+index 3ffb5e8e..f73b7756 100644
 --- a/agent/internal/controller/controller.go
 +++ b/agent/internal/controller/controller.go
-@@ -157,6 +157,9 @@ const (
+@@ -103,6 +103,9 @@ type restoreTarget struct {
+ type restorePlan struct {
+ 	artifact *restoreArtifact
+ 	mappings []podcontract.ContainerMapping
++	// A CRI-derived IP stays local to this restore, never in informer state.
++	targetPodIP             string
++	runtimeNetworkDiscovery bool
+ 	// Read once in preflight, so both gates reach the same answer.
+ 	skipCompatCheck bool
+ }
+@@ -138,6 +141,7 @@ type restoreOperation struct {
+ 	skipCompatCheck bool
+ 	destination     string
+ 	containerID     string
++	targetPodIP     string
+ 	startedAt       time.Time
+ 	log             logr.Logger
+ }
+@@ -157,6 +161,10 @@ const (
  	restorePodFinalizer                = "snapshot/restore-protection"
  	snapshotEventComponent             = "snapshot"
  	restoreSafetyRequeueInterval       = 30 * time.Second
 +	// Opt-in keeps the existing discovery path available as a same-agent
 +	// control while measuring the experimental virtual-cluster runtime lookup.
-+	restoreRuntimeDiscoveryAnnotation = "nvidia.com/gms-prototype-runtime-discovery"
++	restoreRuntimeDiscoveryAnnotation        = "nvidia.com/gms-prototype-runtime-discovery"
++	restoreRuntimeNetworkDiscoveryAnnotation = "nvidia.com/gms-prototype-runtime-network-discovery"
  
  	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
  	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
-@@ -866,12 +869,37 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
+@@ -379,6 +387,7 @@ func (w *NodeController) enqueueRestorePod(obj interface{}) {
+ 	if !ok || !w.restorePodRelevant(pod) {
+ 		return
+ 	}
++	w.traceRestoreStage(pod, "queue_add", time.Time{}, nil, "phase", pod.Status.Phase, "deleting", pod.DeletionTimestamp != nil)
+ 	w.restoreQueue.Add(client.ObjectKeyFromObject(pod))
+ }
+ 
+@@ -414,6 +423,7 @@ func (w *NodeController) runRestoreQueue(ctx context.Context) {
+ }
+ 
+ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client.ObjectKey) {
++	processStarted := time.Now()
+ 	requeue := false
+ 	defer func() {
+ 		w.restoreQueue.Done(key)
+@@ -432,6 +442,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
+ 		return
+ 	}
+ 	pod = pod.DeepCopy()
++	w.traceRestoreStage(pod, "queue_process", processStarted, nil, "phase", pod.Status.Phase, "deleting", pod.DeletionTimestamp != nil)
+ 	if w.skipRequestedAfterRefusal(pod) {
+ 		// The skip request is the way back for a pod the gates turned down, so
+ 		// it has to clear the in-process marker as well as the condition below.
+@@ -451,6 +462,7 @@ func (w *NodeController) processRestoreQueueItem(ctx context.Context, key client
+ 		requeue = w.failRestorePod(ctx, pod, fmt.Errorf("Pod %s/%s is not eligible for restore in phase %s; expected Pending or Running", pod.Namespace, pod.Name, pod.Status.Phase))
+ 		return
+ 	}
++	w.traceRestoreStage(pod, "restore_eligible", processStarted, nil)
+ 	requeue = w.reconcileRestorePod(ctx, pod)
+ }
+ 
+@@ -486,11 +498,18 @@ func (w *NodeController) handleTerminalRestorePod(ctx context.Context, pod *core
+ 
+ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Pod) bool {
+ 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
++	preflightStarted := time.Now()
++	w.traceRestoreStage(pod, "preflight_start", time.Time{}, nil)
+ 	plan, err := w.preflightRestore(ctx, pod)
++	w.traceRestoreStage(pod, "preflight_done", preflightStarted, err)
+ 	if err != nil {
+ 		return w.handleRestorePreflightError(ctx, pod, err)
+ 	}
+-	if err := w.addRestoreFinalizer(ctx, pod); err != nil {
++	finalizerStarted := time.Now()
++	w.traceRestoreStage(pod, "finalizer_start", time.Time{}, nil, "already_present", hasFinalizer(pod, restorePodFinalizer))
++	err = w.addRestoreFinalizer(ctx, pod)
++	w.traceRestoreStage(pod, "finalizer_done", finalizerStarted, err)
++	if err != nil {
+ 		w.log.Error(err, "Failed to protect restore Pod", "pod", podKey)
+ 		emitPodEvent(ctx, w.clientset, w.log, pod, snapshotEventComponent, corev1.EventTypeWarning, restoreFinalizerUpdateFailedReason, err.Error())
+ 		return true
+@@ -502,38 +521,62 @@ func (w *NodeController) reconcileRestorePod(ctx context.Context, pod *corev1.Po
+ // bound PodSnapshotContent, and the node-local artifact. Restore execution is
+ // entered only when this method returns a complete artifact.
+ func (w *NodeController) preflightRestore(ctx context.Context, pod *corev1.Pod) (*restorePlan, error) {
++	stageStarted := time.Now()
++	w.traceRestoreStage(pod, "snapshot_get_start", time.Time{}, nil)
+ 	snapshot, err := w.getPodSnapshotFromPod(ctx, pod)
++	w.traceRestoreStage(pod, "snapshot_get_done", stageStarted, err)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	if err := validatePodSnapshotForRestore(snapshot); err != nil {
+ 		return nil, err
+ 	}
++	stageStarted = time.Now()
++	w.traceRestoreStage(pod, "content_get_start", time.Time{}, nil)
+ 	content, err := w.getPodSnapshotContentFromSnapshot(ctx, pod, snapshot)
++	w.traceRestoreStage(pod, "content_get_done", stageStarted, err)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	if err := validatePodSnapshotContentForRestore(content); err != nil {
+ 		return nil, err
+ 	}
++	stageStarted = time.Now()
++	w.traceRestoreStage(pod, "target_validation_start", time.Time{}, nil)
+ 	target, mappings, err := validateRestoreTarget(pod, snapshot, content)
++	w.traceRestoreStage(pod, "target_validation_done", stageStarted, err)
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	stageStarted = time.Now()
++	w.traceRestoreStage(pod, "artifact_validation_start", time.Time{}, nil)
+ 	artifact, err := w.resolveRestoreArtifact(fmt.Sprintf("%s/%s", pod.Namespace, pod.Name), target)
++	w.traceRestoreStage(pod, "artifact_validation_done", stageStarted, err)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+ 	// Gate A: the earliest point the checkpoint's own record of what it was
+ 	// captured on is readable, and still before any of the restore is attempted.
+ 	skipCompatCheck := w.skipCompatCheckRequested(pod)
+-	if err := w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck); err != nil {
++	stageStarted = time.Now()
++	w.traceRestoreStage(pod, "compatibility_start", time.Time{}, nil)
++	err = w.preflightCompatibility(ctx, pod, artifact, mappings, skipCompatCheck)
++	w.traceRestoreStage(pod, "compatibility_done", stageStarted, err)
++	if err != nil {
+ 		return nil, err
+ 	}
++	plan := &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck, targetPodIP: pod.Status.PodIP}
++	w.traceRestoreStage(pod, "pod_ip_gate", time.Time{}, nil, "required", w.config.CRIU.TcpEstablished)
+ 	if w.config.CRIU.TcpEstablished && pod.Status.PodIP == "" {
++		if w.runtimeNetworkDiscoveryEnabled(pod) {
++			// Poll the IP and running destination together after the ordinary
++			// preflight/finalizer steps instead of waiting for kubelet status.
++			plan.runtimeNetworkDiscovery = true
++			return plan, nil
++		}
+ 		return nil, newRestorePendingError("PodIPPending", fmt.Sprintf("Waiting for restore Pod %s/%s to receive an IP address", pod.Namespace, pod.Name))
+ 	}
+-	return &restorePlan{artifact: artifact, mappings: mappings, skipCompatCheck: skipCompatCheck}, nil
++	return plan, nil
+ }
+ 
+ func (w *NodeController) getPodSnapshotFromPod(ctx context.Context, pod *corev1.Pod) (*snapshotv1alpha1.PodSnapshot, error) {
+@@ -818,7 +861,18 @@ func (w *NodeController) restoreDestination(
+ ) restoreResult {
+ 	artifact := plan.artifact
+ 	result := restoreResult{destination: destination, state: restoreResultPending}
+-	containerID, _ := w.resolveRestoreContainerID(ctx, pod, destination, podKey)
++	var containerID string
++	if plan.runtimeNetworkDiscovery {
++		target, _ := w.resolveRestoreNetworkTarget(ctx, pod, destination, podKey)
++		containerID = target.ContainerID
++		// Sibling destinations share the preflight plan. Keep the resolved
++		// target local so their runtime lookups cannot overwrite each other.
++		localPlan := *plan
++		localPlan.targetPodIP = target.PodIP
++		plan = &localPlan
++	} else {
++		containerID, _ = w.resolveRestoreContainerID(ctx, pod, destination, podKey)
++	}
+ 	if containerID == "" {
+ 		return result
+ 	}
+@@ -831,6 +885,7 @@ func (w *NodeController) restoreDestination(
+ 		"container_id", containerID,
+ 	)
+ 	emitPodEvent(ctx, w.clientset, log, pod, snapshotEventComponent, corev1.EventTypeNormal, restoreRequestedReason, fmt.Sprintf("Restore requested from PodSnapshot %s for destination %s", artifact.SnapshotName, destination))
++	w.traceRestoreStage(pod, "restore_event_done", startedAt, nil, "destination", destination)
+ 
+ 	if err := w.runRestore(ctx, pod, plan, destination, containerID, startedAt, recovering); err != nil {
+ 		var incompatible *compat.IncompatibleError
+@@ -852,9 +907,13 @@ func (w *NodeController) restoreDestination(
+ // resolveRestoreContainerID uses the kubelet-published status fast path, then
+ // polls the node runtime inline while this Pod's queue key remains in progress.
+ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *corev1.Pod, destination, podKey string) (string, bool) {
++	pollStarted := time.Now()
++	w.traceRestoreStage(pod, "container_resolution_start", time.Time{}, nil, "destination", destination)
+ 	if containerID := restoreContainerIDFromStatus(pod, destination); containerID != "" {
++		w.traceRestoreStage(pod, "container_resolution_done", pollStarted, nil, "destination", destination, "source", "initial_status", "container_id", containerID, "attempts", 0)
+ 		return containerID, false
+ 	}
++	w.traceRestoreStage(pod, "runtime_poll_start", time.Time{}, nil, "destination", destination, "identity_discovery", pod.Annotations[restoreRuntimeDiscoveryAnnotation] == "true")
+ 
+ 	w.log.V(1).Info("Restore pod has no running container in Kubernetes status yet; polling node runtime",
+ 		"pod", podKey,
+@@ -865,13 +924,45 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
+ 	defer deadline.Stop()
  	tick := time.NewTicker(restoreContainerResolveInterval)
  	defer tick.Stop()
++	attempts := 0
++	var runtimeDuration time.Duration
  	for {
 +		// Status may become available while a runtime lookup is pending (for
 +		// example, when a virtual cluster and containerd use different pod names).
@@ -186,12 +367,15 @@ index 3ffb5e8e..9bc66963 100644
 +			latest, err := w.restorePodLister.Pods(pod.Namespace).Get(pod.Name)
 +			if err == nil && latest.UID == pod.UID {
 +				if id := restoreContainerIDFromStatus(latest, destination); id != "" {
++					w.traceRestoreStage(pod, "container_resolution_done", pollStarted, nil, "destination", destination, "source", "informer_status", "container_id", id, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
 +					return id, false
 +				}
 +			}
 +		}
  		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
 -		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
++		attemptStarted := time.Now()
++		attempts++
 +		var containerID string
 +		var err error
 +		if pod.Annotations[restoreRuntimeDiscoveryAnnotation] == "true" {
@@ -205,8 +389,10 @@ index 3ffb5e8e..9bc66963 100644
 +			containerID, err = w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
 +		}
  		cancel()
++		runtimeDuration += time.Since(attemptStarted)
  		if err == nil && containerID != "" {
 -			w.log.V(1).Info("Resolved restore container via node runtime",
++			w.traceRestoreStage(pod, "container_resolution_done", pollStarted, nil, "destination", destination, "source", "runtime", "container_id", containerID, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
 +			w.log.Info("Resolved restore container via node runtime",
  				"pod", podKey,
 +				"pod_uid", pod.UID,
@@ -214,6 +400,72 @@ index 3ffb5e8e..9bc66963 100644
  				"container", destination,
  				"container_id", containerID,
  			)
+@@ -880,12 +971,14 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
+ 
+ 		select {
+ 		case <-deadline.C:
++			w.traceRestoreStage(pod, "container_resolution_timeout", pollStarted, err, "destination", destination, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
+ 			w.log.V(1).Info("Timed out polling node runtime for restore container",
+ 				"pod", podKey,
+ 				"container", destination,
+ 			)
+ 			return "", true
+ 		case <-ctx.Done():
++			w.traceRestoreStage(pod, "container_resolution_canceled", pollStarted, ctx.Err(), "destination", destination, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
+ 			return "", false
+ 		case <-tick.C:
+ 		}
+@@ -969,6 +1062,10 @@ func (w *NodeController) newRestoreOperation(
+ ) *restoreOperation {
+ 	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+ 	artifact := plan.artifact
++	targetPodIP := plan.targetPodIP
++	if targetPodIP == "" {
++		targetPodIP = pod.Status.PodIP
++	}
+ 	return &restoreOperation{
+ 		controller:      w,
+ 		pod:             pod,
+@@ -976,13 +1073,15 @@ func (w *NodeController) newRestoreOperation(
+ 		skipCompatCheck: plan.skipCompatCheck,
+ 		destination:     destination,
+ 		containerID:     containerID,
++		targetPodIP:     targetPodIP,
+ 		startedAt:       startedAt,
+-		log:             w.log.WithValues("pod", podKey, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
++		log:             w.log.WithValues("pod", podKey, "pod_uid", pod.UID, "snapshot", artifact.SnapshotName, "content_uid", artifact.ContentUID, "source_container", artifact.SourceContainerName, "destination_container", destination, "container_id", containerID),
+ 	}
+ }
+ 
+ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+ 	w := op.controller
++	w.traceRestoreStage(op.pod, "handler_entry", op.startedAt, nil, "destination", op.destination, "container_id", op.containerID)
+ 	req := executor.RestoreRequest{
+ 		ContentUID:                  op.artifact.ContentUID,
+ 		BasePath:                    w.config.Storage.BasePath,
+@@ -990,7 +1089,7 @@ func (op *restoreOperation) executeRestore(ctx context.Context) (int, error) {
+ 		StartedAt:                   op.startedAt,
+ 		PodName:                     op.pod.Name,
+ 		PodNamespace:                op.pod.Namespace,
+-		TargetPodIP:                 op.pod.Status.PodIP,
++		TargetPodIP:                 op.targetPodIP,
+ 		ArtifactContainerName:       op.artifact.SourceContainerName,
+ 		DestinationContainerName:    op.destination,
+ 		SkipCompatCheck:             op.skipCompatCheck,
+@@ -1049,10 +1148,13 @@ func (w *NodeController) applyRestoredCondition(ctx context.Context, pod *corev1
+ 		WithLastTransitionTime(restored.LastTransitionTime)
+ 	configuration := corev1apply.Pod(pod.Name, pod.Namespace).
+ 		WithStatus(corev1apply.PodStatus().WithConditions(condition))
++	statusStarted := time.Now()
++	w.traceRestoreStage(pod, "status_apply_start", time.Time{}, nil, "reason", reason)
+ 	_, err := w.clientset.CoreV1().Pods(pod.Namespace).ApplyStatus(ctx, configuration, metav1.ApplyOptions{
+ 		FieldManager: restoreStatusFieldManager,
+ 		Force:        true,
+ 	})
++	w.traceRestoreStage(pod, "status_apply_done", statusStarted, err, "reason", reason)
+ 	return err
+ }
+ 
 diff --git a/agent/internal/controller/controller_test.go b/agent/internal/controller/controller_test.go
 index 04959c34..9500d0dd 100644
 --- a/agent/internal/controller/controller_test.go
@@ -331,6 +583,415 @@ index 04959c34..9500d0dd 100644
  func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
  	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
  	tests := map[string]func(*snapshotv1alpha1.PodSnapshotContent){
+diff --git a/agent/internal/controller/network_discovery.go b/agent/internal/controller/network_discovery.go
+new file mode 100644
+index 00000000..e56406db
+--- /dev/null
++++ b/agent/internal/controller/network_discovery.go
+@@ -0,0 +1,96 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++package controller
++
++import (
++	"context"
++	"errors"
++	"time"
++
++	corev1 "k8s.io/api/core/v1"
++
++	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
++)
++
++func (w *NodeController) runtimeNetworkDiscoveryEnabled(pod *corev1.Pod) bool {
++	_, supported := w.runtime.(snapshotruntime.PodRestoreTargetResolver)
++	return supported && pod.Annotations[restoreRuntimeDiscoveryAnnotation] == "true" &&
++		pod.Annotations[restoreRuntimeNetworkDiscoveryAnnotation] == "true"
++}
++
++// resolveRestoreNetworkTarget binds a CRI-derived IP to the same READY sandbox
++// as the running destination. It is used only when both experimental opt-ins
++// are set and the preflight Pod snapshot has no IP. Neither the Pod nor its
++// informer cache is modified. Authoritative status can still win while polling.
++func (w *NodeController) resolveRestoreNetworkTarget(ctx context.Context, pod *corev1.Pod, destination, podKey string) (snapshotruntime.PodRestoreTarget, bool) {
++	var empty snapshotruntime.PodRestoreTarget
++	resolver, supported := w.runtime.(snapshotruntime.PodRestoreTargetResolver)
++	if !supported || !w.runtimeNetworkDiscoveryEnabled(pod) {
++		return empty, true
++	}
++	started := time.Now()
++	deadlineAt := started.Add(restoreContainerResolveTimeout)
++	pollCtx, cancelPoll := context.WithDeadline(ctx, deadlineAt)
++	defer cancelPoll()
++	tick := time.NewTicker(restoreContainerResolveInterval)
++	defer tick.Stop()
++	w.traceRestoreStage(pod, "runtime_network_poll_start", time.Time{}, nil, "destination", destination)
++	attempts := 0
++	var runtimeDuration time.Duration
++	var lastErr error
++	for {
++		if pollCtx.Err() != nil {
++			stage := "network_resolution_canceled"
++			timedOut := ctx.Err() == nil
++			if timedOut {
++				stage = "network_resolution_timeout"
++			}
++			w.traceRestoreStage(pod, stage, started, errors.Join(pollCtx.Err(), lastErr), "destination", destination, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
++			return empty, timedOut
++		}
++
++		// If kubelet catches up, preserve its primary IP and the existing
++		// container-status/runtime path. Never consume another incarnation.
++		latest := pod
++		if w.restorePodLister != nil {
++			observed, err := w.restorePodLister.Pods(pod.Namespace).Get(pod.Name)
++			if err == nil {
++				if observed.UID != pod.UID || observed.DeletionTimestamp != nil {
++					w.traceRestoreStage(pod, "network_resolution_canceled", started, errors.New("restore pod was replaced or deleted"), "destination", destination)
++					return empty, false
++				}
++				latest = observed
++			}
++		}
++		if latest.Status.PodIP != "" {
++			id, requeue := w.resolveRestoreContainerID(pollCtx, latest, destination, podKey)
++			if pollCtx.Err() != nil {
++				continue
++			}
++			if id == "" {
++				return empty, requeue
++			}
++			target := snapshotruntime.PodRestoreTarget{ContainerID: id, PodIP: latest.Status.PodIP}
++			w.traceRestoreStage(pod, "network_resolution_done", started, nil, "destination", destination, "source", "informer_status", "container_id", id, "target_pod_ip", target.PodIP, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
++			return target, false
++		}
++
++		resolveCtx, cancel := restoreContainerResolveAttemptContext(pollCtx, deadlineAt)
++		attemptStarted := time.Now()
++		attempts++
++		target, err := resolver.ResolveRestoreTargetByPodIdentity(resolveCtx, pod.Name, pod.Namespace, string(pod.UID), destination)
++		cancel()
++		runtimeDuration += time.Since(attemptStarted)
++		lastErr = err
++		if pollCtx.Err() == nil && err == nil && target.ContainerID != "" && target.PodSandboxID != "" && target.PodIP != "" {
++			w.traceRestoreStage(pod, "network_resolution_done", started, nil, "destination", destination, "source", "runtime", "container_id", target.ContainerID, "sandbox_id", target.PodSandboxID, "target_pod_ip", target.PodIP, "attempts", attempts, "runtime_seconds", runtimeDuration.Seconds())
++			w.log.Info("Resolved restore container and Pod IP via node runtime", "pod", podKey, "pod_uid", pod.UID, "container", destination, "container_id", target.ContainerID, "sandbox_id", target.PodSandboxID, "target_pod_ip", target.PodIP)
++			return target, false
++		}
++		select {
++		case <-pollCtx.Done():
++		case <-tick.C:
++		}
++	}
++}
+diff --git a/agent/internal/controller/network_discovery_test.go b/agent/internal/controller/network_discovery_test.go
+new file mode 100644
+index 00000000..027efb19
+--- /dev/null
++++ b/agent/internal/controller/network_discovery_test.go
+@@ -0,0 +1,261 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++package controller
++
++import (
++	"context"
++	"errors"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/go-logr/logr"
++	"github.com/go-logr/logr/testr"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	corev1listers "k8s.io/client-go/listers/core/v1"
++	"k8s.io/client-go/tools/cache"
++
++	"github.com/ai-dynamo/snapshot/agent/internal/executor"
++	"github.com/ai-dynamo/snapshot/agent/internal/nsmount"
++	snapshotruntime "github.com/ai-dynamo/snapshot/agent/internal/runtime"
++	"github.com/ai-dynamo/snapshot/api/podcontract"
++)
++
++type networkFakeRuntime struct {
++	identityFakeRuntime
++	resolve func(context.Context) (snapshotruntime.PodRestoreTarget, error)
++	args    []string
++	calls   int
++}
++
++type canceledNetworkFallbackRuntime struct {
++	*networkFakeRuntime
++	cancel context.CancelFunc
++}
++
++func (r *canceledNetworkFallbackRuntime) ResolveContainerIDByPodIdentity(context.Context, string, string, string, string) (string, error) {
++	r.cancel()
++	return "canceled-container", nil
++}
++
++func (r *networkFakeRuntime) ResolveRestoreTargetByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (snapshotruntime.PodRestoreTarget, error) {
++	r.args = []string{pod, ns, uid, ctr}
++	r.calls++
++	if r.resolve != nil {
++		return r.resolve(ctx)
++	}
++	return snapshotruntime.PodRestoreTarget{ContainerID: "network-container", PodSandboxID: "network-sandbox", PodIP: "10.20.30.40"}, nil
++}
++
++func networkDiscoveryPod() *corev1.Pod {
++	return restorePod(map[string]string{
++		podcontract.RestoreFromAnnotation:        "snapshot-a",
++		restoreRuntimeDiscoveryAnnotation:        "true",
++		restoreRuntimeNetworkDiscoveryAnnotation: "true",
++	})
++}
++
++func TestNetworkDiscoveryPreflightIsExplicitAndCapabilityGated(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		identity  bool
++		network   bool
++		supported bool
++		tcp       bool
++		cachedIP  string
++		pending   bool
++		discover  bool
++	}{
++		{name: "both opt-ins", identity: true, network: true, supported: true, tcp: true, discover: true},
++		{name: "identity only", identity: true, supported: true, tcp: true, pending: true},
++		{name: "network only", network: true, supported: true, tcp: true, pending: true},
++		{name: "neither opt-in", supported: true, tcp: true, pending: true},
++		{name: "unsupported runtime", identity: true, network: true, tcp: true, pending: true},
++		{name: "no TCP restore", identity: true, network: true, supported: true},
++		{name: "cached IP wins", identity: true, network: true, supported: true, tcp: true, cachedIP: "10.1.2.3"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			pod := networkDiscoveryPod()
++			if !tc.identity {
++				delete(pod.Annotations, restoreRuntimeDiscoveryAnnotation)
++			}
++			if !tc.network {
++				delete(pod.Annotations, restoreRuntimeNetworkDiscoveryAnnotation)
++			}
++			pod.Status.PodIP = tc.cachedIP
++			snapshot, content := readySnapshotObjects()
++			w := makeTestController(t, pod, snapshot, content)
++			w.config.CRIU.TcpEstablished = tc.tcp
++			rt := &networkFakeRuntime{}
++			if tc.supported {
++				w.runtime = rt
++			}
++			path, err := nsmount.ResolveArtifactPath(w.config.Storage.BasePath, string(content.UID), "main")
++			require.NoError(t, err)
++			require.NoError(t, os.MkdirAll(path, 0o700))
++			plan, err := w.preflightRestore(context.Background(), pod)
++			if tc.pending {
++				require.Nil(t, plan)
++				assert.Equal(t, "PodIPPending", pendingRestoreReason(t, err))
++			} else {
++				require.NoError(t, err)
++				assert.Equal(t, tc.discover, plan.runtimeNetworkDiscovery)
++				assert.Equal(t, tc.cachedIP, plan.targetPodIP)
++			}
++			assert.Zero(t, rt.calls, "preflight does not add runtime RPCs")
++			assert.Equal(t, tc.cachedIP, pod.Status.PodIP)
++		})
++	}
++}
++
++func TestNetworkDiscoveryCarriesBoundTargetToHandlerWithoutChangingPod(t *testing.T) {
++	pod := networkDiscoveryPod()
++	w := makeTestController(t, pod)
++	original := pod.DeepCopy()
++	rt := &networkFakeRuntime{}
++	w.runtime = rt
++	plan := &restorePlan{artifact: &restoreArtifact{SnapshotName: "snapshot-a"}, runtimeNetworkDiscovery: true}
++	var request executor.RestoreRequest
++	w.restoreFn = func(_ context.Context, _ snapshotruntime.Runtime, _ logr.Logger, req executor.RestoreRequest, _ executor.RestoreMounter) (int, error) {
++		request = req
++		return 123, nil
++	}
++	result := w.restoreDestination(context.Background(), pod, plan, "main", "inference/restore-worker", false)
++	assert.Equal(t, restoreResultSucceeded, result.state)
++	assert.Equal(t, "network-container", request.ContainerID)
++	assert.Equal(t, "10.20.30.40", request.TargetPodIP)
++	assert.Equal(t, []string{pod.Name, pod.Namespace, string(pod.UID), "main"}, rt.args)
++	assert.Empty(t, rt.identityArgs, "must not independently resolve another container")
++	assert.Empty(t, plan.targetPodIP, "shared plan is not mutated")
++	assert.Equal(t, original, pod)
++}
++
++func TestNetworkDiscoveryRetriesAtContainerPollingInterval(t *testing.T) {
++	pod := networkDiscoveryPod()
++	rt := &networkFakeRuntime{}
++	var attempts []time.Time
++	rt.resolve = func(context.Context) (snapshotruntime.PodRestoreTarget, error) {
++		attempts = append(attempts, time.Now())
++		if len(attempts) == 1 {
++			return snapshotruntime.PodRestoreTarget{}, errors.New("sandbox not ready")
++		}
++		return snapshotruntime.PodRestoreTarget{ContainerID: "container", PodSandboxID: "sandbox", PodIP: "10.1.2.3"}, nil
++	}
++	w := &NodeController{runtime: rt, log: testr.New(t)}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	target, requeue := w.resolveRestoreNetworkTarget(ctx, pod, "main", "inference/restore-worker")
++	assert.Equal(t, "container", target.ContainerID)
++	assert.False(t, requeue)
++	require.Len(t, attempts, 2)
++	assert.GreaterOrEqual(t, attempts[1].Sub(attempts[0]), 40*time.Millisecond)
++	assert.Empty(t, rt.identityArgs)
++}
++
++func TestNetworkDiscoveryUsesCurrentInformerIPAfterRuntimeError(t *testing.T) {
++	pod := networkDiscoveryPod()
++	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
++	latest := pod.DeepCopy()
++	latest.Status.PodIP = "10.9.8.7"
++	latest.Status.ContainerStatuses[0].ContainerID = "containerd://status-container"
++	rt := &networkFakeRuntime{resolve: func(context.Context) (snapshotruntime.PodRestoreTarget, error) {
++		require.NoError(t, indexer.Update(latest))
++		return snapshotruntime.PodRestoreTarget{}, errors.New("status lookup failed")
++	}}
++	w := &NodeController{runtime: rt, restorePodLister: corev1listers.NewPodLister(indexer), log: testr.New(t)}
++	target, requeue := w.resolveRestoreNetworkTarget(context.Background(), pod, "main", "inference/restore-worker")
++	assert.False(t, requeue)
++	assert.Equal(t, "status-container", target.ContainerID)
++	assert.Equal(t, "10.9.8.7", target.PodIP)
++	assert.Empty(t, target.PodSandboxID, "official status needs no CRI fallback")
++	assert.Equal(t, 1, rt.calls)
++	assert.Empty(t, pod.Status.PodIP)
++}
++
++func TestNetworkDiscoveryRejectsReplacementAndDeletingInformerPod(t *testing.T) {
++	for _, deleted := range []bool{false, true} {
++		pod := networkDiscoveryPod()
++		latest := pod.DeepCopy()
++		latest.Status.PodIP = "10.9.8.7"
++		if deleted {
++			now := metav1.Now()
++			latest.DeletionTimestamp = &now
++		} else {
++			latest.UID = "replacement-uid"
++		}
++		indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
++		require.NoError(t, indexer.Add(latest))
++		rt := &networkFakeRuntime{}
++		w := &NodeController{runtime: rt, restorePodLister: corev1listers.NewPodLister(indexer), log: testr.New(t)}
++		target, requeue := w.resolveRestoreNetworkTarget(context.Background(), pod, "main", "inference/restore-worker")
++		assert.Empty(t, target.ContainerID)
++		assert.False(t, requeue)
++		assert.Zero(t, rt.calls)
++	}
++}
++
++func TestNetworkDiscoveryCancellationCannotRestoreOrFallBackToName(t *testing.T) {
++	for _, cancelDuringRPC := range []bool{false, true} {
++		pod := networkDiscoveryPod()
++		ctx, cancel := context.WithCancel(context.Background())
++		rt := &networkFakeRuntime{}
++		rt.containerIDByPod = "unsafe-name-only"
++		rt.resolve = func(context.Context) (snapshotruntime.PodRestoreTarget, error) {
++			cancel()
++			return snapshotruntime.PodRestoreTarget{ContainerID: "too-late", PodSandboxID: "sandbox", PodIP: "10.1.2.3"}, nil
++		}
++		if !cancelDuringRPC {
++			cancel()
++		}
++		w := &NodeController{runtime: rt, log: testr.New(t)}
++		target, requeue := w.resolveRestoreNetworkTarget(ctx, pod, "main", "inference/restore-worker")
++		assert.Empty(t, target.ContainerID)
++		assert.False(t, requeue)
++		assert.Empty(t, rt.identityArgs)
++		cancel()
++	}
++}
++
++func TestNetworkDiscoveryRejectsCancellationDuringInformerFallback(t *testing.T) {
++	pod := networkDiscoveryPod()
++	latest := pod.DeepCopy()
++	latest.Status.PodIP = "10.1.2.3"
++	latest.Status.ContainerStatuses[0].ContainerID = ""
++	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
++	require.NoError(t, indexer.Add(latest))
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	rt := &canceledNetworkFallbackRuntime{networkFakeRuntime: &networkFakeRuntime{}, cancel: cancel}
++	w := &NodeController{runtime: rt, restorePodLister: corev1listers.NewPodLister(indexer), log: testr.New(t)}
++	target, requeue := w.resolveRestoreNetworkTarget(ctx, pod, "main", "inference/restore-worker")
++	assert.Empty(t, target.ContainerID)
++	assert.False(t, requeue)
++	assert.Zero(t, rt.calls)
++}
++
++func TestNetworkDiscoveryFailureDoesNotEnterRestoreHandler(t *testing.T) {
++	pod := networkDiscoveryPod()
++	w := makeTestController(t, pod)
++	rt := &networkFakeRuntime{resolve: func(context.Context) (snapshotruntime.PodRestoreTarget, error) {
++		return snapshotruntime.PodRestoreTarget{}, errors.New("sandbox status unavailable")
++	}}
++	rt.containerIDByPod = "unsafe-name-only"
++	w.runtime = rt
++	called := false
++	w.restoreFn = func(context.Context, snapshotruntime.Runtime, logr.Logger, executor.RestoreRequest, executor.RestoreMounter) (int, error) {
++		called = true
++		return 123, nil
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
++	defer cancel()
++	plan := &restorePlan{artifact: &restoreArtifact{SnapshotName: "snapshot-a"}, runtimeNetworkDiscovery: true}
++	result := w.restoreDestination(ctx, pod, plan, "main", "inference/restore-worker", false)
++	assert.Equal(t, restoreResultPending, result.state)
++	assert.False(t, called)
++	assert.Empty(t, rt.identityArgs)
++	assert.Empty(t, pod.Status.PodIP)
++}
+diff --git a/agent/internal/controller/restore_trace.go b/agent/internal/controller/restore_trace.go
+new file mode 100644
+index 00000000..a6e1e6dc
+--- /dev/null
++++ b/agent/internal/controller/restore_trace.go
+@@ -0,0 +1,34 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++package controller
++
++import (
++	"time"
++
++	corev1 "k8s.io/api/core/v1"
++)
++
++// traceRestoreStage adds same-clock milestones for the restore startup study.
++// It reads only the Pod already held by the caller: no extra API or runtime
++// lookup belongs in this instrumentation. queue_add means an informer event
++// requested work; the workqueue may coalesce several such events into one pass.
++func (w *NodeController) traceRestoreStage(pod *corev1.Pod, stage string, started time.Time, err error, extra ...any) {
++	now := time.Now()
++	values := []any{
++		"pod", pod.Namespace + "/" + pod.Name,
++		"pod_uid", pod.UID,
++		"resource_version", pod.ResourceVersion,
++		"stage", stage,
++		"at_unix_nano", now.UnixNano(),
++		"pod_ip_present", pod.Status.PodIP != "",
++	}
++	if !started.IsZero() {
++		values = append(values, "elapsed_seconds", now.Sub(started).Seconds())
++	}
++	if err != nil {
++		values = append(values, "error", err.Error())
++	}
++	values = append(values, extra...)
++	w.log.Info("Restore startup milestone", values...)
++}
 diff --git a/agent/internal/cuda/cuda.go b/agent/internal/cuda/cuda.go
 index 7c3e9602..af915adc 100644
 --- a/agent/internal/cuda/cuda.go
@@ -468,10 +1129,10 @@ index 830f3ebd..e37a0875 100644
  		return nil, 0, err
 diff --git a/agent/internal/runtime/discovery.go b/agent/internal/runtime/discovery.go
 new file mode 100644
-index 00000000..058ea21e
+index 00000000..2de005fd
 --- /dev/null
 +++ b/agent/internal/runtime/discovery.go
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,228 @@
 +// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -481,6 +1142,7 @@ index 00000000..058ea21e
 +	"context"
 +	"errors"
 +	"fmt"
++	"net"
 +
 +	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 +)
@@ -492,14 +1154,35 @@ index 00000000..058ea21e
 +	ResolveContainerIDByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (string, error)
 +}
 +
++// PodRestoreTarget binds the destination container and network address to one
++// validated, current pod sandbox. It is never assembled from separate lookups.
++type PodRestoreTarget struct {
++	ContainerID  string
++	PodSandboxID string
++	PodIP        string
++}
++
++// PodRestoreTargetResolver optionally discovers a complete restore destination
++// before kubelet publishes its container ID and Pod IP to the Kubernetes API.
++type PodRestoreTargetResolver interface {
++	ResolveRestoreTargetByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (PodRestoreTarget, error)
++}
++
++type podRestoreDiscoveryService interface {
++	podDiscoveryService
++	PodSandboxStatus(context.Context, string, bool) (*runtimeapi.PodSandboxStatusResponse, error)
++}
++
 +type podDiscoveryService interface {
 +	ListPodSandbox(context.Context, *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error)
 +	ListContainers(context.Context, *runtimeapi.ContainerFilter) ([]*runtimeapi.Container, error)
 +}
 +
 +var (
-+	_ PodIdentityResolver = (*ContainerdRuntime)(nil)
-+	_ PodIdentityResolver = (*CRIORuntime)(nil)
++	_ PodIdentityResolver      = (*ContainerdRuntime)(nil)
++	_ PodIdentityResolver      = (*CRIORuntime)(nil)
++	_ PodRestoreTargetResolver = (*ContainerdRuntime)(nil)
++	_ PodRestoreTargetResolver = (*CRIORuntime)(nil)
 +)
 +
 +func (r *ContainerdRuntime) ResolveContainerIDByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (string, error) {
@@ -510,13 +1193,101 @@ index 00000000..058ea21e
 +	return resolveContainerIDByPodIdentity(ctx, r.svc, pod, ns, uid, ctr)
 +}
 +
-+func resolveContainerIDByPodIdentity(ctx context.Context, svc podDiscoveryService, pod, ns, uid, ctr string) (string, error) {
++func (r *ContainerdRuntime) ResolveRestoreTargetByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (PodRestoreTarget, error) {
++	return resolveRestoreTargetByPodIdentity(ctx, r.cri, pod, ns, uid, ctr)
++}
++
++func (r *CRIORuntime) ResolveRestoreTargetByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (PodRestoreTarget, error) {
++	return resolveRestoreTargetByPodIdentity(ctx, r.svc, pod, ns, uid, ctr)
++}
++
++func validateDiscoveryIdentity(pod, ns, uid, ctr string) error {
 +	if pod == "" || ns == "" || uid == "" || ctr == "" {
-+		return "", errors.New("pod name, namespace, UID, and container name are required for runtime discovery")
++		return errors.New("pod name, namespace, UID, and container name are required for runtime discovery")
++	}
++	return nil
++}
++
++func resolveContainerIDByPodIdentity(ctx context.Context, svc podDiscoveryService, pod, ns, uid, ctr string) (string, error) {
++	if err := validateDiscoveryIdentity(pod, ns, uid, ctr); err != nil {
++		return "", err
 +	}
 +	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
 +	defer cancel()
++	matched, err := findPodIdentitySandbox(ctx, svc, pod, ns, uid)
++	if err != nil {
++		return "", err
++	}
++	return findSandboxContainer(ctx, svc, matched.GetId(), pod, ns, uid, ctr)
++}
 +
++func resolveRestoreTargetByPodIdentity(ctx context.Context, svc podRestoreDiscoveryService, pod, ns, uid, ctr string) (PodRestoreTarget, error) {
++	var empty PodRestoreTarget
++	if err := validateDiscoveryIdentity(pod, ns, uid, ctr); err != nil {
++		return empty, err
++	}
++	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
++	defer cancel()
++	if err := ctx.Err(); err != nil {
++		return empty, err
++	}
++	matched, err := findPodIdentitySandbox(ctx, svc, pod, ns, uid)
++	if err != nil {
++		return empty, err
++	}
++	if err := ctx.Err(); err != nil {
++		return empty, err
++	}
++	containerID, err := findSandboxContainer(ctx, svc, matched.GetId(), pod, ns, uid, ctr)
++	if err != nil {
++		return empty, err
++	}
++	if err := ctx.Err(); err != nil {
++		return empty, err
++	}
++	// verbose=false avoids collecting unrelated runtime metadata. Recheck the
++	// sandbox after finding the container, including its host incarnation.
++	response, err := svc.PodSandboxStatus(ctx, matched.GetId(), false)
++	if err != nil {
++		return empty, fmt.Errorf("get sandbox status for pod %s/%s sandbox %s: %w", ns, pod, matched.GetId(), err)
++	}
++	if err := ctx.Err(); err != nil {
++		return empty, err
++	}
++	status := response.GetStatus()
++	current := &runtimeapi.PodSandbox{
++		Id: status.GetId(), State: status.GetState(), Metadata: status.GetMetadata(),
++		Annotations: status.GetAnnotations(),
++	}
++	if !sandboxMatchesPodIdentity(current, pod, ns, uid) || !sameDiscoverySandboxIdentity(matched, current) {
++		return empty, fmt.Errorf("sandbox identity or readiness changed for pod %s/%s UID %s", ns, pod, uid)
++	}
++	address := status.GetNetwork().GetIp()
++	ip := net.ParseIP(address)
++	if ip == nil || !ip.IsGlobalUnicast() {
++		return empty, fmt.Errorf("sandbox has no usable Pod IP for pod %s/%s UID %s", ns, pod, uid)
++	}
++	return PodRestoreTarget{ContainerID: containerID, PodSandboxID: matched.GetId(), PodIP: address}, nil
++}
++
++func sameDiscoverySandboxIdentity(before, after *runtimeapi.PodSandbox) bool {
++	a, b := before.GetMetadata(), after.GetMetadata()
++	if before.GetId() != after.GetId() || a.GetName() != b.GetName() || a.GetNamespace() != b.GetNamespace() || a.GetUid() != b.GetUid() {
++		return false
++	}
++	for _, key := range []string{
++		"vcluster.loft.sh/object-name", "vcluster.loft.sh/object-namespace",
++		"vcluster.loft.sh/object-uid", "vcluster.loft.sh/object-kind",
++		"vcluster.loft.sh/object-host-name", "vcluster.loft.sh/object-host-namespace",
++	} {
++		if before.GetAnnotations()[key] != after.GetAnnotations()[key] {
++			return false
++		}
++	}
++	return true
++}
++
++func findPodIdentitySandbox(ctx context.Context, svc podDiscoveryService, pod, ns, uid string) (*runtimeapi.PodSandbox, error) {
 +	// CRI carries the pod annotations in the sandbox. Unlike container labels,
 +	// these retain the virtual identity when vcluster translates the host name.
 +	// Inspect only identity keys; other annotations may contain credentials.
@@ -524,7 +1295,7 @@ index 00000000..058ea21e
 +		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
 +	})
 +	if err != nil {
-+		return "", fmt.Errorf("list pod sandboxes for %s/%s: %w", ns, pod, err)
++		return nil, fmt.Errorf("list pod sandboxes for %s/%s: %w", ns, pod, err)
 +	}
 +	var matched *runtimeapi.PodSandbox
 +	for _, sandbox := range sandboxes {
@@ -532,26 +1303,30 @@ index 00000000..058ea21e
 +			continue
 +		}
 +		if matched != nil {
-+			return "", fmt.Errorf("multiple ready sandboxes match pod %s/%s UID %s", ns, pod, uid)
++			return nil, fmt.Errorf("multiple ready sandboxes match pod %s/%s UID %s", ns, pod, uid)
 +		}
 +		matched = sandbox
 +	}
 +	if matched == nil {
-+		return "", fmt.Errorf("no ready sandbox matches pod %s/%s UID %s", ns, pod, uid)
++		return nil, fmt.Errorf("no ready sandbox matches pod %s/%s UID %s", ns, pod, uid)
 +	}
 +
++	return matched, nil
++}
++
++func findSandboxContainer(ctx context.Context, svc podDiscoveryService, sandboxID, pod, ns, uid, ctr string) (string, error) {
 +	containers, err := svc.ListContainers(ctx, &runtimeapi.ContainerFilter{
-+		PodSandboxId: matched.GetId(),
++		PodSandboxId: sandboxID,
 +		State:        &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
 +	})
 +	if err != nil {
-+		return "", fmt.Errorf("list containers for pod %s/%s sandbox %s: %w", ns, pod, matched.GetId(), err)
++		return "", fmt.Errorf("list containers for pod %s/%s sandbox %s: %w", ns, pod, sandboxID, err)
 +	}
 +	containerID := ""
 +	for _, container := range containers {
 +		// Recheck the response as well as sending filters: a sandbox match must
 +		// never broaden to a similarly named container from another pod.
-+		if container.GetId() == "" || container.GetPodSandboxId() != matched.GetId() ||
++		if container.GetId() == "" || container.GetPodSandboxId() != sandboxID ||
 +			container.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING ||
 +			container.GetMetadata().GetName() != ctr {
 +			continue
@@ -588,10 +1363,10 @@ index 00000000..058ea21e
 +}
 diff --git a/agent/internal/runtime/discovery_test.go b/agent/internal/runtime/discovery_test.go
 new file mode 100644
-index 00000000..948ba664
+index 00000000..8fc4620b
 --- /dev/null
 +++ b/agent/internal/runtime/discovery_test.go
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,403 @@
 +// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -618,6 +1393,13 @@ index 00000000..948ba664
 +	sandboxErr      error
 +	containerErr    error
 +	deadline        time.Time
++	status          *runtimeapi.PodSandboxStatusResponse
++	statusErr       error
++	statusSandboxID string
++	statusVerbose   bool
++	sandboxHook     func()
++	containerHook   func()
++	statusHook      func()
 +}
 +
 +func (s *discoveryRuntimeService) ListPodSandbox(ctx context.Context, filter *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error) {
@@ -626,12 +1408,39 @@ index 00000000..948ba664
 +	if err := ctx.Err(); err != nil {
 +		return nil, err
 +	}
++	if s.sandboxHook != nil {
++		s.sandboxHook()
++	}
 +	return s.sandboxes, s.sandboxErr
 +}
 +
 +func (s *discoveryRuntimeService) ListContainers(_ context.Context, filter *runtimeapi.ContainerFilter) ([]*runtimeapi.Container, error) {
 +	s.containerFilter = filter
++	if s.containerHook != nil {
++		s.containerHook()
++	}
 +	return s.containers, s.containerErr
++}
++
++func (s *discoveryRuntimeService) PodSandboxStatus(_ context.Context, id string, verbose bool) (*runtimeapi.PodSandboxStatusResponse, error) {
++	s.statusSandboxID, s.statusVerbose = id, verbose
++	if s.statusHook != nil {
++		s.statusHook()
++	}
++	return s.status, s.statusErr
++}
++
++func discoverySandboxStatus(sandbox *runtimeapi.PodSandbox, address string) *runtimeapi.PodSandboxStatusResponse {
++	annotations := make(map[string]string, len(sandbox.Annotations))
++	for key, value := range sandbox.Annotations {
++		annotations[key] = value
++	}
++	metadata := sandbox.GetMetadata()
++	return &runtimeapi.PodSandboxStatusResponse{Status: &runtimeapi.PodSandboxStatus{
++		Id: sandbox.Id, State: sandbox.State,
++		Metadata:    &runtimeapi.PodSandboxMetadata{Name: metadata.GetName(), Namespace: metadata.GetNamespace(), Uid: metadata.GetUid(), Attempt: metadata.GetAttempt()},
++		Annotations: annotations, Network: &runtimeapi.PodSandboxNetworkStatus{Ip: address},
++	}}
 +}
 +
 +func nativeDiscoverySandbox() *runtimeapi.PodSandbox {
@@ -798,6 +1607,167 @@ index 00000000..948ba664
 +		id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
 +		require.Empty(t, id)
 +		require.ErrorIs(t, err, failure)
++	})
++}
++
++func TestPodRestoreTargetDiscoveryBackends(t *testing.T) {
++	backends := map[string]func(internalapi.RuntimeService) PodRestoreTargetResolver{
++		"containerd": func(service internalapi.RuntimeService) PodRestoreTargetResolver {
++			return &ContainerdRuntime{cri: service}
++		},
++		"cri-o": func(service internalapi.RuntimeService) PodRestoreTargetResolver { return &CRIORuntime{svc: service} },
++	}
++	identities := map[string]func() *runtimeapi.PodSandbox{"native": nativeDiscoverySandbox, "virtual": virtualDiscoverySandbox}
++	for backend, build := range backends {
++		for identity, create := range identities {
++			for _, address := range []string{"10.42.0.8", "fd00:42::8"} {
++				t.Run(backend+"/"+identity+"/"+address, func(t *testing.T) {
++					sandbox := create()
++					service := &discoveryRuntimeService{FakeRuntimeService: critesting.NewFakeRuntimeService(), sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, address)}
++					ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++					defer cancel()
++					deadline, _ := ctx.Deadline()
++					target, err := build(service).ResolveRestoreTargetByPodIdentity(ctx, "worker", "inference", "current-pod-uid", "main")
++					require.NoError(t, err)
++					require.Equal(t, PodRestoreTarget{ContainerID: "container-id", PodSandboxID: "sandbox-id", PodIP: address}, target)
++					require.Equal(t, deadline, service.deadline)
++					require.Equal(t, "sandbox-id", service.containerFilter.GetPodSandboxId())
++					require.Equal(t, "sandbox-id", service.statusSandboxID)
++					require.False(t, service.statusVerbose, "do not request unrelated runtime metadata")
++				})
++			}
++		}
++	}
++}
++
++func TestPodRestoreTargetDiscoveryRevalidatesStatus(t *testing.T) {
++	tests := map[string]func(*runtimeapi.PodSandboxStatusResponse){
++		"changed sandbox ID": func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Id = "other-sandbox" },
++		"empty sandbox ID":   func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Id = "" },
++		"not ready": func(r *runtimeapi.PodSandboxStatusResponse) {
++			r.Status.State = runtimeapi.PodSandboxState_SANDBOX_NOTREADY
++		},
++		"changed host UID":  func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Metadata.Uid = "replacement-host-uid" },
++		"changed host name": func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Metadata.Name = "replacement-host-name" },
++		"changed host namespace": func(r *runtimeapi.PodSandboxStatusResponse) {
++			r.Status.Metadata.Namespace = "replacement-host-namespace"
++		},
++		"missing metadata":    func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Metadata = nil },
++		"missing status":      func(r *runtimeapi.PodSandboxStatusResponse) { r.Status = nil },
++		"missing annotations": func(r *runtimeapi.PodSandboxStatusResponse) { r.Status.Annotations = nil },
++	}
++	for _, key := range []string{"object-name", "object-namespace", "object-uid", "object-kind", "object-host-name", "object-host-namespace"} {
++		tests["changed "+key] = func(r *runtimeapi.PodSandboxStatusResponse) {
++			r.Status.Annotations["vcluster.loft.sh/"+key] = "changed"
++		}
++	}
++	for name, mutate := range tests {
++		t.Run(name, func(t *testing.T) {
++			sandbox := virtualDiscoverySandbox()
++			status := discoverySandboxStatus(sandbox, "10.42.0.8")
++			mutate(status)
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: status}
++			target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, target)
++			require.ErrorContains(t, err, "identity or readiness changed")
++		})
++	}
++	t.Run("nil status response", func(t *testing.T) {
++		service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{nativeDiscoverySandbox()}, containers: []*runtimeapi.Container{discoveryContainer()}}
++		target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, target)
++		require.ErrorContains(t, err, "identity or readiness changed")
++	})
++}
++
++func TestPodRestoreTargetDiscoveryRejectsUnusableAddress(t *testing.T) {
++	for _, address := range []string{"", "not-an-ip", "10.42.0.8/24", " 10.42.0.8", "0.0.0.0", "::", "127.0.0.1", "::1", "224.0.0.1", "ff02::1", "255.255.255.255", "169.254.1.2", "fe80::1"} {
++		t.Run(address, func(t *testing.T) {
++			sandbox := nativeDiscoverySandbox()
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, address)}
++			target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, target)
++			require.ErrorContains(t, err, "no usable Pod IP")
++		})
++	}
++	t.Run("network absent", func(t *testing.T) {
++		sandbox := nativeDiscoverySandbox()
++		service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, "10.42.0.8")}
++		service.status.Status.Network = nil
++		target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, target)
++		require.ErrorContains(t, err, "no usable Pod IP")
++	})
++}
++
++func TestPodRestoreTargetDiscoveryRejectsLookupMismatch(t *testing.T) {
++	tests := map[string]func(*discoveryRuntimeService){
++		"stale UID":                   func(s *discoveryRuntimeService) { s.sandboxes[0].Metadata.Uid = "previous-pod-uid" },
++		"nonready sandbox":            func(s *discoveryRuntimeService) { s.sandboxes[0].State = runtimeapi.PodSandboxState_SANDBOX_NOTREADY },
++		"duplicate sandbox":           func(s *discoveryRuntimeService) { s.sandboxes = append(s.sandboxes, virtualDiscoverySandbox()) },
++		"duplicate container":         func(s *discoveryRuntimeService) { s.containers = append(s.containers, discoveryContainer()) },
++		"different container sandbox": func(s *discoveryRuntimeService) { s.containers[0].PodSandboxId = "other-sandbox" },
++		"not running container":       func(s *discoveryRuntimeService) { s.containers[0].State = runtimeapi.ContainerState_CONTAINER_CREATED },
++	}
++	for name, mutate := range tests {
++		t.Run(name, func(t *testing.T) {
++			sandbox := nativeDiscoverySandbox()
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, "10.42.0.8")}
++			mutate(service)
++			target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, target)
++			require.Error(t, err)
++			require.Empty(t, service.statusSandboxID, "must not retrieve another sandbox's network address")
++		})
++	}
++}
++
++func TestPodRestoreTargetDiscoveryCancellationAndRPCFailures(t *testing.T) {
++	for _, stage := range []string{"before lookup", "after sandbox list", "after container list", "after sandbox status"} {
++		t.Run(stage, func(t *testing.T) {
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			sandbox := nativeDiscoverySandbox()
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, "10.42.0.8")}
++			switch stage {
++			case "before lookup":
++				cancel()
++			case "after sandbox list":
++				service.sandboxHook = cancel
++			case "after container list":
++				service.containerHook = cancel
++			case "after sandbox status":
++				service.statusHook = cancel
++			}
++			target, err := resolveRestoreTargetByPodIdentity(ctx, service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, target)
++			require.ErrorIs(t, err, context.Canceled)
++		})
++	}
++	for _, stage := range []string{"sandbox list", "container list", "sandbox status"} {
++		t.Run(stage, func(t *testing.T) {
++			sandbox := nativeDiscoverySandbox()
++			failure := errors.New("RPC failed")
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{sandbox}, containers: []*runtimeapi.Container{discoveryContainer()}, status: discoverySandboxStatus(sandbox, "10.42.0.8")}
++			switch stage {
++			case "sandbox list":
++				service.sandboxErr = failure
++			case "container list":
++				service.containerErr = failure
++			case "sandbox status":
++				service.statusErr = failure
++			}
++			target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, target)
++			require.ErrorIs(t, err, failure)
++		})
++	}
++	t.Run("missing identity", func(t *testing.T) {
++		service := &discoveryRuntimeService{}
++		target, err := resolveRestoreTargetByPodIdentity(context.Background(), service, "worker", "inference", "", "main")
++		require.Empty(t, target)
++		require.ErrorContains(t, err, "UID")
++		require.Nil(t, service.sandboxFilter)
 +	})
 +}
 diff --git a/api/podcontract/protocol.go b/api/podcontract/protocol.go

@@ -1,0 +1,107 @@
+import json
+import os
+import threading
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import posix_direct as direct
+from resident_server import validate_trigger
+from gpu_memory_service.snapshot.transfer import FileTransferSource, GMSTransferTarget, GMSSnapshotConfig
+
+
+class ResidentPoolTests(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        self.slots = []
+        self.reads = []
+        self.copies = []
+        self.closed = []
+        self.failed = False
+        owner = self
+        class Slot:
+            def __init__(self, vmm, size):
+                self.view = memoryview(bytearray(size))
+                self.thread = threading.get_ident()
+                self.busy = False
+                owner.slots.append(self)
+            def wait(self):
+                assert self.thread == threading.get_ident()
+                self.busy = False
+            def copy_to_device_async(self, dst, length):
+                assert self.thread == threading.get_ident()
+                owner.copies.append((dst, bytes(self.view[:length])))
+                self.busy = True
+            def close(self):
+                self.wait()
+                self.view.release()
+                owner.closed.append(self)
+        self.slot = patch.object(direct, 'PinnedCopySlot', Slot)
+        self.vmm = patch.object(direct, 'get_vmm', lambda: SimpleNamespace(runtime_set_device=lambda _: None))
+        self.slot.start(); self.vmm.start()
+        self.addCleanup(self.slot.stop); self.addCleanup(self.vmm.stop)
+    def emit(self, event, **values):
+        self.events.append((event, values))
+    def read(self, fd, views, offset):
+        self.reads.append((fd, offset, len(views[0])))
+        views[0][:] = bytes([offset]) * len(views[0])
+        return len(views[0])
+    def test_warm_has_no_payload_io_and_load_reuses_every_lane(self):
+        with patch.object(direct.os, 'open') as opened, patch.object(direct.os, 'preadv') as read:
+            pool = direct.ResidentLanePool(0, 3, 8, self.emit)
+            self.assertEqual(len(self.slots), 6)
+            self.assertEqual(len({s.thread for s in self.slots}), 3)
+            opened.assert_not_called(); read.assert_not_called()
+        try:
+            sources = [FileTransferSource('saved-id', 'payload', 8, 28)]
+            targets = {'saved-id': GMSTransferTarget('saved-id', 4096, 0, 28)}
+            backend = direct.ResidentPosixDirect(GMSSnapshotConfig(device=0, max_workers=3), pool)
+            with patch.object(direct.os, 'open', return_value=42) as opened, patch.object(direct.fcntl, 'fcntl', return_value=os.O_DIRECT), patch.object(direct.os, 'preadv', side_effect=self.read), patch.object(direct.os, 'close'):
+                backend.start_restore(sources).restore(targets)
+                self.assertTrue(all(call.args[1] & os.O_DIRECT for call in opened.call_args_list))
+            self.assertEqual(len(self.slots), 6)
+            self.assertEqual(sorted((p, len(b), b[0]) for p,b in self.copies), [(4096,8,8),(4104,8,16),(4112,8,24),(4120,4,32)])
+            self.assertFalse(any(s.busy for s in self.slots))
+            backend.close(); backend.close()
+            self.assertEqual(len(self.closed), 0)
+            with self.assertRaisesRegex(RuntimeError, 'fresh and open'):
+                pool.restore(sources, targets)
+        finally:
+            pool.close(); pool.close()
+        self.assertEqual(len(self.closed), 6)
+    def test_short_read_drains_pending_copies_before_error(self):
+        pool = direct.ResidentLanePool(0, 1, 8, self.emit)
+        calls = 0
+        def fail_second(fd, views, offset):
+            nonlocal calls
+            calls += 1
+            return self.read(fd, views, offset) if calls == 1 else 0
+        try:
+            with patch.object(direct.os, 'open', return_value=42), patch.object(direct.fcntl, 'fcntl', return_value=os.O_DIRECT), patch.object(direct.os, 'preadv', side_effect=fail_second), patch.object(direct.os, 'close'):
+                with self.assertRaisesRegex(OSError, 'short direct read'):
+                    pool.restore([FileTransferSource('a','payload',0,24)], {'a':GMSTransferTarget('a',4096,0,24)})
+                self.assertFalse(any(s.busy for s in self.slots))
+        finally:
+            pool.close()
+    def test_instrumented_cold_backend_preserves_bytes_and_releases_slots(self):
+        backend = direct.PosixDirect(GMSSnapshotConfig(device=0, max_workers=3), emit=self.emit)
+        sources = [FileTransferSource('saved-id', 'payload', 8, 28)]
+        targets = {'saved-id': GMSTransferTarget('saved-id', 4096, 0, 28)}
+        with patch.object(direct, 'CHUNK', 8), patch.object(direct.os, 'open', return_value=42), patch.object(direct.fcntl, 'fcntl', return_value=os.O_DIRECT), patch.object(direct.os, 'preadv', side_effect=self.read), patch.object(direct.os, 'close'):
+            backend.start_restore(sources).restore(targets)
+        self.assertEqual(sorted((p, len(b), b[0]) for p,b in self.copies), [(4096,8,8),(4104,8,16),(4112,8,24),(4120,4,32)])
+        self.assertEqual(len(self.slots), len(self.closed))
+        self.assertIn('transfer_complete', [event for event, _ in self.events])
+    def test_close_before_trigger(self):
+        pool = direct.ResidentLanePool(0, 2, 8, self.emit)
+        pool.close()
+        self.assertEqual(len(self.closed), 4)
+    def test_trigger_rejects_other_capture_generation_and_invalid_epoch(self):
+        good = {'capture_id':'capture', 'generation':'generation', 'trigger_written_epoch':1.0}
+        self.assertEqual(validate_trigger(good, 'capture','generation'), good)
+        for key,value in [('capture_id','other'),('generation','other'),('trigger_written_epoch',0),('trigger_written_epoch',float('nan')),('trigger_written_epoch','1')]:
+            with self.assertRaises(ValueError):
+                validate_trigger({**good,key:value},'capture','generation')
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

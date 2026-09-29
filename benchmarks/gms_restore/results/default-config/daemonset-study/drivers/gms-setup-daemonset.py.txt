@@ -1,0 +1,20 @@
+import sys,json,shlex,time
+from pathlib import Path
+from kubernetes import client
+script=Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928/scripts/setup.py');scope={'__file__':str(script)};exec(script.read_text().rsplit('\nmain()',1)[0],scope)
+c=scope['cluster'];apps=scope['apps'];ns=c.NS;node=scope['NODES']['restore'];orig=json.loads((scope['R']/'manifests/original-vcluster.json').read_text());agent=scope['agent_on'](node)
+mount_cmd=f"mountpoint -q {scope['MOUNT']} || (mkdir -p {scope['MOUNT']} && mount -t nfs -o {scope['NFS_OPTIONS']} {scope['NFS_SOURCE']} {scope['MOUNT']})"
+print(scope['host'](agent,'agent',mount_cmd),flush=True)
+t=scope['bundle_patch'](scope['qualified_template']('stock',orig['daemonset']['spec']['template']['spec'].get('affinity')),True,True)
+for v in t['spec']['volumes']:
+ if v['name']=='exp-bundle':v['hostPath']['path']='/var/lib/schwinns-gms-0928/bundle'
+ if v['name']=='exp-criu':v['hostPath']['path']='/var/lib/schwinns-gms-0928/bundle/criu'
+t['spec']['volumes'].append({'name':'gms-agent','hostPath':{'path':'/var/lib/schwinns-gms-0928/snapshot-agent-daemonset-timing','type':'File'}})
+for container in t['spec']['containers']:
+ if container['name']=='agent':
+  container['volumeMounts'].append({'name':'gms-agent','mountPath':'/usr/local/bin/snapshot-agent','readOnly':True})
+ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',ns);apps.patch_namespaced_daemon_set(ds.metadata.name,ns,[{'op':'replace','path':'/spec/template','value':t},{'op':'replace','path':'/spec/updateStrategy','value':{'type':'OnDelete'}}])
+c.core.patch_namespaced_config_map('dynamo-snapshot-config',ns,{'data':scope['config_data']()})
+op=json.loads((scope['OLD']/'customstorage-glm-matrix/candidate-operator-template.json').read_text());co=op['spec']['containers'][0];co['image']=scope['images']['operator'];co['args']=[a for a in co['args'] if not a.startswith(('--agent-image=','--agent-image-pull-secrets='))]+['--agent-image='+scope['images']['agent']];apps.patch_namespaced_deployment('dynamo-snapshot-operator',ns,{'spec':{'template':op}})
+c.core.delete_namespaced_pod(agent,ns);time.sleep(5);new=scope['wait_agent_ready'](node);Path('/tmp/gms-restore-agent-virtual').write_text(new);Path('/tmp/gms-restore-agent-host').write_text(c.host_name(new));print('agent',new,flush=True)
+print(c.host_exec(new,'nsenter -t 1 -m -- sh /var/lib/schwinns-gms-0928/node-levers.sh apply','agent'),flush=True)

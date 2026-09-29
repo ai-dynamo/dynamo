@@ -1,0 +1,88 @@
+[
+  {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-wfwmt",
+    "namespace": "schwinns-vcluster",
+    "uid": "fecb37f0-a5f9-4889-97c1-1288d4abf9a1",
+    "creationTimestamp": "2026-09-29T05:54:45+00:00",
+    "creation_epoch": 1790661285.0,
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "ReplicaSet",
+        "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+        "uid": "9ca930b8-576c-4de5-a475-2690a78c3518"
+      }
+    ]
+  },
+  {
+    "apiVersion": "apps/v1",
+    "kind": "ReplicaSet",
+    "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+    "namespace": "schwinns-vcluster",
+    "uid": "9ca930b8-576c-4de5-a475-2690a78c3518",
+    "creationTimestamp": "2026-09-29T05:54:45+00:00",
+    "creation_epoch": 1790661285.0,
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "Deployment",
+        "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+        "uid": "59b35031-715d-4fc2-aba1-b45cee82f81a"
+      }
+    ]
+  },
+  {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+    "namespace": "schwinns-vcluster",
+    "uid": "59b35031-715d-4fc2-aba1-b45cee82f81a",
+    "creationTimestamp": "2026-09-29T05:54:45+00:00",
+    "creation_epoch": 1790661285.0,
+    "ownerReferences": [
+      {
+        "apiVersion": "nvidia.com/v1beta1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "DynamoComponentDeployment",
+        "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+        "uid": "9c0fbc73-ed3d-4003-ad6a-d585b4040d39"
+      }
+    ]
+  },
+  {
+    "apiVersion": "nvidia.com/v1beta1",
+    "kind": "DynamoComponentDeployment",
+    "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+    "namespace": "schwinns-vcluster",
+    "uid": "9c0fbc73-ed3d-4003-ad6a-d585b4040d39",
+    "creationTimestamp": "2026-09-29T05:54:45Z",
+    "creation_epoch": 1790661285.0,
+    "ownerReferences": [
+      {
+        "apiVersion": "nvidia.com/v1beta1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "DynamoGraphDeployment",
+        "name": "gms-v1-glm-dgd-0929",
+        "uid": "b00797d3-0038-4a7b-87d6-1efae7306c28"
+      }
+    ]
+  },
+  {
+    "apiVersion": "nvidia.com/v1beta1",
+    "kind": "DynamoGraphDeployment",
+    "name": "gms-v1-glm-dgd-0929",
+    "namespace": "schwinns-vcluster",
+    "uid": "b00797d3-0038-4a7b-87d6-1efae7306c28",
+    "creationTimestamp": "2026-09-29T05:54:44Z",
+    "creation_epoch": 1790661284.0,
+    "ownerReferences": []
+  }
+]

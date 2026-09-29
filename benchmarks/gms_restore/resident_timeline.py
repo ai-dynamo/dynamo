@@ -58,6 +58,8 @@ LABELS = {
     "dispatch": "Dispatch / open payload",
 }
 NOTES = [
+    "Resident mode has independent owners: Dynamo operator → DGD → engine Pod; a separate node DaemonSet owns eight GMS rank containers, each fusing the V1 server and Python loader in one process. Existing Snapshot/PageBroker services restore the engine. A shared timeline does not imply GMS belongs to the DGD. The cold control instead places GMS rank containers inside the DGD Pod.",
+    "Primary cold/resident groups contain trials 1–3 only. Preinstalled CUDA 1/2 use resident 3/4 as a separate followup; network 1/2 use preinstalled 3 with the same new agent as a third followup. Additional controls and treatments are never pooled into the primary means.",
     "t0 is the client DGD creation request. Ready means workload Pod readiness after coherent generation; it is not DGD Ready.",
     "Resident GMS initialization occurs before t0. The prewarm panel shows its cost separately; payload reads and weight allocations begin only after the load trigger.",
     "Main container start uses CRI nanoseconds where available. Kubernetes startedAt fallback has one-second precision. API-watch receipt is an observation, not the container start or agent input time.",
@@ -246,7 +248,9 @@ def gms_rank(case, publication, zero):
     ]
     if detailed:
         overview = make_row(
-            f"GMS rank {rank}",
+            f"Independent GMS DaemonSet — rank {rank}"
+            if online is not None
+            else f"DGD Pod — GMS rank {rank}",
             make_segment(started, import_start, "init"),
             make_segment(import_start, allocation_end, "allocation"),
             make_segment(
@@ -259,7 +263,9 @@ def gms_rank(case, publication, zero):
         )
     else:
         overview = make_row(
-            f"GMS rank {rank}",
+            f"Independent GMS DaemonSet — rank {rank}"
+            if online is not None
+            else f"DGD Pod — GMS rank {rank}",
             make_segment(started, sockets, "init"),
             make_segment(
                 sockets,
@@ -270,7 +276,9 @@ def gms_rank(case, publication, zero):
         )
     prewarm = (
         make_row(
-            f"GMS rank {rank}",
+            f"Independent GMS DaemonSet — rank {rank}"
+            if online is not None
+            else f"DGD Pod — GMS rank {rank}",
             make_segment(daemon, first("loader_context_start", online), "init"),
             phase_pair(
                 events, "loader_context_start", "loader_context_ready", "context"
@@ -337,11 +345,17 @@ def experiment_group(case, timing, ranks):
     resident = any(rank["prewarm"] for rank in ranks)
     group = "resident" if resident else "cold"
     preinstalled = bool(timing.get("preinstalled_cuda_host_path"))
-    network = bool(timing.get("runtime_network_discovery")) or "network" in case.name
+    network = timing.get("runtime_network_discovery") is True
+    if case.name.startswith("daemonset-network-") and not network:
+        raise ValueError(
+            "network trial lacks the runtime_network_discovery timing flag"
+        )
     if preinstalled:
         group += "_preinstalled"
     if network:
         group += "_network"
+    elif preinstalled and case.name == "daemonset-preinstalled-3":
+        group += "_network_control"
     if (
         not preinstalled
         and not network
@@ -447,6 +461,7 @@ def parse_case(case):
         "artifact_validation": "Checkpoint artifact validation",
         "compatibility": "GPU / driver compatibility",
         "container_resolution": "Find running main container",
+        "network_resolution": "Find running container + sandbox IP",
         "status_apply": "Restore status API update",
     }
     paired = []
@@ -454,7 +469,9 @@ def parse_case(case):
         segments, pending = [], None
         for at, data in milestones:
             stage = data.get("stage")
-            if stage == key + "_start":
+            if stage == key + "_start" or (
+                key == "network_resolution" and stage == "runtime_network_poll_start"
+            ):
                 pending = at
             elif stage == key + "_done":
                 begin = (
@@ -465,7 +482,9 @@ def parse_case(case):
                 segment = make_segment(
                     begin,
                     at,
-                    "discovery" if key == "container_resolution" else "orchestration",
+                    "discovery"
+                    if key in {"container_resolution", "network_resolution"}
+                    else "orchestration",
                     json.dumps(data, sort_keys=True),
                 )
                 segments.append(segment)
@@ -481,7 +500,8 @@ def parse_case(case):
         (
             at
             for at, data in milestones
-            if data.get("stage") == "container_resolution_done"
+            if data.get("stage")
+            in {"container_resolution_done", "network_resolution_done"}
         ),
         default=None,
     )
@@ -502,7 +522,7 @@ def parse_case(case):
     hot.extend(
         [
             make_row(
-                f"Main start → handler ({precision})",
+                f"DGD engine Pod: main start → handler ({precision})",
                 make_segment(main_start, handler, "discovery"),
             ),
             make_row(
@@ -519,13 +539,14 @@ def parse_case(case):
     )
     main_rows = [
         make_row(
-            "Request → restore handler", make_segment(zero, handler, "orchestration")
+            "Snapshot agent: request → restore handler",
+            make_segment(zero, handler, "orchestration"),
         )
     ]
     if main_start is not None:
         main_rows.append(
             make_row(
-                f"Main start → handler ({precision})",
+                f"DGD engine Pod: main start → handler ({precision})",
                 make_segment(main_start, handler, "discovery"),
             )
         )
@@ -535,13 +556,13 @@ def parse_case(case):
     gate = float(gate_lines[0]) if gate_lines else None
     main_rows.append(
         make_row(
-            "Verify all eight artifacts",
+            "GMS publication gate: verify all eight artifacts",
             make_segment(last_publication, gate, "publication"),
         )
     )
     main_rows.append(
         make_row(
-            "Snapshot restore operation",
+            "Resident Snapshot/PageBroker services",
             make_segment(handler, operation_end, "operation"),
         )
     )
@@ -551,7 +572,7 @@ def parse_case(case):
     criu_duration = seconds(restore["phases"]["criu_restore"])
     main_rows.append(
         make_row(
-            "CRIU (placement approximate)",
+            "DGD engine Pod: CRIU (placement approximate)",
             make_segment(
                 None if criu_end is None else criu_end - criu_duration, criu_end, "criu"
             ),
@@ -566,7 +587,8 @@ def parse_case(case):
                     make_segment(at - data["duration"], at, operation)
                 )
     main_rows += [
-        make_row(f"CUDA process {pid}", *segments) for pid, segments in pids.items()
+        make_row(f"Engine CUDA process {pid} (Snapshot/PageBroker)", *segments)
+        for pid, segments in pids.items()
     ]
     wake = next(
         (
@@ -584,15 +606,15 @@ def parse_case(case):
         main_rows.extend(
             [
                 make_row(
-                    "Restore return → app gate",
+                    "DGD engine Pod: restore return → app gate",
                     make_segment(operation_end, wake["entered_epoch"], "orchestration"),
                 ),
                 make_row(
-                    "Engine waits for weights",
+                    "DGD engine Pod: waits for GMS weights",
                     make_segment(wake["entered_epoch"], wake["passed_epoch"], "wait"),
                 ),
                 make_row(
-                    "Wake / generation / Ready observed",
+                    "DGD engine Pod: wake / generation / Ready",
                     make_segment(wake["passed_epoch"], ready, "inference"),
                 ),
             ]
@@ -600,7 +622,7 @@ def parse_case(case):
     else:
         main_rows.append(
             make_row(
-                "Wake / generation / Ready observed",
+                "DGD engine Pod: wake / generation / Ready",
                 make_segment(operation_end, ready, "inference"),
             )
         )
@@ -612,6 +634,8 @@ def parse_case(case):
         if re.fullmatch(r"daemonset-(?:cold|resident)-[123]", case.name)
         else "followup",
         "preinstalled_cuda_host_path": timing.get("preinstalled_cuda_host_path"),
+        "runtime_network_discovery": timing.get("runtime_network_discovery", False),
+        "agent_revision": timing.get("agent_revision"),
         "dgd_to_ready_s": ready - zero,
         "dgd_to_handler_s": handler - zero,
         "main_start_offset_s": None if main_start is None else main_start - zero,
@@ -711,6 +735,18 @@ def parse_case(case):
         "hot_path": hot,
         "prewarm": [r["prewarm"] for r in ranks if r["prewarm"]],
         "ranks": ranks,
+        "ownership": {
+            "mode": "resident" if any(rank["prewarm"] for rank in ranks) else "cold",
+            "dgd": "Dynamo operator → DGD → engine Pod",
+            "gms": "Independent node DaemonSet → eight rank containers"
+            if any(rank["prewarm"] for rank in ranks)
+            else "DGD Pod → engine plus eight GMS rank containers",
+            "loader": "Each GMS rank container runs the V1 server and fused Python loader in one process; no separate loader containers.",
+            "restore": "Resident Snapshot/PageBroker services → CRIU/CUDA restoration of the DGD engine Pod",
+            "relationship": "The engine reconnects through shared node-local GMS sockets. Resident GMS initialization is outside t0; payload transfer begins after the timed load trigger."
+            if any(rank["prewarm"] for rank in ranks)
+            else "In this cold control, GMS containers start in the DGD Pod after t0, then initialize and load the same PVC artifacts.",
+        },
         "notes": NOTES,
     }
 
@@ -721,7 +757,7 @@ def draw(path, data, key, suffix, xmin=None, xmax=None):
         return
     zero = data["origin_epoch"]
     fig, ax = plt.subplots(
-        figsize=(16, max(4, 0.34 * len(rows) + 2.7)), layout="constrained"
+        figsize=(18, max(4, 0.34 * len(rows) + 3.2)), layout="constrained"
     )
     for index, row in enumerate(rows):
         for segment in row["segments"]:
@@ -755,7 +791,12 @@ def draw(path, data, key, suffix, xmin=None, xmax=None):
         "prewarm": "GMS prewarm outside the restore timer",
     }[key]
     fig.suptitle(
-        f"{data['case']} — {title}\n{data['metrics']['dgd_to_ready_s']:.3f} s to coherent readiness",
+        f"{data['case']} — {title}\n{data['metrics']['dgd_to_ready_s']:.3f} s to coherent readiness\n"
+        + (
+            "DGD owns engine Pod • independent DaemonSet owns GMS • Snapshot/PageBroker already resident"
+            if data["ownership"]["mode"] == "resident"
+            else "Cold control: DGD Pod contains engine + GMS rank containers • Snapshot/PageBroker already resident"
+        ),
         fontsize=13,
     )
     kinds = list(dict.fromkeys(s["kind"] for row in rows for s in row["segments"]))
@@ -779,14 +820,15 @@ HTML = r"""<!doctype html><meta charset="utf-8"><title>Resident GMS restore time
 <style>body{margin:20px;font:14px system-ui;background:#f6f8fb;color:#253247}h1{font-size:22px}button,select{font:inherit;padding:7px;margin:4px;border:1px solid #cad1dd;border-radius:5px;background:white}button.active{background:#273e60;color:white}.card{background:white;border:1px solid #dde3eb;border-radius:8px;padding:14px;margin:14px 0;overflow:auto}.metrics{display:flex;flex-wrap:wrap;gap:25px}.metrics strong{font-size:23px;display:block}svg{min-width:850px;width:100%;height:auto}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:7px;border-bottom:1px solid #e6eaf0}.legend span{display:inline-block;margin:5px 12px 5px 0}.swatch{display:inline-block;width:12px;height:12px;margin-right:5px}p{line-height:1.5}.muted{color:#657184}#tip{position:fixed;background:#172437;color:white;padding:9px;max-width:470px;border-radius:5px;pointer-events:none;display:none;white-space:pre-wrap;z-index:5}</style>
 <h1>GMS DaemonSet: prestarted initialization, timed PVC/O_DIRECT payload load</h1>
 <div><label>Trial <select id="case"></select></label><button data-mode="rows">Full restore</button><button data-mode="hot_path">Request → handler</button><button data-mode="prewarm">Prewarm before t0</button><button data-mode="rank">Rank detail</button><label id="ranklabel">Rank <select id="rank"></select></label></div>
-<div id="metrics" class="card metrics"></div><div class="card"><div id="caption"></div><div id="chart"></div><div id="legend" class="legend"></div></div><div class="card"><h3>Trial comparison</h3><div id="comparison"></div></div><details class="card"><summary>Measurement boundaries and caveats</summary><div id="notes"></div></details><div id="tip"></div>
+<div id="ownership" class="card"></div><div id="metrics" class="card metrics"></div><div class="card"><div id="caption"></div><div id="chart"></div><div id="legend" class="legend"></div></div><div class="card"><h3>Trial comparison</h3><div id="comparison"></div></div><details class="card"><summary>Measurement boundaries and caveats</summary><div id="notes"></div></details><div id="tip"></div>
 <script>const DATA=__DATA__,COLORS=__COLORS__,LABELS=__LABELS__;let mode='rows';const selector=document.querySelector('#case'),rankSelector=document.querySelector('#rank');
 DATA.forEach((d,i)=>selector.add(new Option(d.case,i)));for(let i=0;i<8;i++)rankSelector.add(new Option(i,i));
 const fmt=v=>v==null?'—':v.toFixed(3)+' s';const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function render(){const d=DATA[selector.value],m=d.metrics,z=d.origin_epoch;document.querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.mode===mode));document.querySelector('#ranklabel').style.display=mode==='rank'?'inline':'none';document.querySelector('#metrics').innerHTML=[['DGD → Ready',m.dgd_to_ready_s],['DGD → handler',m.dgd_to_handler_s],['Main start → handler',m.main_start_to_handler_s],['First payload read',m.first_read_offset_s],['Wait for weights',m.wake_gate_wait_s]].map(([k,v])=>`<div>${k}<strong>${fmt(v)}</strong></div>`).join('');
-let rows=mode==='rank'?d.ranks[rankSelector.value].detail:d[mode];rows=rows.filter(r=>r.segments.length);let min=0,max=d.ready_epoch-z;
+document.querySelector('#ownership').innerHTML=`<strong>Ownership: ${d.ownership.mode==='resident'?'independent GMS DaemonSet and DGD engine Pod':'cold control with GMS inside the DGD Pod'}</strong><div style="display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:14px;margin-top:10px"><div style="border-left:4px solid #607d8b;padding-left:12px">${esc(d.ownership.dgd)}</div><div style="border-left:4px solid #399f68;padding-left:12px">${esc(d.ownership.gms)}</div><div style="border-left:4px solid #b175ab;padding-left:12px">${esc(d.ownership.restore)}</div></div><p>${esc(d.ownership.loader)} ${esc(d.ownership.relationship)}</p><p class="muted">${d.ownership.mode==='resident'?'The common t0 aligns concurrent work across owners; it does not put the GMS DaemonSet inside the DGD.':'This is the cold control: GMS and the engine share the DGD Pod.'}</p>`;
+let rows=mode==='rank' ?d.ranks[rankSelector.value].detail:d[mode];rows=rows.filter(r=>r.segments.length);let min=0,max=d.ready_epoch-z;
 if(mode==='prewarm'||mode==='rank'){min=Math.min(0,...rows.flatMap(r=>r.segments.map(s=>s.start-z)));max=Math.max(0,...rows.flatMap(r=>r.segments.map(s=>s.end-z)));}if(mode==='hot_path')max=Math.max(d.handler_epoch-z,...rows.flatMap(r=>r.segments.map(s=>s.end-z)))+.2;
-if(max-min<.1)max=min+.1;const width=1350,left=370,right=30,top=32,rowH=29,height=top+rows.length*rowH+55,x=t=>left+(t-min)/(max-min)*(width-left-right);let svg=`<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;for(let i=0;i<=10;i++){let t=min+(max-min)*i/10;svg+=`<line x1="${x(t)}" y1="22" x2="${x(t)}" y2="${height-42}" stroke="#e7ebf1"/><text x="${x(t)}" y="${height-22}" text-anchor="middle" fill="#68768a" font-size="12">${t.toFixed(2)}</text>`;}
+if(max-min<.1)max=min+.1;const width=1350,left=490,right=30,top=32,rowH=29,height=top+rows.length*rowH+55,x=t=>left+(t-min)/(max-min)*(width-left-right);let svg=`<svg viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">`;for(let i=0;i<=10;i++){let t=min+(max-min)*i/10;svg+=`<line x1="${x(t)}" y1="22" x2="${x(t)}" y2="${height-42}" stroke="#e7ebf1"/><text x="${x(t)}" y="${height-22}" text-anchor="middle" fill="#68768a" font-size="12">${t.toFixed(2)}</text>`;}
 rows.forEach((r,i)=>{const y=top+i*rowH;svg+=`<text x="${left-12}" y="${y+15}" text-anchor="end" font-size="12" fill="#253247">${esc(r.label)}</text>`;r.segments.forEach(s=>{let start=s.start-z,end=s.end-z,detail=`${r.label}\n${LABELS[s.kind]}\n${start.toFixed(6)} → ${end.toFixed(6)} s\nDuration ${(end-start).toFixed(6)} s\n${s.detail}`;svg+=`<rect class="bar" data-tip="${esc(detail)}" x="${x(start)}" y="${y}" width="${Math.max(.8,x(end)-x(start))}" height="21" fill="${COLORS[s.kind]}" rx="2"/>`;});});svg+=`<line x1="${x(0)}" y1="20" x2="${x(0)}" y2="${height-42}" stroke="#243c60" stroke-dasharray="4 3"/></svg>`;document.querySelector('#chart').innerHTML=svg;
 const used=[...new Set(rows.flatMap(r=>r.segments.map(s=>s.kind)))];document.querySelector('#legend').innerHTML=used.map(k=>`<span><i class="swatch" style="background:${COLORS[k]}"></i>${LABELS[k]}</span>`).join('');document.querySelector('#caption').innerHTML=`<strong>${esc(d.case)}</strong><p class="muted">${mode==='prewarm'?'Negative times are initialization outside the restore timer. The pale interval is the already-warm service waiting for the workload request.':mode==='hot_path'?'Same-clock agent stages split dispatch overhead. API status observation can arrive after the restore handler has already begun. Main start source: '+esc(m.main_start_precision):mode==='rank'?'Detailed phase spans can overlap: lanes initialize and begin reads independently. Negative times belong to resident prewarm.':'All bars share t0 = DGD creation request. Hover a bar for exact offsets and its measurement boundary.'}</p>`;
 const tip=document.querySelector('#tip');document.querySelectorAll('.bar').forEach(el=>{el.onmousemove=e=>{tip.textContent=el.dataset.tip;tip.style.display='block';tip.style.left=Math.min(e.clientX+12,window.innerWidth-490)+'px';tip.style.top=Math.min(e.clientY+12,window.innerHeight-150)+'px';};el.onmouseleave=()=>tip.style.display='none';});}
@@ -850,8 +892,13 @@ def main():
         group: value for group, value in groups.items() if group.startswith("resident")
     }
     if eligible:
-        fastest = min(
-            eligible, key=lambda group: eligible[group]["mean"]["dgd_to_ready_s"]
+        network_groups = [group for group in eligible if group.endswith("_network")]
+        fastest = (
+            network_groups[-1]
+            if network_groups
+            else min(
+                eligible, key=lambda group: eligible[group]["mean"]["dgd_to_ready_s"]
+            )
         )
         ordered = sorted(
             [case for case in cases if case["metrics"]["group"] == fastest],
@@ -877,6 +924,25 @@ def main():
             "note": "Separate followup: adjacent controls are resident-3 and resident-4; preinstalled cases must not be pooled into the primary cold/resident comparison.",
             "controls": aggregate(controls),
             "preinstalled": aggregate(preinstalled),
+        }
+    network_control = [
+        case["metrics"] for case in cases if case["case"] == "daemonset-preinstalled-3"
+    ]
+    network_cases = [
+        case["metrics"]
+        for case in cases
+        if case["case"] in {"daemonset-network-1", "daemonset-network-2"}
+    ]
+    if network_control or network_cases:
+        revisions = {
+            row.get("agent_revision") for row in network_control + network_cases
+        }
+        secondary["runtime_network_discovery"] = {
+            "note": "Separate same-agent followup: network-1/2 against preinstalled-3 only. One control and at most two treatments; this small sample supports a measured startup-gap comparison, not a general latency or throughput conclusion.",
+            "controls": aggregate(network_control),
+            "network_discovery": aggregate(network_cases),
+            "same_agent_revision": len(revisions) == 1 and None not in revisions,
+            "agent_revisions": sorted(str(revision) for revision in revisions),
         }
     output = args.output or (
         args.root / "daemonset-study"

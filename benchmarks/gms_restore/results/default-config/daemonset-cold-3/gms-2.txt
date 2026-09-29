@@ -1,0 +1,370 @@
+{"event": "process_start", "rank": 2, "epoch": 1790661287.7179303, "elapsed_s": 0.002835988998413086, "started_epoch": 1790661287.7150943}
+{"event": "imports_start", "rank": 2, "epoch": 1790661287.717957, "elapsed_s": 0.002862691879272461}
+{"event": "imports_complete", "rank": 2, "epoch": 1790661287.8060644, "elapsed_s": 0.09097003936767578}
+{"event": "vmm_create_start", "rank": 2, "epoch": 1790661287.8060951, "elapsed_s": 0.09100079536437988}
+{"event": "vmm_create_complete", "rank": 2, "epoch": 1790661287.806108, "elapsed_s": 0.09101366996765137}
+{"event": "cuinit_start", "rank": 2, "epoch": 1790661287.8061147, "elapsed_s": 0.09102034568786621}
+{"event": "cuinit_complete", "rank": 2, "epoch": 1790661287.8960402, "elapsed_s": 0.18094587326049805}
+{"event": "numa_start", "rank": 2, "epoch": 1790661287.8961134, "elapsed_s": 0.18101906776428223}
+{"event": "numa_affinity", "rank": 2, "epoch": 1790661287.998249, "elapsed_s": 0.2831547260284424, "node": 0, "cpus": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143]}
+{"event": "server_init_start", "rank": 2, "epoch": 1790661287.9983726, "elapsed_s": 0.283278226852417}
+{"event": "sockets", "rank": 2, "epoch": 1790661287.9987183, "elapsed_s": 0.28362393379211426, "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6"}
+{"event": "loader_context_start", "rank": 2, "epoch": 1790661287.9992814, "elapsed_s": 0.28418707847595215}
+{"event": "loader_context_ready", "rank": 2, "epoch": 1790661288.4786594, "elapsed_s": 0.7635650634765625}
+{"event": "load_weights_start", "rank": 2, "epoch": 1790661288.4787188, "elapsed_s": 0.7636244297027588}
+{"event": "allocation_import_start", "rank": 2, "epoch": 1790661288.4884167, "elapsed_s": 0.773322343826294}
+{"event": "allocation_import_complete", "rank": 2, "epoch": 1790661289.238873, "elapsed_s": 1.5237786769866943, "allocations": 28, "bytes": 60129542144}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2395873, "elapsed_s": 1.5244929790496826, "lane": 0}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.239741, "elapsed_s": 1.5246467590332031, "lane": 0}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2397537, "elapsed_s": 1.5246593952178955, "lane": 0}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2400067, "elapsed_s": 1.5249123573303223, "lane": 1}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.276463, "elapsed_s": 1.561368703842163, "lane": 1}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2767854, "elapsed_s": 1.5616910457611084, "lane": 2}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2769666, "elapsed_s": 1.5618722438812256, "lane": 2}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2769783, "elapsed_s": 1.5618839263916016, "lane": 2}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2771037, "elapsed_s": 1.562009334564209, "lane": 3}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2772524, "elapsed_s": 1.5621581077575684, "lane": 3}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.277267, "elapsed_s": 1.5621726512908936, "lane": 3}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.277346, "elapsed_s": 1.5622515678405762, "lane": 4}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.277484, "elapsed_s": 1.562389612197876, "lane": 4}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2774966, "elapsed_s": 1.5624022483825684, "lane": 4}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2775168, "elapsed_s": 1.562422513961792, "lane": 1}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.277781, "elapsed_s": 1.5626866817474365, "lane": 5}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2779121, "elapsed_s": 1.5628178119659424, "lane": 5}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.277925, "elapsed_s": 1.5628306865692139, "lane": 5}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2780101, "elapsed_s": 1.5629158020019531, "lane": 6}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2781389, "elapsed_s": 1.563044548034668, "lane": 6}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2781513, "elapsed_s": 1.5630569458007812, "lane": 6}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2783237, "elapsed_s": 1.5632293224334717, "lane": 7}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2784445, "elapsed_s": 1.5633502006530762, "lane": 7}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2784595, "elapsed_s": 1.5633652210235596, "lane": 7}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.278653, "elapsed_s": 1.563558578491211, "lane": 8}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2787647, "elapsed_s": 1.5636703968048096, "lane": 8}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2787788, "elapsed_s": 1.5636844635009766, "lane": 8}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2788541, "elapsed_s": 1.5637598037719727, "lane": 9}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2789943, "elapsed_s": 1.5638999938964844, "lane": 9}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2790065, "elapsed_s": 1.5639121532440186, "lane": 9}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2792878, "elapsed_s": 1.5641934871673584, "lane": 10}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2794118, "elapsed_s": 1.5643174648284912, "lane": 10}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.279425, "elapsed_s": 1.5643305778503418, "lane": 10}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2794907, "elapsed_s": 1.5643963813781738, "lane": 11}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2796357, "elapsed_s": 1.5645413398742676, "lane": 11}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.27965, "elapsed_s": 1.5645556449890137, "lane": 11}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.2799406, "elapsed_s": 1.5648462772369385, "lane": 12}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2800663, "elapsed_s": 1.564971923828125, "lane": 12}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.280086, "elapsed_s": 1.5649917125701904, "lane": 12}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.280309, "elapsed_s": 1.5652146339416504, "lane": 13}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2804265, "elapsed_s": 1.5653321743011475, "lane": 13}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2804444, "elapsed_s": 1.56535005569458, "lane": 13}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.280623, "elapsed_s": 1.5655286312103271, "lane": 14}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2807333, "elapsed_s": 1.5656390190124512, "lane": 14}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2807481, "elapsed_s": 1.5656538009643555, "lane": 14}
+{"event": "lane_context_start", "rank": 2, "epoch": 1790661289.280923, "elapsed_s": 1.565828561782837, "lane": 15}
+{"event": "lane_context_ready", "rank": 2, "epoch": 1790661289.2809927, "elapsed_s": 1.5658984184265137, "lane": 15}
+{"event": "lane_buffers_start", "rank": 2, "epoch": 1790661289.2810035, "elapsed_s": 1.5659091472625732, "lane": 15}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.3979158, "elapsed_s": 1.68282151222229, "lane": 3, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.4004705, "elapsed_s": 1.6853761672973633, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.400511, "elapsed_s": 1.6854166984558105, "lane": 3, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.42618, "elapsed_s": 1.711085557937622, "lane": 3, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.4262145, "elapsed_s": 1.7111201286315918, "lane": 3, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.4875643, "elapsed_s": 1.7724699974060059, "lane": 6, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.4883993, "elapsed_s": 1.7733049392700195, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.4884403, "elapsed_s": 1.773345947265625, "lane": 6, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.5765324, "elapsed_s": 1.8614380359649658, "lane": 9, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.6361704, "elapsed_s": 1.9210760593414307, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.6362092, "elapsed_s": 1.9211149215698242, "lane": 9, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.6602547, "elapsed_s": 1.9451603889465332, "lane": 9, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.6602905, "elapsed_s": 1.9451961517333984, "lane": 9, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.687973, "elapsed_s": 1.9728786945343018, "lane": 12, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.6885846, "elapsed_s": 1.9734902381896973, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.6886182, "elapsed_s": 1.9735238552093506, "lane": 12, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.7271094, "elapsed_s": 2.0120151042938232, "lane": 12, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.7272308, "elapsed_s": 2.012136459350586, "lane": 12, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.77969, "elapsed_s": 2.0645956993103027, "lane": 0, "pinned_bytes": 268435456}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.8068619, "elapsed_s": 2.0917675495147705, "lane": 6, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.8068964, "elapsed_s": 2.0918021202087402, "lane": 6, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.8397598, "elapsed_s": 2.1246654987335205, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.8398001, "elapsed_s": 2.1247057914733887, "lane": 0, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.8581774, "elapsed_s": 2.143083095550537, "lane": 0, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.8582146, "elapsed_s": 2.143120288848877, "lane": 0, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.8634264, "elapsed_s": 2.148332118988037, "lane": 5, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.8822167, "elapsed_s": 2.1671223640441895, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661289.8822544, "elapsed_s": 2.1671600341796875, "lane": 5, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661289.9100285, "elapsed_s": 2.194934129714966, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661289.9641073, "elapsed_s": 2.2490129470825195, "lane": 8, "pinned_bytes": 268435456}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661289.9863198, "elapsed_s": 2.2712254524230957, "lane": 5, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661289.9863567, "elapsed_s": 2.2712624073028564, "lane": 5, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.0096235, "elapsed_s": 2.2945291996002197, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.009662, "elapsed_s": 2.294567584991455, "lane": 8, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.0276659, "elapsed_s": 2.3125715255737305, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.0802202, "elapsed_s": 2.365125894546509, "lane": 2, "pinned_bytes": 268435456}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.153467, "elapsed_s": 2.4383726119995117, "lane": 7, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.1686926, "elapsed_s": 2.4535982608795166, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.1687322, "elapsed_s": 2.4536378383636475, "lane": 2, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.2281141, "elapsed_s": 2.5130198001861572, "lane": 1, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.2327087, "elapsed_s": 2.5176143646240234, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.232748, "elapsed_s": 2.517653703689575, "lane": 7, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.3007076, "elapsed_s": 2.585613250732422, "lane": 4, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.3086007, "elapsed_s": 2.593506336212158, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.3086393, "elapsed_s": 2.5935449600219727, "lane": 1, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.325559, "elapsed_s": 2.610464572906494, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.3341587, "elapsed_s": 2.6190643310546875, "lane": 2, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.334195, "elapsed_s": 2.619100570678711, "lane": 2, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.3386343, "elapsed_s": 2.623539924621582, "lane": 13, "pinned_bytes": 268435456}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.379679, "elapsed_s": 2.6645846366882324, "lane": 7, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.3797147, "elapsed_s": 2.6646203994750977, "lane": 7, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.405546, "elapsed_s": 2.6904516220092773, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.4055812, "elapsed_s": 2.6904869079589844, "lane": 4, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.4323103, "elapsed_s": 2.7172160148620605, "lane": 14, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.483154, "elapsed_s": 2.768059730529785, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.4831913, "elapsed_s": 2.768096923828125, "lane": 13, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.4847403, "elapsed_s": 2.769645929336548, "lane": 8, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.4847765, "elapsed_s": 2.7696821689605713, "lane": 8, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.506105, "elapsed_s": 2.791010618209839, "lane": 11, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.5273244, "elapsed_s": 2.812230110168457, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.5425167, "elapsed_s": 2.8274223804473877, "lane": 15, "pinned_bytes": 268435456}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.5594978, "elapsed_s": 2.8444035053253174, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.5703363, "elapsed_s": 2.8552420139312744, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.5703745, "elapsed_s": 2.8552801609039307, "lane": 14, "bytes": 134217728}
+{"event": "lane_ready", "rank": 2, "epoch": 1790661290.6168516, "elapsed_s": 2.90175724029541, "lane": 10, "pinned_bytes": 268435456}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.657154, "elapsed_s": 2.9420597553253174, "lane": 1, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.6571932, "elapsed_s": 2.94209885597229, "lane": 1, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.7615838, "elapsed_s": 3.0464894771575928, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.7616246, "elapsed_s": 3.046530246734619, "lane": 11, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.7635257, "elapsed_s": 3.048431396484375, "lane": 4, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.7636, "elapsed_s": 3.0485057830810547, "lane": 4, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.7695644, "elapsed_s": 3.0544700622558594, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.798296, "elapsed_s": 3.0832016468048096, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.7983286, "elapsed_s": 3.0832343101501465, "lane": 15, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661290.8053367, "elapsed_s": 3.090242385864258, "lane": 13, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661290.8053713, "elapsed_s": 3.0902769565582275, "lane": 13, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.8723128, "elapsed_s": 3.1572184562683105, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661290.8754823, "elapsed_s": 3.1603879928588867, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_start", "rank": 2, "epoch": 1790661290.875522, "elapsed_s": 3.1604275703430176, "lane": 10, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661291.0312107, "elapsed_s": 3.3161163330078125, "lane": 14, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661291.03125, "elapsed_s": 3.3161556720733643, "lane": 14, "bytes": 134217728}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661291.233126, "elapsed_s": 3.518031597137451, "lane": 11, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661291.2331657, "elapsed_s": 3.518071413040161, "lane": 11, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.2855096, "elapsed_s": 3.5704152584075928, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.2991197, "elapsed_s": 3.5840253829956055, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.3207488, "elapsed_s": 3.60565447807312, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.3263338, "elapsed_s": 3.611239433288574, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.3374197, "elapsed_s": 3.6223254203796387, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661291.4641244, "elapsed_s": 3.749030113220215, "lane": 15, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661291.4641547, "elapsed_s": 3.7490603923797607, "lane": 15, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.4948978, "elapsed_s": 3.779803514480591, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.5153954, "elapsed_s": 3.8003010749816895, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "first_read_complete", "rank": 2, "epoch": 1790661291.5210452, "elapsed_s": 3.805950880050659, "lane": 10, "bytes": 134217728}
+{"event": "first_copy_start", "rank": 2, "epoch": 1790661291.5210834, "elapsed_s": 3.8059890270233154, "lane": 10, "bytes": 134217728}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.6477053, "elapsed_s": 3.9326109886169434, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.6916199, "elapsed_s": 3.9765255451202393, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.7036142, "elapsed_s": 3.9885199069976807, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.7331486, "elapsed_s": 4.018054246902466, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.7411227, "elapsed_s": 4.026028394699097, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661291.9430833, "elapsed_s": 4.227988958358765, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.0308766, "elapsed_s": 4.315782308578491, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.1331868, "elapsed_s": 4.418092489242554, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.1521907, "elapsed_s": 4.437096357345581, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.1625214, "elapsed_s": 4.447427034378052, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.205965, "elapsed_s": 4.490870714187622, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.2601461, "elapsed_s": 4.54505181312561, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.2736473, "elapsed_s": 4.558552980422974, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.2806225, "elapsed_s": 4.565528154373169, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.2846963, "elapsed_s": 4.569602012634277, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.4320898, "elapsed_s": 4.716995477676392, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.4384801, "elapsed_s": 4.723385810852051, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.4489024, "elapsed_s": 4.7338080406188965, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.4789205, "elapsed_s": 4.763826131820679, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.4890075, "elapsed_s": 4.773913145065308, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.5450413, "elapsed_s": 4.829946994781494, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.555154, "elapsed_s": 4.840059757232666, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.5794828, "elapsed_s": 4.864388465881348, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.5968993, "elapsed_s": 4.881804943084717, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.6394575, "elapsed_s": 4.924363136291504, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.7324166, "elapsed_s": 5.017322301864624, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.7523856, "elapsed_s": 5.0372912883758545, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.892755, "elapsed_s": 5.177660703659058, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661292.897505, "elapsed_s": 5.182410717010498, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.0731695, "elapsed_s": 5.358075141906738, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.1181827, "elapsed_s": 5.403088331222534, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.1293566, "elapsed_s": 5.414262294769287, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.1505926, "elapsed_s": 5.435498237609863, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.1610851, "elapsed_s": 5.445990800857544, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.1800742, "elapsed_s": 5.464979887008667, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.2029517, "elapsed_s": 5.487857341766357, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.251682, "elapsed_s": 5.536587715148926, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.3441691, "elapsed_s": 5.629074811935425, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.4661686, "elapsed_s": 5.751074314117432, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.4760926, "elapsed_s": 5.760998249053955, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.4921548, "elapsed_s": 5.777060508728027, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.5664935, "elapsed_s": 5.851399183273315, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.6089332, "elapsed_s": 5.893838882446289, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.7826982, "elapsed_s": 6.067603826522827, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.8925223, "elapsed_s": 6.1774280071258545, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.9026675, "elapsed_s": 6.187573194503784, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661293.9826465, "elapsed_s": 6.267552137374878, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.1774192, "elapsed_s": 6.462324857711792, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.182604, "elapsed_s": 6.467509746551514, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.2040565, "elapsed_s": 6.488962173461914, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.2081752, "elapsed_s": 6.4930808544158936, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.251039, "elapsed_s": 6.535944700241089, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.2560637, "elapsed_s": 6.540969371795654, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.4802315, "elapsed_s": 6.765137195587158, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.5356526, "elapsed_s": 6.820558309555054, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.5514362, "elapsed_s": 6.836341857910156, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.571298, "elapsed_s": 6.856203556060791, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.5749, "elapsed_s": 6.859805583953857, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.5755556, "elapsed_s": 6.860461235046387, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.5769603, "elapsed_s": 6.861865997314453, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.6729896, "elapsed_s": 6.957895278930664, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.7044916, "elapsed_s": 6.989397287368774, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661294.8177428, "elapsed_s": 7.102648496627808, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.1232765, "elapsed_s": 7.408182144165039, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.179512, "elapsed_s": 7.4644176959991455, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.2757573, "elapsed_s": 7.5606629848480225, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.2901897, "elapsed_s": 7.5750954151153564, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.3403652, "elapsed_s": 7.625270843505859, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.3780377, "elapsed_s": 7.662943363189697, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.666783, "elapsed_s": 7.951688766479492, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.6704793, "elapsed_s": 7.955384969711304, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.678836, "elapsed_s": 7.963741779327393, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.7386482, "elapsed_s": 8.023553848266602, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661295.9702861, "elapsed_s": 8.255191802978516, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.0233319, "elapsed_s": 8.308237552642822, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.0441945, "elapsed_s": 8.329100131988525, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.0464344, "elapsed_s": 8.331340074539185, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.0651877, "elapsed_s": 8.350093364715576, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.12826, "elapsed_s": 8.41316556930542, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.142259, "elapsed_s": 8.427164554595947, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.5061462, "elapsed_s": 8.791051864624023, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.6185067, "elapsed_s": 8.903412342071533, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.6821752, "elapsed_s": 8.96708083152771, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.6983144, "elapsed_s": 8.983220100402832, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.8082318, "elapsed_s": 9.093137502670288, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.8663862, "elapsed_s": 9.151291847229004, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.9360175, "elapsed_s": 9.22092318534851, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661296.980007, "elapsed_s": 9.264912605285645, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.015658, "elapsed_s": 9.30056357383728, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.1550713, "elapsed_s": 9.439976930618286, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.2234728, "elapsed_s": 9.508378505706787, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.3272188, "elapsed_s": 9.6121244430542, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.3933628, "elapsed_s": 9.678268432617188, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.431983, "elapsed_s": 9.716888666152954, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.5589988, "elapsed_s": 9.843904495239258, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.599316, "elapsed_s": 9.88422155380249, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.602725, "elapsed_s": 9.887630701065063, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.7743337, "elapsed_s": 10.059239387512207, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.940713, "elapsed_s": 10.225618600845337, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661297.946394, "elapsed_s": 10.231299638748169, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.0398026, "elapsed_s": 10.324708223342896, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.0431068, "elapsed_s": 10.328012466430664, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.0922754, "elapsed_s": 10.377181053161621, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.0950103, "elapsed_s": 10.379915952682495, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.1212223, "elapsed_s": 10.4061279296875, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.3016796, "elapsed_s": 10.586585283279419, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.492186, "elapsed_s": 10.77709174156189, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.530645, "elapsed_s": 10.815550565719604, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.673948, "elapsed_s": 10.958853721618652, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.7176447, "elapsed_s": 11.00255036354065, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.7238991, "elapsed_s": 11.00880479812622, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.8057175, "elapsed_s": 11.090623140335083, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661298.9548607, "elapsed_s": 11.239766359329224, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.0096257, "elapsed_s": 11.294531345367432, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.1251528, "elapsed_s": 11.410058498382568, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.1387565, "elapsed_s": 11.423662185668945, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.2012708, "elapsed_s": 11.486176490783691, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.2216065, "elapsed_s": 11.50651216506958, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.3053427, "elapsed_s": 11.590248346328735, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.3593063, "elapsed_s": 11.644212007522583, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.4669578, "elapsed_s": 11.751863479614258, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.471435, "elapsed_s": 11.756340742111206, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.6054177, "elapsed_s": 11.890323400497437, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661299.8614264, "elapsed_s": 12.146332025527954, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.0352993, "elapsed_s": 12.320204973220825, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.046252, "elapsed_s": 12.331157684326172, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.0773597, "elapsed_s": 12.362265348434448, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.1585736, "elapsed_s": 12.443479299545288, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.163692, "elapsed_s": 12.44859766960144, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.2169905, "elapsed_s": 12.501896142959595, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.2303398, "elapsed_s": 12.51524543762207, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.307311, "elapsed_s": 12.592216730117798, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.3166938, "elapsed_s": 12.60159945487976, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.461222, "elapsed_s": 12.746127605438232, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.5964224, "elapsed_s": 12.881328105926514, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.661047, "elapsed_s": 12.945952653884888, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.668901, "elapsed_s": 12.953806638717651, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.7575371, "elapsed_s": 13.042442798614502, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.7948802, "elapsed_s": 13.079785823822021, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.8202178, "elapsed_s": 13.105123519897461, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661300.950085, "elapsed_s": 13.23499059677124, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.0095892, "elapsed_s": 13.294494867324829, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.0294087, "elapsed_s": 13.314314365386963, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.0391974, "elapsed_s": 13.324103116989136, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.0766127, "elapsed_s": 13.361518383026123, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.1544712, "elapsed_s": 13.439376831054688, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.1594589, "elapsed_s": 13.444364547729492, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.210144, "elapsed_s": 13.495049715042114, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.291449, "elapsed_s": 13.576354742050171, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.3489754, "elapsed_s": 13.633881092071533, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.5941365, "elapsed_s": 13.879042148590088, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.6284451, "elapsed_s": 13.913350820541382, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.6318736, "elapsed_s": 13.916779279708862, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.6347268, "elapsed_s": 13.91963243484497, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.7622306, "elapsed_s": 14.047136306762695, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.7669904, "elapsed_s": 14.051896095275879, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.776132, "elapsed_s": 14.06103777885437, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.8913221, "elapsed_s": 14.176227807998657, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.8924687, "elapsed_s": 14.177374362945557, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.9338999, "elapsed_s": 14.21880555152893, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661301.9537513, "elapsed_s": 14.238656997680664, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.029716, "elapsed_s": 14.314621686935425, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.145496, "elapsed_s": 14.43040156364441, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.2217786, "elapsed_s": 14.506684303283691, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.2625227, "elapsed_s": 14.547428369522095, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.312236, "elapsed_s": 14.597141742706299, "lane": 5, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.327762, "elapsed_s": 14.612667560577393, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.4579353, "elapsed_s": 14.742841005325317, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.4797633, "elapsed_s": 14.764668941497803, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.4896479, "elapsed_s": 14.774553537368774, "lane": 11, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.5254946, "elapsed_s": 14.810400247573853, "lane": 0, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.537275, "elapsed_s": 14.82218074798584, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.560352, "elapsed_s": 14.845257759094238, "lane": 6, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.561123, "elapsed_s": 14.846028566360474, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.6960034, "elapsed_s": 14.9809091091156, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.7130692, "elapsed_s": 14.997974872589111, "lane": 9, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661302.7657528, "elapsed_s": 15.050658464431763, "lane": 12, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661302.9293532, "elapsed_s": 15.214258909225464, "lane": 5}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.0548575, "elapsed_s": 15.339763164520264, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.1284904, "elapsed_s": 15.413396120071411, "lane": 1, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.1593704, "elapsed_s": 15.444276094436646, "lane": 8, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.1631591, "elapsed_s": 15.448064804077148, "lane": 13, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.1916502, "elapsed_s": 15.476555824279785, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.1950257, "elapsed_s": 15.479931354522705, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.2112157, "elapsed_s": 15.496121406555176, "lane": 11}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.2398956, "elapsed_s": 15.524801254272461, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.2706845, "elapsed_s": 15.555590152740479, "lane": 0}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.3320618, "elapsed_s": 15.61696743965149, "lane": 9}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.346443, "elapsed_s": 15.631348609924316, "lane": 6}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.3573697, "elapsed_s": 15.642275333404541, "lane": 14, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.4083085, "elapsed_s": 15.693214178085327, "lane": 3, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.4247143, "elapsed_s": 15.709619998931885, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.5022285, "elapsed_s": 15.787134170532227, "lane": 12}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.5731337, "elapsed_s": 15.858039379119873, "lane": 7, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.5874455, "elapsed_s": 15.872351169586182, "lane": 1}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.7736964, "elapsed_s": 16.05860209465027, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.7866478, "elapsed_s": 16.071553468704224, "lane": 8}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661303.8011568, "elapsed_s": 16.08606243133545, "lane": 13}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.9015996, "elapsed_s": 16.18650531768799, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661303.9170663, "elapsed_s": 16.201972007751465, "lane": 10, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661304.247481, "elapsed_s": 16.532386779785156, "lane": 4, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.2520044, "elapsed_s": 16.53691005706787, "lane": 7}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.2934475, "elapsed_s": 16.5783531665802, "lane": 3}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.2973652, "elapsed_s": 16.582270860671997, "lane": 14}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661304.5706177, "elapsed_s": 16.855523347854614, "lane": 15, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.5813031, "elapsed_s": 16.866208791732788, "lane": 10}
+{"event": "artifact_open", "rank": 2, "epoch": 1790661304.5892205, "elapsed_s": 16.874126195907593, "lane": 2, "path": "/checkpoints/gms-restore-0929/default-capture-2/device-2/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.6075706, "elapsed_s": 16.892476320266724, "lane": 4}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.852152, "elapsed_s": 17.137057781219482, "lane": 15}
+{"event": "lane_transfer_complete", "rank": 2, "epoch": 1790661304.9432204, "elapsed_s": 17.228126049041748, "lane": 2}
+{"event": "transfer_complete", "rank": 2, "epoch": 1790661304.9450283, "elapsed_s": 17.229933977127075, "bytes": 60129542144}
+{"rank": 2, "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6", "event": "published", "chunk_mib": 128, "workers": 16, "cpu_before": {"epoch": 1790661287.7177813, "stat": {"usage_usec": 147403, "user_usec": 45745, "system_usec": 101657, "core_sched.force_idle_usec": 0, "nr_periods": 2, "nr_throttled": 0, "throttled_usec": 0, "nr_bursts": 0, "burst_usec": 0}, "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=506\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=506\n", "max": "800000 100000", "weight": "39"}, "cpu_after": {"epoch": 1790661304.949722, "stat": {"usage_usec": 6068462, "user_usec": 245910, "system_usec": 5822552, "core_sched.force_idle_usec": 0, "nr_periods": 174, "nr_throttled": 0, "throttled_usec": 0, "nr_bursts": 0, "burst_usec": 0}, "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2061\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2061\n", "max": "800000 100000", "weight": "39"}, "started_epoch": 1790661287.7150943, "published_epoch": 1790661304.9493809, "elapsed_s": 17.234286546707153}

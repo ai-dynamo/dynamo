@@ -1,0 +1,289 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Validate archived daemonset restore evidence without contacting a cluster.
+
+From the Dynamo checkout:
+  python3 benchmarks/gms_restore/results/default-config/daemonset-study/drivers/gms-independent-validation.py.txt --extend-network
+
+The default validates the first nine cases; --extend-network requires all three
+secondary cases to have their final cpu-main-after.txt collection marker.
+"""
+
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--base', type=Path, default=Path('benchmarks/gms_restore/results/default-config'))
+parser.add_argument('--extend-network', action='store_true')
+args = parser.parse_args()
+base = args.base.resolve()
+sys.path.insert(0, str(base.parents[1]))
+from resolve_plan import resolve_destinations
+names = [f'daemonset-cold-{i}' for i in range(1, 4)] + [f'daemonset-resident-{i}' for i in range(1, 5)] + [f'daemonset-preinstalled-{i}' for i in range(1, 3)]
+primary_names = names.copy()
+secondary_names = ['daemonset-network-1', 'daemonset-preinstalled-3', 'daemonset-network-2'] if args.extend_network else []
+for name in primary_names + secondary_names:
+    if not (base / name / 'cpu-main-after.txt').is_file():
+        raise SystemExit(f'Case collection incomplete: {name}')
+names += secondary_names
+previous = base / 'daemonset-study/validation.json'
+prior_primary = {}
+if previous.exists():
+    prior_primary = {x['case']: x for x in json.loads(previous.read_text())['cases'] if x['case'] in primary_names}
+capture = json.loads((base / 'capture.json').read_text())
+base_numa = {}
+
+def check(ok, message):
+    if not ok:
+        raise AssertionError(message)
+
+def events(path):
+    result = []
+    for line in path.read_text().splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            result.append(value)
+    return result
+
+def zero_restarts(pod):
+    for key in ['containerStatuses', 'initContainerStatuses']:
+        for status in pod['status'].get(key, []):
+            check(status['restartCount'] == 0, f'{key} restart')
+    expected = {x['name'] for x in pod['spec']['containers']}
+    check({x['name'] for x in pod['status']['containerStatuses']} == expected, 'container statuses incomplete')
+    check(all('running' in x['state'] for x in pod['status']['containerStatuses']), 'regular container not running')
+
+out = []
+for name in names:
+    p = base / name
+    used = set()
+    def load(filename):
+        used.add(filename)
+        return json.loads((p / filename).read_text())
+    def ev(filename):
+        used.add(filename)
+        return events(p / filename)
+    t = load('timing.json')
+    t0 = t['create_epoch']
+    if name in secondary_names:
+        expected_network = name.startswith('daemonset-network-')
+        check(t['runtime_network_discovery'] is expected_network, 'network discovery timing flag')
+        check(t['runtime_discovery'] is True, 'runtime discovery prerequisite')
+        check(t['agent_revision'] == 'b209afc332631c5a4c8f747d59dccecd32b4d03e', 'secondary agent revision')
+    plan = load('plan.json')
+    claim = load('claim.json')
+    dests = resolve_destinations(capture, claim, load('slices.json'))
+    check(plan['claim_uid'] == claim['metadata']['uid'], 'claim uid')
+    check(plan['capture_id'] == capture['capture_id'] == t['capture_id'], 'capture id')
+    check(plan['layout'] == capture['layout'] == {'tp': 8, 'pp': 1, 'dp': 1}, 'layout')
+    ranks = {r['rank']: r for r in plan['ranks']}
+    check(len(plan['ranks']) == 8 and set(ranks) == set(range(8)), 'plan ranks')
+    for c in capture['ranks']:
+        r = ranks[c['rank']]
+        check(all(r[k] == v for k, v in c.items()), 'capture artifact/ids/sizes/layout drift')
+        check(r['destination_uuid'] == dests[f"tp-{r['rank']}"] and r['request'] == f"tp-{r['rank']}", 'rank destination join')
+        check(r['local_device'] == 0 and r['socket_device'] == r['rank'] and r['socket_dir'] == '/gms', 'local ordinal/socket')
+    expected_map = ','.join(ranks[i]['source_uuid'] + '=' + ranks[i]['destination_uuid'] for i in range(8))
+    check(expected_map == plan['cuda_device_map'], 'CUDA map')
+    pod = load('ready-pod.json')
+    created_pod = load('operator-created-pod.json')
+    check(pod['metadata']['uid'] == created_pod['metadata']['uid'], 'created/ready pod UID changed')
+    zero_restarts(pod)
+    if name in secondary_names:
+        annotation = pod['metadata'].get('annotations', {}).get('nvidia.com/gms-prototype-runtime-network-discovery')
+        check((annotation == 'true') is expected_network, 'network discovery Pod annotation')
+    main = next(x for x in pod['spec']['containers'] if x['name'] == 'main')
+    env = {x['name']: x.get('value') for x in main.get('env', [])}
+    check(env['SNAPSHOT_CUDA_DEVICE_MAP'] == expected_map and env['DYN_GMS_USE_V1'] == 'true' and env['GMS_SOCKET_DIR'] == '/gms', 'main rank contract')
+    check(main['resources']['requests']['cpu'] == '32' and main['resources']['limits']['cpu'] == '96', 'main CPU drift')
+    check(main['resources']['claims'] == [{'name': 'gpus'}], 'main claim')
+    shm = {v['name']: v for v in pod['spec']['volumes']}
+    check(shm['dshm']['emptyDir']['sizeLimit'] == '32Gi', 'shared memory drift')
+    check(t['workers'] == 16 and t['chunk_mib'] == 128 and t['numa'] and t['gms_cpu_request'] == 1 and t['gms_cpu_limit'] == 8, 'tuning drift')
+    check(t['deployment_mode'] == 'dgd' and t['resident_services_ready_verified_epoch'] < t0, 'deployment or resident agent origin')
+    pubs = load('publications.json')
+    check(len(pubs) == 8 and {x['rank'] for x in pubs} == set(range(8)), 'publication ranks')
+    pubs = {r['rank']: r for r in pubs}
+    resident = t['resident_gms']
+    gms_pod = load('resident-gms-before.json') if resident else pod
+    gms_by_name = {x['name']: x for x in gms_pod['spec']['containers']}
+    check(gms_pod['spec']['resourceClaims'] == pod['spec']['resourceClaims'], 'engine/GMS claim mismatch')
+    if resident:
+        check(set(x['name'] for x in pod['spec']['containers']) == {'main'}, 'resident engine extra containers')
+    opens = []
+    paths = set()
+    total = 0
+    allocations = 0
+    for i in range(8):
+        r = ranks[i]
+        gms = gms_by_name[f'gms-{i}']
+        check(gms['resources']['requests']['cpu'] == '1' and gms['resources']['limits']['cpu'] == '8', 'GMS CPU drift')
+        check(gms['resources']['claims'] == [{'name': 'gpus', 'request': f'tp-{i}'}], 'GMS rank claim')
+        command = gms['command'] + gms.get('args', [])
+        for arg, value in [('--rank', str(i)), ('--workers', '16'), ('--chunk-mib', '128')]:
+            check(command[command.index(arg) + 1] == value, 'GMS CLI drift')
+        check('--numa' in command, 'NUMA flag absent')
+        logs = ev(f'gms-{i}.txt')
+        by_event = {}
+        for log in logs:
+            by_event.setdefault(log.get('event'), []).append(log)
+        numa, = by_event['numa_affinity']
+        affinity = (numa['node'], tuple(numa['cpus']))
+        if not out:
+            base_numa[i] = affinity
+        check(affinity == base_numa[i], 'NUMA cpuset drift')
+        sockets, = by_event['sockets']
+        check(sockets['uuid'] == r['destination_uuid'], 'server socket GPU')
+        transfer, = by_event['transfer_complete']
+        imported, = by_event['allocation_import_complete']
+        bytes_expected = sum(a['aligned_size'] for a in r['allocations'])
+        check(len(r['allocations']) == 28 and len({a['allocation_id'] for a in r['allocations']}) == 28, 'allocation count/unique IDs')
+        check(bytes_expected == 56 * 1024**3 == transfer['bytes'] == imported['bytes'] and imported['allocations'] == 28, 'transferred allocation bytes')
+        total += transfer['bytes']
+        allocations += imported['allocations']
+        rank_paths = {x['path'] for x in by_event['artifact_open']}
+        expected_paths = {str(Path(r['artifact']) / a['shard']) for a in r['allocations']}
+        check(rank_paths == expected_paths and len(rank_paths) == 14, 'rank artifact payload files')
+        check(all(x['o_direct'] is True and x['flags'] & os.O_DIRECT for x in by_event['artifact_open']), 'non O_DIRECT payload open')
+        check(all(x['epoch'] >= t0 for x in by_event['artifact_open'] + by_event['first_read_start']), 'payload IO before t0')
+        opens += by_event['artifact_open']
+        paths.update(rank_paths)
+        pub = pubs[i]
+        check(pub['uuid'] == r['destination_uuid'] and pub['workers'] == 16 and pub['chunk_mib'] == 128, 'published UUID/tuning')
+        check(pub['cpu_before']['max'] == pub['cpu_after']['max'] == '800000 100000', 'CPU quota drift')
+        check(pub['published_epoch'] >= transfer['epoch'] and pub['started_epoch'] >= t0, 'publication ordering')
+        logged, = by_event['published']
+        check(all(logged[k] == v for k, v in pub.items()), 'saved publication/log mismatch')
+    check(total == 448 * 1024**3 and len(paths) == 112 and allocations == 224, 'aggregate payload')
+    used.add('gate.txt')
+    gate = float((p / 'gate.txt').read_text())
+    check(max(x['published_epoch'] for x in pubs.values()) <= gate <= t['ready_epoch'], 'gate order')
+    ownership = load('ownership.json')
+    check([x['kind'] for x in ownership] == ['Pod', 'ReplicaSet', 'Deployment', 'DynamoComponentDeployment', 'DynamoGraphDeployment'], 'operator ownerchain')
+    for child, parent in zip(ownership, ownership[1:]):
+        check(any(o['uid'] == parent['uid'] and o['kind'] == parent['kind'] and o['name'] == parent['name'] and o.get('controller') for o in child['ownerReferences']), 'owner UID chain broken')
+    dc, dr = load('dgd-created.json'), load('dgd-ready.json')
+    check(ownership[0]['uid'] == pod['metadata']['uid'] and ownership[-1]['uid'] == dc['metadata']['uid'] == dr['metadata']['uid'], 'operator/DGD UID')
+    check(any(x['type'] == 'Ready' and x['status'] == 'True' for x in dr['status']['conditions']), 'DGD not ready')
+    watch_counts = {}
+    for filename in ['virtual-watch.jsonl', 'host-watch.jsonl']:
+        entries = [x for x in ev(filename) if 'uid' in x]
+        uids = {x['uid'] for x in entries}
+        check(len(uids) == 1, 'watched pod replacement')
+        if filename.startswith('virtual'):
+            check(uids == {pod['metadata']['uid']}, 'virtual watch UID')
+        check(all(s['restartCount'] == 0 for x in entries for key in ['containers', 'init'] for s in x.get(key) or []), 'watched restart')
+        watch_counts[filename.split('-')[0]] = len(entries)
+    check('berlin' in t['restored_text'].lower(), 'restore Berlin inference')
+    check('rayleigh' in load('inference.json')['text'].lower(), 'HTTP Rayleigh inference')
+    mount, = load('pvc-mount.json')['filesystems']
+    check(mount['fstype'] == 'nfs' and '/pvc-' in mount['source'], 'PVC backing proof')
+    for option in ['ro', 'nconnect=32', 'nosharecache', 'nosharetransport', 'spread_reads']:
+        check(option in mount['options'].split(','), 'NFS mount tuning drift')
+    resident_check = None
+    if resident:
+        after = load('resident-gms-after.json')
+        check(gms_pod['metadata']['uid'] == after['metadata']['uid'], 'resident UID changed')
+        zero_restarts(gms_pod)
+        zero_restarts(after)
+        check(any(x['type'] == 'Ready' and x['status'] == 'True' for x in gms_pod['status']['conditions']), 'resident not ready before')
+        check(gms_pod['spec']['nodeName'] == pod['spec']['nodeName'], 'resident/engine node')
+        ready = load('resident-gms-ready.json')
+        gen = t['resident_gms_generation']
+        check(ready['ready'] is True and ready['publications'] == 0 and ready['state'] == 'waiting' and ready['error'] is None, 'pretrigger readiness')
+        check(ready['capture_id'] == plan['capture_id'] and ready['generation'] == gen, 'resident generation')
+        check(t['resident_gms_ready_verified_epoch'] <= t0, 'resident readiness after timer')
+        online = ready['online']
+        check(len(online) == 8 and {x['rank'] for x in online} == set(range(8)), 'online ranks')
+        for x in online:
+            check(x['uuid'] == ranks[x['rank']]['destination_uuid'] and x['capture_id'] == plan['capture_id'] and x['generation'] == gen, 'online identity')
+            check(x['payload_bytes_read'] == x['weight_allocations'] == 0, 'pretrigger payload/allocations')
+            check(x['workers'] == x['loader_lanes_ready'] == 16 and x['chunk_mib'] == 128, 'online lane tuning')
+            check(x['pinned_bytes'] == 4 * 1024**3 and set(x['server_domains_responsive']) == {'weights', 'kv_cache'}, 'online warm state')
+            check(x['daemon_started_epoch'] < x['online_epoch'] < t0, 'online epoch before t0')
+        trigger = load('resident-gms-trigger.json')
+        check(trigger == t['resident_gms_load_trigger'], 'trigger evidence mismatch')
+        te = trigger['trigger_written_epoch']
+        check(t0 <= trigger['request_epoch'] <= te <= trigger['return_epoch'], 'trigger timing')
+        check(trigger['response']['capture_id'] == plan['capture_id'] and trigger['response']['generation'] == gen, 'trigger identity')
+        check(all(x['epoch'] >= te for x in opens), 'payload open before trigger')
+        for pub in pubs.values():
+            check(pub['generation'] == gen and pub['capture_id'] == plan['capture_id'], 'published generation')
+            check(pub['trigger_written_epoch'] == te <= pub['started_epoch'], 'publication trigger ordering')
+        verified = [x for x in ev('coordinator.txt') if x.get('event') == 'all_ranks_verified']
+        check(len(verified) == 1 and verified[0]['published_epoch'] == gate and verified[0]['generation'] == gen, 'live verifier evidence')
+        resident_check = {'zero_payload_and_allocations_before_trigger': True, 'latest_online_before_t0_s': round(t0-max(x['online_epoch'] for x in online), 6), 'trigger_after_t0_s': round(te-t0, 6), 'minimum_open_after_trigger_s': round(min(x['epoch'] for x in opens)-te, 6), 'stable_pod_uid_and_zero_restarts': True}
+    else:
+        gate_container = gms_by_name['publication-gate']
+        check(gate_container['command'][-1] == '/snapshot-app/publication_gate.py', 'cold gate verifier path')
+    if t.get('preinstalled_cuda_host_path'):
+        check(all(x['name'] != 'snapshot-cuda-install' for x in pod['spec'].get('initContainers', [])), 'installer still in timed path')
+        check(shm['snapshot-cuda']['hostPath'] == {'path': t['preinstalled_cuda_host_path'], 'type': 'Directory'}, 'preinstalled bundle mount')
+        check(all(x['readOnly'] for x in main['volumeMounts'] if x['name'] == 'snapshot-cuda'), 'preinstalled bundle writable')
+    evidence_hash = hashlib.sha256()
+    for filename in sorted(used):
+        evidence_hash.update(filename.encode() + b'\0' + (p / filename).read_bytes() + b'\0')
+    out.append({'case': name, 'passed': True, 'dgd_create_to_ready_s': round(t['dgd_create_to_ready_s'], 6), 'payload_bytes': total, 'unique_o_direct_payload_paths': len(paths), 'payload_open_events': len(opens), 'minimum_open_after_t0_s': round(min(x['epoch'] for x in opens)-t0, 6), 'ranks': 8, 'matching_capture_allocation_ids_and_sizes': allocations, 'rank_uuid_plan_claim_and_engine_map_match': True, 'same_numa_cpuset_and_cpu_tuning': True, 'stable_engine_pod_uid_and_zero_restarts': True, 'operator_ownerchain_and_dgd_ready': True, 'berlin_and_rayleigh': True, 'watch_observations': watch_counts, 'resident': resident_check, 'evidence_files': len(used), 'evidence_sha256': evidence_hash.hexdigest()})
+    if name in secondary_names:
+        out[-1]['runtime_network_discovery'] = expected_network
+        out[-1]['agent_revision'] = t['agent_revision']
+    if name in prior_primary:
+        check(out[-1] == prior_primary[name], 'primary case record changed')
+    print(name, 'PASS', total, len(paths), 'earliest open', round(min(x['epoch'] for x in opens)-t0, 3))
+
+patterns = {
+    'private_key': rb'-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----',
+    'jwt': rb'\beyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_-]{15,}',
+    'github_token': rb'\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b',
+    'aws_access_key': rb'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b',
+    'bearer_token': rb'(?i)\bBearer\s+[A-Za-z0-9_./+=-]{24,}',
+    'kubeconfig_key_data': rb'["\x27]?(?:client-key-data|client-certificate-data)["\x27]?\s*:\s*["\x27]?[A-Za-z0-9+/=]{40,}',
+    'token_field': rb'(?i)["\x27](?:access_token|refresh_token|id_token|token|password|secret_access_key)["\x27]\s*:\s*["\x27][A-Za-z0-9_./+=-]{24,}["\x27]',
+}
+scan_dirs = [base / n for n in names] + [base / 'daemonset-study']
+findings = []
+files_scanned = 0
+for directory in scan_dirs:
+    for path in sorted(directory.rglob('*')):
+        if not path.is_file() or path.suffix.lower() not in {'.json', '.jsonl', '.txt', '.md', '.html', '.svg', '.yaml', '.yml', '.py', '.sh'} or path.name == 'validation.json':
+            continue
+        data = path.read_bytes()
+        files_scanned += 1
+        for kind, pattern in patterns.items():
+            if re.search(pattern, data):
+                findings.append({'file': str(path.relative_to(base)), 'pattern': kind})
+check(not findings, 'secret-like scan matches (values not printed): ' + json.dumps(findings))
+result = {
+    'schema_version': 1,
+    'validated_at_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    'scope': f'Independent offline review of {len(out)} named completed cases; no cluster operations',
+    'passed': True,
+    'cases_checked': len(out),
+    'primary_cases_preserved': primary_names,
+    'secondary_cases': secondary_names,
+    'capture_id': capture['capture_id'],
+    'capture_sha256': hashlib.sha256((base/'capture.json').read_bytes()).hexdigest(),
+    'common': {'payload_bytes_per_restore': 448*1024**3, 'payload_gib_per_restore': 448, 'payload_paths_per_restore': 112, 'ranks': 8, 'allocation_ids_and_sizes_per_rank': 28, 'workers_per_rank': 16, 'chunk_mib': 128, 'gms_cpu_request_limit': [1,8], 'engine_cpu_request_limit': [32,96], 'numa_affinity_identical_per_rank': True, 'main_dev_shm': '32Gi', 'storage': 'NFS PVC; all logged payload opens use O_DIRECT; same recorded read-only nconnect=32 isolated transport mount'},
+    'cases': out,
+    'secret_pattern_scan': {'files_scanned': files_scanned, 'matched_files': 0, 'patterns': list(patterns), 'values_printed': False},
+    'evidence_limits': [
+        'The 448 GiB count is the transferred padded allocation images, not a count of unique model tensor bytes.',
+        'Exact live server allocation IDs/sizes were checked by verify_publication.py before all-ready; offline review checks matching capture/plan, successful gate protocol, and resident coordinator verification events. A separate server allocation inventory is not archived.',
+        'Payload IO evidence is application instrumentation and recorded O_DIRECT flags; NFS server/storage caches were not flushed or characterized, and no new full payload hash was calculated.',
+        'The trials use the same held claim/source GPU UUIDs. They validate explicit named rank mapping, but do not demonstrate a cross-node or nonidentity GPU permutation.',
+        'Dynamo operator ownerchains are real; this is an experimental custom PodTemplate around a captured SGLang Engine API process. Native checkpointRef, gpuMemoryService API, and full Dynamo frontend/runtime restore are not demonstrated.',
+        'Engine Pod UID/restarts are checked through virtual/host watches; resident GMS UID/restarts are checked before and after each trial. Server creation timestamps have one-second precision.'
+    ]
+}
+output = base / 'daemonset-study/validation.json'
+output.write_text(json.dumps(result, indent=2) + '\n')
+print('Wrote', output, 'secret scan files', files_scanned)

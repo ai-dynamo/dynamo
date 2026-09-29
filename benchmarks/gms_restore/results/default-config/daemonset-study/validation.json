@@ -1,0 +1,405 @@
+{
+  "schema_version": 1,
+  "validated_at_utc": "2026-09-29T06:18:20.675057+00:00",
+  "scope": "Independent offline review of 12 named completed cases; no cluster operations",
+  "passed": true,
+  "cases_checked": 12,
+  "primary_cases_preserved": [
+    "daemonset-cold-1",
+    "daemonset-cold-2",
+    "daemonset-cold-3",
+    "daemonset-resident-1",
+    "daemonset-resident-2",
+    "daemonset-resident-3",
+    "daemonset-resident-4",
+    "daemonset-preinstalled-1",
+    "daemonset-preinstalled-2"
+  ],
+  "secondary_cases": [
+    "daemonset-network-1",
+    "daemonset-preinstalled-3",
+    "daemonset-network-2"
+  ],
+  "capture_id": "gms-v1-glm-default-0929",
+  "capture_sha256": "debce2d31730862b3be531bbe479ad0c945bbdc775c4bf22f36f720161da446b",
+  "common": {
+    "payload_bytes_per_restore": 481036337152,
+    "payload_gib_per_restore": 448,
+    "payload_paths_per_restore": 112,
+    "ranks": 8,
+    "allocation_ids_and_sizes_per_rank": 28,
+    "workers_per_rank": 16,
+    "chunk_mib": 128,
+    "gms_cpu_request_limit": [
+      1,
+      8
+    ],
+    "engine_cpu_request_limit": [
+      32,
+      96
+    ],
+    "numa_affinity_identical_per_rank": true,
+    "main_dev_shm": "32Gi",
+    "storage": "NFS PVC; all logged payload opens use O_DIRECT; same recorded read-only nconnect=32 isolated transport mount"
+  },
+  "cases": [
+    {
+      "case": "daemonset-cold-1",
+      "passed": true,
+      "dgd_create_to_ready_s": 27.655837,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 6.335145,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 24,
+        "host": 22
+      },
+      "resident": null,
+      "evidence_files": 23,
+      "evidence_sha256": "8b06d080ccc009176d2b01189bf5c108a33c60f46b90ba77c6c4889750e62fe2"
+    },
+    {
+      "case": "daemonset-cold-2",
+      "passed": true,
+      "dgd_create_to_ready_s": 25.328049,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 5.474023,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 20,
+        "host": 18
+      },
+      "resident": null,
+      "evidence_files": 23,
+      "evidence_sha256": "63319dbcbcb6e7b96478d4dd48cd2143a85f4be689f11cb3a2bf0c3249c529ce"
+    },
+    {
+      "case": "daemonset-cold-3",
+      "passed": true,
+      "dgd_create_to_ready_s": 24.482634,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 3.3972,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 22,
+        "host": 20
+      },
+      "resident": null,
+      "evidence_files": 23,
+      "evidence_sha256": "893b9512e592946d1584651ee94ab6a53c2c3f90ba4d108e5eaf19235968ba8f"
+    },
+    {
+      "case": "daemonset-resident-1",
+      "passed": true,
+      "dgd_create_to_ready_s": 21.684296,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.806234,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 18,
+        "host": 16
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.408997,
+        "trigger_after_t0_s": 0.472884,
+        "minimum_open_after_trigger_s": 0.333349,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "f9bd02ddfb4b8a1611633681a4faffb258648ce3ca2b31e4a9466b92925babfd"
+    },
+    {
+      "case": "daemonset-resident-2",
+      "passed": true,
+      "dgd_create_to_ready_s": 23.266598,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.843136,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 19,
+        "host": 17
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 18.726879,
+        "trigger_after_t0_s": 0.47235,
+        "minimum_open_after_trigger_s": 0.370786,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "8bf1a58aa4729204a7555c9c170110e6c8ee84a579062e8048eae1a596f20a6c"
+    },
+    {
+      "case": "daemonset-resident-3",
+      "passed": true,
+      "dgd_create_to_ready_s": 23.391049,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.76325,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 18,
+        "host": 16
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.777655,
+        "trigger_after_t0_s": 0.467696,
+        "minimum_open_after_trigger_s": 0.295554,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "3dd9910f6d99313a62cc9267fbac1d867dddbcf1ec288615b04ef3a14ead4f8a"
+    },
+    {
+      "case": "daemonset-resident-4",
+      "passed": true,
+      "dgd_create_to_ready_s": 24.638598,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.843345,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 19,
+        "host": 17
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 14.944462,
+        "trigger_after_t0_s": 0.471745,
+        "minimum_open_after_trigger_s": 0.371599,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "77d15ca36d32b2ac10a9b6c0d70c63e85e62abc58aefe38e09d868df39269f64"
+    },
+    {
+      "case": "daemonset-preinstalled-1",
+      "passed": true,
+      "dgd_create_to_ready_s": 24.46907,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.82206,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 17,
+        "host": 15
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.818677,
+        "trigger_after_t0_s": 0.428102,
+        "minimum_open_after_trigger_s": 0.393957,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "95b053f09959174c1667490880e98fab7fadfeae331ab23925a5ac632a7d34a8"
+    },
+    {
+      "case": "daemonset-preinstalled-2",
+      "passed": true,
+      "dgd_create_to_ready_s": 21.831173,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.831693,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 17,
+        "host": 15
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.368745,
+        "trigger_after_t0_s": 0.468966,
+        "minimum_open_after_trigger_s": 0.362727,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "a090eb59582135f7d3a3a2c13237c77ca96d58d432486831273fc12a48b18980"
+    },
+    {
+      "case": "daemonset-network-1",
+      "passed": true,
+      "dgd_create_to_ready_s": 22.603266,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.834588,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 16,
+        "host": 14
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.675538,
+        "trigger_after_t0_s": 0.430292,
+        "minimum_open_after_trigger_s": 0.404296,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "dcc736bc7121e30d98bf616e5d3e5d425f79686429d1a9a0efb12c984d3d8539",
+      "runtime_network_discovery": true,
+      "agent_revision": "b209afc332631c5a4c8f747d59dccecd32b4d03e"
+    },
+    {
+      "case": "daemonset-preinstalled-3",
+      "passed": true,
+      "dgd_create_to_ready_s": 22.368858,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.828517,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 17,
+        "host": 15
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 16.828366,
+        "trigger_after_t0_s": 0.446782,
+        "minimum_open_after_trigger_s": 0.381735,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "5fb8744a35510413ab19e938519005d41dedf70fca8f0752ea7f8ad8209082ca",
+      "runtime_network_discovery": false,
+      "agent_revision": "b209afc332631c5a4c8f747d59dccecd32b4d03e"
+    },
+    {
+      "case": "daemonset-network-2",
+      "passed": true,
+      "dgd_create_to_ready_s": 21.73117,
+      "payload_bytes": 481036337152,
+      "unique_o_direct_payload_paths": 112,
+      "payload_open_events": 1792,
+      "minimum_open_after_t0_s": 0.809724,
+      "ranks": 8,
+      "matching_capture_allocation_ids_and_sizes": 224,
+      "rank_uuid_plan_claim_and_engine_map_match": true,
+      "same_numa_cpuset_and_cpu_tuning": true,
+      "stable_engine_pod_uid_and_zero_restarts": true,
+      "operator_ownerchain_and_dgd_ready": true,
+      "berlin_and_rayleigh": true,
+      "watch_observations": {
+        "virtual": 17,
+        "host": 15
+      },
+      "resident": {
+        "zero_payload_and_allocations_before_trigger": true,
+        "latest_online_before_t0_s": 15.690757,
+        "trigger_after_t0_s": 0.42915,
+        "minimum_open_after_trigger_s": 0.380574,
+        "stable_pod_uid_and_zero_restarts": true
+      },
+      "evidence_files": 28,
+      "evidence_sha256": "47d7abb014ea809e106cac18633ed67c0718273538f041332a3d04d2ae4e949e",
+      "runtime_network_discovery": true,
+      "agent_revision": "b209afc332631c5a4c8f747d59dccecd32b4d03e"
+    }
+  ],
+  "secret_pattern_scan": {
+    "files_scanned": 588,
+    "matched_files": 0,
+    "patterns": [
+      "private_key",
+      "jwt",
+      "github_token",
+      "aws_access_key",
+      "bearer_token",
+      "kubeconfig_key_data",
+      "token_field"
+    ],
+    "values_printed": false
+  },
+  "evidence_limits": [
+    "The 448 GiB count is the transferred padded allocation images, not a count of unique model tensor bytes.",
+    "Exact live server allocation IDs/sizes were checked by verify_publication.py before all-ready; offline review checks matching capture/plan, successful gate protocol, and resident coordinator verification events. A separate server allocation inventory is not archived.",
+    "Payload IO evidence is application instrumentation and recorded O_DIRECT flags; NFS server/storage caches were not flushed or characterized, and no new full payload hash was calculated.",
+    "The trials use the same held claim/source GPU UUIDs. They validate explicit named rank mapping, but do not demonstrate a cross-node or nonidentity GPU permutation.",
+    "Dynamo operator ownerchains are real; this is an experimental custom PodTemplate around a captured SGLang Engine API process. Native checkpointRef, gpuMemoryService API, and full Dynamo frontend/runtime restore are not demonstrated.",
+    "Engine Pod UID/restarts are checked through virtual/host watches; resident GMS UID/restarts are checked before and after each trial. Server creation timestamps have one-second precision."
+  ]
+}

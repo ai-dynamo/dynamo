@@ -276,3 +276,43 @@ incarnations, ambiguity, unrelated containers and native Pod identity.
   NUMA balancing restored, retained GLM/Qwen snapshots Ready. Ruff passes; targeted
   Go tests pass and the experiment agent was built from source 8536a8b1. Full
   raw evidence, operator-generated manifests and updated Gantt are retained.
+
+## Resident GMS DaemonSet experiment (2026-09-29)
+
+Separate branch `schwinns/gms-daemonset-restore-20260929` isolates the user's
+requested interpod experiment. Eight one-GPU V1 server/loader containers warm
+contexts and pinned rings before the DGD request; all payload reads remain
+PVC/O_DIRECT and start only after a generation-qualified HTTP trigger issued
+concurrently with the DGD POST. Fresh DaemonSet generation per trial. Exact
+capture IDs, allocation sizes/IDs, socket names and rank-derived UUID mapping
+remain enforced. Snapshot agent/PageBroker already Ready before every timer.
+Instrument controller preflight and precise CRI start times before attributing
+remaining handler delay. Main comparison holds buffer/CPU/NUMA settings fixed.
+
+- Primary three matched pairs: 25.822 s cold → 22.781 s resident (−3.042 s,
+  11.8%); all six pass both inference checks. PVC payload transfer windows
+  remain ~17.48 s for 448 GiB. Earlier overlap increases CRIU 4.600→6.473 s;
+  CUDA phase 8.667→8.286 s does not show a matching slowdown. All resident
+  wake gates pass immediately; engine restoration is now critical.
+- Exact CRI starts show primary main-running→handler only 12–35 ms; multi-second
+  bars ending at Kubernetes status observations are not actual idle time.
+- Separate immutable-CUDA-bundle followup verifies all three file SHA256s and removes
+  only snapshot-cuda-install. Preinstalled trials 24.469/21.831 s versus nearby
+  regular resident 23.391/24.639 s; do not pool with the primary three pairs. Main starts
+  around +1.65 s but handler around +2.33 s: cached Pod IP now exposes 0.58–0.79 s
+  of real waiting. Testing separate double-opt-in CRI network identity lookup.
+
+- Optional network resolver b209afc33263 binds running container and IP to one
+  validated READY sandbox. Same-binary control waits 1.076 s from main start
+  to handler; enabled trials wait 17.8/19.6 ms and enter at +1.798/+1.715 s.
+  Ready 22.603/21.731 s versus 22.369 s control does not establish an additional
+  total-latency gain with n=2 versus n=1. All twelve restores pass independent
+  payload, mapping, ownership, restart, CPU/NUMA and inference validation.
+- Cleanup verified: original Snapshot stack/config restored; Dynamo operator
+  unchanged; experiment DGD/DaemonSet/Pods/claims and private mounts removed;
+  NUMA balancing restored; retained GLM/Qwen captures Ready.
+- User clarified chart ownership and selected direct PageBroker→GMS as the
+  next experiment. Resident GMS already lives in a separate node DaemonSet;
+  current transfer is still a V1 loader inside each server process. Charts
+  will distinguish ownership explicitly. Audit real PageBroker native import
+  and transfer APIs before starting a separate integration worktree.

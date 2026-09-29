@@ -1,0 +1,17 @@
+{
+  "dynamo_parent": "451f4d84b7d",
+  "snapshot_revision": "d1bb736d31d00db15643759f2e40ebf062288c71",
+  "snapshot_binary_sha256": "9b771800aae4f1d70632e159fea68150e20b48d147621bd815f5dddc7fa9f2ea",
+  "snapshot_tests": "controller/runtime/executor passed",
+  "snapshot_build": "CGO_ENABLED=0 go build -o /tmp/gms-snapshot-agent-daemonset-timing ./agent/cmd/agent",
+  "python_protocol_tests": 7,
+  "python_transfer_behavior_tests": 5,
+  "ruff": "pass",
+  "payload_source": "PVC O_DIRECT; NFS server cache uncontrolled",
+  "baseline_qualified_shim_unchanged": true,
+  "dynamo_prototype_commit": "779e55b43a4",
+  "network_snapshot_revision": "b209afc332631c5a4c8f747d59dccecd32b4d03e",
+  "network_snapshot_binary_sha256": "ef0a146c96c9f8c8bf4705f358c0bb3d132b7fd170d7235f8bb4faaece2b1115",
+  "network_snapshot_tests": "controller/runtime/executor passed",
+  "snapshot_patch_reverse_check": "passed"
+}
