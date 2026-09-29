@@ -183,6 +183,9 @@ impl Bucket for NATSBucket {
             .map_err(|e| StoreError::NATSError(e.to_string()))
     }
 
+    /// Replays the existing entries as individual [`kv::WatchEvent::Put`] events, not as the
+    /// initial [`kv::WatchEvent::Resync`] the [`kv::Bucket::watch`] contract asks for. Discovery
+    /// does not select this store, so nothing depends on that order here.
     async fn watch(
         &self,
     ) -> Result<Pin<Box<dyn futures::Stream<Item = kv::WatchEvent> + Send + 'life0>>, StoreError>
