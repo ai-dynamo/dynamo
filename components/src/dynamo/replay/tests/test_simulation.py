@@ -23,7 +23,12 @@ from aisimulate.sweeper.replay import (
     ReplaySpec,
 )
 
-from dynamo.replay import PlannerReplayDetails, ReplayReport
+from dynamo.replay import (
+    PlannerReplayDetails,
+    ReplayReport,
+    ReplayTelemetryDetails,
+    TelemetryOptions,
+)
 from dynamo.replay import api as replay_api
 from dynamo.replay import run_trace_replay, simulation
 
@@ -304,6 +309,51 @@ def test_dynamo_runner_defers_target_model_validation_until_trace_load(
     simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
     assert seen["execution_model"] is None
+
+
+def test_runner_forwards_and_retains_requested_telemetry(monkeypatch) -> None:
+    seen = {}
+    sample = {"sample_ordinal": 0, "kind": "baseline", "sampled_at_ms": 0.0}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return ReplayReport(
+            summary={"completed_requests": 1},
+            per_request=None,
+            coverage={},
+            planner=None,
+            telemetry=ReplayTelemetryDetails(
+                sample_interval_ms=2_500.0,
+                samples=[sample],
+            ),
+        )
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={"trace_path": "tiny.jsonl", "trace_format": "dynamo"},
+        goal={"target": "throughput"},
+    )
+
+    report = (
+        simulation.DynamoReplayRunnerFactory()
+        .create(2)
+        .run(
+            spec,
+            output_requirements=ReplayOutputRequirements(
+                capture_telemetry=True,
+                telemetry_sample_interval_ms=2_500.0,
+            ),
+        )
+    )
+
+    assert seen["telemetry_options"] == TelemetryOptions(sample_interval_ms=2_500.0)
+    assert "native_report" not in report.metadata
+    assert report.metadata["telemetry"] == {
+        "sample_interval_ms": 2_500.0,
+        "samples": [sample],
+    }
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:

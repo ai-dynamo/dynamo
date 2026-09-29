@@ -494,7 +494,9 @@ class Publisher:
 
     Retrieves KV cache events and stats from TensorRT-LLM engine and publishes them:
     - KV Events: Routes to either ZMQ (if consolidator enabled) or NATS (if no consolidator)
-    - Metrics: Always publishes to NATS via WorkerMetricsPublisher
+    - Metrics: Worker-load samples via WorkerMetricsPublisher and, when opted in,
+      forward-pass metrics via FpmDirectPublisher; both read the engine's
+      iteration stats, which KV events never need
 
     Publisher Selection Logic:
     - If zmq_endpoint provided: Uses ZmqKvEventPublisher (ZMQ PUB) → Consolidator → NATS
@@ -525,6 +527,7 @@ class Publisher:
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
         publish_metrics: bool = True,
+        publish_forward_pass_metrics: bool = False,
         kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
         streaming_kv_events_config: Optional[dict[str, Any]] = None,
         streaming_kv_events_gpus_per_node: Optional[int] = None,
@@ -544,6 +547,7 @@ class Publisher:
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
         self.publish_metrics = publish_metrics
+        self.publish_forward_pass_metrics = publish_forward_pass_metrics
         self.kv_event_publication_mode = kv_event_publication_mode
         self.streaming_kv_events_config = streaming_kv_events_config
         self.streaming_kv_events_gpus_per_node = streaming_kv_events_gpus_per_node
@@ -604,7 +608,13 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        if self.publish_metrics:
+        # One stats stream feeds the Prometheus gauges, the metrics collector,
+        # the router's worker-load sample and the Planner's forward-pass
+        # metrics, so it runs when either opt-in is set. KV events never need
+        # it: the engine only produces iteration stats under
+        # enable_iter_perf_stats, at a per-iteration cost a KV-router benchmark
+        # should not pay.
+        if self.publish_metrics or self.publish_forward_pass_metrics:
             self.metrics_publisher = WorkerMetricsPublisher()
             self._init_publish_metrics_thread()
             task = asyncio.create_task(self._create_metrics_publisher_endpoint())
@@ -616,7 +626,7 @@ class Publisher:
         # attention-DP rank. Non-attention-DP engines report size 1. Under
         # attention-DP, TRT-LLM emits one IterationStats row per rank and
         # Dynamo forwards attentionDpRank as the FPM dp_rank.
-        if self.publish_metrics:
+        if self.publish_forward_pass_metrics:
             try:
                 fpm_dp_size = max(1, int(self.attention_dp_size or 1))
                 self.fpm_publisher = FpmDirectPublisher(
@@ -849,9 +859,9 @@ class Publisher:
         self.fpm_publisher = None
 
     async def _publish_stats_task(self):
-        """
-        Publish stats to the metrics publisher.
-        """
+        """Poll engine iteration stats into the Prometheus gauges, the metrics
+        collector, the worker-load publisher and, when opted in, the Planner's
+        forward-pass publisher."""
         if self.engine is None:
             logging.error("LLM engine not initialized!")
             return
@@ -1327,6 +1337,7 @@ async def get_publisher(
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
     publish_metrics: bool = True,
+    publish_forward_pass_metrics: bool = False,
     kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
     streaming_kv_events_config: Optional[dict[str, Any]] = None,
     streaming_kv_events_gpus_per_node: Optional[int] = None,
@@ -1346,6 +1357,7 @@ async def get_publisher(
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
         publish_metrics=publish_metrics,
+        publish_forward_pass_metrics=publish_forward_pass_metrics,
         kv_event_publication_mode=kv_event_publication_mode,
         streaming_kv_events_config=streaming_kv_events_config,
         streaming_kv_events_gpus_per_node=streaming_kv_events_gpus_per_node,

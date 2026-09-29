@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from dynamo.experimental.llm import LLMUnaryClient, with_engine_data
+from dynamo.llm import LLMUnaryClient, with_engine_data
 
 pytestmark = [
     pytest.mark.parallel,
