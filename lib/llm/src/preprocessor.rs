@@ -4935,19 +4935,17 @@ impl OpenAIPreprocessor {
         if let Some(parser_name) = effective_tool_call_parser.as_deref()
             && tool_parser_v2::enabled()
             && tool_parser_v2::supports_family(parser_name)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(ChatCompletionToolChoiceOption::Auto)
+            )
         {
-            if !uses_tool_call_structural_tag
-                && matches!(
-                    request.inner.tool_choice.as_ref(),
-                    None | Some(ChatCompletionToolChoiceOption::Auto)
-                )
-            {
-                let parser_name = match parser_name {
-                    "deepseek-v4" | "deepseekv4" => "deepseek_v4",
-                    parser_name => parser_name,
-                };
-                return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
-            }
+            let parser_name = match parser_name {
+                "deepseek-v4" | "deepseekv4" => "deepseek_v4",
+                parser_name => parser_name,
+            };
+            return Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()));
         }
         if selected_version == tool_parser_v2::ParserVersion::V2 {
             anyhow::bail!(
@@ -7928,6 +7926,7 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
         FinishReason, Role,
     };
+    use std::path::PathBuf;
 
     #[test]
     fn deepseek_v41_preserves_markers_and_initializes_backend_reasoning() {
@@ -8049,6 +8048,7 @@ mod tests {
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
+            thinking_token_budget: None,
             unsupported_fields: Default::default(),
         }
     }
