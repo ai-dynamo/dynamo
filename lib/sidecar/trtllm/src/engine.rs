@@ -198,6 +198,21 @@ impl LLMEngine for TrtllmSidecarEngine {
             .client
             .get()
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
+        if request
+            .extra_args
+            .as_ref()
+            .and_then(|extra| extra.get("sampling_options"))
+            .and_then(|sampling| sampling.get("allowed_token_ids"))
+            .is_some_and(|ids| !ids.is_null())
+        {
+            // Null is unrestricted in Dynamo's API. Stream the client error
+            // so the transport preserves its type instead of treating it as a
+            // connection failure from the response prologue.
+            let error = client::invalid_argument(
+                "allowed_token_ids is not supported by the TensorRT-LLM sidecar",
+            );
+            return Ok(Box::pin(futures::stream::once(async move { Err(error) })));
+        }
         let request_id = ctx.id().to_string();
         let proto_request =
             build_generate_request(&request, &request_id, self.context_length.get().copied())?;
