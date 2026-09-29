@@ -46,11 +46,11 @@ spec:
 - Per-component fields you will use most: `replicas`, `multinode`, `sharedMemorySize`, and `podTemplate` — a standard Kubernetes [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core). The operator injects its defaults into the container named `main` inside `podTemplate.spec.containers`, where you set the `image`, the `command`/`args` that launch the engine, `resources` (CPU/memory/GPU), `envFrom`, `env`, and `volumeMounts`.
 
 > [!NOTE]
-> For DGDs created by Dynamo Operator 1.6.0 or later, injected system environment variables precede
-> `podTemplate` environment variables, and the operator preserves the user-declared order. A user
-> variable can reference an earlier injected or user variable with `$(NAME)`. A later user entry with
-> the same name overrides an injected value. Older DGDs retain their existing rendered order after an
-> operator upgrade.
+> For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves the declared order when
+> it combines DGD-level `spec.env` with component `podTemplate` environment variables. Standard
+> component and infrastructure defaults precede that user list. A user variable can reference an
+> earlier default or user variable with `$(NAME)`, and a later user entry with the same name overrides
+> a default. Older DGDs retain their existing rendered order after an operator upgrade.
 
 For every backend, a component's `name` is its stable identifier within the DGD. The operator
 uses that name to derive Kubernetes resource names and sets it on the
