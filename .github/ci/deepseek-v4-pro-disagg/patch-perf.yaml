@@ -20,6 +20,9 @@ spec:
       containers:
       - name: bench
         env:
+        # Chat framing adds about 80 tokens; leave room under max-model-len=9280.
+        - name: ISL
+          value: "8064"
         - name: CONCURRENCIES
           value: "512"
       volumes:
