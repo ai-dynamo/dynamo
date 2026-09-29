@@ -7,6 +7,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -16,7 +17,7 @@ const (
 	mpiRunSecretName = "mpi-run-ssh-secret"
 )
 
-func TestShellQuoteForBashC(t *testing.T) {
+func TestMutationShellQuote(t *testing.T) {
 	tests := []struct {
 		name     string
 		input    string
@@ -66,15 +67,15 @@ func TestShellQuoteForBashC(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shellQuoteForBashC(tt.input)
+			result := mutation.ShellQuote(tt.input)
 			if result != tt.expected {
-				t.Errorf("shellQuoteForBashC(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("mutation.ShellQuote(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestShellQuoteForBashC_InLeaderCommand(t *testing.T) {
+func TestMutationShellQuoteInLeaderCommand(t *testing.T) {
 	// End-to-end: verify that when setupLeaderContainer receives args with JSON
 	// (the actual --override-engine-args use case), the final command string
 	// contains properly quoted JSON that will survive bash -c shell parsing.
@@ -458,7 +459,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			component := &v1alpha1.DynamoComponentDeploymentSharedSpec{}
 
 			// Call UpdatePodSpec
-			backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer)
+			require.NoError(t, backend.UpdatePodSpec(podSpec, tt.numberOfNodes, tt.role, betaComponent(t, component), "test-service", tt.multinodeDeployer))
 
 			// Check volume count
 			if len(podSpec.Volumes) != tt.expectedVolumeCount {
