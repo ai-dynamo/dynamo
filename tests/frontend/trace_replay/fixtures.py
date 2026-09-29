@@ -11,6 +11,10 @@ the generation prompt and up to end-of-turn. Tokenized with the teacher's
 tokenizer, it becomes the mocker's scripted output; the parsed fields become
 the expected frontend response.
 
+Because only the parsed fields are used, trajectories of one family can be
+rendered as another family's output (`build(..., source_key=...)`): the target
+supplies template, tokenizer and parsers, the source supplies the conversation.
+
 Output directory:
     model/              tokenizer + chat template files, usable as --model-path
     trajectories.jsonl  conversation, tools and chat-template args per trajectory
@@ -62,6 +66,8 @@ _MODEL_FILES = [
 ]
 # A truncation point needs this much text on both sides to be meaningful.
 _MIN_SPAN_CHARS = 40
+# Reasoning-effort levels in increasing order, for mapping between families.
+_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 _STOP_WORD = re.compile(r"[A-Za-z]{7,}")
 
 
@@ -79,6 +85,7 @@ class Teacher:
     tool_call_parser: str
     reasoning_parser: str
     markup: tuple[str, ...]  # raw syntax that must never reach parsed fields
+    efforts: tuple[str, ...] = ()  # reasoning_effort values its template accepts
     think_end: str = "</think>"
 
 
@@ -94,6 +101,7 @@ TEACHERS: dict[str, Teacher] = {
         tool_call_parser="qwen3_coder",
         reasoning_parser="qwen3",
         markup=("<think>", "</think>", "<tool_call>", "<function=", "<parameter="),
+        efforts=("low", "medium", "xhigh"),
     ),
     "deepseek-v4": Teacher(
         dataset_name="DeepSeek-V4-Flash",
@@ -106,6 +114,7 @@ TEACHERS: dict[str, Teacher] = {
         tool_call_parser="deepseek_v4",
         reasoning_parser="deepseek_v4",
         markup=("<think>", "</think>", "｜DSML｜"),
+        efforts=("high", "max"),
     ),
     "minimax-m2.5": Teacher(
         dataset_name="MiniMax-M2.5",
@@ -236,16 +245,26 @@ def normalize_messages(raw_messages: Iterable[JsonDict]) -> list[JsonDict]:
 
 
 def chat_template_args(teacher: Teacher, teacher_meta: JsonDict) -> JsonDict:
-    """Template kwargs that reproduce the teacher's thinking configuration."""
+    """Template kwargs for `teacher` that reproduce the trajectory's thinking setup."""
     thinking = bool(teacher_meta.get("enable_thinking"))
-    effort = teacher_meta.get("reasoning_effort")
     if teacher.renderer == "dsv4":
         args: JsonDict = {"thinking_mode": "thinking" if thinking else "chat"}
     else:
         args = {"enable_thinking": thinking}
+    effort = _map_effort(teacher_meta.get("reasoning_effort"), teacher.efforts)
     if effort:
         args["reasoning_effort"] = effort
     return args
+
+
+def _map_effort(effort: str | None, supported: tuple[str, ...]) -> str | None:
+    """The supported level closest to `effort`; templates reject unknown levels."""
+    if not effort or not supported or effort not in _EFFORT_ORDER:
+        return None
+    if effort in supported:
+        return effort
+    rank = _EFFORT_ORDER.index(effort)
+    return min(supported, key=lambda level: abs(_EFFORT_ORDER.index(level) - rank))
 
 
 def _with_object_arguments(message: JsonDict) -> JsonDict:
@@ -430,11 +449,14 @@ class FixtureWriter:
         template_args = chat_template_args(
             self.teacher, row["metadata"]["teacher_model"]
         )
+        source = row["metadata"]["teacher_model"]["name"]
+        self.stats[f"source:{source}"] += 1
         self.trajectories.append(
             {
                 "trajectory": trajectory_id,
                 "instance_id": row.get("instance_id"),
                 "teacher": self.teacher.dataset_name,
+                "source": source,
                 "messages": messages,
                 "tools": tools,
                 "chat_template_args": template_args,
@@ -579,15 +601,21 @@ def build(
     max_trajectories: int = 1000,
     variant_every: int = 4,
     rows_file: Path | None = None,
+    source_key: str | None = None,
 ) -> JsonDict:
-    """Build fixtures from dataset rows (or `rows_file`) until `min_turns` turns are kept."""
+    """Build fixtures from dataset rows (or `rows_file`) until `min_turns` turns are kept.
+
+    Rows come from `source_key`'s slice of the dataset (default: the teacher's own)
+    and are rendered as `teacher_key`'s output.
+    """
     teacher = TEACHERS[teacher_key]
     model_dir = download_model_files(teacher, out_dir / "model")
     writer = FixtureWriter(teacher, Renderer(teacher, model_dir), variant_every)
     if rows_file is not None:
         rows: Iterable[JsonDict] = json.loads(rows_file.read_text())
     else:
-        rows = iter_dataset_rows(teacher, offset, writer.stats)
+        source = TEACHERS[source_key or teacher_key]
+        rows = iter_dataset_rows(source, offset, writer.stats)
     for row in rows:
         writer.add_row(row)
         logger.info(
