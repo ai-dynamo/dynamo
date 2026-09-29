@@ -2016,3 +2016,40 @@ fn empty_raw_tokens_win_over_supplied_hashes() {
     assert!(normalized.block_hashes.is_empty());
     assert_eq!(normalized.isl_tokens, 0);
 }
+
+#[tokio::test]
+async fn select_accepts_empty_token_ids() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    for _ in 0..2 {
+        let response = post(
+            app.clone(),
+            "/select",
+            r#"{"model_name":"model","token_ids":[]}"#,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn register_rejects_oversized_dp_range() {
+    let response = post(
+        app(),
+        "/workers",
+        &serde_json::json!({
+            "worker_id": 1,
+            "model_name": "model",
+            "endpoint": "http://worker-1:8000",
+            "block_size": 4,
+            "data_parallel_size": crate::sequences::topology::MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
