@@ -1,0 +1,3 @@
+usage: verify.py [-h] --artifact ARTIFACT [--socket SOCKET]
+verify.py: error: the following arguments are required: --artifact
+command terminated with exit code 2

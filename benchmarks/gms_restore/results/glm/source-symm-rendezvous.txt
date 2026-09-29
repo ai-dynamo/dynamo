@@ -1,0 +1,611 @@
+OFFICIAL_MEMORY_SAVER_VERSION=0.0.10
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+Breakable CUDA graph is incompatible with MLA attention; disabling prefill CUDA graph.
+Setting page size to 64 for DeepSeek DSA.
+Set dense attention kv len threshold to model index_topk=2048 for DeepSeek with DSA.
+DSA with TP mode is active, dp_size=1, tp_size=8, attn_tp_size=8, attention weights will be sharded across 8 ranks.
+Setting KV cache dtype to fp8_e4m3 for DeepSeek DSA on SM10 device.
+Set DSA backends for fp8_e4m3 KV Cache: prefill=trtllm, decode=trtllm.
+FlashInfer TRTLLM MoE is enabled. --disable-shared-experts-fusion is automatically set.
+[2026-09-29 00:16:12] server_args=ServerArgs(model_path='nvidia/GLM-5.2-NVFP4', tokenizer_path='nvidia/GLM-5.2-NVFP4', tokenizer_mode='auto', tokenizer_backend='huggingface', tokenizer_worker_num=1, detokenizer_worker_num=1, skip_tokenizer_init=False, load_format='auto', model_loader_extra_config='{}', trust_remote_code=False, context_length=4096, is_embedding=False, enable_multimodal=None, revision=None, model_impl='auto', model_config_parser='auto', json_model_override_args='{}', dtype='auto', quantization='modelopt_fp4', quantization_param_path=None, kv_cache_dtype='fp8_e4m3', enable_fp32_lm_head=False, modelopt_quant=None, modelopt_checkpoint_restore_path=None, modelopt_checkpoint_save_path=None, modelopt_export_path=None, quantize_and_serve=False, rl_quant_profile=None, enable_tf32_matmul=False, mem_fraction_static=0.7, max_running_requests=None, max_queued_requests=None, max_total_tokens=None, chunked_prefill_size=16384, enable_dynamic_chunking=False, max_prefill_tokens=16384, prefill_max_requests=None, schedule_policy='fcfs', enable_priority_scheduling=False, disable_priority_preemption=False, default_priority_value=None, abort_on_priority_when_disabled=False, schedule_low_priority_values_first=False, priority_scheduling_preemption_threshold=10, retraction_policy='length', schedule_conservativeness=1.0, page_size=64, swa_full_tokens_ratio=0.8, disable_hybrid_swa_memory=False, radix_eviction_policy='lru', prefill_only_disable_kv_cache=False, disable_radix_cache=False, enable_page_major_kv_layout=False, enable_unified_memory=False, disable_chunked_prefix_cache=False, disable_overlap_schedule=False, num_continuous_decode_steps=1, scheduler_recv_interval=1, enable_mixed_chunk=False, nccl_port=None, dist_timeout=None, dist_init_addr=None, nnodes=1, node_rank=0, tp_size=8, dcp_size=1, pp_size=1, pp_max_micro_batch_size=None, pp_async_batch_depth=0, dp_size=1, load_balance_method='round_robin', attn_cp_size=1, moe_dp_size=1, enable_prefill_cp=False, cp_strategy=None, enable_dsa_cache_layer_split=False, enable_dsa_prefill_context_parallel=False, dsa_prefill_cp_mode='round-robin-split', enable_prefill_context_parallel=False, prefill_cp_mode='in-seq-split', enable_dp_attention=False, enable_dp_attention_local_control_broadcast=False, enable_dp_lm_head=False, enable_attn_tp_input_scattered=False, disable_attn_tp_gather=False, enable_p2p_check=False, device='cuda', base_gpu_id=0, gpu_id_step=1, random_seed=47736062, watchdog_timeout=300, soft_watchdog_timeout=None, sleep_on_idle=False, use_ray=False, custom_sigquit_handler=None, numa_node=None, gc_threshold=None, host='127.0.0.1', port=30000, fastapi_root_path='', smg_grpc_mode=False, grpc_mode=False, grpc_port=None, sidecar=None, sidecar_args=None, skip_server_warmup=False, warmups=None, enable_http2=False, ssl_keyfile=None, ssl_certfile=None, ssl_ca_certs=None, ssl_keyfile_password=None, enable_ssl_refresh=False, api_key=None, admin_api_key=None, served_model_name='nvidia/GLM-5.2-NVFP4', weight_version='default', chat_template=None, hf_chat_template_name=None, completion_template=None, file_storage_path='sglang_storage', enable_cache_report=False, reasoning_parser=None, default_chat_template_kwargs=None, strip_thinking_cache=False, enable_strict_thinking=False, tool_call_parser=None, tool_server=None, sampling_defaults='model', asr_max_buffer_seconds=60, asr_max_concurrent_sessions=32, preferred_sampling_params=None, allow_auto_truncate=False, stream_interval=1, batch_notify_size=16, stream_response_default_include_usage=False, incremental_streaming_output=False, enable_streaming_session=False, enable_session_radix_cache=False, log_level='info', log_level_http=None, log_requests=False, log_requests_level=2, log_requests_format='text', log_requests_target=None, uvicorn_access_log_exclude_prefixes=[], crash_dump_folder=None, show_time_cost=False, enable_metrics=False, smg_http_sidecar_port=None, enable_mfu_metrics=False, enable_metrics_for_all_schedulers=False, load_snapshot_publish_interval=15, tokenizer_metrics_custom_labels_header='x-custom-labels', tokenizer_metrics_allowed_custom_labels=None, extra_metric_labels=None, bucket_time_to_first_token=None, bucket_inter_token_latency=None, bucket_e2e_request_latency=None, prompt_tokens_buckets=None, generation_tokens_buckets=None, gc_warning_threshold_secs=0.0, decode_log_interval=40, enable_request_time_stats_logging=False, kv_events_config=None, enable_forward_pass_metrics=False, forward_pass_metrics_worker_id='', forward_pass_metrics_ipc_name=None, enable_trace=False, trace_modules='request', otlp_traces_endpoint='localhost:4317', export_metrics_to_file=False, export_metrics_to_file_dir=None, stat_loggers=None, constrained_json_whitespace_pattern=None, constrained_json_disable_any_whitespace=False, attention_backend='dsa', decode_attention_backend=None, prefill_attention_backend=None, sampling_backend='flashinfer', grammar_backend='xgrammar', radix_cache_backend=None, mm_attention_backend=None, fp8_gemm_runner_backend='auto', fp4_gemm_runner_backend='auto', bf16_gemm_backend='auto', dsa_prefill_backend='trtllm', dsa_decode_backend='trtllm', dsa_paged_mqa_logits_backend='auto', dsa_topk_backend='sgl-kernel', disable_flashinfer_autotune=False, mamba_backend='triton', cuda_graph_config=CudaGraphConfig(decode=PhaseConfig(backend='full', max_bs=512, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], tc_compiler='eager', full_prefill_max_req=None), prefill=PhaseConfig(backend='disabled', max_bs=2048, bs=[4, 8, 12, 16, 20, 24, 28, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240, 256, 288, 320, 352, 384, 416, 448, 480, 512, 576, 640, 704, 768, 832, 896, 960, 1024, 1280, 1536, 1792, 2048], tc_compiler='eager', full_prefill_max_req=None)), cuda_graph_backend_decode=None, cuda_graph_backend_prefill=None, cuda_graph_max_bs_decode=None, cuda_graph_max_bs_prefill=None, cuda_graph_bs_decode=None, cuda_graph_bs_prefill=None, cuda_graph_tc_compiler=None, disable_prefill_cuda_graph=False, disable_decode_cuda_graph=False, disable_cuda_graph=False, disable_cuda_graph_padding=False, enable_profile_cuda_graph=False, enable_cudagraph_gc=False, debug_cuda_graph=False, enable_layerwise_nvtx_marker=False, enable_nccl_nvls=False, enable_symm_mem=False, triton_attention_reduce_in_fp32=False, triton_attention_num_kv_splits=8, triton_attention_split_tile_size=None, flashinfer_mla_disable_ragged=False, enable_fused_qk_norm_rope=False, enable_precise_embedding_interpolation=False, enable_fused_moe_sum_all_reduce=False, enable_deepseek_v4_fp4_indexer=False, disable_custom_all_reduce=False, enable_mscclpp=False, enable_torch_symm_mem=False, enable_scattered_sconv=False, pre_warm_nccl=False, enable_quant_communications=False, enable_flashinfer_allreduce_fusion=False, enforce_disable_flashinfer_allreduce_fusion=False, flashinfer_allreduce_fusion_backend='auto', enable_aiter_allreduce_fusion=False, enable_torch_compile=False, enable_torch_compile_debug_mode=False, torch_compile_max_bs=32, torchao_config='', speculative_algorithm=None, speculative_draft_model_path=None, speculative_draft_model_revision=None, speculative_draft_load_format=None, speculative_num_steps=None, speculative_eagle_topk=None, speculative_num_draft_tokens=None, speculative_dflash_block_size=None, speculative_dspark_block_size=None, speculative_dspark_sps_table_path=None, speculative_dspark_confidence_sts_path=None, speculative_dspark_align_verify_tokens_to_graph_tier=False, speculative_accept_threshold_single=1.0, speculative_accept_threshold_acc=1.0, speculative_use_rejection_sampling=False, speculative_token_map=None, speculative_attention_mode='prefill', speculative_draft_attention_backend=None, speculative_draft_window_size=None, speculative_moe_runner_backend='flashinfer_trtllm', speculative_moe_a2a_backend=None, speculative_draft_model_quantization=None, speculative_skip_dp_mlp_sync=False, enable_multi_layer_eagle=False, speculative_adaptive=False, speculative_adaptive_config=None, decoupled_spec_bind_endpoint=None, decoupled_spec_connect_endpoints=None, decoupled_spec_rank=None, decoupled_spec_role='null', spec_trace_dir=None, speculative_ngram_min_bfs_breadth=1, speculative_ngram_max_bfs_breadth=10, speculative_ngram_match_type='BFS', speculative_ngram_max_trie_depth=18, speculative_ngram_capacity=10000000, speculative_ngram_external_corpus_path=None, speculative_ngram_external_sam_budget=0, speculative_ngram_external_corpus_max_tokens=10000000, ep_size=8, moe_a2a_backend='none', moe_runner_backend='flashinfer_trtllm', flashinfer_mxfp4_moe_precision='default', deepep_mode='auto', fuseep_mode=2, deepep_dispatcher_output_dtype='auto', ep_num_redundant_experts=0, ep_dispatch_algorithm=None, init_expert_location='trivial', enable_eplb=False, eplb_algorithm='auto', eplb_rebalance_num_iterations=1000, eplb_rebalance_layers_per_chunk=None, eplb_min_rebalancing_utilization_threshold=1.0, expert_distribution_recorder_mode=None, expert_distribution_recorder_buffer_size=1000, enable_expert_distribution_metrics=False, deepep_config=None, moe_dense_tp_size=None, elastic_ep_backend=None, enable_elastic_expert_backup=False, mooncake_ib_device=None, enable_waterfill=False, ep_join_mode=None, ep_join_rank_offset=0, elastic_ep_initial_size=None, max_ep_size=None, elastic_ep_scale_timeout=600, elastic_ep_rejoin=False, disable_flashinfer_cutlass_moe_fp4_allgather=False, disable_shared_experts_fusion=True, enforce_shared_experts_fusion=False, max_mamba_cache_size=None, mamba_ssm_dtype=None, enable_mamba_cache_stochastic_rounding=False, mamba_cache_philox_rounds=0, mamba_full_memory_ratio=0.9, mamba_radix_cache_strategy='auto', uses_mamba_radix_cache=False, mamba_track_interval=256, enable_int8_mamba_checkpoint=False, int8_mamba_ckpt_size=None, linear_attn_backend='triton', linear_attn_decode_backend=None, linear_attn_prefill_backend=None, enable_linear_replayssm=False, linear_replayssm_cache_len=16, enable_gdn_replayssm_spec=False, enable_hierarchical_cache=False, hicache_ratio=2.0, hicache_size=0, hicache_write_policy='write_through', hicache_io_backend='kernel', hicache_mem_layout='page_first', hicache_storage_backend=None, hicache_storage_prefetch_policy='timeout', hicache_storage_backend_extra_config=None, enable_hisparse=False, hisparse_config=None, enable_broadcast_mm_inputs_process=False, enable_prefix_mm_cache=False, mm_enable_dp_encoder=False, mm_process_config={}, limit_mm_data_per_request=None, enable_mm_global_cache=False, disable_fast_image_processor=False, mm_feature_transport='cpu', keep_mm_feature_on_device=False, enable_lora=None, enable_lora_overlap_loading=None, max_lora_rank=None, lora_target_modules=None, lora_paths=None, max_loaded_loras=None, max_loras_per_batch=8, lora_eviction_policy='lru', lora_backend='csgmv', max_lora_chunk_size=16, experts_shared_outer_loras=None, lora_use_virtual_experts=False, lora_strict_loading=False, lora_drain_wait_threshold=0.0, enable_two_batch_overlap=False, enable_single_batch_overlap=False, tbo_token_distribution_threshold=0.48, cpu_offload_gb=0, offload_group_size=-1, offload_num_in_group=1, offload_prefetch_step=1, offload_mode='cpu', enable_lmcache=False, lmcache_config_file=None, enable_flexkv=False, flexkv_config_file=None, kt_weight_path=None, kt_method='AMXINT4', kt_cpuinfer=None, kt_threadpool_count=2, kt_num_gpu_experts=None, kt_max_deferred_experts_per_token=None, dllm_algorithm=None, dllm_algorithm_config=None, dllm_fdfo=True, disaggregation_mode='null', disaggregation_transfer_backend='mooncake', disaggregation_bootstrap_port=8998, disaggregation_ib_device=None, disaggregation_decode_enable_radix_cache=False, disaggregation_decode_enable_offload_kvcache=False, num_reserved_decode_tokens=512, disaggregation_decode_extra_slots=None, disaggregation_decode_polling_interval=1, optimistic_prefill_attempts=0, encoder_only=False, language_only=False, encoder_transfer_backend='zmq_to_scheduler', encoder_urls=[], encoder_bootstrap_port=8997, encoder_register_urls=[], enable_adaptive_dispatch_to_encoder=False, enable_pdmux=False, pdmux_config_path=None, sm_group_num=8, custom_weight_loader=[], weight_loader_disable_mmap=False, weight_loader_prefetch_checkpoints=False, weight_loader_prefetch_num_threads=4, weight_loader_drop_cache_after_load=False, remote_instance_weight_loader_seed_instance_ip=None, remote_instance_weight_loader_seed_instance_service_port=None, remote_instance_weight_loader_send_weights_group_ports=None, remote_instance_weight_loader_backend='nccl', remote_instance_weight_loader_start_seed_via_transfer_engine=False, engine_info_bootstrap_port=6789, modelexpress_config=None, download_dir=None, model_checksum=None, delete_ckpt_after_loading=False, decrypted_config_file=None, decrypted_draft_config_file=None, checkpoint_engine_wait_weights_before_ready=False, enable_prefill_delayer=False, prefill_delayer_max_delay_passes=30, prefill_delayer_token_usage_low_watermark=None, prefill_delayer_forward_passes_buckets=None, prefill_delayer_wait_seconds_buckets=None, prefill_delayer_queue_min_ratio=None, prefill_delayer_max_delay_ms=None, min_free_slots_delay=None, enable_deterministic_inference=False, rl_on_policy_target=None, kv_canary='none', kv_canary_real_data='none', kv_canary_sweep_interval=0, enable_dynamic_batch_tokenizer=False, dynamic_batch_tokenizer_batch_size=32, dynamic_batch_tokenizer_batch_timeout=0.002, enable_tokenizer_batch_encode=False, disable_tokenizer_batch_decode=False, debug_tensor_dump_output_folder=None, debug_tensor_dump_layers=None, debug_tensor_dump_input_file=None, enable_memory_saver=True, enable_weights_cpu_backup=False, enable_draft_weights_cpu_backup=False, enable_custom_logit_processor=False, enable_return_hidden_states=False, enable_return_routed_experts=False, enable_return_indexer_topk=False, disable_outlines_disk_cache=False, enable_mis=False, forward_hooks=None, msprobe_dump_config=None)
+[2026-09-29 00:16:12] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:15] Using default HuggingFace chat template with detected content format: openai
+[2026-09-29 00:16:15] Auto-detected template features: reasoning_config=ReasoningToggleConfig(toggle_param='enable_thinking', default_enabled=True, special_case=None, effort_kwarg=None), reasoning_parser=glm45, tool_call_parser=glm47
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+[2026-09-29 00:16:24 TP4 EP4] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+[2026-09-29 00:16:24 TP1 EP1] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+[2026-09-29 00:16:24 TP3 EP3] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:25 TP7 EP7] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+[2026-09-29 00:16:25 TP0 EP0] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:25 TP5 EP5] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.dsa_cache_layer_split.LayerSplitDSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'LayerSplitDSATokenToKVPool' has no attribute '_create_index_key_cache'
+Failed to apply hooks to sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache
+Traceback (most recent call last):
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 163, in apply_hooks
+    cls._apply_target(target, hooks)
+  File "/sgl-workspace/sglang/python/sglang/srt/plugins/hook_registry.py", line 196, in _apply_target
+    original = getattr(obj, attr_name)
+               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: type object 'DSATokenToKVPool' has no attribute '_create_index_key_cache'
+[2026-09-29 00:16:25 TP2 EP2] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:25 TP6 EP6] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:28 TP4 EP4] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:28 TP4 EP4] Init torch distributed begin.
+[2026-09-29 00:16:28 TP3 EP3] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:28 TP3 EP3] Init torch distributed begin.
+[2026-09-29 00:16:29 TP0 EP0] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP5 EP5] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP0 EP0] Init torch distributed begin.
+[2026-09-29 00:16:29 TP5 EP5] Init torch distributed begin.
+[2026-09-29 00:16:29 TP7 EP7] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP2 EP2] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP7 EP7] Init torch distributed begin.
+[2026-09-29 00:16:29 TP6 EP6] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP2 EP2] Init torch distributed begin.
+[2026-09-29 00:16:29 TP6 EP6] Init torch distributed begin.
+[2026-09-29 00:16:29 TP1 EP1] DeepGemm is enabled but the scale_fmt of checkpoint is not ue8m0. This might cause accuracy degradation on Blackwell.
+[2026-09-29 00:16:29 TP1 EP1] Init torch distributed begin.
+[2026-09-29 00:16:31 TP0 EP0] sglang is using nccl==2.28.9
+[2026-09-29 00:16:42 TP0 EP0] All Reduce config: symmetric_memory = 28.01 MB, local_buffer = 8.00 MB, multicast = True
+[2026-09-29 00:16:48 TP0 EP0] Init torch distributed ends. elapsed=18.98 s, mem usage=0.83 GB
+[2026-09-29 00:16:48 TP7 EP7] Init torch distributed ends. elapsed=18.82 s, mem usage=0.74 GB
+[2026-09-29 00:16:48 TP6 EP6] Init torch distributed ends. elapsed=18.72 s, mem usage=0.79 GB
+[2026-09-29 00:16:48 TP4 EP4] Init torch distributed ends. elapsed=19.71 s, mem usage=0.83 GB
+[2026-09-29 00:16:48 TP5 EP5] Init torch distributed ends. elapsed=18.95 s, mem usage=0.83 GB
+[2026-09-29 00:16:48 TP3 EP3] Init torch distributed ends. elapsed=19.32 s, mem usage=0.83 GB
+[2026-09-29 00:16:48 TP1 EP1] Init torch distributed ends. elapsed=18.58 s, mem usage=0.83 GB
+[2026-09-29 00:16:48 TP2 EP2] Init torch distributed ends. elapsed=18.74 s, mem usage=0.79 GB
+[2026-09-29 00:16:49 TP5 EP5] Load weight begin. avail mem=176.21 GB
+[2026-09-29 00:16:49 TP5 EP5] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP5 EP5] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP5 EP5] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP5 EP5] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP5 EP5] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP5 EP5] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:49 TP1 EP1] Load weight begin. avail mem=176.21 GB
+[2026-09-29 00:16:49 TP1 EP1] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP1 EP1] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP1 EP1] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP1 EP1] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP4 EP4] Load weight begin. avail mem=176.21 GB
+[2026-09-29 00:16:49 TP4 EP4] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP4 EP4] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP4 EP4] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP4 EP4] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP0 EP0] Load weight begin. avail mem=176.21 GB
+[2026-09-29 00:16:49 TP6 EP6] Load weight begin. avail mem=176.25 GB
+[2026-09-29 00:16:49 TP0 EP0] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP0 EP0] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP0 EP0] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP0 EP0] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP6 EP6] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP6 EP6] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP6 EP6] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP6 EP6] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP7 EP7] Load weight begin. avail mem=176.30 GB
+[2026-09-29 00:16:49 TP7 EP7] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP7 EP7] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP7 EP7] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP7 EP7] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP3 EP3] Load weight begin. avail mem=176.21 GB
+[2026-09-29 00:16:49 TP3 EP3] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP3 EP3] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP3 EP3] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP3 EP3] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP2 EP2] Load weight begin. avail mem=176.25 GB
+[2026-09-29 00:16:49 TP2 EP2] Using ModelOptModelLoader due to ModelOpt quantization config.
+[2026-09-29 00:16:49 TP2 EP2] ModelOptModelLoader: Loading base model...
+[2026-09-29 00:16:49 TP2 EP2] Model is already quantized, loading directly...
+[2026-09-29 00:16:49 TP2 EP2] Detected nvfp4 checkpoint. Please note that the format is experimental and subject to change.
+[2026-09-29 00:16:49 TP1 EP1] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP1 EP1] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:49 TP4 EP4] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP4 EP4] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:49 TP0 EP0] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP0 EP0] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:49 TP6 EP6] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP6 EP6] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:49 TP7 EP7] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:49 TP7 EP7] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:50 TP3 EP3] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:50 TP3 EP3] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:50 TP2 EP2] FlashInfer TRTLLM MoE deferred finalize is disabled (moe_runner_backend=flashinfer_trtllm, quant_method=ModelOptNvFp4FusedMoEMethod).
+[2026-09-29 00:16:50 TP2 EP2] Setting inplace to False for FlashInfer TRTLLM MoE backend.
+[2026-09-29 00:16:52 TP0 EP0] Found local HF snapshot for nvidia/GLM-5.2-NVFP4 at /model-cache/hub/models--nvidia--GLM-5.2-NVFP4/snapshots/53e0691e21895a3863a606dfd12910c69eba94ab; skipping download.
+
+Multi-thread loading shards:   0% Completed | 0/47 [00:00<?, ?it/s]
+Multi-thread loading shards:   2% Completed | 1/47 [00:02<02:16,  2.96s/it]
+Multi-thread loading shards:   4% Completed | 2/47 [00:03<01:19,  1.77s/it]
+Multi-thread loading shards:   6% Completed | 3/47 [00:04<00:57,  1.31s/it]
+Multi-thread loading shards:   9% Completed | 4/47 [00:05<00:52,  1.22s/it]
+Multi-thread loading shards:  11% Completed | 5/47 [00:06<00:43,  1.05s/it]
+Multi-thread loading shards:  13% Completed | 6/47 [00:07<00:38,  1.07it/s]
+Multi-thread loading shards:  15% Completed | 7/47 [00:07<00:35,  1.14it/s]
+Multi-thread loading shards:  17% Completed | 8/47 [00:09<00:37,  1.04it/s]
+Multi-thread loading shards:  19% Completed | 9/47 [00:09<00:32,  1.15it/s]
+Multi-thread loading shards:  21% Completed | 10/47 [00:10<00:30,  1.22it/s]
+Multi-thread loading shards:  23% Completed | 11/47 [00:11<00:28,  1.28it/s]
+Multi-thread loading shards:  26% Completed | 12/47 [00:12<00:30,  1.13it/s]
+Multi-thread loading shards:  28% Completed | 13/47 [00:12<00:28,  1.21it/s]
+Multi-thread loading shards:  30% Completed | 14/47 [00:13<00:26,  1.24it/s]
+Multi-thread loading shards:  32% Completed | 15/47 [00:14<00:24,  1.29it/s]
+Multi-thread loading shards:  34% Completed | 16/47 [00:15<00:23,  1.33it/s]
+Multi-thread loading shards:  36% Completed | 17/47 [00:16<00:29,  1.03it/s]
+Multi-thread loading shards:  38% Completed | 18/47 [00:17<00:25,  1.14it/s]
+Multi-thread loading shards:  40% Completed | 19/47 [00:17<00:22,  1.23it/s]
+Multi-thread loading shards:  43% Completed | 20/47 [00:18<00:22,  1.20it/s]
+Multi-thread loading shards:  45% Completed | 21/47 [00:19<00:20,  1.25it/s]
+Multi-thread loading shards:  47% Completed | 22/47 [00:20<00:19,  1.31it/s]
+Multi-thread loading shards:  49% Completed | 23/47 [00:20<00:18,  1.33it/s]
+Multi-thread loading shards:  51% Completed | 24/47 [00:22<00:21,  1.08it/s]
+Multi-thread loading shards:  53% Completed | 25/47 [00:22<00:18,  1.18it/s]
+Multi-thread loading shards:  55% Completed | 26/47 [00:23<00:16,  1.26it/s]
+Multi-thread loading shards:  57% Completed | 27/47 [00:24<00:15,  1.32it/s]
+Multi-thread loading shards:  60% Completed | 28/47 [00:25<00:14,  1.33it/s]
+Multi-thread loading shards:  62% Completed | 29/47 [00:25<00:13,  1.37it/s]
+Multi-thread loading shards:  64% Completed | 30/47 [00:26<00:12,  1.38it/s]
+Multi-thread loading shards:  66% Completed | 31/47 [00:28<00:15,  1.02it/s]
+Multi-thread loading shards:  68% Completed | 32/47 [00:28<00:13,  1.14it/s]
+Multi-thread loading shards:  70% Completed | 33/47 [00:29<00:11,  1.23it/s]
+Multi-thread loading shards:  72% Completed | 34/47 [00:30<00:10,  1.28it/s]
+Multi-thread loading shards:  74% Completed | 35/47 [00:30<00:09,  1.32it/s]
+Multi-thread loading shards:  77% Completed | 36/47 [00:31<00:07,  1.40it/s]
+Multi-thread loading shards:  79% Completed | 37/47 [00:31<00:06,  1.63it/s]
+Multi-thread loading shards:  81% Completed | 38/47 [00:31<00:04,  1.97it/s]
+Multi-thread loading shards:  83% Completed | 39/47 [00:32<00:03,  2.37it/s]
+Multi-thread loading shards:  85% Completed | 40/47 [00:32<00:02,  2.80it/s]
+Multi-thread loading shards:  87% Completed | 41/47 [00:33<00:03,  1.79it/s]
+Multi-thread loading shards:  89% Completed | 42/47 [00:33<00:02,  2.06it/s]
+Multi-thread loading shards:  91% Completed | 43/47 [00:33<00:01,  2.47it/s]
+Multi-thread loading shards:  94% Completed | 44/47 [00:34<00:01,  2.81it/s]
+Multi-thread loading shards:  96% Completed | 45/47 [00:34<00:00,  3.37it/s]
+Multi-thread loading shards: 100% Completed | 47/47 [00:34<00:00,  1.37it/s]
+[2026-09-29 00:17:33 TP0 EP0] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:33 TP0 EP0] Load weight end. elapsed=43.73 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.21 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:35 TP4 EP4] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:35 TP4 EP4] Load weight end. elapsed=45.33 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.21 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:35 TP2 EP2] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:35 TP2 EP2] Load weight end. elapsed=45.40 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.25 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:36 TP1 EP1] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:36 TP1 EP1] Load weight end. elapsed=46.87 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.21 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:38 TP6 EP6] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:38 TP6 EP6] Load weight end. elapsed=48.59 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.25 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:38 TP5 EP5] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:38 TP5 EP5] Load weight end. elapsed=49.23 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.21 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:38 TP7 EP7] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:38 TP7 EP7] Load weight end. elapsed=49.12 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.30 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:40 TP3 EP3] Using FP8 KV cache but no scaling factors provided. Defaulting to scaling factors of 1.0. This may lead to less accurate results!
+[2026-09-29 00:17:40 TP3 EP3] Load weight end. elapsed=50.80 s, type=GlmMoeDsaForCausalLM, quant=modelopt_fp4, quant_algo=NVFP4, avail mem=118.21 GB, mem usage=58.00 GB.
+[2026-09-29 00:17:46 TP3 EP3] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP3 EP3] Memory pool end. avail mem=28.02 GB
+[2026-09-29 00:17:46 TP4 EP4] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP1 EP1] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP4 EP4] Memory pool end. avail mem=28.02 GB
+[2026-09-29 00:17:46 TP7 EP7] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP7 EP7] Memory pool end. avail mem=28.11 GB
+[2026-09-29 00:17:46 TP1 EP1] Memory pool end. avail mem=28.02 GB
+[2026-09-29 00:17:46 TP6 EP6] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP6 EP6] Memory pool end. avail mem=28.06 GB
+[2026-09-29 00:17:46 TP0 EP0] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP0 EP0] Memory pool end. avail mem=28.02 GB
+[2026-09-29 00:17:46 TP5 EP5] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP5 EP5] Memory pool end. avail mem=28.02 GB
+[2026-09-29 00:17:46 TP2 EP2] KV Cache is allocated. dtype: torch.float8_e4m3fn, #tokens: 1270080, KV size: 65.33 GB
+[2026-09-29 00:17:46 TP2 EP2] Memory pool end. avail mem=28.06 GB
+[2026-09-29 00:17:48 TP4 EP4] GMS weights committed device=4 models=1 allocations=28
+[2026-09-29 00:17:48 TP2 EP2] GMS weights committed device=2 models=1 allocations=28
+[2026-09-29 00:17:48 TP6 EP6] GMS weights committed device=6 models=1 allocations=28
+[2026-09-29 00:17:48 TP1 EP1] GMS weights committed device=1 models=1 allocations=28
+[2026-09-29 00:17:48 TP5 EP5] GMS weights committed device=5 models=1 allocations=28
+[2026-09-29 00:17:48 TP3 EP3] GMS weights committed device=3 models=1 allocations=28
+[2026-09-29 00:17:48 TP7 EP7] GMS weights committed device=7 models=1 allocations=28
+[2026-09-29 00:17:48 TP0 EP0] GMS weights committed device=0 models=1 allocations=28
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W929 00:17:49.483858495 ProcessGroupNCCL.cpp:5188] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+[2026-09-29 00:17:50 TP2 EP2] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=2, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP6 EP6] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=6, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP1 EP1] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=1, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP0 EP0] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=0, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP7 EP7] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=7, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP5 EP5] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=5, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP4 EP4] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=4, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP3 EP3] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=3, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP7 EP7] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=7, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP6 EP6] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=6, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP0 EP0] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=0, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP2 EP2] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=2, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP3 EP3] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=3, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP1 EP1] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=1, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP5 EP5] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=5, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP4 EP4] FlashInfer AllReduce Fusion enabled and workspace initialized: backend=mnnvl, rank=4, world_size=8, max_token_num=2048, hidden_dim=6144
+[2026-09-29 00:17:50 TP6 EP6] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp6_pp0_dp0.json
+[2026-09-29 00:17:50 TP0 EP0] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp0_pp0_dp0.json
+[2026-09-29 00:17:50 TP5 EP5] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp5_pp0_dp0.json
+[2026-09-29 00:17:50 TP4 EP4] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp4_pp0_dp0.json
+[2026-09-29 00:17:50 TP1 EP1] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp1_pp0_dp0.json
+[2026-09-29 00:17:50 TP2 EP2] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp2_pp0_dp0.json
+[2026-09-29 00:17:50 TP3 EP3] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp3_pp0_dp0.json
+[2026-09-29 00:17:50 TP7 EP7] Running FlashInfer autotune with cache: /root/.cache/sglang/flashinfer/autotune/0.6.14/sm100/7c2abb44d59cdaf1/rank_tp7_pp0_dp0.json
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  67%|██████▋   | 14/21 [00:00<00:00, 129.12profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  71%|███████▏  | 15/21 [00:00<00:00, 143.09profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  81%|████████  | 17/21 [00:00<00:00, 161.59profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  81%|████████  | 17/21 [00:00<00:00, 160.10profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 135.32profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 163.67profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 155.39profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 128.13profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  90%|█████████ | 19/21 [00:00<00:00, 167.13profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  76%|███████▌  | 16/21 [00:00<00:00, 158.71profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 140.16profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 117.39profile/s]
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla:   0%|          | 0/21 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  67%|██████▋   | 14/21 [00:00<00:00, 123.11profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla:  67%|██████▋   | 14/21 [00:00<00:00, 133.62profile/s]
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 91.55profile/s] 
+
+[AutoTuner]: Tuning trtllm_batch_decode_mla: 100%|██████████| 21/21 [00:00<00:00, 87.41profile/s] 
+[2026-09-29 00:23:56.136] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:23:56.730] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:23:59.918] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:24:02.176] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:24:02.961] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:24:03.106] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:24:03.745] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+[2026-09-29 00:24:04.030] [info] TRT-LLM fused MoE cooperative launch SM allocation: 140 SMs used for MoE, 8 SMs reserved for overlapping kernels (total SMs: 148)
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   0%|          | 0/20 [00:00<?, ?profile/s]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:28, 33.10s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:30, 33.19s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:33, 33.35s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:35, 33.42s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:41, 33.75s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:44, 33.94s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:33<10:45, 33.97s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:   5%|▌         | 1/20 [00:34<10:46, 34.03s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:06<09:55, 33.09s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:06<09:57, 33.20s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:06<10:00, 33.36s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:06<10:00, 33.37s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:07<10:05, 33.63s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:07<10:12, 34.00s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:08<10:13, 34.11s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  10%|█         | 2/20 [01:08<10:15, 34.20s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:43<09:59, 35.25s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:44<10:01, 35.37s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:44<10:01, 35.40s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:44<10:03, 35.53s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:46<10:10, 35.93s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:46<10:13, 36.10s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:46<10:14, 36.15s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  15%|█▌        | 3/20 [01:47<10:18, 36.36s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:25<10:06, 37.88s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:26<10:06, 37.90s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:26<10:08, 38.03s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:26<10:09, 38.10s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:28<10:13, 38.33s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:28<10:13, 38.35s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:28<10:17, 38.59s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  20%|██        | 4/20 [02:29<10:19, 38.72s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:07<09:49, 39.31s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:08<09:51, 39.46s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:08<09:51, 39.45s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:09<09:55, 39.70s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:10<09:57, 39.84s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:11<09:59, 39.96s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:11<09:58, 39.92s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  25%|██▌       | 5/20 [03:12<10:02, 40.19s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:50<09:24, 40.31s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:50<09:26, 40.49s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:51<09:30, 40.76s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:52<09:33, 41.00s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:53<09:33, 40.95s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:54<09:34, 41.04s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:54<09:34, 41.05s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  30%|███       | 6/20 [03:55<09:38, 41.32s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:35<09:07, 42.12s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:36<09:07, 42.15s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:38<09:13, 42.55s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:39<09:16, 42.83s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:40<09:15, 42.71s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:41<09:17, 42.92s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:41<09:18, 42.96s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  35%|███▌      | 7/20 [04:42<09:18, 42.94s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:09<07:54, 39.54s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:10<07:53, 39.48s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:12<07:57, 39.83s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:14<08:05, 40.42s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:15<08:04, 40.34s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:16<08:04, 40.38s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:16<08:07, 40.63s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  40%|████      | 8/20 [05:16<08:03, 40.31s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:27<05:59, 32.67s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:28<06:02, 32.93s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:30<03:54, 23.42s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:31<02:27, 16.43s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:31<03:56, 23.63s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:31<06:07, 33.43s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:31<01:32, 11.61s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:31<02:29, 16.58s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:32<00:57,  8.27s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:32<01:33, 11.69s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:32<00:58,  8.31s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:32<00:35,  5.98s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:33<00:35,  5.97s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:33<00:21,  4.38s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:33<03:57, 23.77s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:33<06:11, 33.76s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:34<00:21,  4.39s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:34<00:12,  3.23s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:34<02:30, 16.67s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:34<06:10, 33.67s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:34<00:12,  3.23s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:34<06:09, 33.60s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:34<00:07,  2.44s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:34<01:34, 11.80s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:35<00:07,  2.44s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:35<00:03,  1.88s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:35<06:08, 33.50s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:35<00:58,  8.43s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  45%|████▌     | 9/20 [05:35<06:12, 33.82s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:35<00:03,  1.89s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:36<00:01,  1.52s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:36<04:00, 24.02s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:36<00:36,  6.09s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:36<00:01,  1.54s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:36<02:31, 16.87s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:36<00:00,  1.28s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:36<00:00, 16.84s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:36<03:59, 23.98s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:37<00:22,  4.48s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:37<03:59, 23.94s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:37<00:00,  1.29s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:37<00:00, 16.86s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:37<01:35, 11.93s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:37<02:31, 16.83s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:37<02:31, 16.81s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:37<00:13,  3.36s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:37<03:59, 23.91s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:38<00:59,  8.52s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  50%|█████     | 10/20 [05:38<04:01, 24.15s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:38<01:35, 11.92s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:38<01:35, 11.92s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:38<00:07,  2.56s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:38<02:31, 16.82s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:38<00:37,  6.18s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:38<00:59,  8.51s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  55%|█████▌    | 11/20 [05:38<02:32, 16.98s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:39<00:59,  8.51s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:39<00:03,  1.99s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:39<01:35, 11.93s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:39<00:22,  4.59s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  60%|██████    | 12/20 [05:39<01:36, 12.05s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:39<00:37,  6.20s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:39<00:37,  6.20s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:40<00:59,  8.52s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:40<00:01,  1.66s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  65%|██████▌   | 13/20 [05:40<01:00,  8.60s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:40<00:13,  3.46s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:40<00:22,  4.57s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:40<00:37,  6.18s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:40<00:00,  1.40s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:40<00:00, 17.04s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:40<00:23,  4.62s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:41<00:07,  2.62s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  70%|███████   | 14/20 [05:41<00:37,  6.25s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:41<00:13,  3.40s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:41<00:23,  4.61s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:41<00:14,  3.51s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:42<00:07,  2.63s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:42<00:04,  2.11s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  75%|███████▌  | 15/20 [05:42<00:23,  4.69s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:42<00:13,  3.48s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:42<00:08,  2.71s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:42<00:04,  2.12s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:43<00:01,  1.77s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  80%|████████  | 16/20 [05:43<00:14,  3.58s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:43<00:08,  2.68s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:43<00:04,  2.18s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:44<00:01,  1.81s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:44<00:00,  1.58s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:44<00:00, 17.21s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  85%|████████▌ | 17/20 [05:44<00:08,  2.81s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:44<00:04,  2.19s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:44<00:01,  1.90s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:45<00:00,  1.61s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:45<00:00, 17.26s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  90%|█████████ | 18/20 [05:45<00:04,  2.28s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:45<00:01,  1.90s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:46<00:00,  1.69s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:46<00:00, 17.31s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe:  95%|█████████▌| 19/20 [05:46<00:01,  1.97s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:47<00:00,  1.74s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:47<00:00, 17.35s/profile]
+
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:49<00:00,  2.16s/profile]
+[AutoTuner]: Tuning flashinfer::trtllm_fp4_block_scale_moe: 100%|██████████| 20/20 [05:49<00:00, 17.45s/profile]
+[2026-09-29 00:24:17 TP4 EP4] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP5 EP5] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP6 EP6] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP1 EP1] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP5 EP5] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP4 EP4] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP6 EP6] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP3 EP3] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP1 EP1] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP3 EP3] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP7 EP7] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP7 EP7] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:17 TP2 EP2] FlashInfer autotune completed.
+[2026-09-29 00:24:17 TP2 EP2] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:18 TP0 EP0] FlashInfer autotune completed.
+[2026-09-29 00:24:18 TP0 EP0] Disable prefill CUDA graph because cuda_graph_config resolved prefill.backend='disabled' (e.g. via --cuda-graph-backend-prefill=disabled or auto-disable rules).
+[2026-09-29 00:24:18 TP1 EP1] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.49 GB
+[2026-09-29 00:24:18 TP5 EP5] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.49 GB
+[2026-09-29 00:24:18 TP3 EP3] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.49 GB
+[2026-09-29 00:24:18 TP0 EP0] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.49 GB
+[2026-09-29 00:24:18 TP7 EP7] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.68 GB
+[2026-09-29 00:24:18 TP4 EP4] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.49 GB
+[2026-09-29 00:24:18 TP2 EP2] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.59 GB
+[2026-09-29 00:24:18 TP6 EP6] Capture target decode CUDA graph begin. backend=full, num_tokens_per_req=1, bs=[1, 2, 4, 8, 12, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], avail mem=28.59 GB

@@ -1,0 +1,310 @@
+diff --git a/agent/cmd/cuinterpose/rust/core/src/handlers.rs b/agent/cmd/cuinterpose/rust/core/src/handlers.rs
+index 82a3e80c..9b3d2a05 100644
+--- a/agent/cmd/cuinterpose/rust/core/src/handlers.rs
++++ b/agent/cmd/cuinterpose/rust/core/src/handlers.rs
+@@ -65,6 +65,12 @@ pub fn cuMemRelease(handle: u64) -> Result<()> {
+         state.release_virtual_handle(handle)?;
+     } else {
+         unsafe { crate::driver::cuMemRelease(handle) }?;
++        if let Some(count) = state.external_handles.get_mut(&handle) {
++            *count -= 1;
++            if *count == 0 {
++                state.external_handles.remove(&handle);
++            }
++        }
+     }
+     Ok(())
+ }
+@@ -80,6 +86,11 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
+         .next_back()
+         .filter(|(_, mapping)| address as u64 - mapping.address < mapping.size as u64)
+         .map(|(_, mapping)| (mapping.id, mapping.handle));
++    let external = state
++        .external_mappings
++        .range(..=address as u64)
++        .next_back()
++        .is_some_and(|(start, size)| address as u64 - *start < *size as u64);
+     let mut driver = 0;
+     unsafe { crate::driver::cuMemRetainAllocationHandle(&mut driver, address) }?;
+     if let Some((id, handle)) = mapping {
+@@ -90,6 +101,9 @@ pub fn cuMemRetainAllocationHandle(out: *mut u64, address: *mut c_void) -> Resul
+         };
+     } else {
+         let driver = runtime::must_complete(VirtualAllocationHandle::from_driver(driver));
++        if external {
++            *state.external_handles.entry(driver).or_default() += 1;
++        }
+         unsafe {
+             out.write(driver);
+         }
+@@ -101,6 +115,9 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
+     let mut state = active()?;
+     let Some(id) = state.resolve_virtual_handle(handle)? else {
+         unsafe { crate::driver::cuMemMap(address, size, offset, handle, flags) }?;
++        if state.external_handles.contains_key(&handle) {
++            state.external_mappings.insert(address, size);
++        }
+         return Ok(());
+     };
+     if state
+@@ -132,6 +149,9 @@ pub fn cuMemMap(address: u64, size: usize, offset: usize, handle: u64, flags: u6
+ pub fn cuMemUnmap(address: u64, size: usize) -> Result<()> {
+     let mut state = active()?;
+     unsafe { crate::driver::cuMemUnmap(address, size) }?;
++    state
++        .external_mappings
++        .retain(|start, _| *start < address || *start - address >= size as u64);
+     // CUDA only unmaps whole mappings; a successful range can contain several.
+     let addresses: Vec<_> = state
+         .mappings
+@@ -193,6 +213,18 @@ pub fn cuMemExportToShareableHandle(
+     {
+         return Err(CudaError::from(CUDA_ERROR_INVALID_VALUE));
+     }
++    // GMS owns external reader admission and fences/drains all leases before
++    // checkpoint. Its wire protocol must carry real CUDA FDs across containers,
++    // rather than coordinator tickets scoped to this process namespace.
++    if std::env::var("CUINTERPOSE_GMS_RAW_EXPORT").as_deref() == Ok("1") {
++        let driver = state
++            .memblocks
++            .get(&id)
++            .ok_or(CUDA_ERROR_INVALID_HANDLE)?
++            .driver_handle()?;
++        unsafe { crate::driver::cuMemExportToShareableHandle(out, driver, kind, flags) }?;
++        return Ok(());
++    }
+     let namespace_pid = state.namespace_pid;
+     let memblock = state
+         .memblocks
+@@ -220,9 +252,21 @@ pub fn cuMemImportFromShareableHandle(
+     if kind != CUmemAllocationHandleType::CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR {
+         return Err(CUDA_ERROR_NOT_SUPPORTED.into());
+     }
+-    let reference = sharing::decode(fd as isize as i32)
+-        .map_err(|_| CUDA_ERROR_INVALID_HANDLE)?
+-        .ok_or(CUDA_ERROR_NOT_SUPPORTED)?;
++    let reference = sharing::decode(fd as isize as i32).map_err(|_| CUDA_ERROR_INVALID_HANDLE)?;
++    let Some(reference) = reference else {
++        // Experimental opt-in for owners outside this checkpoint process tree.
++        // No external handle or mapping may survive BeginCheckpoint.
++        if std::env::var("CUINTERPOSE_QUIESCENT_EXTERNAL_IMPORTS").as_deref() != Ok("1") {
++            return Err(CUDA_ERROR_NOT_SUPPORTED.into());
++        }
++        let mut state = active()?;
++        let mut imported = 0;
++        unsafe { crate::driver::cuMemImportFromShareableHandle(&mut imported, fd, kind) }?;
++        let imported = runtime::must_complete(VirtualAllocationHandle::from_driver(imported));
++        *state.external_handles.entry(imported).or_default() += 1;
++        unsafe { out.write(imported) };
++        return Ok(());
++    };
+     let state = active()?;
+     let (_state, handle) = sharing::import_reference(state, reference)?;
+     unsafe { out.write(handle) };
+diff --git a/agent/cmd/cuinterpose/rust/core/src/memory/checkpoint.rs b/agent/cmd/cuinterpose/rust/core/src/memory/checkpoint.rs
+index f8919d4d..bb1dbf6f 100644
+--- a/agent/cmd/cuinterpose/rust/core/src/memory/checkpoint.rs
++++ b/agent/cmd/cuinterpose/rust/core/src/memory/checkpoint.rs
+@@ -123,6 +123,9 @@ impl ProcessState {
+         if self.phase != Phase::Active || self.unlocked_driver_calls != 0 {
+             return Err(CUDA_ERROR_NOT_READY.into());
+         }
++        if !self.external_handles.is_empty() || !self.external_mappings.is_empty() {
++            return Err(CUDA_ERROR_NOT_SUPPORTED.into());
++        }
+         let records = self.inspect()?;
+         self.phase = Phase::Checkpointing;
+         Ok(records)
+@@ -382,3 +385,21 @@ mod tests {
+         assert_eq!(state.new_reference(), Err(CUDA_ERROR_NOT_READY.into()));
+     }
+ }
++
++#[cfg(test)]
++mod external_import_tests {
++    use super::*;
++    #[test]
++    fn external_owners_must_be_fully_disconnected() {
++        let mut state = ProcessState::new(42);
++        state.external_handles.insert(7, 1);
++        assert!(state.begin_checkpoint().is_err());
++        assert_eq!(state.phase, Phase::Active);
++        state.external_handles.clear();
++        state.external_mappings.insert(0x1000, 4096);
++        assert!(state.begin_checkpoint().is_err());
++        assert_eq!(state.phase, Phase::Active);
++        state.external_mappings.clear();
++        assert!(state.begin_checkpoint().is_ok());
++    }
++}
+diff --git a/agent/cmd/cuinterpose/rust/core/src/memory/mod.rs b/agent/cmd/cuinterpose/rust/core/src/memory/mod.rs
+index c51fa755..4acce3f3 100644
+--- a/agent/cmd/cuinterpose/rust/core/src/memory/mod.rs
++++ b/agent/cmd/cuinterpose/rust/core/src/memory/mod.rs
+@@ -127,6 +127,9 @@ pub struct ProcessState {
+     pub memblocks: BTreeMap<AllocationId, Memblock>,
+     pub virtual_allocation_handles: BTreeMap<VirtualAllocationHandle, HandleEntry>,
+     pub mappings: BTreeMap<u64, Mapping>,
++    // External owners (e.g. GMS) must be fully disconnected before checkpoint.
++    pub external_handles: BTreeMap<u64, usize>,
++    pub external_mappings: BTreeMap<u64, usize>,
+     pub phase: Phase,
+     pub arena: Option<host_carrier::Arena>,
+     pub unlocked_driver_calls: usize,
+@@ -141,6 +144,8 @@ impl ProcessState {
+             memblocks: BTreeMap::new(),
+             virtual_allocation_handles: BTreeMap::new(),
+             mappings: BTreeMap::new(),
++            external_handles: BTreeMap::new(),
++            external_mappings: BTreeMap::new(),
+             next_virtual_allocation_handle: 1,
+             phase: Phase::Active,
+             arena: None,
+diff --git a/agent/internal/cuda/cuda.go b/agent/internal/cuda/cuda.go
+index 7c3e9602..af915adc 100644
+--- a/agent/internal/cuda/cuda.go
++++ b/agent/internal/cuda/cuda.go
+@@ -445,6 +445,37 @@ func BuildDeviceMap(sourceUUIDs, targetUUIDs []string, log logr.Logger) (string,
+ 	return strings.Join(pairs, ","), nil
+ }
+ 
++// ValidateExplicitDeviceMap accepts a complete bijection selected by the caller's
++// logical-rank plan. Unlike BuildDeviceMap it never favors matching physical UUIDs.
++func ValidateExplicitDeviceMap(value string, sourceUUIDs, targetUUIDs []string) (string, error) {
++	sources, targets := make(map[string]bool), make(map[string]bool)
++	for _, id := range sourceUUIDs {
++		sources[id] = true
++	}
++	for _, id := range targetUUIDs {
++		targets[id] = true
++	}
++	if len(sources) == 0 || len(sources) != len(sourceUUIDs) || len(targets) != len(targetUUIDs) || len(sources) != len(targets) {
++		return "", fmt.Errorf("explicit device map requires nonempty unique source and destination GPU sets of equal size")
++	}
++	mapping, used := make(map[string]string), make(map[string]bool)
++	for _, pair := range strings.Split(value, ",") {
++		src, dst, ok := strings.Cut(pair, "=")
++		if !ok || !gpuUUIDPattern.MatchString(src) || !gpuUUIDPattern.MatchString(dst) || !sources[src] || !targets[dst] || mapping[src] != "" || used[dst] {
++			return "", fmt.Errorf("invalid, duplicate, or unallocated explicit GPU pair %q", pair)
++		}
++		mapping[src], used[dst] = dst, true
++	}
++	if len(mapping) != len(sources) {
++		return "", fmt.Errorf("explicit device map must cover every captured GPU")
++	}
++	pairs := make([]string, 0, len(sourceUUIDs))
++	for _, src := range sourceUUIDs {
++		pairs = append(pairs, src+"="+mapping[src])
++	}
++	return strings.Join(pairs, ","), nil
++}
++
+ // CheckpointProcessTree locks and checkpoints CUDA state for all given PIDs,
+ // then persists the launch-job state needed to restore them.
+ // On failure, the caller is expected to fail the operation and terminate the workload.
+diff --git a/agent/internal/cuda/explicit_map_test.go b/agent/internal/cuda/explicit_map_test.go
+new file mode 100644
+index 00000000..7d02b6b2
+--- /dev/null
++++ b/agent/internal/cuda/explicit_map_test.go
+@@ -0,0 +1,33 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++package cuda
++
++import "testing"
++
++func TestExplicitDeviceMap(t *testing.T) {
++	a := "GPU-00000000-0000-0000-0000-000000000001"
++	b := "GPU-00000000-0000-0000-0000-000000000002"
++	c := "GPU-00000000-0000-0000-0000-000000000003"
++	for _, tc := range []struct {
++		name, value string
++		valid       bool
++	}{
++		{"permutation overrides identity", a + "=" + b + "," + b + "=" + a, true},
++		{"identity", a + "=" + a + "," + b + "=" + b, true},
++		{"missing rank", a + "=" + b, false},
++		{"duplicate target", a + "=" + b + "," + b + "=" + b, false},
++		{"duplicate source", a + "=" + a + "," + a + "=" + b, false},
++		{"unallocated destination", a + "=" + c + "," + b + "=" + b, false},
++		{"unknown source", c + "=" + a + "," + b + "=" + b, false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got, err := ValidateExplicitDeviceMap(tc.value, []string{a, b}, []string{b, a})
++			if (err == nil) != tc.valid {
++				t.Fatalf("result %q error %v", got, err)
++			}
++			if tc.valid && got != tc.value {
++				t.Fatalf("map changed: %q", got)
++			}
++		})
++	}
++}
+diff --git a/agent/internal/executor/restore.go b/agent/internal/executor/restore.go
+index 830f3ebd..e37a0875 100644
+--- a/agent/internal/executor/restore.go
++++ b/agent/internal/executor/restore.go
+@@ -12,6 +12,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"strconv"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/go-logr/logr"
+@@ -42,12 +43,16 @@ type RestoreMounter interface {
+ // Compatibility policy remains in the registered checks, not in this preparation.
+ func prepareGPUMapping(log logr.Logger, manifest *types.CheckpointManifest, uuids []string,
+ 	resolvePaths func() (map[string]string, error),
++	explicit ...string,
+ ) (string, map[string]string, error) {
+ 	// Let the compatibility gate report count mismatches before positional pairing.
+ 	if len(uuids) == 0 || len(uuids) != len(manifest.CUDA.SourceGPUUUIDs) {
+ 		return "", nil, nil
+ 	}
+ 	deviceMap, err := cuda.BuildDeviceMap(manifest.CUDA.SourceGPUUUIDs, uuids, log)
++	if len(explicit) > 0 && explicit[0] != "" {
++		deviceMap, err = cuda.ValidateExplicitDeviceMap(explicit[0], manifest.CUDA.SourceGPUUUIDs, uuids)
++	}
+ 	if err != nil {
+ 		return "", nil, err
+ 	}
+@@ -430,12 +435,23 @@ func inspectRestore(
+ 		}
+ 	}
+ 
++	// Experimental injection point: the orchestration plan resolves named DRA
++	// requests and supplies the same map used by the GMS loaders. Validate it
++	// against captured UUIDs and actual container allocation before any restore.
++	explicitMap := ""
++	if ociSpec != nil && ociSpec.Process != nil {
++		for _, entry := range ociSpec.Process.Env {
++			if strings.HasPrefix(entry, "SNAPSHOT_CUDA_DEVICE_MAP=") {
++				explicitMap = strings.TrimPrefix(entry, "SNAPSHOT_CUDA_DEVICE_MAP=")
++			}
++		}
++	}
+ 	deviceMapStart := time.Now()
+ 	cudaDeviceMap, gpuMountAliases, err := prepareGPUMapping(
+ 		log, manifest, targetGPUUUIDs,
+ 		func() (map[string]string, error) {
+ 			return cuda.ResolveDevicePaths(snapshotruntime.HostProcPath, placeholderPID, targetGPUUUIDs)
+-		},
++		}, explicitMap,
+ 	)
+ 	if err != nil {
+ 		return nil, 0, err
+diff --git a/api/podcontract/protocol.go b/api/podcontract/protocol.go
+index 1c45a1a1..d4e3a83c 100644
+--- a/api/podcontract/protocol.go
++++ b/api/podcontract/protocol.go
+@@ -15,7 +15,7 @@ import (
+ const (
+ 	// RestoreFromAnnotation names the PodSnapshot to restore in the Pod's
+ 	// namespace.
+-	RestoreFromAnnotation = "nvidia.com/restore-from"
++	RestoreFromAnnotation = "nvidia.com/gms-prototype-restore-from"
+ 
+ 	// RestoreContainerMapAnnotation optionally maps the single captured source
+ 	// container to one or more restore destinations. Its value is a

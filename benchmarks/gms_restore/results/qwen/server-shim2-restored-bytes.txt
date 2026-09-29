@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/client/session.py", line 159, in _call
+    response, received_fd = receive_message(self._socket)
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/protocol.py", line 216, in receive_message
+    (length,) = struct.unpack("!I", read_exact(4))
+                                    ^^^^^^^^^^^^^
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/protocol.py", line 211, in read_exact
+    raise EOFError
+EOFError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/tmp/verify.py", line 53, in <module>
+    mapping = _map_export(
+              ^^^^^^^^^^^^
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/snapshot/weight_artifact.py", line 495, in _map_export
+    session.export(record.allocation_id),
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/client/session.py", line 119, in export
+    _response, fd = self._call(
+                    ^^^^^^^^^^^
+  File "/checkpoints/gms-restore-0928/code/lib/gpu_memory_service/v1/client/session.py", line 163, in _call
+    raise ConnectionError(f"GMS {operation} failed") from cause
+ConnectionError: GMS ExportRequest failed
+command terminated with exit code 1

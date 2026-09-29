@@ -10,10 +10,10 @@ import argparse
 import ctypes
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 p = argparse.ArgumentParser()
 p.add_argument("--root", required=True)
@@ -49,16 +49,15 @@ if not shard.exists():
 )
 
 # Imports happen outside timed fresh server/loader subprocesses, only for validation.
-from gpu_memory_service.common.vmm import init_vmm, get_vmm, VMMDeviceType
-from gpu_memory_service.common.locks import RequestedLockType
+from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.client.session import _GMSClientSession
+from gpu_memory_service.v1.device import get_device_uuid
 from gpu_memory_service.v1.protocol import (
     ListAllocationsRequest,
     ListAllocationsResponse,
 )
 from gpu_memory_service.v1.snapshot.weight_artifact import _map_export, _release_mapping
-from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.v1.device import get_device_uuid
 
 for i in range(a.iterations):
     sockets = root / f"sockets-{os.getpid()}-{i}"

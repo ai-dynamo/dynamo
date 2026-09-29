@@ -1,0 +1,45 @@
+{
+    "apiVersion": "nvidia.com/v1alpha1",
+    "kind": "PodSnapshot",
+    "metadata": {
+        "creationTimestamp": "2026-09-29T00:12:14Z",
+        "finalizers": [
+            "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "name": "gms-v1-server-native-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11489493",
+        "uid": "daaf82be-148d-4d66-b62d-8a64a49f6809"
+    },
+    "spec": {
+        "source": {
+            "podRef": {
+                "containers": [
+                    "main"
+                ],
+                "name": "gms-v1-server-source-0928",
+                "uid": "091cb98e-b94b-43a3-be5a-e7395dda50fa"
+            }
+        }
+    },
+    "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-daaf82be-148d-4d66-b62d-8a64a49f6809",
+        "conditions": [
+            {
+                "lastTransitionTime": "2026-09-29T00:12:18Z",
+                "message": "Checkpoint captured and verified",
+                "reason": "Captured",
+                "status": "True",
+                "type": "Ready"
+            },
+            {
+                "lastTransitionTime": "2026-09-29T00:12:18Z",
+                "message": "Checkpoint captured and verified",
+                "reason": "Captured",
+                "status": "False",
+                "type": "Failed"
+            }
+        ]
+    }
+}

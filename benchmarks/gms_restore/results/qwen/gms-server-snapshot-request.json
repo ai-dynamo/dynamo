@@ -1,0 +1,19 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshot",
+  "metadata": {
+    "name": "gms-v1-server-0928",
+    "namespace": "schwinns-vcluster"
+  },
+  "spec": {
+    "source": {
+      "podRef": {
+        "name": "gms-v1-qwen-source-0928",
+        "uid": "6e803705-1ed8-43ee-9595-600fa3b4fc80",
+        "containers": [
+          "gms-0"
+        ]
+      }
+    }
+  }
+}

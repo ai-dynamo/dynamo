@@ -108,7 +108,7 @@ def serve_api(engine: Any, restored_text: str) -> None:
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
                 self.send_error(400, str(error))
                 return
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - return inference failures over HTTP
                 self.send_error(500, str(error))
                 return
 

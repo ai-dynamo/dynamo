@@ -1,0 +1,10 @@
+
+# Experimental fallback for the evidence image: multimem rendezvous hangs with
+# the GMS V1 + cuinterpose composition. Retain graph capture, use NCCL for logits.
+if os.environ.get("GMS_PROTOTYPE_NCCL_LOGITS") == "1":
+    from sglang.srt.distributed.device_communicators import triton_symm_mem_ag
+    _gms_original_gather_init = triton_symm_mem_ag.MultimemAllGatherer.__init__
+    def _gms_nccl_gather_init(self, *args, **kwargs):
+        kwargs["enabled"] = False
+        _gms_original_gather_init(self, *args, **kwargs)
+    triton_symm_mem_ag.MultimemAllGatherer.__init__ = _gms_nccl_gather_init

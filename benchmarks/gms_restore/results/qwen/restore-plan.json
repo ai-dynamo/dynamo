@@ -1,0 +1,52 @@
+{
+  "capture_id": "gms-v1-qwen-0928",
+  "layout": {
+    "tp": 2,
+    "pp": 1,
+    "dp": 1
+  },
+  "claim_uid": "5a4f774f-fcf4-450e-b131-60713718a910",
+  "ranks": [
+    {
+      "rank": 0,
+      "source_uuid": "GPU-fd77376f-599d-a407-48c4-e89927e80d3f",
+      "captured_ordinal": 0,
+      "socket_device": 0,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0928/qwen-capture-1/device-0",
+      "manifest_sha256": "8f15b3d22fc0d98f3e7db8bb2d6dab39c861d2d43e055b324dd7886587094e86",
+      "allocations": [
+        {
+          "allocation_id": "allocation-654efb17-1475-463d-b6e7-a9f475779985",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        }
+      ],
+      "request": "tp-0",
+      "destination_uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "local_device": 0
+    },
+    {
+      "rank": 1,
+      "source_uuid": "GPU-f9f66bb6-1527-586f-d438-aca8e5fecba0",
+      "captured_ordinal": 1,
+      "socket_device": 1,
+      "socket_dir": "/gms",
+      "artifact": "/checkpoints/gms-restore-0928/qwen-capture-1/device-1",
+      "manifest_sha256": "e721e5970f1aea986d1057b368633ddcb4e3c67fdf8fa12d7a980ce02591cbe2",
+      "allocations": [
+        {
+          "allocation_id": "allocation-e13e890e-73d0-4907-9fa2-a7b089486123",
+          "aligned_size": 2147483648,
+          "shard": "shards/shard_0000.bin",
+          "offset": 0
+        }
+      ],
+      "request": "tp-1",
+      "destination_uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "local_device": 0
+    }
+  ],
+  "cuda_device_map": "GPU-fd77376f-599d-a407-48c4-e89927e80d3f=GPU-0d5ad102-eb8f-922a-173e-e91033320e0f,GPU-f9f66bb6-1527-586f-d438-aca8e5fecba0=GPU-02ff0cc1-647f-dee7-8365-921738e945a6"
+}

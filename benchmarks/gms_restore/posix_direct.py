@@ -6,8 +6,8 @@ Benchmark-only backend injection. Every lane owns two buffers and one device
 context; completion and cleanup finish before the V1 loader publishes its lease.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 import os
+from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
 from gpu_memory_service.common.vmm import get_vmm
@@ -97,9 +97,10 @@ def install():
 
 if __name__ == "__main__":
     import argparse
-    from gpu_memory_service.common.vmm import init_vmm, VMMDeviceType
-    from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
+
+    from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm
     from gpu_memory_service.v1.device import get_socket_path
+    from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint-dir", required=True)

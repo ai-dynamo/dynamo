@@ -1,0 +1,98 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshot",
+  "metadata": {
+    "creationTimestamp": "2026-09-29T00:23:14Z",
+    "finalizers": [
+      "nvidia.com/podsnapshotcontent-cleanup"
+    ],
+    "generation": 1,
+    "managedFields": [
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            ".": {},
+            "f:source": {
+              ".": {},
+              "f:podRef": {
+                ".": {},
+                "f:containers": {},
+                "f:name": {},
+                "f:uid": {}
+              }
+            }
+          }
+        },
+        "manager": "OpenAPI-Generator",
+        "operation": "Update",
+        "time": "2026-09-29T00:23:14Z"
+      },
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:finalizers": {
+              ".": {},
+              "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+            }
+          }
+        },
+        "manager": "manager",
+        "operation": "Update",
+        "time": "2026-09-29T00:23:14Z"
+      },
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            ".": {},
+            "f:boundSnapshotContentName": {},
+            "f:conditions": {}
+          }
+        },
+        "manager": "manager",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T00:23:16Z"
+      }
+    ],
+    "name": "gms-v1-server-shim-0928",
+    "namespace": "schwinns-vcluster",
+    "resourceVersion": "11490879",
+    "uid": "4dd007a5-eb6a-4965-840e-630a69305b8e"
+  },
+  "spec": {
+    "source": {
+      "podRef": {
+        "containers": [
+          "main"
+        ],
+        "name": "gms-v1-server-shim-source-0928",
+        "uid": "dc96cd00-a05e-41c6-9e1f-eb213c398085"
+      }
+    }
+  },
+  "status": {
+    "boundSnapshotContentName": "podsnapshotcontent-4dd007a5-eb6a-4965-840e-630a69305b8e",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T00:23:16Z",
+        "message": "Checkpoint captured and verified",
+        "reason": "Captured",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T00:23:16Z",
+        "message": "Checkpoint captured and verified",
+        "reason": "Captured",
+        "status": "False",
+        "type": "Failed"
+      }
+    ]
+  }
+}

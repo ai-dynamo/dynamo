@@ -5,10 +5,10 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 p = argparse.ArgumentParser()
 p.add_argument("--rank", type=int, required=True)
@@ -28,7 +28,7 @@ server = subprocess.Popen(
     ]
 )
 try:
-    from gpu_memory_service.common.vmm import init_vmm, VMMDeviceType
+    from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm
     from gpu_memory_service.v1.device import get_device_uuid, get_socket_path
 
     init_vmm(VMMDeviceType.CUDA)
