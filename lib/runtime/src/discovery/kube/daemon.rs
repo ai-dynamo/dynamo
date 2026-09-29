@@ -229,14 +229,14 @@ impl DiscoveryDaemon {
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
-        let (readiness_tx, mut readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
         let (source, readiness_handle) =
             DiscoverySource::new(&self.pod_info, self.kube_client.clone(), readiness_tx);
 
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
         let (cr_reader, cr_writer) = reflector::store();
-        let (cr_tx, mut cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
 
         tracing::info!(
             "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
@@ -263,85 +263,175 @@ impl DiscoveryDaemon {
             }
         });
 
-        let mut join_table = JoinTable::new();
-        let mut readiness_index = ReadinessIndex::default();
-        let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
-
-        // The loop itself yields the daemon's outcome via `break` instead of
-        // returning directly, so every exit path -- cancellation or either
-        // reflector channel closing -- reaches the cleanup below before this
-        // function returns. See issue #13874: without this, an early `bail!`
-        // from inside the loop would skip stopping the two reflector tasks.
-        let outcome: Result<()> = loop {
-            let mut changes = BatchChanges::default();
-
-            tokio::select! {
-                _ = self.cancel_token.cancelled() => {
-                    tracing::info!("Discovery daemon received cancellation");
-                    break Ok(());
-                }
-                event = readiness_rx.recv() => {
-                    let Some(event) = event else {
-                        break Err(anyhow::anyhow!("Readiness reflector stream stopped"));
-                    };
-                    apply_readiness_event(
-                        event,
-                        &source,
-                        &mut readiness_index,
-                        &mut join_table,
-                        &mut changes,
-                    );
-                }
-                event = cr_rx.recv() => {
-                    let Some(event) = event else {
-                        break Err(anyhow::anyhow!("DynamoWorkerMetadata reflector stream stopped"));
-                    };
-                    apply_cr_event(
-                        event,
-                        &cr_reader,
-                        &mut valid_cr_cache,
-                        &mut join_table,
-                        &mut changes,
-                    );
-                }
-            }
-
-            let publication = changes.finish(&join_table);
-            if !publication.state_changes.is_empty() || !publication.events.is_empty() {
-                let mut state = list_state.write().await;
-                for change in publication.state_changes {
-                    match change {
-                        StateChange::Upsert(instance_id, metadata) => {
-                            state.insert(instance_id, metadata);
-                        }
-                        StateChange::Remove(instance_id) => {
-                            state.remove(&instance_id);
-                        }
-                    }
-                }
-                for event in publication.events {
-                    event_tx.send(event).ok();
-                }
-            }
-        };
-
-        stop_reflector_tasks(readiness_handle, cr_handle).await;
+        let outcome = run_discovery_loop(
+            self.cancel_token.clone(),
+            readiness_rx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+            ReflectorTasks::new(readiness_handle, cr_handle),
+        )
+        .await;
 
         tracing::info!("Discovery daemon stopped");
         outcome
     }
 }
 
-/// Aborts both reflector tasks and waits for them to actually finish. `abort`
-/// only requests cancellation -- it takes effect the next time the target task
-/// reaches an `.await` point -- so this does not return until both tasks have,
-/// releasing whatever Kubernetes watch stream and reflector writer each one
-/// held (issue #13874).
-async fn stop_reflector_tasks(readiness_handle: JoinHandle<()>, cr_handle: JoinHandle<()>) {
-    readiness_handle.abort();
-    cr_handle.abort();
-    let _ = readiness_handle.await;
-    let _ = cr_handle.await;
+/// Owns both reflector task handles for the lifetime of one `run()` call.
+///
+/// `run()`'s two explicit exit points call [`ReflectorTasks::stop`], which
+/// aborts and awaits both handles so a returning `run()` means the underlying
+/// Kubernetes watches have actually stopped (issue #13874). But a plain local
+/// `JoinHandle` only detaches its task when dropped -- it does not abort it --
+/// so if `run()`'s own future were ever dropped or panicked after spawning the
+/// reflectors but before reaching `stop`, the handles would be dropped without
+/// either task being told to stop, recreating the leak outside those two exit
+/// points. Wrapping both handles in this guard closes that gap: its `Drop`
+/// aborts whatever handles `stop` did not already take, so even an abnormal
+/// drop of `run()`'s future schedules cancellation instead of leaking silently.
+struct ReflectorTasks {
+    readiness_handle: Option<JoinHandle<()>>,
+    cr_handle: Option<JoinHandle<()>>,
+}
+
+impl ReflectorTasks {
+    fn new(readiness_handle: JoinHandle<()>, cr_handle: JoinHandle<()>) -> Self {
+        Self {
+            readiness_handle: Some(readiness_handle),
+            cr_handle: Some(cr_handle),
+        }
+    }
+
+    /// Aborts both reflector tasks and waits for them to actually finish.
+    /// `abort` only requests cancellation -- it takes effect the next time the
+    /// target task reaches an `.await` point -- so this does not return until
+    /// both tasks have, releasing whatever Kubernetes watch stream and
+    /// reflector writer each one held (issue #13874).
+    async fn stop(mut self) {
+        if let Some(handle) = self.readiness_handle.take() {
+            handle.abort();
+            join_ignoring_cancellation(handle, "readiness").await;
+        }
+        if let Some(handle) = self.cr_handle.take() {
+            handle.abort();
+            join_ignoring_cancellation(handle, "DynamoWorkerMetadata").await;
+        }
+    }
+}
+
+impl Drop for ReflectorTasks {
+    fn drop(&mut self) {
+        // Reached only when `stop` never ran to completion. A synchronous
+        // `Drop` cannot await task completion, but aborting still schedules
+        // cancellation so the task stops holding its Kubernetes watch instead
+        // of running detached for the life of the runtime.
+        if let Some(handle) = self.readiness_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.cr_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Awaits an aborted reflector handle, distinguishing the expected
+/// cancellation error from a genuine panic. A reflector task can already have
+/// panicked before `abort` is called; silently discarding every `JoinError`
+/// would let that race hide the panic behind an apparently clean shutdown.
+async fn join_ignoring_cancellation(handle: JoinHandle<()>, reflector_name: &str) {
+    match handle.await {
+        Ok(()) => {}
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => {
+            tracing::error!("{reflector_name} reflector task panicked: {error}");
+        }
+    }
+}
+
+/// Runs the discovery event loop until cancellation or either reflector
+/// channel closes, then stops both reflector tasks before returning.
+///
+/// Split out of `DiscoveryDaemon::run` so tests can drive it directly with
+/// synthetic reflector tasks and channels instead of a real Kubernetes client
+/// (issue #13874).
+#[allow(clippy::too_many_arguments)]
+async fn run_discovery_loop(
+    cancel_token: CancellationToken,
+    mut readiness_rx: mpsc::Receiver<ReadinessEvent>,
+    mut cr_rx: mpsc::Receiver<CrEvent>,
+    source: DiscoverySource,
+    cr_reader: reflector::Store<DynamoWorkerMetadata>,
+    list_state: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
+    event_tx: broadcast::Sender<DiscoveryEvent>,
+    reflector_tasks: ReflectorTasks,
+) -> Result<()> {
+    let mut join_table = JoinTable::new();
+    let mut readiness_index = ReadinessIndex::default();
+    let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
+
+    // The loop itself yields the daemon's outcome via `break` instead of
+    // returning directly, so every exit path -- cancellation or either
+    // reflector channel closing -- reaches the cleanup below before this
+    // function returns. See issue #13874: without this, an early `bail!`
+    // from inside the loop would skip stopping the two reflector tasks.
+    let outcome: Result<()> = loop {
+        let mut changes = BatchChanges::default();
+
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!("Discovery daemon received cancellation");
+                break Ok(());
+            }
+            event = readiness_rx.recv() => {
+                let Some(event) = event else {
+                    break Err(anyhow::anyhow!("Readiness reflector stream stopped"));
+                };
+                apply_readiness_event(
+                    event,
+                    &source,
+                    &mut readiness_index,
+                    &mut join_table,
+                    &mut changes,
+                );
+            }
+            event = cr_rx.recv() => {
+                let Some(event) = event else {
+                    break Err(anyhow::anyhow!("DynamoWorkerMetadata reflector stream stopped"));
+                };
+                apply_cr_event(
+                    event,
+                    &cr_reader,
+                    &mut valid_cr_cache,
+                    &mut join_table,
+                    &mut changes,
+                );
+            }
+        }
+
+        let publication = changes.finish(&join_table);
+        if !publication.state_changes.is_empty() || !publication.events.is_empty() {
+            let mut state = list_state.write().await;
+            for change in publication.state_changes {
+                match change {
+                    StateChange::Upsert(instance_id, metadata) => {
+                        state.insert(instance_id, metadata);
+                    }
+                    StateChange::Remove(instance_id) => {
+                        state.remove(&instance_id);
+                    }
+                }
+            }
+            for event in publication.events {
+                event_tx.send(event).ok();
+            }
+        }
+    };
+
+    reflector_tasks.stop().await;
+    outcome
 }
 
 fn apply_readiness_event(
@@ -906,7 +996,7 @@ mod tests {
     }
 
     /// Sets its flag on drop, including when the future holding it is aborted
-    /// rather than run to completion -- unlike checking that `stop_reflector_tasks`
+    /// rather than run to completion -- unlike checking that a stop function
     /// merely returns, this distinguishes an implementation that awaits both
     /// handles from one that only calls `abort` (which schedules cancellation
     /// but does not itself wait for the task's drop glue to run).
@@ -918,44 +1008,83 @@ mod tests {
         }
     }
 
+    /// Spawns a task that runs forever until aborted, setting `done` (via
+    /// `SetOnDrop`) only once its future is actually dropped. Stands in for a
+    /// reflector loop without needing a real Kubernetes client.
+    ///
+    /// Only returns once the task is confirmed running: a task aborted before
+    /// its first poll never runs any of its body -- including constructing the
+    /// `SetOnDrop` guard -- so it would never set `done` either. Waiting for
+    /// this signal means callers only ever abort a real in-flight task,
+    /// matching what happens to the reflector loops this stands in for.
+    async fn spawn_never_ending(done: Arc<AtomicBool>) -> JoinHandle<()> {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _guard = SetOnDrop(done);
+            let _ = started_tx.send(());
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        });
+        started_rx
+            .await
+            .expect("spawned task must start before its handle is used");
+        handle
+    }
+
+    /// Builds the non-Kubernetes-backed pieces `run_discovery_loop` needs: an
+    /// empty `DiscoverySource`/CR store pair, fresh channels, list state, and
+    /// an event bus. Tests drive the loop's exit paths by cancelling
+    /// `cancel_token` or dropping the returned senders, then assert on the
+    /// synthetic reflector tasks' `AtomicBool` flags to prove both were
+    /// actually stopped, not just asked to stop.
+    #[allow(clippy::type_complexity)]
+    fn discovery_loop_test_fixture() -> (
+        CancellationToken,
+        mpsc::Sender<ReadinessEvent>,
+        mpsc::Receiver<ReadinessEvent>,
+        mpsc::Sender<CrEvent>,
+        mpsc::Receiver<CrEvent>,
+        DiscoverySource,
+        reflector::Store<DynamoWorkerMetadata>,
+        Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
+        broadcast::Sender<DiscoveryEvent>,
+    ) {
+        let cancel_token = CancellationToken::new();
+        let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (cr_tx, cr_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
+        let (source_reader, _source_writer) = reflector::store::<EndpointSlice>();
+        let source = DiscoverySource::EndpointSlice(source_reader);
+        let (cr_reader, _cr_writer) = reflector::store::<DynamoWorkerMetadata>();
+        let list_state = Arc::new(RwLock::new(HashMap::new()));
+        let (event_tx, _event_rx) = broadcast::channel(16);
+        (
+            cancel_token,
+            readiness_tx,
+            readiness_rx,
+            cr_tx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+        )
+    }
+
     /// Regression test for issue #13874.
     #[tokio::test]
-    async fn stop_reflector_tasks_awaits_both_aborted_handles() {
+    async fn reflector_tasks_stop_awaits_both_aborted_handles() {
         let readiness_done = Arc::new(AtomicBool::new(false));
         let cr_done = Arc::new(AtomicBool::new(false));
-
-        let never_ending = |done: Arc<AtomicBool>, started: tokio::sync::oneshot::Sender<()>| {
-            tokio::spawn(async move {
-                let _guard = SetOnDrop(done);
-                // A task aborted before its first poll never runs any of its
-                // body -- including constructing `_guard` above -- so it would
-                // never set `done` either. Signal once actually running (i.e.
-                // once `_guard` unquestionably exists) so the test only aborts
-                // real, in-flight tasks, matching what happens to the reflector
-                // loops this stands in for.
-                let _ = started.send(());
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-                }
-            })
-        };
-        let (readiness_started_tx, readiness_started_rx) = tokio::sync::oneshot::channel();
-        let (cr_started_tx, cr_started_rx) = tokio::sync::oneshot::channel();
-        let readiness_handle = never_ending(readiness_done.clone(), readiness_started_tx);
-        let cr_handle = never_ending(cr_done.clone(), cr_started_tx);
-        readiness_started_rx
-            .await
-            .expect("readiness task must start before this test aborts it");
-        cr_started_rx
-            .await
-            .expect("CR task must start before this test aborts it");
+        let readiness_handle = spawn_never_ending(readiness_done.clone()).await;
+        let cr_handle = spawn_never_ending(cr_done.clone()).await;
 
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            stop_reflector_tasks(readiness_handle, cr_handle),
+            ReflectorTasks::new(readiness_handle, cr_handle).stop(),
         )
         .await
-        .expect("stop_reflector_tasks must return once both tasks are aborted, not hang");
+        .expect("stop must return once both tasks are aborted, not hang");
 
         assert!(
             readiness_done.load(Ordering::SeqCst),
@@ -964,6 +1093,220 @@ mod tests {
         assert!(
             cr_done.load(Ordering::SeqCst),
             "CR task must have actually finished, not just been asked to abort"
+        );
+    }
+
+    /// Companion regression test for issue #13874: proves `run_discovery_loop`
+    /// itself -- not just the extracted `ReflectorTasks::stop` helper -- stops
+    /// both reflector tasks on its cancellation exit path. Mutation-tested by
+    /// removing the `reflector_tasks.stop().await` call from
+    /// `run_discovery_loop`: without it, this test fails because the flags are
+    /// still false by the time the loop returns.
+    #[tokio::test]
+    async fn run_discovery_loop_stops_both_reflectors_on_cancellation() {
+        let readiness_done = Arc::new(AtomicBool::new(false));
+        let cr_done = Arc::new(AtomicBool::new(false));
+        let readiness_handle = spawn_never_ending(readiness_done.clone()).await;
+        let cr_handle = spawn_never_ending(cr_done.clone()).await;
+
+        let (
+            cancel_token,
+            _readiness_tx,
+            readiness_rx,
+            _cr_tx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+        ) = discovery_loop_test_fixture();
+        cancel_token.cancel();
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_discovery_loop(
+                cancel_token,
+                readiness_rx,
+                cr_rx,
+                source,
+                cr_reader,
+                list_state,
+                event_tx,
+                ReflectorTasks::new(readiness_handle, cr_handle),
+            ),
+        )
+        .await
+        .expect("run_discovery_loop must return once cancelled, not hang");
+
+        assert!(outcome.is_ok(), "cancellation must be a clean exit");
+        assert!(
+            readiness_done.load(Ordering::SeqCst),
+            "readiness reflector must actually be stopped, not just asked to stop"
+        );
+        assert!(
+            cr_done.load(Ordering::SeqCst),
+            "CR reflector must actually be stopped, not just asked to stop"
+        );
+    }
+
+    /// Companion regression test for issue #13874: the readiness reflector
+    /// channel closing (its sender dropped, mirroring the reflector task
+    /// exiting) must also stop both reflectors before `run_discovery_loop`
+    /// returns.
+    #[tokio::test]
+    async fn run_discovery_loop_stops_both_reflectors_when_readiness_channel_closes() {
+        let readiness_done = Arc::new(AtomicBool::new(false));
+        let cr_done = Arc::new(AtomicBool::new(false));
+        let readiness_handle = spawn_never_ending(readiness_done.clone()).await;
+        let cr_handle = spawn_never_ending(cr_done.clone()).await;
+
+        let (
+            cancel_token,
+            readiness_tx,
+            readiness_rx,
+            _cr_tx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+        ) = discovery_loop_test_fixture();
+        drop(readiness_tx);
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_discovery_loop(
+                cancel_token,
+                readiness_rx,
+                cr_rx,
+                source,
+                cr_reader,
+                list_state,
+                event_tx,
+                ReflectorTasks::new(readiness_handle, cr_handle),
+            ),
+        )
+        .await
+        .expect("run_discovery_loop must return once the readiness channel closes, not hang");
+
+        assert!(
+            outcome.is_err(),
+            "a closed readiness channel must be reported as a failure"
+        );
+        assert!(
+            readiness_done.load(Ordering::SeqCst),
+            "readiness reflector must actually be stopped, not just asked to stop"
+        );
+        assert!(
+            cr_done.load(Ordering::SeqCst),
+            "CR reflector must actually be stopped, not just asked to stop"
+        );
+    }
+
+    /// Companion regression test for issue #13874: the CR reflector channel
+    /// closing must also stop both reflectors before `run_discovery_loop`
+    /// returns.
+    #[tokio::test]
+    async fn run_discovery_loop_stops_both_reflectors_when_cr_channel_closes() {
+        let readiness_done = Arc::new(AtomicBool::new(false));
+        let cr_done = Arc::new(AtomicBool::new(false));
+        let readiness_handle = spawn_never_ending(readiness_done.clone()).await;
+        let cr_handle = spawn_never_ending(cr_done.clone()).await;
+
+        let (
+            cancel_token,
+            _readiness_tx,
+            readiness_rx,
+            cr_tx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+        ) = discovery_loop_test_fixture();
+        drop(cr_tx);
+
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_discovery_loop(
+                cancel_token,
+                readiness_rx,
+                cr_rx,
+                source,
+                cr_reader,
+                list_state,
+                event_tx,
+                ReflectorTasks::new(readiness_handle, cr_handle),
+            ),
+        )
+        .await
+        .expect("run_discovery_loop must return once the CR channel closes, not hang");
+
+        assert!(
+            outcome.is_err(),
+            "a closed CR channel must be reported as a failure"
+        );
+        assert!(
+            readiness_done.load(Ordering::SeqCst),
+            "readiness reflector must actually be stopped, not just asked to stop"
+        );
+        assert!(
+            cr_done.load(Ordering::SeqCst),
+            "CR reflector must actually be stopped, not just asked to stop"
+        );
+    }
+
+    /// Negative control for the three tests above: with no exit condition
+    /// triggered (token not cancelled, both channels open), the loop must
+    /// keep running -- and, since nothing asked either reflector to stop, both
+    /// must still be running too. Without this control, the other three tests
+    /// could pass vacuously if `run_discovery_loop` returned immediately
+    /// regardless of input.
+    #[tokio::test]
+    async fn run_discovery_loop_keeps_running_without_an_exit_condition() {
+        let readiness_done = Arc::new(AtomicBool::new(false));
+        let cr_done = Arc::new(AtomicBool::new(false));
+        let readiness_handle = spawn_never_ending(readiness_done.clone()).await;
+        let cr_handle = spawn_never_ending(cr_done.clone()).await;
+
+        let (
+            cancel_token,
+            _readiness_tx,
+            readiness_rx,
+            _cr_tx,
+            cr_rx,
+            source,
+            cr_reader,
+            list_state,
+            event_tx,
+        ) = discovery_loop_test_fixture();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            run_discovery_loop(
+                cancel_token,
+                readiness_rx,
+                cr_rx,
+                source,
+                cr_reader,
+                list_state,
+                event_tx,
+                ReflectorTasks::new(readiness_handle, cr_handle),
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "run_discovery_loop must not exit while no exit condition has fired"
+        );
+        assert!(
+            !readiness_done.load(Ordering::SeqCst),
+            "readiness reflector must still be running, not already stopped"
+        );
+        assert!(
+            !cr_done.load(Ordering::SeqCst),
+            "CR reflector must still be running, not already stopped"
         );
     }
 }
