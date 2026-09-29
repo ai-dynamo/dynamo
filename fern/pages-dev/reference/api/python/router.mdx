@@ -16,7 +16,7 @@ CLI argument group for standalone router options.
 from dynamo.router.args import DynamoRouterArgGroup
 ```
 
-[`components/src/dynamo/router/args.py#L88`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L88)
+[`components/src/dynamo/router/args.py#L80`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L80)
 
 **Public methods**
 
@@ -28,7 +28,7 @@ add_arguments(parser) -> None
 
 Add router-owned arguments to parser.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L93)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L85)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-dynamorouterconfig" title="DynamoRouterConfig (class)">
@@ -60,7 +60,7 @@ Router search-space preparation and replay-spec materialization.
 from dynamo.router.simulation import DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L132)
+[`components/src/dynamo/router/simulation/provider.py#L187`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L187)
 
 **Public methods**
 
@@ -72,7 +72,7 @@ compile_prediction(config: Mapping[str, JSONValue], context: PredictionAdapterCo
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L141)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L196)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-compile-recommendation">compile_recommendation</h4>
 
@@ -82,7 +82,7 @@ compile_recommendation(config: Mapping[str, JSONValue], context: RecommendationA
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L181)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L236)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-materialize-candidate">materialize_candidate</h4>
 
@@ -92,7 +92,7 @@ materialize_candidate(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L300)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L368)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-generate-search-space">generate_search_space</h4>
 
@@ -102,7 +102,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L308)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L376)
 
 <h4 id="api-dynamo-router-simulation-provider-dynamoroutersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -112,21 +112,21 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L339)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L408)
 </Accordion>
 
-<Accordion id="api-dynamo-router-args-build-aic-perf-config" title="build_aic_perf_config (function)">
+<Accordion id="api-dynamo-router-args-build-ais-perf-config" title="build_ais_perf_config (function)">
 No summary available.
 
 ```python
-from dynamo.router.args import build_aic_perf_config
+from dynamo.router.args import build_ais_perf_config
 ```
 
 ```python
-build_aic_perf_config(router_config: DynamoRouterConfig) -> AicPerfConfig | None
+build_ais_perf_config(router_config: DynamoRouterConfig) -> AisPerfConfig | None
 ```
 
-[`components/src/dynamo/router/args.py#L135`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L135)
+[`components/src/dynamo/router/args.py#L127`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L127)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-build-kv-router-config" title="build_kv_router_config (function)">
@@ -140,7 +140,7 @@ from dynamo.router.args import build_kv_router_config
 build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig
 ```
 
-[`components/src/dynamo/router/args.py#L130`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L130)
+[`components/src/dynamo/router/args.py#L122`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L122)
 </Accordion>
 
 <Accordion id="api-dynamo-router-simulation-provider-create-provider" title="create_provider (function)">
@@ -154,7 +154,7 @@ from dynamo.router.simulation import create_provider
 create_provider() -> DynamoRouterSweepConfigProvider
 ```
 
-[`components/src/dynamo/router/simulation/provider.py#L417`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L417)
+[`components/src/dynamo/router/simulation/provider.py#L487`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/simulation/provider.py#L487)
 </Accordion>
 
 <Accordion id="api-dynamo-router-args-parse-args" title="parse_args (function)">
@@ -172,5 +172,5 @@ parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig
 
 - `DynamoRouterConfig` — Parsed and validated configuration.
 
-[`components/src/dynamo/router/args.py#L143`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L143)
+[`components/src/dynamo/router/args.py#L135`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/router/args.py#L135)
 </Accordion>
