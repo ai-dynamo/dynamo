@@ -15,6 +15,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 from _fake_vmm import FakeVMM
 from blake3 import blake3
 from gpu_memory_service.snapshot.backends.nixl import NixlTransferBackend
@@ -302,3 +303,20 @@ def test_staging_backend_restores_an_unchanged_shard(monkeypatch, tmp_path):
 def test_staging_backend_rejects_same_length_mutation(monkeypatch, tmp_path):
     with pytest.raises(RuntimeError, match="BLAKE3 mismatch"):
         _restore_with_staging_backend(monkeypatch, tmp_path, b"abcdefgh", b"xbcdefgh")
+
+
+def test_pinned_copy_slot_skips_unsupported_host_register():
+    class HostRegisterUnsupportedVMM(FakeVMM):
+        def host_register(self, ptr, size):
+            raise RuntimeError(
+                "_sycl_vmm: register_host_memory not available (oneAPI too old)"
+            )
+
+        def host_unregister(self, ptr):
+            raise AssertionError("host_unregister should be skipped when registration is unsupported")
+
+    slot = PinnedCopySlot(HostRegisterUnsupportedVMM())
+
+    assert slot._registered is False
+
+    slot.close()
