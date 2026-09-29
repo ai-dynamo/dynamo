@@ -533,11 +533,21 @@ pub struct PreprocessedRequest {
 static TOKEN_IDS_AS_BYTES: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| dynamo_runtime::config::env_is_truthy("DYN_TOKEN_IDS_AS_BYTES"));
 
+/// Readers decode the packed form as signed int32 (the engines' token type), so
+/// ids above `i32::MAX` keep the sequence form.
+fn token_ids_fit_i32(ids: &[TokenIdType]) -> bool {
+    ids.iter().all(|&id| id <= i32::MAX as TokenIdType)
+}
+
+/// Upper bound on the capacity reserved from a sequence size hint; a MessagePack
+/// array header can claim any length before supplying the elements.
+const TOKEN_IDS_PREALLOC_CAP: usize = 1 << 20;
+
 fn serialize_token_ids<S>(ids: &Arc<Vec<TokenIdType>>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    if *TOKEN_IDS_AS_BYTES && !serializer.is_human_readable() {
+    if *TOKEN_IDS_AS_BYTES && !serializer.is_human_readable() && token_ids_fit_i32(ids) {
         let mut buf = Vec::with_capacity(ids.len() * 4);
         for id in ids.iter() {
             buf.extend_from_slice(&id.to_le_bytes());
@@ -564,7 +574,8 @@ where
         where
             A: serde::de::SeqAccess<'de>,
         {
-            let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+            let mut out =
+                Vec::with_capacity(seq.size_hint().unwrap_or(0).min(TOKEN_IDS_PREALLOC_CAP));
             while let Some(id) = seq.next_element::<TokenIdType>()? {
                 out.push(id);
             }
@@ -704,6 +715,70 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct TokenIdsOnly {
+        #[serde(deserialize_with = "deserialize_token_ids")]
+        token_ids: Arc<Vec<TokenIdType>>,
+    }
+
+    struct Bytes<'a>(&'a [u8]);
+
+    impl serde::Serialize for Bytes<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_bytes(self.0)
+        }
+    }
+
+    struct PackedTokenIds<'a>(&'a [u8]);
+
+    impl serde::Serialize for PackedTokenIds<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeStruct;
+            let mut st = serializer.serialize_struct("TokenIdsOnly", 1)?;
+            st.serialize_field("token_ids", &Bytes(self.0))?;
+            st.end()
+        }
+    }
+
+    fn le_bytes(ids: &[TokenIdType]) -> Vec<u8> {
+        ids.iter().flat_map(|id| id.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn packed_token_ids_deserialize_from_msgpack_bytes() {
+        let ids = vec![0u32, 1, 128_000, i32::MAX as u32];
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&le_bytes(&ids))).unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn packed_token_ids_reject_odd_byte_length() {
+        let payload = rmp_serde::to_vec_named(&PackedTokenIds(&[1, 0, 0])).unwrap();
+        assert!(rmp_serde::from_slice::<TokenIdsOnly>(&payload).is_err());
+    }
+
+    #[test]
+    fn sequence_token_ids_still_deserialize() {
+        #[derive(serde::Serialize)]
+        struct Seq {
+            token_ids: Vec<TokenIdType>,
+        }
+        let ids = vec![7u32, 8, 9];
+        let payload = rmp_serde::to_vec_named(&Seq {
+            token_ids: ids.clone(),
+        })
+        .unwrap();
+        let decoded: TokenIdsOnly = rmp_serde::from_slice(&payload).unwrap();
+        assert_eq!(*decoded.token_ids, ids);
+    }
+
+    #[test]
+    fn ids_above_i32_max_keep_the_sequence_form() {
+        assert!(token_ids_fit_i32(&[0, i32::MAX as u32]));
+        assert!(!token_ids_fit_i32(&[i32::MAX as u32 + 1]));
+    }
 
     fn request_with_tokens(token_ids: Vec<TokenIdType>) -> PreprocessedRequest {
         PreprocessedRequest::builder()
