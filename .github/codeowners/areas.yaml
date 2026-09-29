@@ -342,6 +342,8 @@ areas:
   - container/render.py
   - container/run.sh
   - container/validate-global-router-poc.sh
+  - container/Dockerfile.kv-dc-relay-poc
+  - container/validate-kv-dc-relay-poc.sh
   - container/templates/
   - container/use-sccache.sh
   - deny.toml

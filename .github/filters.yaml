@@ -137,6 +137,8 @@ ignore:
   # a local full build and runtime smoke check in its draft PR.
   - 'container/Dockerfile.global-router-poc'
   - 'container/validate-global-router-poc.sh'
+  - 'container/Dockerfile.kv-dc-relay-poc'
+  - 'container/validate-kv-dc-relay-poc.sh'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
   - 'container/dev/**'

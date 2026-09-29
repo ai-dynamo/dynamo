@@ -601,3 +601,22 @@ Relay stats proxy gRPC URL. A regional public API endpoint points at this router
 the router forwards directly to the chosen pool's private Frontend, including
 when that pool is in another region. The image includes no AWS credentials or
 pool configuration.
+
+## KV DC Relay POC image
+
+Build the CPU-only Rust Relay from this source revision and validate both gRPC
+listeners before deploying it:
+
+```bash
+docker build -f container/Dockerfile.kv-dc-relay-poc -t kv-dc-relay-poc:local .
+container/validate-kv-dc-relay-poc.sh kv-dc-relay-poc:local
+```
+
+Run the image with a mounted JSON file containing `dc_id`, `runtime_namespace`,
+`wan_listen`, and `stats_listen`. Optional `watch_namespaces` limits discovery to
+specific Dynamo namespaces; omission watches all. The smoke script uses local
+in-memory discovery and publishes both container ports only on host loopback.
+Non-loopback stats binding requires the explicit `stats_allow_non_loopback`
+setting; the deployment must keep that gRPC service private.
+The deployment configuration must provide the Dynamo discovery backend and
+private listener addresses reachable by regional Global Router replicas.

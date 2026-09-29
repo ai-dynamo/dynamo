@@ -125,6 +125,8 @@ pub struct KvDcRelayProducerConfig {
     pub publication_delay_ms: u64,
     pub recovery_attempt_timeout_ms: u64,
     pub grpc_listen_address: Option<SocketAddr>,
+    /// Enable only when the stats listener is protected by a private network boundary.
+    pub stats_allow_non_loopback: bool,
 }
 
 impl Default for KvDcRelayProducerConfig {
@@ -135,6 +137,7 @@ impl Default for KvDcRelayProducerConfig {
             publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
             recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
             grpc_listen_address: None,
+            stats_allow_non_loopback: false,
         }
     }
 }
@@ -763,6 +766,7 @@ impl KvDcRelay {
                 pools.clone(),
                 publication_source.clone(),
                 listen_address,
+                config.producer.stats_allow_non_loopback,
                 cancel.clone(),
                 terminal.clone(),
             )
