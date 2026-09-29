@@ -118,10 +118,21 @@ function counts(jobs) {
   return `${jobs.length} total: ${Object.entries(result).filter(([key, count]) => count || ['passed', 'failed', 'skipped', 'cancelled'].includes(key)).map(([key, count]) => `${count} ${key}`).join(', ')}`;
 }
 
+function statusLabel(value) {
+  const labels = new Map([
+    ['success', '✅ Pass'], ['failure', '❌ Failed'], ['timed_out', '⏱ Timed out'],
+    ['in_progress', '🔄 Running'], ['queued', '⏳ Queued'], ['waiting', '⏳ Waiting'],
+    ['pending', '⏳ Pending'], ['requested', '⏳ Pending'], ['cancelled', '🚫 Cancelled'],
+    ['skipped', '— Skipped'], ['action_required', '⚠️ Action required'],
+    ['startup_failure', '⚠️ Startup failure'], ['neutral', '➖ Neutral'],
+  ]);
+  return labels.get(value) || `❔ Unknown${value ? ` (${text(value)})` : ''}`;
+}
+
 function missingStatus(name) {
-  if (name === 'PR') return 'No run for this head; full CI requires approval';
-  if (name === 'PR-XPU') return 'Optional / not run';
-  return 'Not run';
+  if (name === 'PR') return '— No run for this head; full CI requires approval';
+  if (name === 'PR-XPU') return '— Optional / not run';
+  return '— Not run';
 }
 
 function failureDetails(failure, run) {
@@ -131,13 +142,13 @@ function failureDetails(failure, run) {
   const stepLines = steps.slice(0, 8).map(step => {
     const number = Number(step.number);
     const url = jobUrl && Number.isSafeInteger(number) && number > 0 ? `${jobUrl}#step:${number}:1` : jobUrl;
-    return `- ${link(step.name || 'Unnamed step', url)} (${text(step.conclusion)})`;
+    return `- ${link(step.name || 'Unnamed step', url)} (${statusLabel(step.conclusion)})`;
   });
   if (steps.length > 8) stepLines.push(`- ${steps.length - 8} more failed steps; see the job log.`);
   const excerpt = clip(sanitize(failure.excerpt), MAX_EXCERPT);
   const unavailable = typeof failure.unavailable === 'string' ? ` (${text(failure.unavailable, 240)})` : '';
   const evidence = excerpt ? `<pre>${html(excerpt)}</pre>` : `Log excerpt unavailable${unavailable}; open the job log for details.`;
-  return `<details>\n<summary>${text(job.name || 'Unnamed job')} — ${text(job.conclusion || 'failure')}</summary>\n\n${link('Open job log', jobUrl)}\n\n${stepLines.length ? `Failed steps:\n\n${stepLines.join('\n')}\n\n` : ''}${evidence}\n\n</details>\n\n`;
+  return `<details>\n<summary>${text(job.name || 'Unnamed job')} — ${statusLabel(job.conclusion || 'failure')}</summary>\n\n${link('Open job log', jobUrl)}\n\n${stepLines.length ? `Failed steps:\n\n${stepLines.join('\n')}\n\n` : ''}${evidence}\n\n</details>\n\n`;
 }
 
 function failuresFor(workflow) {
@@ -157,15 +168,16 @@ function renderSummary({pullRequest, workflows}) {
   body += '| Workflow | Status | Jobs | Run |\n| --- | --- | --- | --- |\n';
   for (const workflow of workflows.slice(0, 20)) {
     const run = workflow.run;
-    const status = run ? run.conclusion || run.status || 'Unknown' : missingStatus(workflow.name);
+    const status = run ? statusLabel(run.conclusion || run.status) : missingStatus(workflow.name);
     const runLink = run ? link(`Run ${run.id ?? ''} · attempt ${run.run_attempt ?? 1}`, run.html_url) : '—';
-    const row = `| ${text(workflow.name)} | ${text(status)} | ${run ? counts(workflow.jobs || []) : '—'} | ${runLink} |\n`;
+    const row = `| ${text(workflow.name)} | ${status} | ${run ? counts(workflow.jobs || []) : '—'} | ${runLink} |\n`;
     if (body.length + row.length > 18000) break;
     body += row;
     selected.push(workflow);
   }
   if (workflows.length > selected.length) body += `\n${workflows.length - selected.length} additional workflows omitted.\n`;
-  body += '\nCounts include skipped and cancelled jobs; they are not passing tests.\n\n';
+  body += '\nLegend: ✅ Pass · ❌ Failed · ⏱ Timed out · 🔄 Running · ⏳ Pending · 🚫 Cancelled · — Skipped / not run · ⚠️ Needs attention · ➖ Neutral · ❔ Unknown.\n\n';
+  body += 'Counts include skipped and cancelled jobs; they are not passing tests.\n\n';
   const footer = 'Failure excerpts are selected from job logs and may be incomplete. Open the linked job or run for the full logs.\n';
   const groups = selected.filter(workflow => workflow.run).map(workflow => {
     const failures = failuresFor(workflow);

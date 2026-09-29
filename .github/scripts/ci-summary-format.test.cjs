@@ -74,12 +74,13 @@ test('reports missing full CI, optional XPU and Pre Merge independently', () => 
   assert.ok(body.includes(`<code>${sha}</code>`));
   assert.match(body, /No run for this head; full CI requires approval/);
   assert.match(body, /Optional \/ not run/);
-  assert.match(body, /Pre Merge \| Not run/);
+  assert.match(body, /Pre Merge \| — Not run/);
 });
 
 test('success summary counts every job without treating skips or cancellations as passing', () => {
   const jobs = [job(1, 'success'), job(2, 'skipped'), job(3, 'cancelled'), job(4, 'neutral')];
   const body = summary([{name: 'PR', run: {...run, conclusion: 'success'}, jobs, failures: []}]);
+  assert.match(body, /PR \| ✅ Pass/);
   assert.match(body, /4 total: 1 passed, 0 failed, 1 skipped, 1 cancelled, 1 other/);
   assert.match(body, /Run 1234 · attempt 2/);
   assert.ok(body.includes(run.html_url));
@@ -93,6 +94,10 @@ test('failed jobs include step links and excerpts, including unavailable logs', 
     {job: failed, excerpt: 'FAILED tests/test_router.py::test_route - AssertionError'},
     {job: timeout, unavailable: true},
   ]}]);
+  assert.match(body, /PR \| ❌ Failed/);
+  assert.match(body, /Job 10 — ❌ Failed<\/summary>/);
+  assert.match(body, /Job 11 — ⏱ Timed out<\/summary>/);
+  assert.match(body, /\(❌ Failed\)/);
   assert.match(body, /3 total: 0 passed, 2 failed, 1 skipped, 0 cancelled/);
   assert.ok(body.includes(`${failed.html_url}#step:4:1`));
   assert.match(body, /<pre>FAILED tests\/test_router.py::test_route - AssertionError<\/pre>/);
@@ -103,11 +108,12 @@ test('pending workflows distinguish queued and running jobs', () => {
   const jobs = [job(1, null, {status: 'queued'}), job(2, null, {status: 'in_progress'})];
   const body = summary([{name: 'PR', run: {...run, status: 'in_progress', conclusion: null}, jobs}]);
   assert.match(body, /1 running, 1 queued/);
-  assert.ok(body.includes('in&#95;progress'));
+  assert.match(body, /PR \| 🔄 Running/);
 });
 
 test('discovers failed jobs when the collector has no excerpt entry', () => {
   const body = summary([{name: 'PR', run, jobs: [job(1, 'action_required')]}]);
+  assert.match(body, /Job 1 — ⚠️ Action required<\/summary>/);
   assert.match(body, /1 failed/);
   assert.match(body, /Log excerpt unavailable/);
 });
@@ -115,7 +121,7 @@ test('discovers failed jobs when the collector has no excerpt entry', () => {
 test('escapes adversarial names and logs and suppresses mentions', () => {
   const name = '</summary><script>alert(1)</script> [x](javascript:evil) | @team **bold** &';
   const failed = job(1, 'failure', {name, html_url: 'javascript:alert(1)', steps: [{name, number: 1, conclusion: 'failure'}]});
-  const body = summary([{name, run, jobs: [failed], failures: [{job: failed, excerpt: 'ERROR </pre><img src=x onerror=alert(1)> @team ```\nHF_TOKEN=hf_supersecret'}]}]);
+  const body = summary([{name, run: {...run, conclusion: name}, jobs: [failed], failures: [{job: failed, excerpt: 'ERROR </pre><img src=x onerror=alert(1)> @team ```\nHF_TOKEN=hf_supersecret'}]}]);
   assert.ok(!body.includes('<script>'));
   assert.ok(!body.includes('<img'));
   assert.ok(!body.includes('](javascript:'));
@@ -123,6 +129,7 @@ test('escapes adversarial names and logs and suppresses mentions', () => {
   assert.ok(!body.includes('@team'));
   assert.ok(!body.includes('hf_supersecret'));
   assert.ok(body.includes('&lt;/pre&gt;'));
+  assert.ok(body.includes('❔ Unknown ('));
   assert.ok(body.includes('&#124;'));
   assert.ok(body.includes('&#42;&#42;bold&#42;&#42;'));
   assert.ok(!body.includes('&&#35;'));

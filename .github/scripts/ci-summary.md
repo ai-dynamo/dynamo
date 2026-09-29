@@ -13,7 +13,9 @@ job counts (including skipped and cancelled jobs), failed step names, short
 failure excerpts, and links to the original runs and jobs. A missing full PR run
 is reported as absent, with a reminder that full CI requires approval; missing
 XPU CI is shown as optional/not run.
-Skipped jobs are never counted as passed tests. Counts describe jobs, not tests.
+Status labels use emojis, including ✅ Pass, ❌ Failed, ⏱ Timed out, 🔄 Running,
+and ⏳ Queued, with a legend below the table. Skipped jobs are never counted as
+passed tests. Counts describe jobs, not tests.
 
 The reporting shape is inspired by the
 [FlashInfer CI comment](https://github.com/flashinfer-ai/flashinfer/pull/4604#issuecomment-5715075212).
