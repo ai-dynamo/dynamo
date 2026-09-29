@@ -8,14 +8,13 @@
 import asyncio
 import json
 import logging
-import math
 import os
 import time
 from collections.abc import AsyncGenerator
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures import wait as _futures_wait
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from sglang.srt.parser.conversation import chat_template_exists
 from sglang.srt.utils.hf_transformers_utils import get_tokenizer
@@ -50,6 +49,7 @@ from .utils import (
     random_uuid,
     read_jinja_chat_template,
     resolve_chat_template,
+    routing_hints_from_request,
     worker_warmup,
 )
 
@@ -79,64 +79,6 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
                     seen.add(token_id)
         return token_ids
     return []
-
-
-_I32_MIN = -(2**31)
-_I32_MAX = 2**31 - 1
-_U32_MAX = 2**32 - 1
-
-
-def _is_i32(value: Any) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and _I32_MIN <= value <= _I32_MAX
-    )
-
-
-def _is_u32(value: Any) -> bool:
-    return (
-        isinstance(value, int)
-        and not isinstance(value, bool)
-        and 0 <= value <= _U32_MAX
-    )
-
-
-def _finite_float(value: Any) -> float | None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        return None
-    try:
-        result = float(value)
-    except OverflowError:
-        return None
-    return result if math.isfinite(result) else None
-
-
-def _routing_from_agent_hints(nvext: dict[str, Any]) -> dict[str, Any] | None:
-    agent_hints = nvext.get("agent_hints")
-    if not isinstance(agent_hints, dict):
-        return None
-
-    routing: dict[str, Any] = {}
-    priority = agent_hints.get("priority")
-    if _is_i32(priority):
-        priority_value = cast(int, priority)
-        routing["priority"] = priority_value
-        routing["priority_jump"] = float(max(priority_value, 0))
-    else:
-        latency_sensitivity = _finite_float(agent_hints.get("latency_sensitivity"))
-        if latency_sensitivity is not None:
-            routing["priority_jump"] = latency_sensitivity
-
-    strict_priority = agent_hints.get("strict_priority")
-    if _is_u32(strict_priority):
-        routing["strict_priority"] = strict_priority
-
-    expected_output_tokens = agent_hints.get("osl")
-    if _is_u32(expected_output_tokens):
-        routing["expected_output_tokens"] = expected_output_tokens
-
-    return routing or None
 
 
 def _request_stop_strings(request: dict[str, Any]) -> set[str]:
@@ -413,31 +355,7 @@ def _build_dynamo_preproc(
         logprobs_val = top_logprobs
 
     nvext = request.get("nvext") or {}
-    routing = request.get("routing")
-    nvext_routing = (
-        _routing_from_agent_hints(nvext) if isinstance(nvext, dict) else None
-    )
-    if isinstance(nvext, dict):
-        # Preserve explicit targets for the router to resolve in the current phase.
-        # Rank zero is a valid target; only absent/null values are omitted.
-        worker_routing = {
-            key: nvext[key]
-            for key in (
-                "backend_instance_id",
-                "decode_worker_id",
-                "prefill_worker_id",
-                "dp_rank",
-                "prefill_dp_rank",
-            )
-            if nvext.get(key) is not None
-        }
-        if worker_routing:
-            nvext_routing = {**(nvext_routing or {}), **worker_routing}
-    if isinstance(routing, dict):
-        if nvext_routing:
-            routing = {**nvext_routing, **routing}
-    else:
-        routing = nvext_routing
+    routing = routing_hints_from_request(request)
 
     preproc = {
         "model": model_name,
