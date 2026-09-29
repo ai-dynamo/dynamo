@@ -90,11 +90,13 @@ def probe(driver):
             raise RuntimeError(f"target did not load the requested compatibility library: {libraries}")
         emit(mode=mode, **ready)
         environment["LD_DEBUG"] = "libs"
-        for action in ("lock", "checkpoint", "restore", "unlock"):
+        library = f"/proc/{process.pid}/root{libraries[0]}"
+        for action in ("get-restore-tid", "get-state", "lock", "checkpoint", "restore", "unlock"):
             started = time.monotonic()
-            emit(event="helper_start", mode=mode, action=action, driver=libraries[0], target_pid=process.pid, parent_pid=os.getpid())
+            emit(event="helper_start", mode=mode, action=action, driver=library, target_pid=process.pid, parent_pid=os.getpid())
+            arguments = [f"--{action}"] if action.startswith("get-") else ["--action", action]
             helper = subprocess.Popen(
-                ["/helpers/cuda-checkpoint-helper", "--driver-library", libraries[0], "--action", action, "--pid", str(process.pid)],
+                ["/helpers/cuda-checkpoint-helper", "--driver-library", library, *arguments, "--pid", str(process.pid)],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, start_new_session=True,
             )
@@ -107,7 +109,7 @@ def probe(driver):
                 return 1
             finally:
                 stop(helper)
-            matched = any("calling init:" in line and line.rstrip().endswith(libraries[0]) for line in output.splitlines())
+            matched = any("calling init:" in line and line.rstrip().endswith(library) for line in output.splitlines())
             emit(event="helper_end", mode=mode, action=action, status=helper.returncode, driver_confirmed=matched, elapsed=round(time.monotonic() - started, 3), output=output[-4096:])
             if not matched:
                 raise RuntimeError("loader trace did not confirm the exact target CUDA library")

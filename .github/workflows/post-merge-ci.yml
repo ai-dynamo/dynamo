@@ -92,7 +92,7 @@ jobs:
             echo "### $mode: exec exit $result (pod $phase)" >> "$GITHUB_STEP_SUMMARY"
             probe_node=$(jq -r '.spec.nodeName // ""' <<< "$pod")
             if [[ "$result" != 0 ]]; then all_passed=false; fi
-            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" delete pod "$mode" --wait=true --timeout=10s
+            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" delete pod "$mode" --wait=false
           done
           "$all_passed"
       - name: Always remove isolated namespace

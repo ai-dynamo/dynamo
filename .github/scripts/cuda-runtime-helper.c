@@ -411,7 +411,7 @@ main(int argc, char** argv)
     status = do_get_restore_tid(pid, &tid);
     if (status != CUDA_SUCCESS) {
       print_cuda_error(status);
-      return 1;
+      return status == CUDA_ERROR_NOT_INITIALIZED ? 1 : 2;
     }
     return fprintf(stdout, "%d\n", tid) < 0 ? 1 : 0;
   }
