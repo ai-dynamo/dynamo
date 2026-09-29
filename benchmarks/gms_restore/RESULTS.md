@@ -4,8 +4,8 @@
 
 This is a prototype using Dynamo GMS **V1**, SGLang's Engine API, and the qualified
 Snapshot/PageBroker composition. It does not yet exercise Dynamo's distributed
-frontend or a DynamoGraphDeployment. No large-model speedup is claimed until the
-GLM correctness and timing gates below complete.
+frontend or a DynamoGraphDeployment. Large-model inference has passed with the constraints described below; the
+RAM-staged measurements are not cold-NFS comparisons.
 
 ## Completed gates
 
@@ -58,7 +58,43 @@ These times are **failed experiments**, not a supported fast path. See
 checkpoint a sidecar after the engine in the same source pod had already exited
 also failed source-pod validation; dedicated server captures avoid that issue.
 
-## Large-model qualification in progress
+## GLM TP8, first qualified capture
+
+All three restores produced Berlin and the same coherent Rayleigh-scattering
+continuation as the source, with CUDA graphs enabled. Each rank's 28 matching
+2 GiB allocations were published before engine restoration.
+
+| Loader | All-rank preload span | Agent engine restore | Pod creation to coherent readiness |
+|---|---:|---:|---:|
+| Fused, first run | 7.197 s | 17.213 s | 67.137 s (35.624 s remote validation gap) |
+| Fused, in-pod gate | 7.840 s | 14.802 s | 30.536 s |
+| Default NIXL, in-pod gate | 10.329 s | 14.712 s | 34.005 s |
+
+Preload span starts at the first GMS Python process and ends at the last rank's
+publication. Pod timing includes scheduling, init/container startup, publication,
+validation, restoration and the first generation. The last two trials perform
+claim/artifact/server checks in the placeholder before exposing the publication
+gate; they still have about 1.4 s of orchestration between observing the gate and
+sending the restore trigger. They are individual trials, not statistical means.
+
+**Storage constraint:** both NFS exports returned EDQUOT despite reported free
+space. Retiring this experiment's failed server snapshots and small probes did
+not clear it. Moving the 449 GiB matching weight set into a node-local 512 GiB
+tmpfs cleared the quota. Its dedicated staging pod took **200.585 s** to copy;
+that is explicitly outside these pre-staged restore measurements. The first copy
+attempt in the low-memory agent cgroup was OOM-killed and retried in a staging
+pod with a 640 GiB limit. No original artifact was removed until its complete
+rank copy passed size checks. Native engine checkpoints still use the original
+NFS/PageBroker stack. These results cannot establish a cold-storage speedup.
+
+Engine GPU checkpoint payload was 147,958,267,904 bytes (18,494,783,488 per rank),
+with about 57 GiB of CPU pages. Agent capture took 228.354 s, of which CRIU was
+211.515 s. The next experiment fixes the image's DSA cache hook name and trims
+unused libc allocations before capture. Initial-capture artifacts in tmpfs were
+retired after these completed trials to make room for the improved capture;
+all initial plans, manifests and measured outputs remain in this branch.
+
+### Communication compatibility
 
 GLM-5.2-NVFP4 TP8 loaded and committed its weights through V1, but stalled in
 PyTorch symmetric-memory rendezvous, first for the logits multimem gather and
@@ -69,7 +105,7 @@ retaining CUDA graphs. These are communication-layout changes from the baseline.
 
 When a stalled source pod released its claim, another namespace allocated all
 8 source-node GPUs. No foreign workloads or agents were changed. The large-model
-trial moved to s2877; it will use same-node capture/restore. Cross-node mapping
+trial moved to s2877; the measured GLM restores used same-node capture/restore. Cross-node mapping
 correctness was established only by the Qwen test above.
 
 ## Prototype boundaries
@@ -87,3 +123,9 @@ correctness was established only by the Qwen test above.
   accesses private manager state and requires further lifecycle design.
 - Prepublication UUID/ID/size checks do not replace validating restored inference.
   Marker files alone are insufficient, as the GMS-server experiments demonstrated.
+
+Validation: 17 focused Python tests passed (minimal pytest configuration emits
+unknown-marker warnings); CUDA/executor/podcontract Go tests passed; 14 Rust core
+tests passed. Benchmark scripts pass Ruff. GMS server export remained broken in
+an additional explicit ctypes dispatch experiment; no checkpointed-server timing
+is counted as a functional result.

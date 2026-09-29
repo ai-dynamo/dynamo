@@ -27,6 +27,10 @@ from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManage
 from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 from posix_direct import install
 
+if os.environ.get("GMS_PROTOTYPE_INTERPOSE_CUDA_PYTHON") == "1":
+    from ctypes_interpose import install as install_interpose
+
+    install_interpose()
 init_vmm(VMMDeviceType.CUDA)
 vmm = get_vmm()
 uuid = get_device_uuid(0)

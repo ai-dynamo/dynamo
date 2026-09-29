@@ -1,0 +1,41 @@
+--- a/lib/gpu_memory_service/v1/integrations/sglang/plugin.py
++++ b/lib/gpu_memory_service/v1/integrations/sglang/plugin.py
+@@ -84,6 +84,10 @@
+     def after_release_memory_occupation(result, manager, *args, **kwargs):
+         # Fence the TP group: ranks that finish releasing early must not race
+         # ahead of ranks still unmapping their share of the weights.
++        import gc
++        import ctypes
++        gc.collect()
++        ctypes.CDLL(None).malloc_trim(0)
+         torch.distributed.barrier(group=manager.tp_cpu_group)
+         return result
+ 
+@@ -110,7 +114,7 @@
+         HookType.AFTER,
+     )
+     HookRegistry.register(
+-        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_key_cache",
++        "sglang.srt.mem_cache.memory_pool.DSATokenToKVPool._create_index_buffers",
+         around_create_dsa_index_key_cache,
+         HookType.AROUND,
+     )
+@@ -118,7 +122,17 @@
+     # wrap its index cache or remote buffer.
+     HookRegistry.register(
+         "sglang.srt.mem_cache.dsa_cache_layer_split."
+-        "LayerSplitDSATokenToKVPool._create_index_key_cache",
++        "LayerSplitDSATokenToKVPool._create_index_buffers",
+         around_create_dsa_index_key_cache,
+         HookType.AROUND,
+     )
++
++# Experimental fallback for the evidence image: multimem rendezvous hangs with
++# the GMS V1 + cuinterpose composition. Retain graph capture, use NCCL for logits.
++if os.environ.get("GMS_PROTOTYPE_NCCL_LOGITS") == "1":
++    from sglang.srt.distributed.device_communicators import triton_symm_mem_ag
++    _gms_original_gather_init = triton_symm_mem_ag.MultimemAllGatherer.__init__
++    def _gms_nccl_gather_init(self, *args, **kwargs):
++        kwargs["enabled"] = False
++        _gms_original_gather_init(self, *args, **kwargs)
++    triton_symm_mem_ag.MultimemAllGatherer.__init__ = _gms_nccl_gather_init

@@ -53,7 +53,15 @@ class PosixDirect:
                     if stop.is_set():
                         return
                     if path not in fds:
-                        fds[path] = os.open(path, os.O_RDONLY | os.O_DIRECT)
+                        fds[path] = os.open(
+                            path,
+                            os.O_RDONLY
+                            | (
+                                0
+                                if os.environ.get("GMS_PROTOTYPE_BUFFERED_READS") == "1"
+                                else os.O_DIRECT
+                            ),
+                        )
                     slot = slots[i % 2]
                     slot.wait()
                     view = slot.view.cast("B")[:length]

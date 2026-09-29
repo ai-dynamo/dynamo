@@ -1,0 +1,33 @@
+{
+  "case": "fused-ram-2",
+  "weights_bytes": 481036337152,
+  "preload_span_s": 7.8403120040893555,
+  "rank_preload_s": [
+    4.141364574432373,
+    4.058997631072998,
+    4.480286121368408,
+    5.883426189422607,
+    6.182149887084961,
+    6.498727321624756,
+    6.241497755050659,
+    6.041651248931885
+  ],
+  "first_gms_start_to_ready_s": 27.33152961730957,
+  "pod_create_to_ready_s": 30.53647804260254,
+  "verification_orchestration_gap_s": 1.3959805965423584,
+  "agent": {
+    "duration": "14.801838782s",
+    "phases": {
+      "criu_prepare": "39.701683ms",
+      "criu_restore": "3.630899394s",
+      "cuda_restore": "9.311882818s",
+      "gpu_device_map": "94.369433ms",
+      "overlay_capture": "30.214896ms",
+      "pagebroker_commit": "539.533\u00b5s",
+      "pagebroker_mount": "0s",
+      "pagebroker_stage": "50.677363ms",
+      "unaccounted": "1.643553662s"
+    },
+    "started_to_complete": "14.8056822s"
+  }
+}

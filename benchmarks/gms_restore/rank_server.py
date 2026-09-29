@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 
+started = time.time()
 p = argparse.ArgumentParser()
 p.add_argument("--rank", type=int, required=True)
 p.add_argument("--artifact-root", required=True)
@@ -50,6 +51,16 @@ try:
         from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 
         load_weights(f"{a.artifact_root}/device-{a.rank}", get_socket_path(a.rank), 0)
+    published = time.time()
+    record = {
+        "rank": a.rank,
+        "uuid": uuid,
+        "started_epoch": started,
+        "published_epoch": published,
+        "elapsed_s": published - started,
+    }
+    (root / f"rank-{a.rank}.json").write_text(json.dumps(record))
+    print(json.dumps(record), flush=True)
     (root / f"published-{a.rank}").write_text(uuid)
     server.wait()
     raise RuntimeError(f"server exited {server.returncode}")

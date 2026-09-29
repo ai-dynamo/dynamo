@@ -1,0 +1,77 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "gms-v1-artifact-stage-0928",
+    "namespace": "schwinns-vcluster",
+    "labels": {
+      "experiment": "gms-v1-0928"
+    }
+  },
+  "spec": {
+    "nodeSelector": {
+      "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "tolerations": [
+      {
+        "operator": "Exists"
+      }
+    ],
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      },
+      {
+        "name": "acr-token-secret"
+      }
+    ],
+    "volumes": [
+      {
+        "name": "weights",
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/ram-weights",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "artifacts",
+        "persistentVolumeClaim": {
+          "claimName": "snapshot-pvc"
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "stage",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "python3",
+          "-u",
+          "-c",
+          "import shutil,time,json\nfrom pathlib import Path\nfrom concurrent.futures import ThreadPoolExecutor\nsrc=Path('/checkpoints/gms-restore-0928/glm-capture-1');dst=Path('/gms-artifacts/glm-capture-1')\nstarted=time.time()\ndef move_rank(rank):\n    target=dst/f'device-{rank}'\n    if target.exists():shutil.rmtree(target)\n    source=src/f'device-{rank}'\n    target.mkdir(parents=True)\n    for f in source.rglob('*'):\n        rel=f.relative_to(source);out=target/rel\n        if f.is_dir():out.mkdir(exist_ok=True);continue\n        shutil.copyfile(f,out)\n        assert out.stat().st_size==f.stat().st_size\n    print(json.dumps({'rank':rank,'copied_s':time.time()-started}),flush=True)\n    shutil.rmtree(source)\nwith ThreadPoolExecutor(max_workers=8) as pool:list(pool.map(move_rank,range(8)))\nprint('MOVED',time.time()-started,flush=True)\nwhile True:time.sleep(60)\n"
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "16",
+            "memory": "640Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "4Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "weights",
+            "mountPath": "/gms-artifacts"
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/checkpoints"
+          }
+        ]
+      }
+    ],
+    "restartPolicy": "Never"
+  }
+}

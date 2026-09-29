@@ -1,0 +1,957 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceClaim",
+      "metadata": {
+        "name": "gms-v1-glm-source-0928",
+        "namespace": "schwinns-vcluster"
+      },
+      "spec": {
+        "devices": {
+          "requests": [
+            {
+              "name": "tp-0",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-1",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-2",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-3",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-4",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-5",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-6",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            },
+            {
+              "name": "tp-7",
+              "exactly": {
+                "deviceClassName": "gpu.nvidia.com",
+                "count": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "gms-v1-glm-app-0928",
+        "namespace": "schwinns-vcluster"
+      },
+      "data": {
+        "app.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\nimport argparse\nimport json\nimport os\nimport time\nimport traceback\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nfrom pathlib import Path\nfrom typing import Any\n\nCONTROL_DIR = Path(os.environ.get(\"SNAPSHOT_CONTROL_DIR\", \"/snapshot-control\"))\n\n\ndef parse_args() -> argparse.Namespace:\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--mode\", choices=(\"prime\", \"snapshot\"), default=\"snapshot\")\n    return parser.parse_args()\n\n\ndef configure_capture_environment() -> None:\n    os.environ.update(\n        {\n            \n            \n            \"NCCL_IB_DISABLE\": \"1\",\n            \"NCCL_RAS_ENABLE\": \"0\",\n            \"TORCH_NCCL_ENABLE_MONITORING\": \"0\",\n            \"TORCH_NCCL_DUMP_ON_TIMEOUT\": \"0\",\n            \"HF_HUB_OFFLINE\": \"1\",\n        }\n    )\n\n\ndef create_engine(snapshot_mode: bool) -> Any:\n    import importlib.metadata\n    version = importlib.metadata.version(\"torch-memory-saver\")\n    assert version == \"0.0.10\", version\n    print(\"OFFICIAL_MEMORY_SAVER_VERSION=\" + version, flush=True)\n    import sglang as sgl\n\n    return sgl.Engine(\n        model_path=os.environ[\"SNAPSHOT_MODEL\"],\n        context_length=int(os.environ.get(\"SGLANG_CONTEXT_LENGTH\", \"10240\")),\n        page_size=int(os.environ.get(\"SGLANG_PAGE_SIZE\", \"16\")),\n        tp_size=8, ep_size=8, mem_fraction_static=0.70, enforce_disable_flashinfer_allreduce_fusion=True,\n        \n        trust_remote_code=False,\n        enable_memory_saver=snapshot_mode,\n        enable_weights_cpu_backup=False,\n        log_level=\"info\",\n    )\n\n\ndef generate_text(engine: Any, prompt: str) -> str:\n    result = engine.generate(\n        prompt,\n        sampling_params={\"temperature\": 0, \"max_new_tokens\": 100},\n    )\n    text = result.get(\"text\", \"\").strip()\n    if not text:\n        raise RuntimeError(\"SGLang produced empty output\")\n    return text\n\n\ndef pause_generation(engine: Any) -> None:\n    from sglang.srt.managers.io_struct import PauseGenerationReqInput\n\n    # \"retract\" drains the scheduler before pausing: it processes any pending\n    # overlap result, clears last_batch and running_batch, and re-queues\n    # unfinished requests (there are none here; the warm-up generation has\n    # returned). release_memory_occupation() asserts is_fully_idle(), which\n    # also requires last_batch to be empty. The default \"in_place\" mode freezes\n    # scheduler state untouched, so pausing right after a generation leaves a\n    # stale last_batch and the release fails with \"should be called only when\n    # server is idle\" (SGLang 0.5.17).\n    engine.loop.run_until_complete(\n        engine.tokenizer_manager.pause_generation(PauseGenerationReqInput(mode=\"retract\"))\n    )\n\n\ndef continue_generation(engine: Any) -> None:\n    from sglang.srt.managers.io_struct import ContinueGenerationReqInput\n\n    engine.loop.run_until_complete(\n        engine.tokenizer_manager.continue_generation(ContinueGenerationReqInput())\n    )\n\n\ndef serve_api(engine: Any, restored_text: str) -> None:\n    class GenerateHandler(BaseHTTPRequestHandler):\n        def do_POST(self) -> None:\n            if self.path != \"/generate\":\n                self.send_error(404)\n                return\n\n            try:\n                length = int(self.headers.get(\"Content-Length\", \"0\"))\n                payload = json.loads(self.rfile.read(length))\n                prompt = payload[\"prompt\"]\n                if not isinstance(prompt, str) or not prompt.strip():\n                    raise ValueError(\"prompt must be a non-empty string\")\n                text = generate_text(engine, prompt)\n            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:\n                self.send_error(400, str(error))\n                return\n            except Exception as error:\n                self.send_error(500, str(error))\n                return\n\n            body = json.dumps({\"text\": text}).encode()\n            self.send_response(200)\n            self.send_header(\"Content-Type\", \"application/json\")\n            self.send_header(\"Content-Length\", str(len(body)))\n            self.end_headers()\n            self.wfile.write(body)\n\n    server = HTTPServer((\"0.0.0.0\", 8000), GenerateHandler)\n    CONTROL_DIR.joinpath(\"sglang-restore-ready\").write_text(\n        restored_text + \"\\n\",\n        encoding=\"utf-8\",\n    )\n    print(\"SGLang API listening on port 8000\", flush=True)\n    server.serve_forever()\n\n\ndef main() -> None:\n    args = parse_args()\n    snapshot_mode = args.mode == \"snapshot\"\n    if snapshot_mode:\n        configure_capture_environment()\n        CONTROL_DIR.joinpath(\"ready-for-snapshot\").unlink(missing_ok=True)\n\n    rank_ids=[]\n    for rank in range(8):\n        path=Path('/gms')/f'rank-{rank}.json'\n        while not path.exists(): time.sleep(.05)\n        rank_ids.append(json.loads(path.read_text())['uuid'])\n    import subprocess\n    rows=subprocess.check_output(['nvidia-smi','--query-gpu=uuid,pci.bus_id','--format=csv,noheader'],text=True)\n    ordered=[u.strip() for u,b in sorted((line.split(',') for line in rows.splitlines()),key=lambda x:x[1].strip())]\n    os.environ['CUDA_VISIBLE_DEVICES']=','.join(str(ordered.index(u)) for u in rank_ids)\n    engine = create_engine(snapshot_mode)\n    try:\n        text = generate_text(engine, \"The capital city of France is\")\n        print(f\"SGLang pre-checkpoint output={text!r}\", flush=True)\n\n        if not snapshot_mode:\n            return\n\n        paragraph = engine.generate(\n            \"Explain in two sentences why the sky is blue.\",\n            sampling_params={\"temperature\": 0, \"max_new_tokens\": 100},\n        )\n        print(\"SOURCE_COHERENCE \" + repr(paragraph), flush=True)\n        print(\"SOURCE COHERENCE REVIEW REQUIRED\", flush=True)\n        assert \"paris\" in text.lower(), text\n        pause_generation(engine)\n        try:\n            engine.release_memory_occupation(tags=[\"weights\", \"kv_cache\"])\n        except BaseException:\n            continue_generation(engine)\n            raise\n\n        Path('/gms/save').touch()\n        for rank in range(8):\n            while not Path(f'/gms/published-{rank}').exists(): time.sleep(.05)\n        CONTROL_DIR.joinpath(\"ready-for-snapshot\").write_text(\n            \"ready\\n\",\n            encoding=\"utf-8\",\n        )\n\n        while not CONTROL_DIR.joinpath(\"restore-complete\").exists():\n            time.sleep(1)\n\n        # The restored process keeps the source container's stdout, which is\n        # gone; a failure here would otherwise be invisible. Record it in the\n        # control directory next to the success sentinel.\n        try:\n            progress = CONTROL_DIR.joinpath(\"sglang-restore-progress\")\n            engine.resume_memory_occupation(tags=[\"weights\", \"kv_cache\"])\n            progress.write_text(\"memory-resumed\\n\", encoding=\"utf-8\")\n            continue_generation(engine)\n            progress.write_text(\"generation-continued\\n\", encoding=\"utf-8\")\n\n            text = generate_text(engine, \"The capital city of Germany is\")\n            progress.write_text(\"generated\\n\", encoding=\"utf-8\")\n            print(f\"SGLang restored output={text!r}\", flush=True)\n            serve_api(engine, text)\n        except Exception:\n            CONTROL_DIR.joinpath(\"sglang-restore-error\").write_text(\n                traceback.format_exc(),\n                encoding=\"utf-8\",\n            )\n            raise\n    finally:\n        engine.shutdown()\n\n\nif __name__ == \"__main__\":\n    main()\n",
+        "rank_server.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"One isolated GPU, stable engine socket ordinal, optional exact artifact save.\"\"\"\n\nimport argparse\nimport json\nimport os\nimport subprocess\nimport sys\nimport time\nfrom pathlib import Path\n\nstarted = time.time()\np = argparse.ArgumentParser()\np.add_argument(\"--rank\", type=int, required=True)\np.add_argument(\"--artifact-root\", required=True)\np.add_argument(\"--mode\", choices=[\"capture\", \"load\"], default=\"capture\")\na = p.parse_args()\nroot = Path(os.environ[\"GMS_SOCKET_DIR\"])\nserver = subprocess.Popen(\n    [\n        sys.executable,\n        \"-m\",\n        \"gpu_memory_service.v1.cli\",\n        \"--device\",\n        \"0\",\n        \"--socket-device\",\n        str(a.rank),\n    ]\n)\ntry:\n    from gpu_memory_service.common.vmm import VMMDeviceType, init_vmm\n    from gpu_memory_service.v1.device import get_device_uuid, get_socket_path\n\n    init_vmm(VMMDeviceType.CUDA)\n    uuid = get_device_uuid(0)\n    (root / f\"rank-{a.rank}.json\").write_text(\n        json.dumps({\"rank\": a.rank, \"uuid\": uuid})\n    )\n    if a.mode == \"capture\":\n        while not (root / \"save\").exists():\n            if server.poll() is not None:\n                raise RuntimeError(\"server exited\")\n            time.sleep(0.05)\n        from gpu_memory_service.v1.snapshot.weight_artifact import save_weights\n\n        manifest = save_weights(\n            f\"{a.artifact_root}/device-{a.rank}\", get_socket_path(a.rank), 0\n        )\n    else:\n        from gpu_memory_service.v1.snapshot.weight_artifact import load_weights\n\n        load_weights(f\"{a.artifact_root}/device-{a.rank}\", get_socket_path(a.rank), 0)\n    published = time.time()\n    record = {\n        \"rank\": a.rank,\n        \"uuid\": uuid,\n        \"started_epoch\": started,\n        \"published_epoch\": published,\n        \"elapsed_s\": published - started,\n    }\n    (root / f\"rank-{a.rank}.json\").write_text(json.dumps(record))\n    print(json.dumps(record), flush=True)\n    (root / f\"published-{a.rank}\").write_text(uuid)\n    server.wait()\n    raise RuntimeError(f\"server exited {server.returncode}\")\nfinally:\n    server.terminate()\n    server.wait(timeout=10)\n"
+      }
+    },
+    {
+      "kind": "Pod",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": "gms-v1-glm-source-0928",
+        "namespace": "schwinns-vcluster",
+        "labels": {
+          "experiment": "gms-v1-0928"
+        },
+        "annotations": {
+          "nvidia.com/snapshot-pagebroker": "true",
+          "nvidia.com/cuinterpose-enabled": "true"
+        }
+      },
+      "spec": {
+        "volumes": [
+          {
+            "name": "snapshot-control",
+            "emptyDir": {}
+          },
+          {
+            "name": "tun",
+            "hostPath": {
+              "path": "/dev/net/tun",
+              "type": "CharDevice"
+            }
+          },
+          {
+            "name": "app",
+            "configMap": {
+              "name": "gms-v1-glm-app-0928"
+            }
+          },
+          {
+            "name": "model-cache",
+            "nfs": {
+              "server": "192.168.0.223",
+              "path": "/unikorn-identity-03cfadd31877-551/pvc-92b73e65-4eb9-486c-a773-8f58c2f32abd"
+            }
+          },
+          {
+            "name": "dshm",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "32Gi"
+            }
+          },
+          {
+            "name": "snapshot-cuda",
+            "emptyDir": {}
+          },
+          {
+            "name": "gms",
+            "emptyDir": {}
+          },
+          {
+            "name": "artifacts",
+            "persistentVolumeClaim": {
+              "claimName": "snapshot-pvc"
+            }
+          },
+          {
+            "name": "ram-weights",
+            "hostPath": {
+              "path": "/var/lib/schwinns-gms-0928/ram-weights",
+              "type": "Directory"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "snapshot-cuda-install",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+            "command": [
+              "/bin/sh",
+              "-c"
+            ],
+            "args": [
+              "cp /usr/local/sbin/cuda-checkpoint /usr/local/lib/snapshot/libcuinterpose.so /snapshot-cuda/ && cp /checkpoints/gms-restore-0928/libcuinterpose_core.so /snapshot-cuda/"
+            ],
+            "resources": {},
+            "volumeMounts": [
+              {
+                "name": "snapshot-cuda",
+                "mountPath": "/snapshot-cuda"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints",
+                "readOnly": true
+              }
+            ],
+            "imagePullPolicy": "IfNotPresent",
+            "securityContext": {
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "allowPrivilegeEscalation": false,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            }
+          }
+        ],
+        "containers": [
+          {
+            "name": "main",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/app.py"
+            ],
+            "args": [
+              "--mode",
+              "snapshot"
+            ],
+            "ports": [
+              {
+                "name": "api",
+                "containerPort": 8000
+              }
+            ],
+            "env": [
+              {
+                "name": "SGLANG_PAGE_SIZE",
+                "value": "16"
+              },
+              {
+                "name": "SNAPSHOT_CONTROL_DIR",
+                "value": "/snapshot-control"
+              },
+              {
+                "name": "HF_HUB_DISABLE_XET",
+                "value": "1"
+              },
+              {
+                "name": "NCCL_CUMEM_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "NCCL_NVLS_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "NCCL_IB_DISABLE",
+                "value": "1"
+              },
+              {
+                "name": "NCCL_RAS_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "TORCH_NCCL_ENABLE_MONITORING",
+                "value": "0"
+              },
+              {
+                "name": "TORCH_NCCL_DUMP_ON_TIMEOUT",
+                "value": "0"
+              },
+              {
+                "name": "SGLANG_CONTEXT_LENGTH",
+                "value": "4096"
+              },
+              {
+                "name": "VLLM_WORKER_MULTIPROC_METHOD",
+                "value": "spawn"
+              },
+              {
+                "name": "VLLM_ALLOW_INSECURE_SERIALIZATION",
+                "value": "1"
+              },
+              {
+                "name": "HF_HOME",
+                "value": "/model-cache"
+              },
+              {
+                "name": "HF_HUB_OFFLINE",
+                "value": "1"
+              },
+              {
+                "name": "TRANSFORMERS_OFFLINE",
+                "value": "1"
+              },
+              {
+                "name": "SNAPSHOT_MODEL",
+                "value": "nvidia/GLM-5.2-NVFP4"
+              },
+              {
+                "name": "VLLM_GPU_MEMORY_UTILIZATION",
+                "value": "0.70"
+              },
+              {
+                "name": "VLLM_MAX_MODEL_LEN",
+                "value": "4096"
+              },
+              {
+                "name": "VLLM_CACHE_ROOT",
+                "value": "/model-cache/glm52-cache/vllm"
+              },
+              {
+                "name": "TORCHINDUCTOR_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/torchinductor"
+              },
+              {
+                "name": "TRITON_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/triton"
+              },
+              {
+                "name": "DG_JIT_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/deepgemm"
+              },
+              {
+                "name": "CUDA_CACHE_PATH",
+                "value": "/model-cache/glm52-cache/nv"
+              },
+              {
+                "name": "XDG_CACHE_HOME",
+                "value": "/model-cache/glm52-cache/xdg"
+              },
+              {
+                "name": "FLASHINFER_WORKSPACE_BASE",
+                "value": "/model-cache/glm52-cache/flashinfer"
+              },
+              {
+                "name": "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/vllm/flashinfer_autotune"
+              },
+              {
+                "name": "LD_PRELOAD",
+                "value": "/tmp/snapshot-cuda/libcuinterpose.so"
+              },
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              },
+              {
+                "name": "CUDA_DEVICE_MAX_COPY_CONNECTIONS",
+                "value": "2"
+              },
+              {
+                "name": "CUINTERPOSE_QUIESCENT_EXTERNAL_IMPORTS",
+                "value": "1"
+              },
+              {
+                "name": "CUDA_DEVICE_ORDER",
+                "value": "PCI_BUS_ID"
+              },
+              {
+                "name": "GMS_PROTOTYPE_NCCL_LOGITS",
+                "value": "1"
+              },
+              {
+                "name": "SGLANG_CACHE_DIR",
+                "value": "/checkpoints/gms-restore-0928/sglang-cache"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "96",
+                "memory": "1536Gi"
+              },
+              "requests": {
+                "cpu": "32",
+                "memory": "128Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus"
+                }
+              ]
+            },
+            "volumeMounts": [
+              {
+                "name": "snapshot-control",
+                "mountPath": "/snapshot-control",
+                "subPath": "main"
+              },
+              {
+                "name": "tun",
+                "mountPath": "/dev/net/tun"
+              },
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "model-cache",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "model-cache",
+                "mountPath": "/root/.cache/flashinfer",
+                "subPath": "glm52-cache/flashinfer/.cache/flashinfer"
+              },
+              {
+                "name": "dshm",
+                "mountPath": "/dev/shm"
+              },
+              {
+                "name": "snapshot-cuda",
+                "readOnly": true,
+                "mountPath": "/tmp/snapshot-cuda"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "cat",
+                  "/snapshot-control/ready-for-snapshot"
+                ]
+              },
+              "timeoutSeconds": 2400,
+              "periodSeconds": 1,
+              "failureThreshold": 1800
+            },
+            "imagePullPolicy": "Always"
+          },
+          {
+            "name": "gms-0",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "0",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-0"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-1",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "1",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-1"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-2",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "2",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-2"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-3",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "3",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-3"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-4",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "4",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-4"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-5",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "5",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-5"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-6",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "6",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-6"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          },
+          {
+            "name": "gms-7",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/rank_server.py",
+              "--rank",
+              "7",
+              "--artifact-root",
+              "/gms-artifacts/glm-capture-2"
+            ],
+            "env": [
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/checkpoints/gms-restore-0928/code/lib"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-7"
+                }
+              ],
+              "limits": {
+                "cpu": "8",
+                "memory": "96Gi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              },
+              {
+                "name": "ram-weights",
+                "mountPath": "/gms-artifacts"
+              }
+            ]
+          }
+        ],
+        "restartPolicy": "Never",
+        "terminationGracePeriodSeconds": 1,
+        "nodeSelector": {
+          "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "securityContext": {
+          "seccompProfile": {
+            "type": "Localhost",
+            "localhostProfile": "profiles/block-iouring.json"
+          }
+        },
+        "imagePullSecrets": [
+          {
+            "name": "nvcr-secret"
+          },
+          {
+            "name": "acr-token-secret"
+          }
+        ],
+        "tolerations": [
+          {
+            "operator": "Exists"
+          }
+        ],
+        "runtimeClassName": "nvidia",
+        "resourceClaims": [
+          {
+            "name": "gpus",
+            "resourceClaimName": "gms-v1-glm-source-0928"
+          }
+        ]
+      },
+      "status": {}
+    }
+  ]
+}

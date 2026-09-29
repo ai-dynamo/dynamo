@@ -1,0 +1,383 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "gms-v1-server-bridge-app-0928",
+        "namespace": "schwinns-vcluster"
+      },
+      "data": {
+        "fast_server.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Experimental fused V1 server/loader: one CUDA init and no NIXL startup.\"\"\"\n\nimport argparse\nimport json\nimport os\nimport signal\nimport time\nfrom concurrent.futures import ThreadPoolExecutor\nfrom contextlib import ExitStack\nfrom pathlib import Path\nfrom threading import Event\n\nstarted = time.time()\np = argparse.ArgumentParser()\np.add_argument(\"--rank\", type=int, required=True)\np.add_argument(\"--artifact-root\", required=True)\np.add_argument(\"--checkpoint-target\", action=\"store_true\")\np.add_argument(\"--retain-anchors\", action=\"store_true\")\na = p.parse_args()\nfrom gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm\nfrom gpu_memory_service.v1.checkpoint import GMSCheckpointClient, GMSCheckpointLifecycle\nfrom gpu_memory_service.v1.cli import run_servers\nfrom gpu_memory_service.v1.device import get_device_uuid, get_socket_path\nfrom gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager\nfrom gpu_memory_service.v1.snapshot.weight_artifact import load_weights\nfrom posix_direct import install\n\nif os.environ.get(\"GMS_PROTOTYPE_INTERPOSE_CUDA_PYTHON\") == \"1\":\n    from ctypes_interpose import install as install_interpose\n    install_interpose()\ninit_vmm(VMMDeviceType.CUDA)\nvmm = get_vmm()\nuuid = get_device_uuid(0)\nroot = Path(os.environ[\"GMS_SOCKET_DIR\"])\nroot.mkdir(exist_ok=True)\nlifecycle = GMSCheckpointLifecycle()\nwith ExitStack() as stack:\n    managers = {\n        d: GMSServerMemoryManager(uuid, vmm, 0, checkpoint_lifecycle=lifecycle)\n        for d in (\"weights\", \"kv_cache\")\n    }\n    lifecycle.bind_domains(managers)\n    servers = [\n        stack.enter_context(GMSRPCServer(get_socket_path(a.rank, d), managers[d]))\n        for d in managers\n    ]\n    stop = Event()\n    signal.signal(signal.SIGTERM, lambda *_: stop.set())\n    signal.signal(signal.SIGINT, lambda *_: stop.set())\n    print(\n        json.dumps(\n            {\"event\": \"sockets\", \"elapsed_s\": time.time() - started, \"uuid\": uuid}\n        ),\n        flush=True,\n    )\n    with ThreadPoolExecutor(max_workers=1) as pool:\n        serving = pool.submit(run_servers, servers, stop)\n        try:\n            install()\n            load_weights(\n                f\"{a.artifact_root}/device-{a.rank}\",\n                get_socket_path(a.rank),\n                0,\n                transfer_backend=\"posix-direct\",\n                max_workers=4,\n            )\n            published = time.time()\n            record = {\n                \"rank\": a.rank,\n                \"uuid\": uuid,\n                \"event\": \"published\",\n                \"started_epoch\": started,\n                \"published_epoch\": published,\n                \"elapsed_s\": published - started,\n            }\n            (root / f\"rank-{a.rank}.json\").write_text(json.dumps(record))\n            (root / f\"published-{a.rank}\").write_text(uuid)\n            print(json.dumps(record), flush=True)\n            if a.checkpoint_target:\n                response = GMSCheckpointClient(get_socket_path(a.rank)).prepare()\n                anchors = []\n                if a.retain_anchors:\n                    from gpu_memory_service.common.locks import GrantedLockType\n\n                    for manager in managers.values():\n                        for allocation_id, size in manager.allocation_snapshot():\n                            handle = manager._allocations._allocations[allocation_id]\n                            va = vmm.address_reserve(\n                                size, int(vmm.get_allocation_granularity(0))\n                            )\n                            vmm.map(va, size, handle)\n                            vmm.set_access(va, size, 0, GrantedLockType.RO)\n                            anchors.append((manager, allocation_id, va, size))\n                Path(\"/snapshot-control/checkpoint-token\").write_text(response.token)\n                Path(\"/snapshot-control/ready-for-snapshot\").touch()\n            restored = False\n            while not stop.wait(0.01):\n                if (\n                    a.checkpoint_target\n                    and not restored\n                    and Path(\"/snapshot-control/restore-complete\").exists()\n                ):\n                    # Prototype restore hook: CUDA has remapped the process, so\n                    # refresh identity before admitting any engine connection.\n                    from gpu_memory_service.v1.device import (\n                        invalidate_device_uuid_cache,\n                    )\n\n                    if a.retain_anchors:\n                        from cuda.bindings import driver as cuda\n\n                        for manager, allocation_id, va, size in anchors:\n                            result, handle = cuda.cuMemRetainAllocationHandle(va)\n                            if int(result) != 0:\n                                raise RuntimeError(\n                                    f\"retain restored allocation: {result}\"\n                                )\n                            manager._allocations._allocations[allocation_id] = int(\n                                handle\n                            )\n                    invalidate_device_uuid_cache()\n                    restored_uuid = get_device_uuid(0)\n                    with lifecycle.condition:\n                        for manager in managers.values():\n                            manager._identity = (manager.identity[0], restored_uuid)\n                    GMSCheckpointClient(get_socket_path(a.rank)).complete(\n                        response.token\n                    )\n                    Path(\"/snapshot-control/server-restore-ready\").write_text(\n                        restored_uuid\n                    )\n                    restored = True\n                if serving.done():\n                    serving.result()\n                    raise RuntimeError(\"server stopped\")\n        finally:\n            stop.set()\n            serving.result()\n",
+        "posix_direct.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Experimental O_DIRECT -> pinned buffers -> CUDA backend, without NIXL startup.\n\nBenchmark-only backend injection. Every lane owns two buffers and one device\ncontext; completion and cleanup finish before the V1 loader publishes its lease.\n\"\"\"\n\nfrom concurrent.futures import ThreadPoolExecutor\nimport os\nfrom threading import Event\n\nfrom gpu_memory_service.common.vmm import get_vmm\nfrom gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot\nfrom gpu_memory_service.snapshot.transfer import validate_transfer_targets\n\nCHUNK = 16 * 1024**2\n\n\nclass PosixDirect:\n    def __init__(self, config):\n        self.config = config\n\n    def start_restore(self, sources):\n        self.sources = list(sources)\n        return self\n\n    def restore(self, targets):\n        validate_transfer_targets(self.sources, targets, device=self.config.device)\n        work = []\n        for source in self.sources:\n            for offset in range(0, source.byte_count, CHUNK):\n                work.append(\n                    (\n                        source.file_path,\n                        source.file_offset + offset,\n                        targets[source.allocation_id].va + offset,\n                        min(CHUNK, source.byte_count - offset),\n                    )\n                )\n        lanes = min(self.config.max_workers, len(work))\n        stop = Event()\n\n        def lane(items):\n            vmm = get_vmm()\n            vmm.runtime_set_device(self.config.device)\n            slots = []\n            fds = {}\n            try:\n                slots = [PinnedCopySlot(vmm, CHUNK)]\n                slots.append(PinnedCopySlot(vmm, CHUNK))\n                for i, (path, offset, dst, length) in enumerate(items):\n                    if stop.is_set():\n                        return\n                    if path not in fds:\n                        fds[path] = os.open(path, os.O_RDONLY | os.O_DIRECT)\n                    slot = slots[i % 2]\n                    slot.wait()\n                    view = slot.view.cast(\"B\")[:length]\n                    try:\n                        read = os.preadv(fds[path], [view], offset)\n                    finally:\n                        view.release()\n                    if read != length:\n                        raise OSError(f\"short direct read: {read}/{length}\")\n                    slot.copy_to_device_async(dst, length)\n            except BaseException:\n                stop.set()\n                raise\n            finally:\n                try:\n                    for slot in slots:\n                        slot.close()\n                finally:\n                    for fd in fds.values():\n                        os.close(fd)\n\n        with ThreadPoolExecutor(max_workers=lanes) as pool:\n            futures = [pool.submit(lane, work[i::lanes]) for i in range(lanes)]\n            for future in futures:\n                future.result()\n\n    def close(self):\n        pass\n\n\ndef install():\n    from gpu_memory_service.v1.snapshot import weight_artifact\n\n    original = weight_artifact.create_transfer_backend\n\n    def create(name, config):\n        return PosixDirect(config) if name == \"posix-direct\" else original(name, config)\n\n    weight_artifact.create_transfer_backend = create\n\n\nif __name__ == \"__main__\":\n    import argparse\n    from gpu_memory_service.common.vmm import init_vmm, VMMDeviceType\n    from gpu_memory_service.v1.snapshot.weight_artifact import load_weights\n    from gpu_memory_service.v1.device import get_socket_path\n\n    p = argparse.ArgumentParser()\n    p.add_argument(\"--checkpoint-dir\", required=True)\n    p.add_argument(\"--transfer-backend\", default=\"posix-direct\")\n    p.add_argument(\"--max-workers\", type=int, default=4)\n    a = p.parse_args()\n    if a.max_workers < 1:\n        p.error(\"max-workers must be positive\")\n    init_vmm(VMMDeviceType.CUDA)\n    install()\n    load_weights(\n        a.checkpoint_dir + \"/device-0\",\n        get_socket_path(0),\n        0,\n        transfer_backend=\"posix-direct\",\n        max_workers=a.max_workers,\n    )\n",
+        "ctypes_interpose.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Experimental CUDA Python bridge through LD_PRELOAD's VMM entrypoints.\n\nThe evidence image's cuda-python dispatch bypasses the interposed allocation\nentrypoints (the captured GMS cuinterpose state contains zero memory blocks).\nExplicitly route only the VMM ownership APIs through the loaded frontend.\nMust be installed before any VMM allocations. Benchmark-only, CUDA/Linux only.\n\"\"\"\n\nimport ctypes as C\n\nfrom cuda.bindings import driver as cuda\n\n\ndef install():\n    lib = C.CDLL(None)\n\n    def bind(name, args):\n        fn = getattr(lib, name)\n        fn.argtypes = args\n        fn.restype = C.c_int\n        return fn\n\n    create = bind(\n        \"cuMemCreate\", [C.POINTER(C.c_uint64), C.c_size_t, C.c_void_p, C.c_ulonglong]\n    )\n    export = bind(\n        \"cuMemExportToShareableHandle\", [C.c_void_p, C.c_uint64, C.c_int, C.c_ulonglong]\n    )\n    release = bind(\"cuMemRelease\", [C.c_uint64])\n    map_ = bind(\n        \"cuMemMap\", [C.c_uint64, C.c_size_t, C.c_size_t, C.c_uint64, C.c_ulonglong]\n    )\n    unmap = bind(\"cuMemUnmap\", [C.c_uint64, C.c_size_t])\n\n    def mem_create(size, prop, flags):\n        handle = C.c_uint64()\n        result = create(C.byref(handle), size, prop.getPtr(), flags)\n        return cuda.CUresult(result), handle.value\n\n    def mem_export(handle, kind, flags):\n        if int(kind) != 1:\n            raise ValueError(\"POSIX FD only\")\n        fd = C.c_int(-1)\n        result = export(C.byref(fd), int(handle), int(kind), flags)\n        return cuda.CUresult(result), fd.value\n\n    cuda.cuMemCreate = mem_create\n    cuda.cuMemExportToShareableHandle = mem_export\n    cuda.cuMemRelease = lambda handle: (cuda.CUresult(release(int(handle))),)\n    cuda.cuMemMap = lambda va, size, offset, handle, flags: (\n        cuda.CUresult(map_(int(va), size, offset, int(handle), flags)),\n    )\n    cuda.cuMemUnmap = lambda va, size: (cuda.CUresult(unmap(int(va), size)),)\n"
+      }
+    },
+    {
+      "kind": "Pod",
+      "apiVersion": "v1",
+      "metadata": {
+        "name": "gms-v1-server-bridge-source-0928",
+        "namespace": "schwinns-vcluster",
+        "labels": {
+          "experiment": "gms-v1-0928"
+        },
+        "annotations": {
+          "nvidia.com/snapshot-pagebroker": "true",
+          "nvidia.com/cuinterpose-enabled": "true"
+        }
+      },
+      "spec": {
+        "volumes": [
+          {
+            "name": "snapshot-control",
+            "emptyDir": {}
+          },
+          {
+            "name": "tun",
+            "hostPath": {
+              "path": "/dev/net/tun",
+              "type": "CharDevice"
+            }
+          },
+          {
+            "name": "app",
+            "configMap": {
+              "name": "gms-v1-server-bridge-app-0928"
+            }
+          },
+          {
+            "name": "model-cache",
+            "nfs": {
+              "server": "192.168.0.223",
+              "path": "/unikorn-identity-03cfadd31877-551/pvc-92b73e65-4eb9-486c-a773-8f58c2f32abd"
+            }
+          },
+          {
+            "name": "dshm",
+            "emptyDir": {
+              "medium": "Memory",
+              "sizeLimit": "32Gi"
+            }
+          },
+          {
+            "name": "snapshot-cuda",
+            "emptyDir": {}
+          },
+          {
+            "name": "gms",
+            "emptyDir": {}
+          },
+          {
+            "name": "artifacts",
+            "persistentVolumeClaim": {
+              "claimName": "snapshot-pvc"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "snapshot-cuda-install",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+            "command": [
+              "/bin/sh",
+              "-c"
+            ],
+            "args": [
+              "cp /usr/local/sbin/cuda-checkpoint /usr/local/lib/snapshot/libcuinterpose.so /snapshot-cuda/ && cp /checkpoints/gms-restore-0928/libcuinterpose_export_core.so /snapshot-cuda/libcuinterpose_core.so"
+            ],
+            "resources": {},
+            "volumeMounts": [
+              {
+                "name": "snapshot-cuda",
+                "mountPath": "/snapshot-cuda"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints",
+                "readOnly": true
+              }
+            ],
+            "imagePullPolicy": "IfNotPresent",
+            "securityContext": {
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "readOnlyRootFilesystem": true,
+              "allowPrivilegeEscalation": false,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            }
+          }
+        ],
+        "containers": [
+          {
+            "name": "main",
+            "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+            "command": [
+              "python3",
+              "-u",
+              "/snapshot-app/fast_server.py",
+              "--rank",
+              "0",
+              "--artifact-root",
+              "/checkpoints/gms-restore-0928/qwen-capture-1",
+              "--checkpoint-target"
+            ],
+            "ports": [
+              {
+                "name": "api",
+                "containerPort": 8000
+              }
+            ],
+            "env": [
+              {
+                "name": "SGLANG_PAGE_SIZE",
+                "value": "16"
+              },
+              {
+                "name": "SNAPSHOT_CONTROL_DIR",
+                "value": "/snapshot-control"
+              },
+              {
+                "name": "HF_HUB_DISABLE_XET",
+                "value": "1"
+              },
+              {
+                "name": "NCCL_CUMEM_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "NCCL_NVLS_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "NCCL_IB_DISABLE",
+                "value": "1"
+              },
+              {
+                "name": "NCCL_RAS_ENABLE",
+                "value": "0"
+              },
+              {
+                "name": "TORCH_NCCL_ENABLE_MONITORING",
+                "value": "0"
+              },
+              {
+                "name": "TORCH_NCCL_DUMP_ON_TIMEOUT",
+                "value": "0"
+              },
+              {
+                "name": "SGLANG_CONTEXT_LENGTH",
+                "value": "4096"
+              },
+              {
+                "name": "VLLM_WORKER_MULTIPROC_METHOD",
+                "value": "spawn"
+              },
+              {
+                "name": "VLLM_ALLOW_INSECURE_SERIALIZATION",
+                "value": "1"
+              },
+              {
+                "name": "HF_HOME",
+                "value": "/model-cache"
+              },
+              {
+                "name": "HF_HUB_OFFLINE",
+                "value": "1"
+              },
+              {
+                "name": "TRANSFORMERS_OFFLINE",
+                "value": "1"
+              },
+              {
+                "name": "SNAPSHOT_MODEL",
+                "value": "/model-cache/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca"
+              },
+              {
+                "name": "VLLM_GPU_MEMORY_UTILIZATION",
+                "value": "0.70"
+              },
+              {
+                "name": "VLLM_MAX_MODEL_LEN",
+                "value": "4096"
+              },
+              {
+                "name": "VLLM_CACHE_ROOT",
+                "value": "/model-cache/glm52-cache/vllm"
+              },
+              {
+                "name": "TORCHINDUCTOR_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/torchinductor"
+              },
+              {
+                "name": "TRITON_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/triton"
+              },
+              {
+                "name": "DG_JIT_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/deepgemm"
+              },
+              {
+                "name": "CUDA_CACHE_PATH",
+                "value": "/model-cache/glm52-cache/nv"
+              },
+              {
+                "name": "XDG_CACHE_HOME",
+                "value": "/model-cache/glm52-cache/xdg"
+              },
+              {
+                "name": "FLASHINFER_WORKSPACE_BASE",
+                "value": "/model-cache/glm52-cache/flashinfer"
+              },
+              {
+                "name": "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+                "value": "/model-cache/glm52-cache/vllm/flashinfer_autotune"
+              },
+              {
+                "name": "DYN_GMS_USE_V1",
+                "value": "true"
+              },
+              {
+                "name": "GMS_SOCKET_DIR",
+                "value": "/gms"
+              },
+              {
+                "name": "PYTHONPATH",
+                "value": "/snapshot-app:/checkpoints/gms-restore-0928/code/lib"
+              },
+              {
+                "name": "CUDA_DEVICE_MAX_COPY_CONNECTIONS",
+                "value": "2"
+              },
+              {
+                "name": "GMS_PROTOTYPE_INTERPOSE_CUDA_PYTHON",
+                "value": "1"
+              },
+              {
+                "name": "LD_PRELOAD",
+                "value": "/tmp/snapshot-cuda/libcuinterpose.so"
+              },
+              {
+                "name": "CUINTERPOSE_GMS_RAW_EXPORT",
+                "value": "1"
+              },
+              {
+                "name": "CUINTERPOSE_QUIESCENT_EXTERNAL_IMPORTS",
+                "value": "1"
+              }
+            ],
+            "resources": {
+              "limits": {
+                "cpu": "48",
+                "memory": "192Gi"
+              },
+              "requests": {
+                "cpu": "8",
+                "memory": "32Gi"
+              },
+              "claims": [
+                {
+                  "name": "gpus",
+                  "request": "tp-1"
+                }
+              ]
+            },
+            "volumeMounts": [
+              {
+                "name": "snapshot-control",
+                "mountPath": "/snapshot-control",
+                "subPath": "main"
+              },
+              {
+                "name": "tun",
+                "mountPath": "/dev/net/tun"
+              },
+              {
+                "name": "app",
+                "readOnly": true,
+                "mountPath": "/snapshot-app"
+              },
+              {
+                "name": "model-cache",
+                "mountPath": "/model-cache"
+              },
+              {
+                "name": "model-cache",
+                "mountPath": "/root/.cache/flashinfer",
+                "subPath": "glm52-cache/flashinfer/.cache/flashinfer"
+              },
+              {
+                "name": "dshm",
+                "mountPath": "/dev/shm"
+              },
+              {
+                "name": "snapshot-cuda",
+                "readOnly": true,
+                "mountPath": "/tmp/snapshot-cuda"
+              },
+              {
+                "name": "gms",
+                "mountPath": "/gms"
+              },
+              {
+                "name": "artifacts",
+                "mountPath": "/checkpoints"
+              }
+            ],
+            "readinessProbe": {
+              "exec": {
+                "command": [
+                  "cat",
+                  "/snapshot-control/ready-for-snapshot"
+                ]
+              },
+              "timeoutSeconds": 2400,
+              "periodSeconds": 1,
+              "failureThreshold": 1800
+            },
+            "imagePullPolicy": "Always"
+          }
+        ],
+        "restartPolicy": "Never",
+        "terminationGracePeriodSeconds": 1,
+        "nodeSelector": {
+          "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "securityContext": {
+          "seccompProfile": {
+            "type": "Localhost",
+            "localhostProfile": "profiles/block-iouring.json"
+          }
+        },
+        "imagePullSecrets": [
+          {
+            "name": "nvcr-secret"
+          },
+          {
+            "name": "acr-token-secret"
+          }
+        ],
+        "tolerations": [
+          {
+            "operator": "Exists"
+          }
+        ],
+        "runtimeClassName": "nvidia",
+        "resourceClaims": [
+          {
+            "name": "gpus",
+            "resourceClaimName": "gms-v1-glm-source-0928"
+          }
+        ]
+      },
+      "status": {}
+    }
+  ]
+}

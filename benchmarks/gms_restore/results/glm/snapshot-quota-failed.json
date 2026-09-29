@@ -1,0 +1,48 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshot",
+  "metadata": {
+    "annotations": {
+      "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"PodSnapshot\",\"metadata\":{\"annotations\":{},\"name\":\"gms-v1-glm-0928\",\"namespace\":\"schwinns-vcluster\"},\"spec\":{\"source\":{\"podRef\":{\"containers\":[\"main\"],\"name\":\"gms-v1-glm-source-0928\",\"uid\":\"14958d6b-41d8-43bf-b469-79ee2b56c7e9\"}}}}\n"
+    },
+    "creationTimestamp": "2026-09-29T00:43:33Z",
+    "finalizers": [
+      "nvidia.com/podsnapshotcontent-cleanup"
+    ],
+    "generation": 1,
+    "name": "gms-v1-glm-0928",
+    "namespace": "schwinns-vcluster",
+    "resourceVersion": "11493630",
+    "uid": "350fb6cc-b685-401a-b2c4-426a69c712b0"
+  },
+  "spec": {
+    "source": {
+      "podRef": {
+        "containers": [
+          "main"
+        ],
+        "name": "gms-v1-glm-source-0928",
+        "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+      }
+    }
+  },
+  "status": {
+    "boundSnapshotContentName": "podsnapshotcontent-350fb6cc-b685-401a-b2c4-426a69c712b0",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T00:43:33Z",
+        "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/4ec711d2-3ed9-4c13-99c0-d8797cdc39a1]",
+        "reason": "CheckpointFailed",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T00:43:33Z",
+        "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/4ec711d2-3ed9-4c13-99c0-d8797cdc39a1]",
+        "reason": "CheckpointFailed",
+        "status": "True",
+        "type": "Failed"
+      }
+    ]
+  }
+}

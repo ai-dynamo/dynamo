@@ -1,0 +1,99 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshotContent",
+  "metadata": {
+    "creationTimestamp": "2026-09-29T00:53:44Z",
+    "finalizers": [
+      "nvidia.com/podsnapshotcontent-artifact-cleanup"
+    ],
+    "generation": 1,
+    "labels": {
+      "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:finalizers": {
+              ".": {},
+              "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+            },
+            "f:labels": {
+              ".": {},
+              "f:nvidia.com/snapshot-node": {}
+            }
+          },
+          "f:spec": {
+            ".": {},
+            "f:snapshotRef": {
+              ".": {},
+              "f:name": {},
+              "f:namespace": {},
+              "f:uid": {}
+            },
+            "f:source": {
+              ".": {},
+              "f:nodeName": {},
+              "f:podRef": {
+                ".": {},
+                "f:containers": {},
+                "f:name": {},
+                "f:uid": {}
+              }
+            }
+          }
+        },
+        "manager": "manager",
+        "operation": "Update",
+        "time": "2026-09-29T00:53:44Z"
+      },
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            ".": {},
+            "f:conditions": {}
+          }
+        },
+        "manager": "snapshot-agent",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T00:57:42Z"
+      }
+    ],
+    "name": "podsnapshotcontent-7cffb7a3-f54a-447f-8e8a-17fa1e18fd49",
+    "resourceVersion": "11495734",
+    "uid": "bcd6efe8-0aed-418d-b4d9-3b8054cb147c"
+  },
+  "spec": {
+    "snapshotRef": {
+      "name": "gms-v1-glm-retry-0928",
+      "namespace": "schwinns-vcluster",
+      "uid": "7cffb7a3-f54a-447f-8e8a-17fa1e18fd49"
+    },
+    "source": {
+      "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "podRef": {
+        "containers": [
+          "main"
+        ],
+        "name": "gms-v1-glm-source-0928",
+        "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+      }
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T00:57:42Z",
+        "message": "Checkpoint captured and verified",
+        "reason": "Captured",
+        "status": "True",
+        "type": "Ready"
+      }
+    ]
+  }
+}

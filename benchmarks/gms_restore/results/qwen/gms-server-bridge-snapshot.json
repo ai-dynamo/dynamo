@@ -1,0 +1,98 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshot",
+  "metadata": {
+    "creationTimestamp": "2026-09-29T00:52:28Z",
+    "finalizers": [
+      "nvidia.com/podsnapshotcontent-cleanup"
+    ],
+    "generation": 1,
+    "managedFields": [
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            ".": {},
+            "f:source": {
+              ".": {},
+              "f:podRef": {
+                ".": {},
+                "f:containers": {},
+                "f:name": {},
+                "f:uid": {}
+              }
+            }
+          }
+        },
+        "manager": "OpenAPI-Generator",
+        "operation": "Update",
+        "time": "2026-09-29T00:52:28Z"
+      },
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:finalizers": {
+              ".": {},
+              "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+            }
+          }
+        },
+        "manager": "manager",
+        "operation": "Update",
+        "time": "2026-09-29T00:52:28Z"
+      },
+      {
+        "apiVersion": "nvidia.com/v1alpha1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            ".": {},
+            "f:boundSnapshotContentName": {},
+            "f:conditions": {}
+          }
+        },
+        "manager": "manager",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T00:52:28Z"
+      }
+    ],
+    "name": "gms-v1-server-bridge-0928",
+    "namespace": "schwinns-vcluster",
+    "resourceVersion": "11494578",
+    "uid": "b70f2a1f-4552-48f1-8981-2e0319c9c663"
+  },
+  "spec": {
+    "source": {
+      "podRef": {
+        "containers": [
+          "main"
+        ],
+        "name": "gms-v1-server-bridge-source-0928",
+        "uid": "4e75bca9-27c8-4530-a2cc-6e0f0f35f368"
+      }
+    }
+  },
+  "status": {
+    "boundSnapshotContentName": "podsnapshotcontent-b70f2a1f-4552-48f1-8981-2e0319c9c663",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T00:52:28Z",
+        "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/7411c668-e10f-4327-8595-2a52d8318e0d]",
+        "reason": "CheckpointFailed",
+        "status": "False",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T00:52:28Z",
+        "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/7411c668-e10f-4327-8595-2a52d8318e0d]",
+        "reason": "CheckpointFailed",
+        "status": "True",
+        "type": "Failed"
+      }
+    ]
+  }
+}

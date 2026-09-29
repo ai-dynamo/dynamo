@@ -1,0 +1,33 @@
+{
+  "case": "nixl-ram-1",
+  "weights_bytes": 481036337152,
+  "preload_span_s": 10.32913851737976,
+  "rank_preload_s": [
+    9.72128176689148,
+    9.62147045135498,
+    9.017799854278564,
+    9.246512174606323,
+    9.347764253616333,
+    8.631609201431274,
+    8.667424440383911,
+    8.320202350616455
+  ],
+  "first_gms_start_to_ready_s": 30.726540088653564,
+  "pod_create_to_ready_s": 34.005462408065796,
+  "verification_orchestration_gap_s": 1.3559556007385254,
+  "agent": {
+    "duration": "14.712358573s",
+    "phases": {
+      "criu_prepare": "33.59327ms",
+      "criu_restore": "3.730703816s",
+      "cuda_restore": "9.11489892s",
+      "gpu_device_map": "88.587854ms",
+      "overlay_capture": "28.416624ms",
+      "pagebroker_commit": "369.085\u00b5s",
+      "pagebroker_mount": "0s",
+      "pagebroker_stage": "59.055232ms",
+      "unaccounted": "1.656733772s"
+    },
+    "started_to_complete": "14.717330907s"
+  }
+}
