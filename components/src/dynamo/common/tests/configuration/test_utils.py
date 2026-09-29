@@ -3,9 +3,11 @@
 
 """Tests for configuration utility functions."""
 import argparse
+import logging
 
 import pytest
 
+from dynamo.common.configuration import utils
 from dynamo.common.configuration.utils import (
     add_argument,
     add_negatable_bool_argument,
@@ -333,3 +335,61 @@ class TestAddNegatableBool:
 
         help_text = parser.format_help()
         assert "False" in help_text or "false" in help_text
+
+
+def _resolve_negatable(env_var: str, default: bool) -> bool:
+    parser = argparse.ArgumentParser()
+    add_negatable_bool_argument(
+        parser,
+        flag_name="--feature",
+        env_var=env_var,
+        default=default,
+        help="test flag",
+    )
+    return parser.parse_args([]).feature
+
+
+@pytest.mark.parametrize(
+    ("value", "env_var"),
+    [("ture", "DYN_TEST_TYPO")],
+)
+def test_unrecognised_bool_env_warns_and_is_false(
+    monkeypatch, caplog, value, env_var
+) -> None:
+    """A flag defaulting to true is the dangerous direction: a typo turns the
+    feature off, and without the warning nothing says so."""
+    monkeypatch.setenv(env_var, value)
+
+    with caplog.at_level(logging.WARNING, logger=utils.__name__):
+        resolved = _resolve_negatable(env_var, default=True)
+
+    assert resolved is False
+    assert env_var in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("true", True), ("on", True), ("TRUE ", True), ("false", False), ("no", False)],
+)
+def test_recognised_bool_env_is_unchanged_and_silent(
+    monkeypatch, caplog, value, expected
+) -> None:
+    env_var = "DYN_TEST_RECOGNISED"
+    monkeypatch.setenv(env_var, value)
+
+    with caplog.at_level(logging.WARNING, logger=utils.__name__):
+        resolved = _resolve_negatable(env_var, default=True)
+
+    assert resolved is expected
+    assert env_var not in caplog.text
+
+
+def test_unrecognised_bool_env_warns_once_per_variable(monkeypatch, caplog) -> None:
+    env_var = "DYN_TEST_WARN_ONCE"
+    monkeypatch.setenv(env_var, "ture")
+
+    with caplog.at_level(logging.WARNING, logger=utils.__name__):
+        _resolve_negatable(env_var, default=True)
+        _resolve_negatable(env_var, default=True)
+
+    assert caplog.text.count(env_var) == 1
