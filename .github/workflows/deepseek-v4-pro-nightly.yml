@@ -122,9 +122,13 @@ jobs:
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
-          until "${k[@]}" wait job/dsv4-bench --for=condition=Complete --timeout=60s; do
+          until "${k[@]}" wait job/dsv4-bench --for=condition=Complete --timeout=5s; do
             "${k[@]}" get job dsv4-bench -o json |
               jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
+            "${k[@]}" get pods -l job-name=dsv4-bench -o wide
+            timeout 60s "${k[@]}" logs -f job/dsv4-bench \
+              --prefix --timestamps --since=1m --tail=20 --ignore-errors || true
+            sleep 5
           done
       - name: Collect logs and perf artifacts
         if: always()
