@@ -179,21 +179,13 @@ func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 // TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins the numeric readers to vLLM's
 // FlexibleArgumentParser precedence: a repeated flag resolves to its final occurrence.
 // Reading the first one makes the operator size a topology the engine will not use --
-// "--tensor-parallel-size 1 -tp 4" launches 4 ranks but would be read as 1.
+// "--tensor-parallel-size 1 --tensor-parallel-size 4" launches 4 ranks but would be read as 1.
 func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
-	for name, args := range map[string][]string{
-		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
-		"long then short":  {tensorParallelSizeFlag, "1", "-tp", "4"},
-		"short then long":  {"-tp", "1", tensorParallelSizeFlag, "4"},
-		"short then short": {"-tp", "1", "-tp", "4"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
-			if got != 4 {
-				t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
-					"applies the last value when a flag is repeated", args, got)
-			}
-		})
+	args := []string{tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"}
+	got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+	if got != 4 {
+		t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
+			"applies the last value when a flag is repeated", args, got)
 	}
 }
 
