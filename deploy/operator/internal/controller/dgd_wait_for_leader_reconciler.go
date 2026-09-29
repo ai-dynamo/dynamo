@@ -27,7 +27,7 @@ import (
 )
 
 // dgdWaitForLeaderReconciler owns the wait-for-leader ConfigMap used by
-// multinode vLLM mp workers.
+// multinode vLLM MP and Ray workers.
 type dgdWaitForLeaderReconciler struct {
 	dgdResourceSyncer
 }
@@ -43,6 +43,7 @@ func (r *dgdWaitForLeaderReconciler) Reconcile(
 	if !dgd.HasAnyMultinodeComponent() {
 		return nil
 	}
+
 	configMap := dynamo.GenerateWaitLeaderConfigMap(dgd.Name, dgd.Namespace)
 	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(context.Context) (*corev1.ConfigMap, bool, error) {
 		return configMap, false, nil
