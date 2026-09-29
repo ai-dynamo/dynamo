@@ -353,6 +353,14 @@ sidecar:
   - 'lib/sidecar/**'
   - '.github/workflows/shared-build-sidecar.yml'
   - 'tests/serve/test_sidecar.py'
+  - 'tests/router/common.py'
+  - 'tests/router/helper.py'
+  - 'tests/router/router_process.py'
+  - 'tests/utils/gpu_args.py'
+  - 'tests/utils/prometheus.py'
+  - 'tests/utils/router_logs.py'
+  - 'tests/utils/router_nvext.py'
+  - 'tests/utils/payloads.py'
   - 'Cargo.toml'
   - 'Cargo.lock'
   # Compliance policy and baseline changes can fail the sidecar image build.
@@ -418,7 +426,7 @@ frontend:
   - 'components/src/dynamo/replay/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
-  - 'tests/frontend/router_aic_image_smoke.py'
+  - 'tests/frontend/router_ais_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
   # The frontend image is rendered from these two: render.py generates its

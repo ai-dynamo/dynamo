@@ -11,7 +11,9 @@ from typing import (
     Dict,
     List,
     Literal,
+    Mapping,
     Optional,
+    Protocol,
     Sequence,
     Set,
     Tuple,
@@ -19,6 +21,7 @@ from typing import (
     overload,
 )
 
+from aisimulate_core.sdk import ForwardPassPerfModelConfig
 from typing_extensions import NotRequired
 
 # Import from specialized modules
@@ -1788,26 +1791,12 @@ class LoadThresholdConfig:
     ) -> None:
         ...
 
-class AicPerfConfig:
-    def __init__(
-        self,
-        aic_backend: str,
-        aic_system: str,
-        aic_model_path: str,
-        aic_tp_size: int = 1,
-        aic_backend_version: Optional[str] = None,
-        aic_moe_tp_size: Optional[int] = None,
-        aic_moe_ep_size: Optional[int] = None,
-        aic_attention_dp_size: Optional[int] = None,
-        aic_nextn: Optional[int] = None,
-        aic_nextn_accept_rates: Optional[str] = None,
-        aic_gemm_dtype: Optional[str] = None,
-        aic_moe_dtype: Optional[str] = None,
-        aic_fmha_dtype: Optional[str] = None,
-        aic_kv_cache_dtype: Optional[str] = None,
-        aic_comm_dtype: Optional[str] = None,
-    ) -> None:
-        ...
+class AisPerfConfig:
+    """Canonical AISimulate estimator identity and controls."""
+
+    def __init__(self, config: Mapping[str, Any] | ForwardPassPerfModelConfig) -> None: ...
+
+    def to_dict(self) -> Dict[str, Any]: ...
 
 class KvRouterConfig:
     """Values for KV router"""
@@ -1884,7 +1873,7 @@ class KvRouterConfig:
                 derivation. Required only for keyed tracking mode.
             router_prefill_load_model: Prompt-side prefill load model (default: "none").
                 "none" keeps static prompt load accounting.
-                "aic" decays the oldest active prefill request using AIC-predicted duration.
+                "ais" decays the oldest active prefill request using AISimulate-predicted duration.
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
             router_approximate_cache_policy: Process-local approximate-index retention policy,
                 "ttl" or "lru" (default: "ttl"). LRU requires use_kv_events=False.
@@ -2011,22 +2000,9 @@ class MockEngineArgs:
         startup_time: Optional[float] = None,
         worker_type: str = "aggregated",
         planner_profile_data: Optional[str | os.PathLike[str]] = None,
-        aic_backend: Optional[str] = None,
-        aic_system: Optional[str] = None,
-        aic_backend_version: Optional[str] = None,
-        aic_tp_size: Optional[int] = None,
-        aic_model_path: Optional[str] = None,
-        aic_moe_tp_size: Optional[int] = None,
-        aic_moe_ep_size: Optional[int] = None,
-        aic_attention_dp_size: Optional[int] = None,
-        aic_nextn: Optional[int] = None,
-        aic_nextn_accept_rates: Optional[str] = None,
-        aic_mtp_seed: int = 42,
-        aic_gemm_dtype: Optional[str] = None,
-        aic_moe_dtype: Optional[str] = None,
-        aic_fmha_dtype: Optional[str] = None,
-        aic_kv_cache_dtype: Optional[str] = None,
-        aic_comm_dtype: Optional[str] = None,
+        ais_nextn: Optional[int] = None,
+        ais_nextn_accept_rates: Optional[str] = None,
+        ais_mtp_seed: Optional[int] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2045,6 +2021,7 @@ class MockEngineArgs:
         sglang: Optional[SglangArgs] = None,
         trtllm: Optional[TrtllmArgs] = None,
         max_model_len: Optional[int] = None,
+        ais_perf_config: Optional[Mapping[str, Any]] = None,
     ) -> None:
         ...
 
@@ -2100,100 +2077,55 @@ class MockEngineArgs:
     def response_replay_trace_path(self) -> Optional[os.PathLike[str]]: ...
 
     @property
-    def aic_backend(self) -> Optional[str]: ...
-
-    @aic_backend.setter
-    def aic_backend(self, value: Optional[str]) -> None: ...
+    def ais_perf_config(self) -> Optional[Dict[str, Any]]: ...
 
     @property
-    def aic_system(self) -> Optional[str]: ...
-
-    @aic_system.setter
-    def aic_system(self, value: Optional[str]) -> None: ...
+    def ais_backend(self) -> Optional[str]: ...
 
     @property
-    def aic_backend_version(self) -> Optional[str]: ...
-
-    @aic_backend_version.setter
-    def aic_backend_version(self, value: Optional[str]) -> None: ...
+    def ais_system(self) -> Optional[str]: ...
 
     @property
-    def aic_tp_size(self) -> Optional[int]: ...
-
-    @aic_tp_size.setter
-    def aic_tp_size(self, value: Optional[int]) -> None: ...
+    def ais_backend_version(self) -> Optional[str]: ...
 
     @property
-    def aic_model_path(self) -> Optional[str]: ...
-
-    @aic_model_path.setter
-    def aic_model_path(self, value: Optional[str]) -> None: ...
+    def ais_tp_size(self) -> Optional[int]: ...
 
     @property
-    def aic_moe_tp_size(self) -> Optional[int]: ...
-
-    @aic_moe_tp_size.setter
-    def aic_moe_tp_size(self, value: Optional[int]) -> None: ...
+    def ais_model_path(self) -> Optional[str]: ...
 
     @property
-    def aic_moe_ep_size(self) -> Optional[int]: ...
-
-    @aic_moe_ep_size.setter
-    def aic_moe_ep_size(self, value: Optional[int]) -> None: ...
+    def ais_moe_tp_size(self) -> Optional[int]: ...
 
     @property
-    def aic_attention_dp_size(self) -> Optional[int]: ...
-
-    @aic_attention_dp_size.setter
-    def aic_attention_dp_size(self, value: Optional[int]) -> None: ...
+    def ais_moe_ep_size(self) -> Optional[int]: ...
 
     @property
-    def aic_gemm_dtype(self) -> Optional[str]: ...
-
-    @aic_gemm_dtype.setter
-    def aic_gemm_dtype(self, value: Optional[str]) -> None: ...
+    def ais_attention_dp_size(self) -> Optional[int]: ...
 
     @property
-    def aic_moe_dtype(self) -> Optional[str]: ...
-
-    @aic_moe_dtype.setter
-    def aic_moe_dtype(self, value: Optional[str]) -> None: ...
+    def ais_gemm_dtype(self) -> Optional[str]: ...
 
     @property
-    def aic_fmha_dtype(self) -> Optional[str]: ...
-
-    @aic_fmha_dtype.setter
-    def aic_fmha_dtype(self, value: Optional[str]) -> None: ...
+    def ais_moe_dtype(self) -> Optional[str]: ...
 
     @property
-    def aic_kv_cache_dtype(self) -> Optional[str]: ...
-
-    @aic_kv_cache_dtype.setter
-    def aic_kv_cache_dtype(self, value: Optional[str]) -> None: ...
+    def ais_fmha_dtype(self) -> Optional[str]: ...
 
     @property
-    def aic_comm_dtype(self) -> Optional[str]: ...
-
-    @aic_comm_dtype.setter
-    def aic_comm_dtype(self, value: Optional[str]) -> None: ...
+    def ais_kv_cache_dtype(self) -> Optional[str]: ...
 
     @property
-    def aic_nextn(self) -> Optional[int]: ...
-
-    @aic_nextn.setter
-    def aic_nextn(self, value: Optional[int]) -> None: ...
+    def ais_comm_dtype(self) -> Optional[str]: ...
 
     @property
-    def aic_nextn_accept_rates(self) -> Optional[str]: ...
-
-    @aic_nextn_accept_rates.setter
-    def aic_nextn_accept_rates(self, value: Optional[str]) -> None: ...
+    def ais_nextn(self) -> Optional[int]: ...
 
     @property
-    def aic_mtp_seed(self) -> int: ...
+    def ais_nextn_accept_rates(self) -> Optional[str]: ...
 
-    @aic_mtp_seed.setter
-    def aic_mtp_seed(self, value: int) -> None: ...
+    @property
+    def ais_mtp_seed(self) -> int: ...
 
     @property
     def gpu_memory_utilization(self) -> Optional[float]: ...
@@ -2230,22 +2162,9 @@ class MockEngineArgs:
         zmq_replay_port: Optional[int] = None,
         kv_bytes_per_token: Optional[int] = None,
         num_gpu_blocks: Optional[int] = None,
-        aic_backend: Optional[str] = None,
-        aic_system: Optional[str] = None,
-        aic_backend_version: Optional[str] = None,
-        aic_tp_size: Optional[int] = None,
-        aic_model_path: Optional[str] = None,
-        aic_moe_tp_size: Optional[int] = None,
-        aic_moe_ep_size: Optional[int] = None,
-        aic_attention_dp_size: Optional[int] = None,
-        aic_nextn: Optional[int] = None,
-        aic_nextn_accept_rates: Optional[str] = None,
-        aic_mtp_seed: Optional[int] = None,
-        aic_gemm_dtype: Optional[str] = None,
-        aic_moe_dtype: Optional[str] = None,
-        aic_fmha_dtype: Optional[str] = None,
-        aic_kv_cache_dtype: Optional[str] = None,
-        aic_comm_dtype: Optional[str] = None,
+        ais_nextn: Optional[int] = None,
+        ais_nextn_accept_rates: Optional[str] = None,
+        ais_mtp_seed: Optional[int] = None,
         gpu_memory_utilization: Optional[float] = None,
         mem_fraction_static: Optional[float] = None,
         free_gpu_memory_fraction: Optional[float] = None,
@@ -2488,6 +2407,63 @@ async def run_input(
     """
     ...
 
+class ReplaySchedulerMetricsSnapshot(TypedDict):
+    worker_id: int
+    dp_rank: int
+    active_blocks: int
+    inactive_blocks: int
+    total_blocks: int
+    active_cache_usage: float
+    physical_cache_usage: float
+    running_requests: int
+    waiting_requests: int
+
+class ReplaySchedulerIntervalMetrics(TypedDict):
+    cache_hit_tokens: int
+    cache_total_tokens: int
+    preemptions: int
+
+class ReplayTrafficMetricsSnapshot(TypedDict):
+    duration_s: float
+    arriving_requests: int
+    completed_requests: int
+    avg_isl: float
+    avg_osl: float
+    avg_ttft_ms: float
+    avg_itl_ms: float
+    ttft_count: int
+    itl_count: int
+    avg_router_kv_hit_rate: float
+    router_kv_hit_rate_count: int
+    avg_accept_length: Optional[float]
+    accept_length_forward_count: int
+
+class ReplayTelemetrySnapshot(TypedDict):
+    sample_ordinal: int
+    kind: Literal["baseline", "periodic", "final"]
+    interval_start_ms: float
+    sampled_at_ms: float
+    traffic: ReplayTrafficMetricsSnapshot
+    prefill_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    decode_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    prefill_interval_metrics: ReplaySchedulerIntervalMetrics
+    decode_interval_metrics: ReplaySchedulerIntervalMetrics
+    router_pending_prefill_requests: int
+    router_pending_decode_requests: int
+    active_prefill_ids: list[int]
+    active_decode_ids: list[int]
+    starting_prefill_ids: list[int]
+    starting_decode_ids: list[int]
+    draining_prefill_ids: list[int]
+    draining_decode_ids: list[int]
+
+class ReplayTelemetryDetails(TypedDict):
+    sample_interval_ms: float
+    samples: list[ReplayTelemetrySnapshot]
+
+class ReplayTelemetryCallback(Protocol):
+    def __call__(self, snapshot: ReplayTelemetrySnapshot, /) -> None: ...
+
 class _OfflineReplayResult:
     @property
     def summary(self) -> Dict[str, Any]: ...
@@ -2497,6 +2473,8 @@ class _OfflineReplayResult:
     def coverage(self) -> Dict[str, Any]: ...
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
+    @property
+    def telemetry(self) -> Optional[ReplayTelemetryDetails]: ...
 
 @overload
 def run_mocker_trace_replay(
@@ -2521,7 +2499,7 @@ def run_mocker_trace_replay(
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
-    aic_perf_config: Optional[AicPerfConfig] = None,
+    ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
@@ -2552,6 +2530,10 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2572,6 +2554,18 @@ def run_mocker_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    Replay telemetry is independent from ``scaling_policy``. Set
+    ``capture_telemetry`` to retain samples on the offline result, provide
+    ``telemetry_callback`` to consume each sample without retaining it, or set
+    ``telemetry_jsonl_path`` to stream one JSON object per sample. The positive
+    ``telemetry_sample_interval_ms`` cadence is measured in simulated time and
+    does not need to be a multiple of a Planner tick. Callbacks and per-sample
+    JSONL writes are synchronous and therefore extend replay wall time. The
+    final buffered-file flush occurs after the simulator finalizes
+    ``wall_time_ms``; time the outer call for end-to-end persistence overhead.
+    The JSONL target is opened on the first sample; after a write failure,
+    completed prior lines remain and the failing final line may be partial.
     """
     ...
 
@@ -2604,7 +2598,7 @@ def run_mocker_synthetic_trace_replay(
     prefill_engine_args: Optional[MockEngineArgs] = None,
     decode_engine_args: Optional[MockEngineArgs] = None,
     router_config: Optional[KvRouterConfig] = None,
-    aic_perf_config: Optional[AicPerfConfig] = None,
+    ais_perf_config: Optional[AisPerfConfig] = None,
     num_workers: int = 1,
     num_prefill_workers: int = 1,
     num_decode_workers: int = 1,
@@ -2626,6 +2620,10 @@ def run_mocker_synthetic_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2639,6 +2637,10 @@ def run_mocker_synthetic_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    Replay telemetry uses the same policy-neutral capture, callback, and JSONL
+    options as ``run_mocker_trace_replay``. Its cadence is simulated time and
+    is independent from Planner ticks.
     """
     ...
 
@@ -2944,7 +2946,7 @@ class KvRouter:
         endpoint: Endpoint,
         block_size: int,
         kv_router_config: KvRouterConfig,
-        aic_perf_config: Optional[AicPerfConfig] = None,
+        ais_perf_config: Optional[AisPerfConfig] = None,
         session_affinity_ttl_secs: Optional[int] = None,
         *,
         load_threshold_config: Optional[LoadThresholdConfig] = None,
@@ -2957,7 +2959,7 @@ class KvRouter:
             endpoint: The endpoint to connect to for routing requests
             block_size: The KV cache block size
             kv_router_config: Configuration for the KV router
-            aic_perf_config: Optional AIC perf-model config for effective prefill load tracking
+            ais_perf_config: Canonical AIS configuration for effective prefill load tracking
             session_affinity_ttl_secs: Optional router-local session-affinity idle TTL in seconds
             load_threshold_config: Optional overload-admission thresholds; all checks are disabled when omitted
             session_affinity_mode: Session binding behavior: ``hard`` or ``soft``
@@ -3221,7 +3223,7 @@ class EntrypointArgs:
         migration_limit: int = 0,
         migration_max_seq_len: Optional[int] = None,
         chat_engine_factory: Optional[Callable] = None,
-        aic_perf_config: Optional[AicPerfConfig] = None,
+        ais_perf_config: Optional[AisPerfConfig] = None,
         *,
         tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
@@ -3259,7 +3261,7 @@ class EntrypointArgs:
             migration_limit: Maximum number of request migrations (0=disabled)
             migration_max_seq_len: Optional max sequence length for migration
             chat_engine_factory: Optional Python chat completions engine factory callback
-            aic_perf_config: Optional AIC perf-model configuration for default KV routing
+            ais_perf_config: Canonical AIS configuration for default KV routing
             metrics_prefix: Optional Prometheus metrics prefix override
             enable_anthropic_api: Optional Anthropic Messages API override
             strip_anthropic_preamble: Optional Anthropic preamble stripping override

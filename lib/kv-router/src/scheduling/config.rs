@@ -473,14 +473,19 @@ impl fmt::Display for RouterQueuePolicy {
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
-    Aic,
+    // v1.5 frontends only recognize "aic" in worker cards.
+    // TODO(v1.8): write "ais" with alias="aic" when v1.5 leaves N-2.
+    // TODO(v1.10): remove the wire "aic" alias when v1.7 writers leave N-2,
+    // provided v1.8 and later consistently emit "ais".
+    #[serde(rename = "aic", alias = "ais")]
+    Ais,
 }
 
 impl fmt::Display for RouterPrefillLoadModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::None => f.write_str("none"),
-            Self::Aic => f.write_str("aic"),
+            Self::Ais => f.write_str("ais"),
         }
     }
 }
@@ -491,9 +496,9 @@ impl FromStr for RouterPrefillLoadModel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "aic" => Ok(Self::Aic),
+            "ais" | "aic" => Ok(Self::Ais),
             _ => Err(format!(
-                "unknown prefill load model: {s:?}, expected 'none' or 'aic'"
+                "unknown prefill load model: {s:?}, expected 'none' or 'ais'"
             )),
         }
     }
@@ -857,7 +862,7 @@ pub struct KvRouterConfig {
     pub policy_config_cache: OnceLock<super::policy_config::RouterPolicyConfig>,
 
     /// Number of KV indexer worker threads.
-    /// When > 1, uses ConcurrentRadixTree with a thread pool for event-driven
+    /// When > 1, uses ConcurrentRadixTreeCompressed with a thread pool for event-driven
     /// and approximate routing writes. Default: 4.
     pub router_event_threads: u32,
 
@@ -1605,6 +1610,48 @@ mod tests {
     }
 
     #[test]
+    fn prefill_load_model_preserves_legacy_wire_value_and_canonical_name() {
+        // The v1.5 reader recognizes only these two wire variants.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum LegacyPrefillLoadModel {
+            None,
+            Aic,
+        }
+
+        for spelling in ["aic", "ais"] {
+            let model: RouterPrefillLoadModel =
+                serde_json::from_value(serde_json::json!(spelling)).unwrap();
+            assert_eq!(model, RouterPrefillLoadModel::Ais);
+            assert_eq!(model.to_string(), "ais");
+            let wire = serde_json::to_string(&model).unwrap();
+            assert_eq!(wire, r#""aic""#);
+            assert_eq!(
+                serde_json::from_str::<LegacyPrefillLoadModel>(&wire).unwrap(),
+                LegacyPrefillLoadModel::Aic
+            );
+
+            let config = config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", spelling)]);
+            assert_eq!(
+                config.router_prefill_load_model,
+                RouterPrefillLoadModel::Ais
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<RouterPrefillLoadModel>(r#""none""#).unwrap(),
+            RouterPrefillLoadModel::None
+        );
+        assert_eq!(
+            serde_json::from_str::<LegacyPrefillLoadModel>(
+                &serde_json::to_string(&RouterPrefillLoadModel::None).unwrap()
+            )
+            .unwrap(),
+            LegacyPrefillLoadModel::None
+        );
+        assert!(serde_json::from_str::<RouterPrefillLoadModel>(r#""unknown""#).is_err());
+    }
+
+    #[test]
     fn dynamo_env_config_parses_canonical_settings() {
         let config = config_from_values(&[
             ("DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT", "0.25"),
@@ -1633,7 +1680,7 @@ mod tests {
             ("DYN_SHARED_CACHE_TYPE", "hicache"),
             ("DYN_ROUTER_HOST_CACHE_HIT_WEIGHT", "0.6"),
             ("DYN_ROUTER_DISK_CACHE_HIT_WEIGHT", "0.3"),
-            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "aic"),
+            ("DYN_ROUTER_PREFILL_LOAD_MODEL", "ais"),
             (DYN_ROUTER_PREFILL_POLICY, "prefill-cli"),
             (DYN_ROUTER_DECODE_POLICY, "decode-cli"),
             (DYN_ROUTER_APPROXIMATE_CACHE_POLICY, "lru"),
@@ -1672,7 +1719,7 @@ mod tests {
         assert_eq!(config.disk_cache_hit_weight, 0.3);
         assert_eq!(
             config.router_prefill_load_model,
-            RouterPrefillLoadModel::Aic
+            RouterPrefillLoadModel::Ais
         );
         assert_eq!(
             config.router_approximate_cache_policy,
@@ -1761,7 +1808,7 @@ mod tests {
 
         let error =
             try_config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", "fast")]).unwrap_err();
-        assert!(error.contains("expected 'none' or 'aic'"));
+        assert!(error.contains("expected 'none' or 'ais'"));
 
         assert!(serde_json::to_string(&config_from_values(&[])).is_ok());
     }
@@ -2330,7 +2377,7 @@ worker_selection:
     #[test]
     fn policy_config_uses_fast_recheck_with_prefill_load_model() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some("/tmp/policy.yaml".to_string()),
             router_queue_threshold: None,
             ..Default::default()
@@ -2358,7 +2405,7 @@ worker_selection:
         )
         .unwrap();
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_policy_config: Some(policy_file.path().display().to_string()),
             ..Default::default()
         };
@@ -2373,7 +2420,7 @@ worker_selection:
     #[test]
     fn prefill_load_model_allows_wspt_policy_classes() {
         let config = KvRouterConfig {
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             router_queue_policy: RouterQueuePolicy::Wspt,
             ..Default::default()
         };
