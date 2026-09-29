@@ -601,7 +601,8 @@ runs:
         # Count ready Pods, not total: a terminal Pod never becomes ready. Scope
         # to this run's vCluster; a shared namespace holds identically named Pods.
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
-        end=$((SECONDS + 1800))
+        READY_TIMEOUT=1800
+        end=$((SECONDS + READY_TIMEOUT))
         while true; do
           # Default shell is `bash -eo pipefail`, so a bare assignment would
           # inherit kubectl's status and abandon the retry loop on one blip.
@@ -638,7 +639,7 @@ runs:
             break
           fi
           if [ "${SECONDS}" -ge "${end}" ]; then
-            echo "::error::Operator Pods were not ready within 600s (dynamo ready=${DYNAMO_READY}, grove ready=${GROVE_READY}, Pods: ${POD_SUMMARY:-not found})"
+            echo "::error::Operator Pods were not ready within ${READY_TIMEOUT}s (dynamo ready=${DYNAMO_READY}, grove ready=${GROVE_READY}, Pods: ${POD_SUMMARY:-not found})"
             exit 1
           fi
           echo "Waiting for operator readiness... dynamo=${DYNAMO_READY} grove=${GROVE_READY} pods=${POD_SUMMARY:-not found}"
