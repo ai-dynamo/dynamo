@@ -181,6 +181,7 @@ def test_structural_tag_flag_uses_default_config(monkeypatch):
 
 def test_structural_tag_json_config_enables_and_fills_defaults(monkeypatch):
     _clear_structural_tag_env(monkeypatch)
+    monkeypatch.setattr(runtime_args, "distribution_version", lambda _: "0.2.3")
 
     config, _ = _parse_runtime_args(
         [
@@ -201,6 +202,26 @@ def test_structural_tag_json_config_enables_and_fills_defaults(monkeypatch):
         "reasoning_boundary": "backend",
         "tool_arguments_any_order": True,
     }
+
+
+@pytest.mark.parametrize(
+    ("xgrammar_version", "supported"), [("0.2.1", False), ("0.2.3", True)]
+)
+def test_structural_tag_any_order_requires_supported_xgrammar(
+    monkeypatch, xgrammar_version, supported
+):
+    _clear_structural_tag_env(monkeypatch)
+    monkeypatch.setattr(
+        runtime_args, "distribution_version", lambda _: xgrammar_version
+    )
+    argv = ["--dyn-structural-tag", '{"tool_arguments_any_order":true}']
+
+    if supported:
+        config, _ = _parse_runtime_args(argv)
+        assert config.structural_tag["tool_arguments_any_order"] is True
+    else:
+        with pytest.raises(ValueError, match="requires XGrammar >= 0.2.3"):
+            _parse_runtime_args(argv)
 
 
 def test_structural_tag_environment_is_supported(monkeypatch):

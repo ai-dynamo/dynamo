@@ -6,9 +6,11 @@
 import argparse
 import logging
 import os
+from importlib.metadata import version as distribution_version
 from typing import List, Literal, Optional
 
 import msgspec
+from packaging.version import Version
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -559,6 +561,15 @@ class DynamoRuntimeArgGroup(ArgGroup):
         )
 
 
+def _validate_xgrammar_any_order_support() -> None:
+    xgrammar_version = Version(distribution_version("xgrammar"))
+    if xgrammar_version < Version("0.2.3"):
+        raise ValueError(
+            "tool_arguments_any_order requires XGrammar >= 0.2.3; "
+            f"found {xgrammar_version}"
+        )
+
+
 def resolve_structural_tag_config(
     runtime_config: DynamoRuntimeConfig,
 ) -> Optional[dict[str, object]]:
@@ -606,6 +617,11 @@ def resolve_structural_tag_config(
             )
         if not enabled:
             return None
+        if (
+            isinstance(structural_tag_setting, StructuralTagConfig)
+            and structural_tag_setting.tool_arguments_any_order
+        ):
+            _validate_xgrammar_any_order_support()
         return msgspec.to_builtins(structural_tag_setting)
 
     if legacy_enable is not True:
