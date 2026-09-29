@@ -554,6 +554,14 @@ jobs:
         if: env.NIGHTLY != 'true'
         env:
           NGC_HELM_REPO: https://helm.ngc.nvidia.com/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
+          # OCI mirror of the same staging namespace. ChartMuseum and OCI are
+          # SEPARATE registries in NGC — a chart in one is invisible from the
+          # other — so a GA release that only cm-pushes leaves the OCI copy
+          # missing, and the OCI publishing MR has nothing to promote. The
+          # nightly step below has dual-pushed since it was written; this step
+          # did not, which is why every GA chart through 1.4.0 is
+          # ChartMuseum-only.
+          NGC_HELM_OCI_REPO: oci://nvcr.io/${{ secrets.NGC_PUBLISH_ORG }}/ai-dynamo
           NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
           NGC_USERNAME: ${{ secrets.NGC_PUBLISH_USERNAME }}
           HELM_CHART_VERSION: ${{ needs.prepare-release.outputs.helm_chart_version }}
@@ -591,6 +599,22 @@ jobs:
           echo "Pushing ${CHART_FILE} to NGC Helm registry..."
           helm cm-push "${CHART_FILE}" "${REPO_ALIAS}"
           echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC Helm registry" >> $GITHUB_STEP_SUMMARY
+
+          # Same tarball, second registry. helm does not read docker's login for
+          # OCI, so this needs its own registry login. Fail-soft: ChartMuseum is
+          # still the primary distribution channel and has already succeeded by
+          # this point, so an OCI hiccup must not fail the release. The GitLab
+          # publish:helm-oci:ondemand job probes for this copy and fails loudly
+          # if it is missing, so a soft failure here cannot ship silently.
+          echo "Pushing ${CHART_FILE} to NGC OCI registry..."
+          if echo "${NGC_TOKEN}" | helm registry login nvcr.io \
+               --username "${NGC_USERNAME}" --password-stdin \
+             && helm push "${CHART_FILE}" "${NGC_HELM_OCI_REPO}"; then
+            echo "- \`${CHART_NAME}:${HELM_CHART_VERSION}\` pushed to NGC OCI (\`${NGC_HELM_OCI_REPO}/${CHART_NAME}\`)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "::warning::OCI push of ${CHART_FILE} failed — the ChartMuseum copy is unaffected. Re-run this job or push by hand before the OCI publishing MR."
+            echo "- :warning: \`${CHART_NAME}:${HELM_CHART_VERSION}\` OCI push FAILED (ChartMuseum copy is fine)" >> $GITHUB_STEP_SUMMARY
+          fi
 
           helm repo remove "${REPO_ALIAS}"
 

@@ -251,9 +251,9 @@ below 5 s and p50 user output throughput at or above 50 tok/s.
 | Chat (15% subset) | Disaggregated 1P:2D, round-robin | vLLM | B200 | 44 | 206.20 | 51.69 | 2277 |
 
 Figures are measured with the profile's benchmark manifest (`perf.yaml` for
-aggregated, `perf-disagg.yaml` for disaggregated). That configuration isolates the
-warmup phase from profiling; it does not clear server-side KV cache. For runs that
-must start from a cold cache, restart the worker pods between them.
+aggregated, `perf-disagg.yaml` for disaggregated). Neither manifest clears
+server-side KV cache, so a run inherits whatever the workers already hold. For runs
+that must start from a cold cache, restart the worker pods between them.
 
 ## Source
 

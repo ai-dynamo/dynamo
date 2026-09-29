@@ -8,8 +8,7 @@ use dynamo_kv_router::indexer::pruning::PruneConfig;
 use dynamo_kv_router::indexer::{KvIndexer, KvIndexerInterface, KvIndexerMetrics};
 use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, StorageTier};
 use dynamo_kv_router::{
-    BranchShardedIndexer, ConcurrentRadixTree, ConcurrentRadixTreeCompressed, PositionalIndexer,
-    ThreadPoolIndexer,
+    BranchShardedIndexer, ConcurrentRadixTreeCompressed, PositionalIndexer, ThreadPoolIndexer,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +20,6 @@ use dynamo_bench::kv_router_common::trace_gen::WorkerTimelines;
 pub enum MooncakeIndexerKind {
     RadixTree,
     NestedMap,
-    ConcurrentRadixTree,
     ConcurrentRadixTreeCompressed,
     BranchShardedCrtc,
 }
@@ -58,14 +56,6 @@ impl MooncakeIndexerConfig {
         }
     }
 
-    pub fn concurrent_radix_tree(num_event_workers: usize) -> Self {
-        Self {
-            kind: MooncakeIndexerKind::ConcurrentRadixTree,
-            num_event_workers,
-            ..Self::radix_tree()
-        }
-    }
-
     pub fn concurrent_radix_tree_compressed(num_event_workers: usize) -> Self {
         Self {
             kind: MooncakeIndexerKind::ConcurrentRadixTreeCompressed,
@@ -92,7 +82,6 @@ impl MooncakeIndexerConfig {
         match self.kind {
             MooncakeIndexerKind::RadixTree => "radix-tree",
             MooncakeIndexerKind::NestedMap => "nested-map",
-            MooncakeIndexerKind::ConcurrentRadixTree => "concurrent-radix-tree",
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 "concurrent-radix-tree-compressed"
             }
@@ -104,13 +93,12 @@ impl MooncakeIndexerConfig {
         let config = match name {
             "radix-tree" => Self::radix_tree(),
             "nested-map" => Self::nested_map(8, num_event_workers),
-            "concurrent-radix-tree" => Self::concurrent_radix_tree(num_event_workers),
             "concurrent-radix-tree-compressed" => {
                 Self::concurrent_radix_tree_compressed(num_event_workers)
             }
             "branch-sharded-crtc" => Self::branch_sharded_crtc(2, num_event_workers, 2),
             _ => anyhow::bail!(
-                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree, concurrent-radix-tree-compressed, branch-sharded-crtc",
+                "Unknown indexer '{}'. Valid names: radix-tree, nested-map, concurrent-radix-tree-compressed, branch-sharded-crtc",
                 name
             ),
         };
@@ -134,14 +122,6 @@ impl MooncakeIndexerConfig {
                 block_size,
                 Some(metrics),
             )),
-            MooncakeIndexerKind::ConcurrentRadixTree => {
-                Arc::new(ThreadPoolIndexer::new_with_metrics(
-                    ConcurrentRadixTree::new(),
-                    self.num_event_workers,
-                    block_size,
-                    Some(metrics),
-                ))
-            }
             MooncakeIndexerKind::ConcurrentRadixTreeCompressed => {
                 Arc::new(ThreadPoolIndexer::new_with_metrics(
                     ConcurrentRadixTreeCompressed::new(),
@@ -187,15 +167,6 @@ impl MooncakeIndexerConfig {
             MooncakeIndexerKind::NestedMap => {
                 Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
                     PositionalIndexer::new(self.jump_size),
-                    self.num_event_workers,
-                    block_size,
-                    Some(metrics),
-                    Some(prune_config),
-                ))
-            }
-            MooncakeIndexerKind::ConcurrentRadixTree => {
-                Arc::new(ThreadPoolIndexer::new_with_metrics_and_pruning(
-                    ConcurrentRadixTree::new(),
                     self.num_event_workers,
                     block_size,
                     Some(metrics),

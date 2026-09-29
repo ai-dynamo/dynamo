@@ -156,6 +156,22 @@ spec:
 Treat the generated `InferencePool`, EPP Service, and Deployment as operator-owned resources. Make
 persistent changes in the DGD.
 
+### Endpoint Picker Failure Mode
+
+`InferencePool.spec.endpointPickerRef.failureMode` decides what the gateway does when the EPP does not
+answer, such as when its pod is restarting or has failed:
+
+- `FailClose` drops the request. The client gets an error, in practice HTTP 500.
+- `FailOpen` forwards the request to an endpoint the gateway picks. The request is served, but without
+  KV-aware routing.
+
+The operator does not set this field, so the Gateway API default of `FailClose` applies. Setting it by
+hand on the generated `InferencePool` does not hold: the operator restores its own rendering on the
+next reconcile, which leaves the field unset and lets the default apply again. No DGD field selects it.
+
+A standalone EPP is unaffected. Its `InferencePool` is user-applied, so the value you write is the
+value you keep. The on-ramp example leaves the field out, so it also gets `FailClose`.
+
 ## HTTPRoute Contract
 
 <ParamField path="spec.parentRefs[]" type="ParentReference" required={true}>
