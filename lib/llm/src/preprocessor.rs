@@ -7243,17 +7243,14 @@ impl
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
-        // Apply request payload aggregation strategy.
-        // The payload branch already returns Pin<Box<...>> from scan/fold_aggregate_with_future,
-        // while the non-payload branch boxes the impl Stream from postprocessor_parsing_stream.
+        // Request payload capture is a pass-through: every chunk reaches the HTTP
+        // layer unchanged (metrics, errors, aggregation all behave as with capture
+        // off) while a copy is aggregated on the side for the record.
         let final_stream = if let Some(payload) = payload_handle {
-            let (stream, agg_fut) = if payload.streaming() {
-                // Streaming: apply scan (pass-through + parallel aggregation)
-                crate::request_trace::payload_stream::scan_aggregate_with_future(transformed_stream)
-            } else {
-                // Non-streaming: apply fold (collect all, then emit single chunk)
-                crate::request_trace::payload_stream::fold_aggregate_with_future(transformed_stream)
-            };
+            let (stream, agg_fut) =
+                crate::request_trace::payload_stream::scan_aggregate_with_future(Box::pin(
+                    transformed_stream,
+                ));
 
             // Spawn the payload emit off the request path. The outcome carries a drop
             // reason and any recovered partial response, so emit the record either way.

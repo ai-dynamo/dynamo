@@ -4729,11 +4729,10 @@ mod tests {
         );
     }
 
-    /// Helpers for the #11349 fold/scan regression tests below. They build the
-    /// production stream shape (typed per-chunk metrics, a finish chunk, and
-    /// the zero-token `payload_usage` tail that payload capture appends) and
-    /// read the collector's output back from a private registry.
-    mod fold_regression {
+    /// Request payload capture must be transparent: the collector, the client
+    /// response and the handler's error path behave identically with capture on
+    /// (`scan_aggregate_with_future`) and off (#11349).
+    mod capture_transparency {
         use super::*;
         use crate::http::service::openai::check_for_backend_error;
         use crate::http::service::service_v2::BackendErrorCheck;
@@ -4741,9 +4740,7 @@ mod tests {
         use crate::protocols::openai::ParsingOptions;
         use crate::protocols::openai::chat_completions::NvCreateChatCompletionResponse;
         use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-        use crate::request_trace::payload_stream::{
-            fold_aggregate_with_future, scan_aggregate_with_future,
-        };
+        use crate::request_trace::payload_stream::scan_aggregate_with_future;
         use crate::types::Annotated;
         use futures::{Stream, StreamExt};
 
@@ -4897,13 +4894,19 @@ mod tests {
             }
         }
 
-        /// Drive `stream` through the non-streaming HTTP handler's observation
-        /// chain (observe, backend-error preflight, aggregate) against a
-        /// private registry. Aggregating consumes the stream, which drops the
-        /// collector and flushes ITL and the final OSL.
+        /// Where the non-streaming handler chain rejected the stream, if it did.
+        #[derive(Debug, PartialEq)]
+        enum Rejected {
+            Preflight,
+            Aggregation,
+        }
+
+        /// Drive `stream` through the non-streaming HTTP handler's chain (observe,
+        /// backend-error preflight, aggregate) against a private registry.
+        /// Consuming the stream drops the collector, which flushes ITL and OSL.
         async fn observe_and_aggregate(
             stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
-        ) -> (Registry, NvCreateChatCompletionResponse) {
+        ) -> (Registry, Result<NvCreateChatCompletionResponse, Rejected>) {
             let metrics = Arc::new(Metrics::new_with_prefix(None));
             let registry = Registry::new();
             metrics.register(&registry).unwrap();
@@ -4917,16 +4920,24 @@ mod tests {
                     &mut http_queue_guard,
                 );
             });
-            let checked = check_for_backend_error(observed, BackendErrorCheck::UntilFirstEvent)
-                .await
-                .expect("production-shaped stream must pass the backend-error preflight");
+            let checked =
+                match check_for_backend_error(observed, BackendErrorCheck::UntilFirstEvent).await {
+                    Ok(checked) => checked,
+                    Err(_) => return (registry, Err(Rejected::Preflight)),
+                };
             let response = NvCreateChatCompletionResponse::from_annotated_stream(
                 checked,
                 ParsingOptions::default(),
             )
             .await
-            .expect("aggregation must produce a response");
+            .map_err(|_| Rejected::Aggregation);
             (registry, response)
+        }
+
+        fn ok(
+            result: Result<NvCreateChatCompletionResponse, Rejected>,
+        ) -> NvCreateChatCompletionResponse {
+            result.expect("production-shaped stream must aggregate")
         }
 
         fn assert_identity(response: &NvCreateChatCompletionResponse) {
@@ -4935,150 +4946,158 @@ mod tests {
             assert_eq!(response.inner.created, CREATED);
         }
 
-        /// #11349 regression: non-streaming chat must preserve per-chunk metrics
-        /// through folding and the backend-error preflight, including a zero-token
-        /// payload-usage tail, and the fold's blank metric envelopes must not
-        /// blank the response identity.
+        /// The invariant #11349 is about: same chunks, same collector output,
+        /// same client response, whether capture is on or off.
         #[tokio::test]
-        async fn test_non_streaming_fold_preserves_chunk_metrics() {
-            let (folded, payload_future) =
-                fold_aggregate_with_future(futures::stream::iter(production_chunks()));
-            let (registry, response) = observe_and_aggregate(folded).await;
+        async fn test_capture_does_not_change_metrics_or_response() {
+            let (plain_registry, plain) =
+                observe_and_aggregate(futures::stream::iter(production_chunks())).await;
+            let (captured, future) =
+                scan_aggregate_with_future(futures::stream::iter(production_chunks()));
+            let (capture_registry, capture) = observe_and_aggregate(captured).await;
 
+            let signature_plain = signature(&plain_registry);
             assert_eq!(
-                response.inner.choices[0].message.content.as_ref().unwrap(),
+                signature(&capture_registry),
+                signature_plain,
+                "capture changed the collector output"
+            );
+            // Not three agreeing zeros: the real request.
+            assert_eq!(
+                signature_plain,
+                MetricSignature {
+                    output_tokens_total: 3,
+                    isl: (1, INPUT_TOKENS as u64),
+                    osl: (1, 3),
+                    cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
+                    ttft_samples: 1,
+                    itl_samples: 2,
+                }
+            );
+
+            let (plain, capture) = (ok(plain), ok(capture));
+            assert_eq!(plain, capture, "capture changed the client response");
+            assert_identity(&plain);
+            assert_eq!(
+                plain.inner.choices[0].message.content.as_ref().unwrap(),
                 &dynamo_protocols::types::ChatCompletionMessageContent::Text(
                     "Hello world".to_string()
                 )
             );
-            assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
-            assert_identity(&response);
 
-            let outcome = payload_future.await;
-            assert!(
-                outcome.drop_reason.is_none(),
-                "complete fold must not carry a drop reason"
-            );
-            let record = outcome
-                .response
-                .expect("payload capture must produce a response record");
-            assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+            let outcome = future.await;
+            assert!(outcome.drop_reason.is_none());
+            let record = outcome.response.expect("capture must produce a record");
             assert_identity(&record);
-
-            assert_eq!(
-                signature(&registry),
-                MetricSignature {
-                    // Positive chunks contribute 1 + 2 output tokens; the
-                    // zero-token tail must not increment the counter again.
-                    output_tokens_total: 3,
-                    // ISL and TTFT are emitted once, from the first positive chunk.
-                    isl: (1, INPUT_TOKENS as u64),
-                    // The zero-token tail still supplies the final cumulative
-                    // OSL and the only cached_tokens observation, so dropping
-                    // the tail's metrics is visible here.
-                    osl: (1, 3),
-                    cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
-                    ttft_samples: 1,
-                    // The second chunk contributes two ITL observations.
-                    itl_samples: 2,
-                }
-            );
+            assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
         }
 
-        /// The tool-call jail attaches typed `llm_metrics` to the payload-usage
-        /// tail, so one chunk carries both metric forms. The fold must observe
-        /// it once, typed form winning, exactly as the unfolded stream does;
-        /// forwarding both frames lets the zero-token annotation overwrite the
-        /// final OSL.
+        /// A chunk carrying both typed `llm_metrics` and a `payload_usage`
+        /// annotation (tool-call jail shape) is observed once, typed form
+        /// winning, with capture on or off.
         #[tokio::test]
-        async fn test_non_streaming_fold_observes_dual_carrier_chunk_once() {
+        async fn test_capture_observes_dual_carrier_chunk_once() {
             let dual_carrier = || {
                 let mut tail = payload_usage_tail(3);
                 tail.data.as_mut().unwrap().llm_metrics = Some(chunk_metrics(5, 5));
                 vec![tail]
             };
-
-            let (folded, _payload_future) =
-                fold_aggregate_with_future(futures::stream::iter(dual_carrier()));
-            let (fold_registry, _) = observe_and_aggregate(folded).await;
-            let (control_registry, _) =
+            let (plain_registry, _) =
                 observe_and_aggregate(futures::stream::iter(dual_carrier())).await;
+            let (captured, _future) =
+                scan_aggregate_with_future(futures::stream::iter(dual_carrier()));
+            let (capture_registry, _) = observe_and_aggregate(captured).await;
 
             let expected = MetricSignature {
                 output_tokens_total: 5,
                 isl: (1, INPUT_TOKENS as u64),
-                // Typed metrics win: OSL is 5, not the annotation's 3.
                 osl: (1, 5),
-                // The unobserved annotation also carried cached_tokens; the
-                // control path drops it the same way, since the collector
-                // reads one carrier per chunk.
                 cached_tokens: (0, 0),
                 ttft_samples: 1,
                 itl_samples: 0,
             };
-            assert_eq!(signature(&control_registry), expected);
-            assert_eq!(signature(&fold_registry), expected);
+            assert_eq!(signature(&plain_registry), expected);
+            assert_eq!(signature(&capture_registry), expected);
         }
 
-        /// The invariant #11349 is about: the collector sees the same metrics
-        /// whether payload capture is off, on with streaming (scan), or on
-        /// without streaming (fold). The same chunk vector goes through each
-        /// transform into its own registry; the capture-off cells share the
-        /// untransformed path because neither wrapper is applied there.
+        /// A backend error after content is surfaced to the client as an error
+        /// (not an empty success) with capture on, exactly as with capture off,
+        /// and the metrics observed before the error agree.
         #[tokio::test]
-        async fn test_metrics_parity_across_payload_capture_modes() {
-            let (plain_registry, plain_response) =
-                observe_and_aggregate(futures::stream::iter(production_chunks())).await;
+        async fn test_capture_surfaces_mid_stream_error_identically() {
+            let chunks = || {
+                vec![
+                    chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
+                    Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
+                        "invalid sampling parameter",
+                    ),
+                ]
+            };
+            let (plain_registry, plain) =
+                observe_and_aggregate(futures::stream::iter(chunks())).await;
+            let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
+            let (capture_registry, capture) = observe_and_aggregate(captured).await;
 
-            let (scanned, scan_future) =
-                scan_aggregate_with_future(futures::stream::iter(production_chunks()));
-            let (scan_registry, scan_response) = observe_and_aggregate(scanned).await;
-
-            let (folded, fold_future) =
-                fold_aggregate_with_future(futures::stream::iter(production_chunks()));
-            let (fold_registry, fold_response) = observe_and_aggregate(folded).await;
-
-            let plain = signature(&plain_registry);
+            assert_eq!(plain.unwrap_err(), Rejected::Aggregation);
             assert_eq!(
-                signature(&scan_registry),
-                plain,
-                "scan path diverges from plain"
+                capture.unwrap_err(),
+                Rejected::Aggregation,
+                "capture must not turn an error into a success"
             );
-            assert_eq!(
-                signature(&fold_registry),
-                plain,
-                "fold path diverges from plain"
-            );
-            // The shared signature must be the real request, not three
-            // agreeing zeros.
-            assert_eq!(plain.output_tokens_total, 3);
-            assert_eq!(plain.osl, (1, 3));
-            assert_eq!(plain.cached_tokens, (1, TAIL_CACHED_TOKENS as u64));
-            assert_eq!(plain.ttft_samples, 1);
-            assert_eq!(plain.itl_samples, 2);
+            assert_eq!(signature(&capture_registry), signature(&plain_registry));
 
-            // The client response and the captured record agree across paths.
-            for response in [&plain_response, &scan_response, &fold_response] {
-                assert_identity(response);
-                assert_eq!(
-                    response.inner.choices[0].message.content.as_ref().unwrap(),
-                    &dynamo_protocols::types::ChatCompletionMessageContent::Text(
-                        "Hello world".to_string()
-                    )
-                );
-                assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
-            }
-            for outcome in [scan_future.await, fold_future.await] {
-                assert!(
-                    outcome.drop_reason.is_none(),
-                    "complete paths must not carry a drop reason"
-                );
-                let record = outcome
-                    .response
-                    .expect("payload capture must produce a response record");
-                assert_identity(&record);
-                assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
-            }
+            let outcome = future.await;
+            assert!(
+                outcome
+                    .drop_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("invalid sampling parameter")
+            );
+            assert!(
+                outcome.response.is_some(),
+                "the pre-error prefix is recorded"
+            );
+        }
+
+        /// A backend error as the first event is rejected by the preflight with
+        /// capture on or off, and nothing is observed either way.
+        #[tokio::test]
+        async fn test_capture_rejects_leading_error_identically() {
+            let chunks = || {
+                vec![
+                    Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
+                        "backend unavailable",
+                    ),
+                ]
+            };
+            let (plain_registry, plain) =
+                observe_and_aggregate(futures::stream::iter(chunks())).await;
+            let (captured, future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
+            let (capture_registry, capture) = observe_and_aggregate(captured).await;
+
+            assert_eq!(plain.unwrap_err(), Rejected::Preflight);
+            assert_eq!(capture.unwrap_err(), Rejected::Preflight);
+            let nothing = MetricSignature {
+                output_tokens_total: 0,
+                isl: (0, 0),
+                osl: (0, 0),
+                cached_tokens: (0, 0),
+                ttft_samples: 0,
+                itl_samples: 0,
+            };
+            assert_eq!(signature(&plain_registry), nothing);
+            assert_eq!(signature(&capture_registry), nothing);
+
+            let outcome = future.await;
+            assert!(outcome.response.is_none());
+            assert!(
+                outcome
+                    .drop_reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("backend unavailable")
+            );
         }
     }
 }
