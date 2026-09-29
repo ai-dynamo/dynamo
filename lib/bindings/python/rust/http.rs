@@ -121,7 +121,7 @@ impl HttpService {
         // multi-minute streams are still draining.
         let guard = runtime.inner().register_graceful_task();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        crate::future_into_py(py, async move {
             let _guard = guard;
             service.run(token).await.map_err(to_pyerr)?;
             Ok(())

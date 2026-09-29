@@ -1060,3 +1060,49 @@ async fn test_muse_unified_batch_native_fallback_zero_calls_still_strips_markup(
          guided-JSON synthetic placeholder"
     );
 }
+
+#[tokio::test]
+async fn test_responses_tool_parsing_is_owned_by_the_aggregator() {
+    use dynamo_llm::protocols::openai::responses::{ResponseParams, chat_completion_to_response};
+    use dynamo_protocols::types::responses::{OutputItem, OutputMessageContent};
+
+    let raw = r#"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#;
+    let params = ResponseParams {
+        tools: Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "function", "name": "get_weather", "parameters": {"type": "object"}
+            }]))
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    for parser in [None, Some("hermes".to_string())] {
+        let parses_tools = parser.is_some();
+        let chat = NvCreateChatCompletionResponse::from_annotated_stream(
+            futures::stream::iter([make_stream_delta(Some(raw), None)]),
+            ParsingOptions::new(parser, None),
+        )
+        .await
+        .unwrap();
+        let response = chat_completion_to_response(chat, &params, None).unwrap();
+        assert_eq!(response.inner.output.len(), 1);
+        if parses_tools {
+            let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
+                panic!("expected an upstream-parsed call");
+            };
+            assert_eq!(call.name, "get_weather");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                serde_json::json!({"city":"Paris"})
+            );
+        } else {
+            let OutputItem::Message(message) = &response.inner.output[0] else {
+                panic!("no-parser output must remain text");
+            };
+            let OutputMessageContent::OutputText(content) = &message.content[0] else {
+                panic!("expected output text");
+            };
+            assert_eq!(content.text, raw);
+        }
+    }
+}

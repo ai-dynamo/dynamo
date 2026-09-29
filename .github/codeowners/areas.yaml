@@ -234,7 +234,6 @@ areas:
   - components/src/dynamo/common/utils/
   - components/src/dynamo/experimental/
   - examples/backends/sample/
-  - examples/backends/tritonserver/
   - examples/common/
   - examples/custom_backend/
   - lib/backend-common/
@@ -459,6 +458,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
+  - examples/rl/
   - lib/rl/
   - tests/rl/
 - label: performance
@@ -1063,7 +1063,7 @@ shared:
   owners:
   - router
   - kv-memory
-- glob: lib/llm/src/preprocessor/lightseek_mm.rs
+- glob: lib/llm/src/preprocessor/mm_routing/
   owners:
   - frontend
   - multimodal
@@ -1275,10 +1275,6 @@ shared:
   owners:
   - ops
   - backend-vllm
-- glob: examples/backends/tritonserver/Dockerfile
-  owners:
-  - runtime
-  - ops
 - glob: examples/diffusers/Dockerfile
   owners:
   - diffusion

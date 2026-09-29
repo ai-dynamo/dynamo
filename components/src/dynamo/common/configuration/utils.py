@@ -160,7 +160,7 @@ def add_negatable_bool_argument(
     *,
     flag_name: str,
     env_var: str,
-    default: bool,
+    default: Optional[bool],
     help: str,
     dest: Optional[str] = None,
     obsolete_flag: Optional[str] = None,
@@ -173,7 +173,7 @@ def add_negatable_bool_argument(
         parser: ArgumentParser or argument group
         flag_name: Primary flag (must start with '--', e.g. "--enable-feature")
         env_var: Environment variable name (e.g., "DYN_ENABLE_FEATURE")
-        default: Default value
+        default: Default value. Use None when an omitted flag must remain unset.
         help: Help text
         dest: Optional destination name for the parsed value
         obsolete_flag: Optional obsolete/legacy flag (for help msg only, must start with '--')

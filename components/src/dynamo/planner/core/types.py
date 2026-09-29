@@ -69,6 +69,15 @@ class WorkerCounts:
     expected_num_decode: Optional[int] = None
     prefill_scaling_in_progress: bool = False
     decode_scaling_in_progress: bool = False
+    # Positive only when the connector has verified a scale-up with no drain,
+    # rollout, or unobserved spec update anywhere in the deployment.
+    pending_num_prefill: int = 0
+    pending_num_decode: int = 0
+
+    @property
+    def startup_in_progress(self) -> bool:
+        """True when verified startup-only inventory includes pending workers."""
+        return self.pending_num_prefill > 0 or self.pending_num_decode > 0
 
 
 @dataclass

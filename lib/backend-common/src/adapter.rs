@@ -865,7 +865,7 @@ mod tests {
         let input = Context::new(make_request(vec![1]));
         let err = adapter.generate(input).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("BackendInvalidArgument"), "got: {msg}");
+        assert!(msg.contains("InvalidRequest"), "got: {msg}");
         assert!(msg.contains("bad param"), "got: {msg}");
     }
 

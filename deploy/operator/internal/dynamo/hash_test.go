@@ -18,13 +18,17 @@
 package dynamo
 
 import (
+	"context"
 	"testing"
 
+	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -91,24 +95,73 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 }
 
 func TestComputeBetaDGDWorkersSpecHash_CanonicalizesForceScalingGroupFalse(t *testing.T) {
-	t.Log("Build equivalent omitted and explicit-false Grove configurations")
-	omitted := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
-	}))
-	omitted.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
-		Grove: &v1beta1.GroveSpec{},
+	t.Log("Build a worker with omitted experimental configuration")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.Components[0].Experimental = nil
+	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), base, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	t.Log("Compare optional outer objects and explicit false with complete omission")
+	cases := []struct {
+		name         string
+		experimental *v1beta1.ExperimentalSpec
+	}{
+		{"empty_experimental", &v1beta1.ExperimentalSpec{}},
+		{"empty_grove", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{}}},
+		{"explicit_false", &v1beta1.ExperimentalSpec{Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}}},
 	}
-	explicitFalse := omitted.DeepCopy()
-	explicitFalse.Spec.Components[0].Experimental.Grove.ForceScalingGroup = ptr.To(false)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Render an equivalent configuration")
+			candidate := base.DeepCopy()
+			candidate.Spec.Components[0].Experimental = tc.experimental
+			original := candidate.DeepCopy()
+			rendered, err := GenerateGrovePodCliqueSet(context.Background(), candidate, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, rendered.Spec, "precondition: effective workload must be identical")
 
-	t.Log("Verify presence alone does not create a worker generation")
-	omittedHash := mustComputeBetaDGDWorkersSpecHash(t, omitted)
-	assert.Equal(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitFalse))
+			t.Log("Verify the worker hash is unchanged")
+			actual := mustComputeBetaDGDWorkersSpecHash(t, candidate)
+			require.Equal(t, omittedHash, actual)
 
-	t.Log("Verify the effective true opt-in remains part of the worker generation")
-	explicitTrue := omitted.DeepCopy()
-	explicitTrue.Spec.Components[0].Experimental.Grove.ForceScalingGroup = ptr.To(true)
+			t.Log("Verify rendering and hashing do not mutate the input")
+			require.Equal(t, original, candidate)
+		})
+	}
+
+	t.Log("Verify the effective true opt-in still changes the worker generation")
+	explicitTrue := base.DeepCopy()
+	explicitTrue.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
+	}
 	assert.NotEqual(t, omittedHash, mustComputeBetaDGDWorkersSpecHash(t, explicitTrue))
+}
+
+func TestWorkerHashSpec_PreservesOtherExperimentalFeatures(t *testing.T) {
+	t.Log("Cover other experimental features alongside an ineffective Grove option")
+	cases := []struct {
+		name         string
+		experimental v1beta1.ExperimentalSpec
+	}{
+		{"gms", v1beta1.ExperimentalSpec{GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{}}},
+		{"failover", v1beta1.ExperimentalSpec{Failover: &v1beta1.FailoverSpec{}}},
+		{"enabled_checkpoint", v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Add explicit false alongside another experimental feature")
+			dcd := &v1beta1.DynamoComponentDeployment{}
+			dcd.Spec.Experimental = tc.experimental.DeepCopy()
+			dcd.Spec.Experimental.Grove = &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)}
+			original := dcd.DeepCopy()
+
+			t.Log("Hash normalization removes only Grove and leaves the original input intact")
+			normalized := workerHashSpec(dcd)
+			require.Equal(t, &tc.experimental, normalized.Experimental)
+			require.Equal(t, original, dcd)
+		})
+	}
 }
 
 func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testing.T) {
@@ -472,4 +525,99 @@ func TestSortEnvVars(t *testing.T) {
 	assert.Equal(t, "C", sorted[2].Name)
 	// Original not mutated
 	assert.Equal(t, "C", envs[0].Name)
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesDisabledCheckpoint(t *testing.T) {
+	t.Log("Build a worker with omitted checkpoint configuration")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.Components[0].Experimental = nil
+
+	cases := []struct {
+		name       string
+		checkpoint *v1beta1.ComponentCheckpointConfig
+		grove      *v1beta1.GroveSpec
+	}{
+		{name: "disabled", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false}},
+		{name: "disabled_with_options", checkpoint: &v1beta1.ComponentCheckpointConfig{
+			Enabled: false, CheckpointRef: ptr.To("existing-snapshot"),
+			StartupPolicy:  v1beta1.CheckpointStartupPolicyWaitForCheckpoint,
+			DeletionPolicy: v1beta1.CheckpointDeletionPolicyRetain,
+		}},
+		{name: "disabled_with_grove", checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: false},
+			grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Log("Build equivalent omitted and disabled checkpoint configurations")
+			omitted := base.DeepCopy()
+			if tc.grove != nil {
+				omitted.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{Grove: tc.grove}
+			}
+			disabled := omitted.DeepCopy()
+			if disabled.Spec.Components[0].Experimental == nil {
+				disabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{}
+			}
+			disabled.Spec.Components[0].Experimental.Checkpoint = tc.checkpoint
+			original := disabled.DeepCopy()
+
+			t.Log("Verify equal rendered workloads and worker hashes")
+			omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			disabledRendered, err := GenerateGrovePodCliqueSet(context.Background(), disabled, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+			require.NoError(t, err)
+			require.Equal(t, omittedRendered.Spec, disabledRendered.Spec)
+			assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, disabled))
+			assert.Equal(t, original, disabled, "rendering and hashing must preserve the input")
+		})
+	}
+
+	t.Log("Verify enabling checkpointing still changes the worker hash")
+	enabled := base.DeepCopy()
+	enabled.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
+		Checkpoint: &v1beta1.ComponentCheckpointConfig{Enabled: true},
+	}
+	assert.NotEqual(t, mustComputeBetaDGDWorkersSpecHash(t, base), mustComputeBetaDGDWorkersSpecHash(t, enabled))
+}
+
+func TestComputeBetaDGDWorkersSpecHash_CanonicalizesCompilationCacheMountPath(t *testing.T) {
+	t.Log("Build equivalent omitted and explicit default cache paths")
+	omitted := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	omitted.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	omitted.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	explicit := omitted.DeepCopy()
+	explicit.Spec.Components[0].CompilationCache.MountPath = commonconsts.DefaultVLLMCacheMountPoint
+	originalOmitted, originalExplicit := omitted.DeepCopy(), explicit.DeepCopy()
+
+	t.Log("Verify equal rendered workloads and worker hashes without mutating either input")
+	omittedRendered, err := GenerateGrovePodCliqueSet(context.Background(), omitted, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	explicitRendered, err := GenerateGrovePodCliqueSet(context.Background(), explicit, &configv1alpha1.OperatorConfiguration{}, &controller_common.RuntimeConfig{}, nil, nil, nil, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, omittedRendered.Spec, explicitRendered.Spec)
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, omitted), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+	assert.Equal(t, originalOmitted, omitted)
+	assert.Equal(t, originalExplicit, explicit)
+
+	t.Log("Keep custom paths and PVC identity in the worker hash")
+	base := betaDGDWithRuntimeVersion(t, "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0", "")
+	base.Spec.BackendFramework = string(BackendFrameworkVLLM)
+	base.Spec.Components[0].CompilationCache = &v1beta1.CompilationCacheConfig{PVCName: "compilation-cache"}
+	baseHash := mustComputeBetaDGDWorkersSpecHash(t, base)
+	for _, cache := range []v1beta1.CompilationCacheConfig{
+		{PVCName: "compilation-cache", MountPath: "/custom/cache"},
+		{PVCName: "other-cache"},
+	} {
+		changed := base.DeepCopy()
+		changed.Spec.Components[0].CompilationCache = &cache
+		assert.NotEqual(t, baseHash, mustComputeBetaDGDWorkersSpecHash(t, changed), "cache: %+v", cache)
+	}
+
+	t.Log("Preserve explicit paths for a backend without a default cache path")
+	dcd := &v1beta1.DynamoComponentDeployment{}
+	dcd.Spec.BackendFramework = string(BackendFrameworkSGLang)
+	dcd.Spec.CompilationCache = &v1beta1.CompilationCacheConfig{
+		PVCName: "compilation-cache", MountPath: commonconsts.DefaultVLLMCacheMountPoint,
+	}
+	normalized := workerHashSpec(dcd)
+	assert.Equal(t, commonconsts.DefaultVLLMCacheMountPoint, normalized.CompilationCache.MountPath)
 }

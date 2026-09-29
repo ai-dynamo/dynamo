@@ -266,6 +266,12 @@ impl RequestTracker {
         *self.request_finish_time.lock() = Some(Instant::now());
     }
 
+    pub(crate) fn record_finish_if_missing(&self) {
+        self.request_finish_time
+            .lock()
+            .get_or_insert_with(Instant::now);
+    }
+
     /// Record KV cache hit information. Returns true if this was the first call.
     pub fn record_kv_hit(&self, overlap_blocks: f64, isl_blocks: usize) -> bool {
         let overlap_set = self.kv_overlap_blocks.set(overlap_blocks).is_ok();

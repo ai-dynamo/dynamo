@@ -99,6 +99,31 @@ import { TerminalDemo } from "@/components/TerminalDemo";
 />
 ```
 
+## Generated Modules
+
+`nightly-selector-data.generated.ts` is gitignored and rebuilt by the docs
+workflow on every publish, so the install selectors never serve a nightly pin
+that a human forgot to refresh. `install-selector-data.ts` imports it, so a
+fresh clone has no module to resolve until it is generated once:
+
+```bash
+python3 docs/fern/scripts/gen_nightly_selector.py            # real data, needs network
+python3 docs/fern/scripts/gen_nightly_selector.py --offline  # empty module, no network
+```
+
+The offline form writes a valid empty module; the selectors then render their
+"not currently available" state for the nightly channel. Without `--offline`
+the generator fails rather than write a module that resolved nothing — no NGC
+tags, or an unreachable wheel index — so a publish cannot replace live nightly
+rows with nothing or strip every wheel command.
+
+`simulate_docs_website.sh` generates its own empty copy into the scratch
+checkout via `--out`, so running the composition check leaves the module here
+alone.
+
+`events.generated.ts` and `publisher-logos.generated.ts` are committed instead,
+refreshed by their own workflows, and need no local step.
+
 ## Adding A Component
 
 - No third-party dependencies. There is no `package.json` alongside `fern/`, so

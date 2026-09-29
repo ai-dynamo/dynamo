@@ -27,6 +27,7 @@ from argparse import Namespace
 from typing import TYPE_CHECKING, Any, Optional
 
 import uvloop
+from packaging.version import Version
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
@@ -41,6 +42,7 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
+from .cpu_affinity import warn_if_frontend_cpu_affinity_spans_numa_nodes
 from .frontend_args import FrontendArgGroup, FrontendConfig
 
 if TYPE_CHECKING:
@@ -291,7 +293,11 @@ def parse_args() -> tuple[FrontendConfig, Optional[Namespace], Optional[Namespac
 
         try:
             from vllm.engine.arg_utils import AsyncEngineArgs
-            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            if Version(importlib.metadata.version("vllm")).release >= (0, 29):
+                from vllm.entrypoints.launchers.cli_args import FrontendArgs
+            else:
+                from vllm.entrypoints.openai.cli_args import FrontendArgs
         except ModuleNotFoundError:
             logger.exception("Flag '--chat-processor vllm' requires vllm be installed.")
             sys.exit(1)
@@ -391,6 +397,7 @@ async def async_main():
     # it connects to NATS eagerly, so NATS (m)TLS env vars must already be set or
     # the CLI flags are silently ignored (unlike the lazily-dialed TCP planes).
     _export_transport_tls_env(config)
+    warn_if_frontend_cpu_affinity_spans_numa_nodes(logger)
     runtime = DistributedRuntime(
         loop,
         config.discovery_backend,
