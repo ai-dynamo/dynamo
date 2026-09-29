@@ -66,6 +66,8 @@ module.exports = async ({ github, context, core }) => {
     failures: [{ job: fixture, excerpt }],
   }] });
   assert.ok(rendered.includes('&lt;tag&gt;'), 'diagnostic HTML is escaped');
+  assert.ok(rendered.includes('❌ Failed'), 'failed jobs show the requested status emoji');
+  assert.ok(rendered.includes('✅ Pass'), 'status legend includes the pass emoji');
   const exampleBody = `${EXAMPLE}\n**Intentional smoke-test fixture, separate from this PR's CI results.**\n\n${rendered.replace(`${MARKER}\n`, '')}`;
   const examples = await comments(EXAMPLE);
   let example;
