@@ -34,6 +34,7 @@ import importlib.util
 import json
 import logging
 import re
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -45,7 +46,7 @@ from typing import Any, Iterable, Iterator
 
 import tokenizers
 from huggingface_hub import snapshot_download
-from transformers import PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,10 @@ _MODEL_FILES = [
     "preprocessor_config.json",
     "video_preprocessor_config.json",
     "encoding/encoding_dsv4.py",
+    # Kimi K3: tiktoken tokenizer and reference segment encoder, no chat template.
+    "tiktoken.model",
+    "tokenization_kimi.py",
+    "encoding_k3.py",
 ]
 # A truncation point needs this much text on both sides to be meaningful.
 _MIN_SPAN_CHARS = 40
@@ -79,7 +84,7 @@ class Teacher:
     repo: str  # HF repo with the tokenizer and chat template; no weights needed
     config: str  # dataset config and split holding its trajectories
     split: str
-    renderer: str  # "jinja" (HF chat template) or "dsv4" (encoding_dsv4.py)
+    renderer: str  # "jinja" (HF chat template), "dsv4" or "k3" (reference encoders)
     eos: str  # token text that closes an assistant turn
     tool_start: str  # opens the tool-call block in a raw completion
     tool_call_parser: str
@@ -127,6 +132,23 @@ TEACHERS: dict[str, Teacher] = {
         tool_call_parser="minimax_m2",
         reasoning_parser="minimax_m2",
         markup=("<think>", "</think>", "<minimax:tool_call>", "<invoke name="),
+    ),
+    # Open-SWE-Traces has no Kimi K3 trajectories, so K3 is a render target only
+    # (`--source-teacher`). Its output is XTML: think / response / tools channels
+    # opened and closed with <|open|>, <|close|> and <|sep|> tokens.
+    "kimi-k3": Teacher(
+        dataset_name="Kimi-K3",
+        repo="moonshotai/Kimi-K3",
+        config="",
+        split="",
+        renderer="k3",
+        eos="<|end_of_msg|>",
+        tool_start="<|open|>tools",
+        tool_call_parser="kimi_k3",
+        reasoning_parser="kimi_k3",
+        markup=("<|open|>", "<|close|>", "<|sep|>"),
+        efforts=("low", "high", "max"),
+        think_end="<|close|>think",
     ),
     # Small Qwen3.5-family tokenizer for the committed CI fixture; it shares the
     # vocabulary and tool syntax of the Qwen3.8 teacher.
@@ -277,12 +299,13 @@ def _with_object_arguments(message: JsonDict) -> JsonDict:
     return message
 
 
-def _load_dsv4_encoding(model_dir: Path) -> ModuleType:
-    path = model_dir / "encoding" / "encoding_dsv4.py"
-    spec = importlib.util.spec_from_file_location("encoding_dsv4", path)
+def _load_module(path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     if spec is None or spec.loader is None:
         raise FileNotFoundError(path)
     module = importlib.util.module_from_spec(spec)
+    # Dataclasses in the module resolve their types through sys.modules.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -292,18 +315,29 @@ class Renderer:
 
     def __init__(self, teacher: Teacher, model_dir: Path):
         self.teacher = teacher
+        self._dsv4: ModuleType | None = None
+        self._k3: ModuleType | None = None
+        self._kimi: Any = None
+        self._hf: PreTrainedTokenizerFast | None = None
+        self._template = ""
+        if teacher.renderer == "k3":
+            # Kimi K3 encodes typed segments: literal text never becomes a control
+            # token, so ids come from its own segment encoder, not from re-tokenizing.
+            self._k3 = _load_module(model_dir / "encoding_k3.py")
+            self._kimi = AutoTokenizer.from_pretrained(
+                str(model_dir), trust_remote_code=True
+            )
+            self.eos_id: int = self._kimi.convert_tokens_to_ids(teacher.eos)
+            return
         self.tokenizer = tokenizers.Tokenizer.from_file(
             str(model_dir / "tokenizer.json")
         )
         eos_id = self.tokenizer.token_to_id(teacher.eos)
         if eos_id is None:
             raise ValueError(f"{teacher.eos!r} is not a single token in {teacher.repo}")
-        self.eos_id: int = eos_id
-        self._dsv4: ModuleType | None = None
-        self._hf: PreTrainedTokenizerFast | None = None
-        self._template = ""
+        self.eos_id = eos_id
         if teacher.renderer == "dsv4":
-            self._dsv4 = _load_dsv4_encoding(model_dir)
+            self._dsv4 = _load_module(model_dir / "encoding" / "encoding_dsv4.py")
             return
         config = json.loads((model_dir / "tokenizer_config.json").read_text())
         template_file = model_dir / "chat_template.jinja"
@@ -367,6 +401,62 @@ class Renderer:
         if end < 0:
             raise SkipTurn("template-no-eos")
         return completion[: end + len(self.teacher.eos)]
+
+    def turn_tokens(
+        self,
+        messages: list[JsonDict],
+        index: int,
+        tools: list[JsonDict],
+        template_args: JsonDict,
+    ) -> tuple[str, list[int], list[int]]:
+        """Assistant turn `index` as (text, token ids ending in EOS, char offset per token)."""
+        if self._k3 is not None:
+            return self._k3_turn_tokens(messages, index, tools, template_args)
+        completion = self.completion(messages, index, tools, template_args)
+        encoding = self.tokenizer.encode(completion, add_special_tokens=False)
+        ids: list[int] = encoding.ids
+        if not ids or ids[-1] != self.eos_id:
+            raise SkipTurn("eos-not-a-single-final-token")
+        if self.tokenizer.decode(ids, skip_special_tokens=False) != completion:
+            raise SkipTurn("tokenizer-roundtrip-mismatch")
+        return completion, ids, [start for start, _ in encoding.offsets]
+
+    def _k3_turn_tokens(
+        self,
+        messages: list[JsonDict],
+        index: int,
+        tools: list[JsonDict],
+        template_args: JsonDict,
+    ) -> tuple[str, list[int], list[int]]:
+        assert self._k3 is not None
+        options: JsonDict = {"thinking": template_args.get("enable_thinking", True)}
+        if template_args.get("reasoning_effort"):
+            options["thinking_effort"] = template_args["reasoning_effort"]
+
+        def encode(conversation: list[JsonDict], generation_prompt: bool) -> list[int]:
+            segments = self._k3.build_chat_segments(
+                copy.deepcopy(conversation),
+                tools or None,
+                add_generation_prompt=generation_prompt,
+                **options,
+            )
+            return self._kimi._encode_chat_segments(segments)
+
+        prompt = encode(messages[:index], True)
+        full = encode(messages[: index + 1], False)
+        if full[: len(prompt)] != prompt:
+            raise SkipTurn("template-prefix-mismatch")
+        rest = full[len(prompt) :]
+        if self.eos_id not in rest:
+            raise SkipTurn("template-no-eos")
+        ids = rest[: rest.index(self.eos_id) + 1]
+        text, offsets = self._kimi.model.decode_with_offsets(ids)
+        return text, ids, offsets
+
+    def decode(self, ids: list[int], skip_special_tokens: bool) -> str:
+        if self._kimi is not None:
+            return self._kimi.decode(ids, skip_special_tokens=skip_special_tokens)
+        return self.tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
 
 
 def _token_text(value: Any) -> str:
@@ -488,13 +578,9 @@ class FixtureWriter:
     ) -> None:
         teacher = self.teacher
         expected = expected_turn(messages[index])
-        completion = self.renderer.completion(messages, index, tools, template_args)
-        encoding = self.renderer.tokenizer.encode(completion, add_special_tokens=False)
-        ids: list[int] = encoding.ids
-        if not ids or ids[-1] != self.renderer.eos_id:
-            raise SkipTurn("eos-not-a-single-final-token")
-        if self.renderer.tokenizer.decode(ids, skip_special_tokens=False) != completion:
-            raise SkipTurn("tokenizer-roundtrip-mismatch")
+        completion, ids, offsets = self.renderer.turn_tokens(
+            messages, index, tools, template_args
+        )
 
         base = f"{trajectory_id}:{index}"
         self._add_case(base, "full", trajectory_id, index, ids, expected, eos=True)
@@ -504,8 +590,7 @@ class FixtureWriter:
             return
         for variant, cut in _cut_points(teacher, completion, expected).items():
             end = next(
-                (i for i, (start, _) in enumerate(encoding.offsets) if start >= cut),
-                len(ids) - 1,
+                (i for i, start in enumerate(offsets) if start >= cut), len(ids) - 1
             )
             if 0 < end < len(ids) - 1:
                 self._add_case(
@@ -560,9 +645,7 @@ class FixtureWriter:
                 "script_len": len(ids),
                 "eos_terminated": eos,
                 # What the frontend returns with no parsers configured.
-                "raw_text": self.renderer.tokenizer.decode(
-                    visible, skip_special_tokens=True
-                ),
+                "raw_text": self.renderer.decode(visible, skip_special_tokens=True),
                 "expected": expected
                 if eos
                 else {**expected, "finish_reason": "length"},
@@ -615,6 +698,10 @@ def build(
         rows: Iterable[JsonDict] = json.loads(rows_file.read_text())
     else:
         source = TEACHERS[source_key or teacher_key]
+        if not source.config:
+            raise ValueError(
+                f"{source.dataset_name} has no dataset slice; pass source_key"
+            )
         rows = iter_dataset_rows(source, offset, writer.stats)
     for row in rows:
         writer.add_row(row)

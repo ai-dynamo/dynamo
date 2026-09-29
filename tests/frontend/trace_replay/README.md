@@ -75,4 +75,4 @@ python -m tests.frontend.trace_replay build \
   --out /data/replay/deepseek-v4@qwen3.8
 ```
 
-The source's `reasoning_effort` is mapped to the nearest level the target template accepts. This exercises the target's parsers with shapes its own traces may lack, such as parallel tool calls or edge whitespace in arguments. The formatting is canonical for the target, but the behavior (how often it calls tools, what it writes) is the source's, so same-family traces remain the reference.
+The source's `reasoning_effort` is mapped to the nearest level the target template accepts. Kimi K3 (`--teacher kimi-k3`) has no trajectories in the dataset, so it is a target only; its turns are token ids from the model's own segment encoder (`encoding_k3.py`) and tiktoken tokenizer, so `tiktoken` must be installed. This exercises the target's parsers with shapes its own traces may lack, such as parallel tool calls or edge whitespace in arguments. The formatting is canonical for the target, but the behavior (how often it calls tools, what it writes) is the source's, so same-family traces remain the reference.
