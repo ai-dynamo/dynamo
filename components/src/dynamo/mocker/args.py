@@ -7,6 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.configuration.groups.router_args import (
     WorkerRouterConfig,
     add_worker_router_arguments,
@@ -422,6 +423,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Optional Mooncake JSONL trace containing output_token_ids for "
             "output_replay_id annotation lookup."
         ),
+    )
+    # Same flags as the engine backends: the frontend applies these parsers to
+    # this worker's output, so replayed token streams get parsed like a real model's.
+    parser.add_argument(
+        "--dyn-tool-call-parser",
+        type=str,
+        default=os.environ.get("DYN_TOOL_CALL_PARSER"),
+        choices=get_tool_parser_names(),
+        help="Tool call parser name for the model (env: DYN_TOOL_CALL_PARSER).",
+    )
+    parser.add_argument(
+        "--dyn-reasoning-parser",
+        type=str,
+        default=os.environ.get("DYN_REASONING_PARSER"),
+        choices=get_reasoning_parser_names(),
+        help="Reasoning parser name for the model (env: DYN_REASONING_PARSER). "
+        "If not specified, no reasoning parsing is performed.",
     )
 
     # Engine type selection

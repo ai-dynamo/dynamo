@@ -224,6 +224,42 @@ def test_runtime_config_disables_local_indexer_for_decode_worker():
     assert runtime_config.enable_local_indexer is False
 
 
+def test_mocker_cli_parser_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DYN_TOOL_CALL_PARSER", raising=False)
+    monkeypatch.delenv("DYN_REASONING_PARSER", raising=False)
+    args = parse_args([])
+    assert args.dyn_tool_call_parser is None
+    assert args.dyn_reasoning_parser is None
+
+    args = parse_args(
+        ["--dyn-tool-call-parser", "qwen3_coder", "--dyn-reasoning-parser", "qwen3"]
+    )
+    assert args.dyn_tool_call_parser == "qwen3_coder"
+    assert args.dyn_reasoning_parser == "qwen3"
+
+    monkeypatch.setenv("DYN_TOOL_CALL_PARSER", "hermes")
+    monkeypatch.setenv("DYN_REASONING_PARSER", "deepseek_r1")
+    args = parse_args([])
+    assert args.dyn_tool_call_parser == "hermes"
+    assert args.dyn_reasoning_parser == "deepseek_r1"
+
+    with pytest.raises(SystemExit):
+        parse_args(["--dyn-tool-call-parser", "not-a-parser"])
+
+
+def test_runtime_config_carries_parsers_except_for_prefill_worker() -> None:
+    parsers = {"tool_call_parser": "qwen3_coder", "reasoning_parser": "qwen3"}
+    engine_args = CONFIG.build_mocker_engine_args(make_args())
+    _, runtime_config = CONFIG.build_runtime_config(engine_args, **parsers)
+    assert runtime_config.tool_call_parser == "qwen3_coder"
+    assert runtime_config.reasoning_parser == "qwen3"
+
+    prefill_args = CONFIG.build_mocker_engine_args(make_args(is_prefill_worker=True))
+    _, runtime_config = CONFIG.build_runtime_config(prefill_args, **parsers)
+    assert runtime_config.tool_call_parser is None
+    assert runtime_config.reasoning_parser is None
+
+
 def test_entrypoint_args_accept_typed_mocker_engine_args():
     engine_args = CONFIG.build_mocker_engine_args(make_args())
 

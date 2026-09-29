@@ -339,6 +339,9 @@ def apply_worker_engine_args_overrides(
 
 def build_runtime_config(
     engine_args: MockEngineArgs,
+    *,
+    tool_call_parser: str | None = None,
+    reasoning_parser: str | None = None,
 ) -> tuple[int, ModelRuntimeConfig]:
     rc = ModelRuntimeConfig()
     rc.context_length = engine_args.max_model_len or 0
@@ -358,6 +361,10 @@ def build_runtime_config(
     )
     rc.data_parallel_size = engine_args.dp_size
     rc.set_engine_specific("output_replay_consumer", "true")
+    # Prefill workers have no OpenAI surface, so the frontend never parses their output.
+    if not engine_args.is_prefill():
+        rc.tool_call_parser = tool_call_parser
+        rc.reasoning_parser = reasoning_parser
 
     bootstrap_port = engine_args.bootstrap_port
     if engine_args.is_prefill() and bootstrap_port is not None:
