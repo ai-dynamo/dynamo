@@ -140,7 +140,7 @@ async fn run_relay_view_publishing(
 }
 
 /// Consume the catalog/CKF Relay and the separate PR #13187 stats listener
-/// against one DGD assembler. Deployment supplies the stats proxy channel.
+/// against one DGD assembler. Deployment supplies the stats service channel.
 // Each source parameter owns a distinct connection or lifecycle boundary.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_relay_view_with_stats(
