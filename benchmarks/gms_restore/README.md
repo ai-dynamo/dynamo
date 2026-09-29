@@ -56,7 +56,7 @@ recorded here. Host `kubectl` must reach translated pods. For an allocated and h
 claim, the repeated-trial entry point is:
 
 ```sh
-python run_glm_restore.py --case fused-ram-N --backend fused --same-claim --fast-gate
+python run_glm_restore.py --case nixl-pvc-N --backend nixl --storage pvc --same-claim --fast-gate
 ```
 
 `--capture-dir` selects a different captured generation. The harness intentionally
@@ -73,7 +73,7 @@ For the corrected capture and tuned loader, pass:
 
 ```sh
 python run_glm_restore.py --capture-dir results/glm/index-fix \
-  --case fused-numa4-N --backend fused --workers 4 --numa --same-claim --fast-gate
+  --case fused-numa4-N --storage tmpfs --backend fused --workers 4 --numa --same-claim --fast-gate
 python summarize.py results/glm
 ```
 
@@ -81,3 +81,15 @@ Each trial must start with the preceding restore pod removed while a separate
 holder keeps the named claim allocated. Save that trial's agent log as `agent.txt`
 before the next restore; the summarizer uses the final matching restore entry.
 `summary.json` separates all-rank publication span, agent duration, and pod time.
+
+The default-config follow-up uses durable artifacts on `snapshot-pvc`, with
+`O_DIRECT` verified using `fcntl(F_GETFL)` for every payload file opened. Use
+`--capture-dir results/default-config --storage pvc`. Both the standard NIXL
+loader (`--backend nixl`) and fused prototype (`--backend fused`) use the V1
+artifact API; only the latter substitutes the transfer backend.
+
+`--overlap --fast-gate` starts Snapshot once the containers are running and moves
+the UUID/allocation publication validator into a CPU-only sidecar. It requires a
+capture whose engine waits for `/gms/all-ready` before resuming memory occupation.
+Without `--overlap`, all publication and validation finish before Snapshot starts.
+The flag changes scheduling, not the rank mapping or the capture artifacts.

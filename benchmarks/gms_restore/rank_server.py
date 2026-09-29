@@ -3,6 +3,7 @@
 """One isolated GPU, stable engine socket ordinal, optional exact artifact save."""
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
@@ -37,6 +38,13 @@ try:
     (root / f"rank-{a.rank}.json").write_text(
         json.dumps({"rank": a.rank, "uuid": uuid})
     )
+    for domain in ("weights", "kv_cache"):
+        while not Path(get_socket_path(a.rank, domain)).exists():
+            if server.poll() is not None:
+                raise RuntimeError("server exited during initialization")
+            time.sleep(0.01)
+    sockets = time.time()
+    print(json.dumps({"event": "sockets", "elapsed_s": sockets - started}), flush=True)
     if a.mode == "capture":
         while not (root / "save").exists():
             if server.poll() is not None:
@@ -48,8 +56,29 @@ try:
             f"{a.artifact_root}/device-{a.rank}", get_socket_path(a.rank), 0
         )
     else:
+        from gpu_memory_service.snapshot.backends import nixl_staging
         from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 
+        original_open = nixl_staging.open_direct_read_fd
+
+        def verified_open(path, **kwargs):
+            fd = original_open(path, **kwargs)
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            assert flags & os.O_DIRECT, "artifact FD must use O_DIRECT"
+            print(
+                json.dumps(
+                    {
+                        "event": "artifact_open",
+                        "path": path,
+                        "flags": flags,
+                        "o_direct": True,
+                    }
+                ),
+                flush=True,
+            )
+            return fd
+
+        nixl_staging.open_direct_read_fd = verified_open
         load_weights(f"{a.artifact_root}/device-{a.rank}", get_socket_path(a.rank), 0)
     published = time.time()
     record = {

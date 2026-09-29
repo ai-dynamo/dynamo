@@ -18,13 +18,17 @@ from kubernetes import client, config
 
 p = argparse.ArgumentParser()
 p.add_argument("--case", required=True)
+p.add_argument("--storage", choices=["pvc", "tmpfs"], default="pvc")
 p.add_argument("--workers", type=int, default=4)
 p.add_argument("--numa", action="store_true")
 p.add_argument("--capture-dir", type=Path)
 p.add_argument("--same-claim", action="store_true")
 p.add_argument("--fast-gate", action="store_true")
+p.add_argument("--overlap", action="store_true")
 p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
+if a.overlap and not a.fast_gate:
+    p.error("--overlap requires --fast-gate")
 root = Path(__file__).parent
 capture_dir = a.capture_dir or root / "results/glm"
 out = capture_dir / a.case
@@ -69,6 +73,10 @@ def save(path, data):
 
 source = json.loads((capture_dir / "source-manifest-nccl.json").read_text())
 capture = json.loads((capture_dir / "capture.json").read_text())
+if a.storage == "pvc":
+    assert all(r["artifact"].startswith("/checkpoints/") for r in capture["ranks"]), (
+        "PVC trial requires PVC artifact paths"
+    )
 targets = (
     [r["source_uuid"] for r in capture["ranks"]]
     if a.same_claim
@@ -148,23 +156,24 @@ for v in pod["spec"]["volumes"]:
 pod["spec"]["volumes"] = [
     v for v in pod["spec"]["volumes"] if v["name"] != "ram-weights"
 ]
-pod["spec"]["volumes"].append(
-    {
-        "name": "ram-weights",
-        "hostPath": {
-            "path": "/var/lib/schwinns-gms-0928/ram-weights",
-            "type": "Directory",
-        },
-    }
-)
+if a.storage == "tmpfs":
+    pod["spec"]["volumes"].append(
+        {
+            "name": "ram-weights",
+            "hostPath": {
+                "path": "/var/lib/schwinns-gms-0928/ram-weights",
+                "type": "Directory",
+            },
+        }
+    )
 main = pod["spec"]["containers"][0]
 main["imagePullPolicy"] = "IfNotPresent"
 main["command"] = (
     ["python3", "-u", "/snapshot-app/publication_gate.py"]
-    if a.fast_gate
+    if a.fast_gate and not a.overlap
     else ["sleep", "infinity"]
 )
-if a.fast_gate:
+if a.fast_gate and a.storage == "tmpfs":
     main["volumeMounts"].append(
         {"name": "ram-weights", "mountPath": "/gms-artifacts", "readOnly": True}
     )
@@ -179,11 +188,14 @@ map_value = ",".join(
 main["env"].append({"name": "SNAPSHOT_CUDA_DEVICE_MAP", "value": map_value})
 for rank, c in enumerate(pod["spec"]["containers"][1:]):
     c["imagePullPolicy"] = "IfNotPresent"
-    c["env"].append({"name": "GMS_PROTOTYPE_BUFFERED_READS", "value": "1"})
+    c["env"] = [e for e in c["env"] if e["name"] != "GMS_PROTOTYPE_BUFFERED_READS"]
+    if a.storage == "tmpfs":
+        c["env"].append({"name": "GMS_PROTOTYPE_BUFFERED_READS", "value": "1"})
     c["volumeMounts"] = [v for v in c["volumeMounts"] if v["name"] != "ram-weights"]
-    c["volumeMounts"].append(
-        {"name": "ram-weights", "mountPath": "/gms-artifacts", "readOnly": True}
-    )
+    if a.storage == "tmpfs":
+        c["volumeMounts"].append(
+            {"name": "ram-weights", "mountPath": "/gms-artifacts", "readOnly": True}
+        )
     c["command"] = [
         "python3",
         "-u",
@@ -212,6 +224,34 @@ if a.fast_gate:
         "/gms/all-ready",
     ]
 save(out / "manifest.json", pod)
+if a.overlap:
+    assert "GMS_WAKE_GATE" in cm["data"]["app.py"], (
+        "capture must include the wake-time publication gate"
+    )
+    gate = copy.deepcopy(main)
+    gate["name"] = "publication-gate"
+    gate["command"] = ["python3", "-u", "/snapshot-app/publication_gate.py"]
+    gate.pop("ports", None)
+    gate["resources"] = {
+        "requests": {"cpu": "100m", "memory": "128Mi"},
+        "limits": {"cpu": "1", "memory": "512Mi"},
+    }
+    gate["env"] = [
+        e
+        for e in gate["env"]
+        if e["name"] in {"PYTHONPATH", "SNAPSHOT_CUDA_DEVICE_MAP", "GMS_SOCKET_DIR"}
+    ]
+    gate["volumeMounts"] = [
+        v
+        for v in gate["volumeMounts"]
+        if v["name"] in {"app", "gms", "artifacts", "ram-weights"}
+    ]
+    gate["readinessProbe"] = {
+        "exec": {"command": ["test", "-f", "/gms/all-ready"]},
+        "periodSeconds": 1,
+    }
+    pod["spec"]["containers"].append(gate)
+    save(out / "manifest.json", pod)
 started = time.time()
 core.create_namespaced_pod(ns, pod)
 end = time.monotonic() + 300
@@ -220,12 +260,17 @@ while time.monotonic() < end:
     states = current.status.container_statuses or []
     if any(s.state.terminated for s in states):
         raise RuntimeError("container exited before publication")
-    if sum(s.ready for s in states if s.name.startswith("gms-")) == 8:
+    if a.overlap:
+        if len(states) == len(pod["spec"]["containers"]) and all(
+            s.state.running for s in states
+        ):
+            break
+    elif sum(s.ready for s in states if s.name.startswith("gms-")) == 8:
         break
     time.sleep(0.5)
 else:
     raise TimeoutError("GMS publication")
-publication_observed = time.time()
+publication_observed = None if a.overlap else time.time()
 host = host_name()
 if a.fast_gate:
     allocated = custom.get_namespaced_custom_object(
@@ -331,15 +376,22 @@ result = {
     "workers": a.workers,
     "numa": a.numa,
     "fast_gate": a.fast_gate,
+    "overlap": a.overlap,
     "capture_id": capture["capture_id"],
-    "storage": "tmpfs weights; NFS engine checkpoint",
+    "storage": "PVC O_DIRECT weights; PVC engine checkpoint"
+    if a.storage == "pvc"
+    else "tmpfs weights; PVC engine checkpoint",
     "create_epoch": started,
     "publication_observed_epoch": publication_observed,
     "trigger_epoch": triggered,
     "ready_epoch": ready,
     "pod_create_to_ready_s": ready - started,
-    "pod_create_to_publication_observed_s": publication_observed - started,
-    "verification_orchestration_gap_s": triggered - publication_observed,
+    "pod_create_to_publication_observed_s": None
+    if publication_observed is None
+    else publication_observed - started,
+    "verification_orchestration_gap_s": None
+    if publication_observed is None
+    else triggered - publication_observed,
     "trigger_to_ready_s": ready - triggered,
     "restored_text": text,
 }

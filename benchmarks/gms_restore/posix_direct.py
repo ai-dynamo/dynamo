@@ -6,6 +6,8 @@ Benchmark-only backend injection. Every lane owns two buffers and one device
 context; completion and cleanup finish before the V1 loader publishes its lease.
 """
 
+import fcntl
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -61,6 +63,21 @@ class PosixDirect:
                                 if os.environ.get("GMS_PROTOTYPE_BUFFERED_READS") == "1"
                                 else os.O_DIRECT
                             ),
+                        )
+                        flags = fcntl.fcntl(fds[path], fcntl.F_GETFL)
+                        direct = bool(flags & os.O_DIRECT)
+                        if os.environ.get("GMS_PROTOTYPE_BUFFERED_READS") != "1":
+                            assert direct, "artifact FD must use O_DIRECT"
+                        print(
+                            json.dumps(
+                                {
+                                    "event": "artifact_open",
+                                    "path": path,
+                                    "flags": flags,
+                                    "o_direct": direct,
+                                }
+                            ),
+                            flush=True,
                         )
                     slot = slots[i % 2]
                     slot.wait()
