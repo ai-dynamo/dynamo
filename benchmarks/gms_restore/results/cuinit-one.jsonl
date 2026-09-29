@@ -1,0 +1,5 @@
+{"visible_devices": 1, "uuids": ["GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"], "cuda_visible_devices": null, "dlopen_s": 0.0016380306333303452, "cuinit_s": 0.13058900833129883, "total_s": 0.1332954317331314}
+{"visible_devices": 1, "uuids": ["GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"], "cuda_visible_devices": null, "dlopen_s": 0.0014263764023780823, "cuinit_s": 0.12452659010887146, "total_s": 0.1270667277276516}
+{"visible_devices": 1, "uuids": ["GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"], "cuda_visible_devices": null, "dlopen_s": 0.0015575718134641647, "cuinit_s": 0.1325286440551281, "total_s": 0.13519805669784546}
+{"visible_devices": 1, "uuids": ["GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"], "cuda_visible_devices": null, "dlopen_s": 0.0013832654803991318, "cuinit_s": 0.1262475997209549, "total_s": 0.12870432995259762}
+{"visible_devices": 1, "uuids": ["GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"], "cuda_visible_devices": null, "dlopen_s": 0.0014781933277845383, "cuinit_s": 0.12522532977163792, "total_s": 0.12782476842403412}

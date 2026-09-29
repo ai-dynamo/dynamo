@@ -52,7 +52,23 @@ def _build_parser():
 
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
+    parser.add_argument(
+        "--socket-device",
+        type=int,
+        help="Captured engine ordinal used only for socket naming",
+    )
+    parser.add_argument(
+        "--artifact-device",
+        type=int,
+        help="Captured artifact directory ordinal; defaults to --device",
+    )
     args = parser.parse_args(argv)
+    socket_device = args.device if args.socket_device is None else args.socket_device
+    artifact_device = (
+        args.device if args.artifact_device is None else args.artifact_device
+    )
+    if min(args.device, socket_device, artifact_device) < 0:
+        parser.error("device ordinals must be nonnegative")
     if not args.checkpoint_dir:
         parser.error(
             f"--checkpoint-dir is required for --transfer-backend={args.transfer_backend}"
@@ -70,8 +86,8 @@ def main(argv: list[str] | None = None) -> None:
 
     init_vmm(VMMDeviceType.CUDA)
     load_weights(
-        os.path.join(args.checkpoint_dir, f"device-{args.device}"),
-        get_socket_path(args.device, "weights"),
+        os.path.join(args.checkpoint_dir, f"device-{artifact_device}"),
+        get_socket_path(socket_device, "weights"),
         args.device,
         max_workers=args.max_workers,
         transfer_backend=args.transfer_backend,

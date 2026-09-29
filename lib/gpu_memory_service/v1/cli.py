@@ -52,7 +52,15 @@ def main(argv: list[str] | None = None) -> None:
         allow_abbrev=False,
     )
     parser.add_argument("--device", type=int, default=0)
+    parser.add_argument(
+        "--socket-device",
+        type=int,
+        help="Captured engine ordinal used only for socket naming; defaults to --device",
+    )
     args = parser.parse_args(argv)
+    socket_device = args.device if args.socket_device is None else args.socket_device
+    if args.device < 0 or socket_device < 0:
+        parser.error("device and socket-device must be nonnegative")
 
     init_vmm(VMMDeviceType.CUDA)
     vmm = get_vmm()
@@ -72,7 +80,7 @@ def main(argv: list[str] | None = None) -> None:
         servers = [
             stack.enter_context(
                 GMSRPCServer(
-                    get_socket_path(args.device, domain),
+                    get_socket_path(socket_device, domain),
                     managers[domain],
                 )
             )

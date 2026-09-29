@@ -281,7 +281,8 @@ def _record_handshake(v1_owner: _V1Owner, outcome: list[str]) -> None:
     outcome.append("admitted")
 
 
-def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
+@pytest.mark.parametrize("socket_device", [0, 7])
+def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch, socket_device) -> None:
     servers = []
 
     class _Server:
@@ -308,11 +309,11 @@ def test_cli_composes_one_lifecycle_across_both_domains(monkeypatch) -> None:
     monkeypatch.setattr(cli, "run_servers", lambda _servers, _stop: None)
     monkeypatch.setattr(cli.signal, "signal", lambda *_args: None)
 
-    cli.main(["--device", "0"])
+    cli.main(["--device", "0", "--socket-device", str(socket_device)])
 
     assert [server.path for server in servers] == [
-        "/0-weights.sock",
-        "/0-kv_cache.sock",
+        f"/{socket_device}-weights.sock",
+        f"/{socket_device}-kv_cache.sock",
     ]
     lifecycle = servers[0].checkpoint_lifecycle
     assert servers[1].checkpoint_lifecycle is lifecycle
