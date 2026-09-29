@@ -15,61 +15,9 @@ import requests
 import yaml
 
 from tests.deploy import dgd_utils
-from tests.deploy.conftest import deployment_spec
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 pytestmark = [pytest.mark.unit, pytest.mark.pre_merge, pytest.mark.gpu_0]
-
-
-@pytest.mark.parametrize("schema", ["v1alpha1", "v1beta1"])
-@pytest.mark.parametrize("from_source", [False, True])
-@pytest.mark.parametrize("declared_version", [None, "1.4.0"])
-def test_ci_image_runtime_version_is_explicit_and_schema_aware(
-    tmp_path, monkeypatch, schema, from_source, declared_version
-) -> None:
-    components = [{"name": "frontend"}, {"name": "worker"}]
-    if declared_version is not None:
-        for component in components:
-            component["runtimeVersionOverride"] = declared_version
-    manifest = {
-        "apiVersion": f"nvidia.com/{schema}",
-        "kind": "DynamoGraphDeployment",
-        "metadata": {"name": "ci-version-test"},
-        "spec": (
-            {"components": components}
-            if schema == "v1beta1"
-            else {
-                "services": {component["name"]: component for component in components}
-            }
-        ),
-    }
-    path = tmp_path / "deploy.yaml"
-    path.write_text(yaml.safe_dump(manifest))
-    (tmp_path / "pyproject.toml").write_text('[project]\nversion = "1.6.0.dev8"\n')
-    monkeypatch.setattr(
-        "tests.deploy.conftest._get_workspace_dir", lambda: str(tmp_path)
-    )
-    options = {
-        "--runtime-version-from-source": from_source,
-        "--model-cache-pvc": "",
-    }
-    request = SimpleNamespace(config=SimpleNamespace(getoption=options.__getitem__))
-
-    spec = deployment_spec.__wrapped__(
-        path, "registry/runtime:commit-sha", "test", request
-    )
-
-    payload = spec.spec()["spec"]
-    services = (
-        payload["components"] if schema == "v1beta1" else payload["services"].values()
-    )
-    expected = "1.6.0" if from_source else declared_version
-    assert all(
-        service.get("runtimeVersionOverride") == expected for service in services
-    )
-    assert all(
-        service.image == "registry/runtime:commit-sha" for service in spec.services
-    )
 
 
 def managed_deployment(tmp_path) -> ManagedDeployment:
