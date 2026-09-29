@@ -13,6 +13,12 @@ from pathlib import Path
 from typing import AsyncIterator, Dict, List, Optional
 
 import pytest
+from packaging.version import Version
+
+try:
+    import tomllib
+except ImportError:  # Python 3.10 support; tomli is in requirements.test.txt.
+    import tomli as tomllib
 
 from tests.deploy.dgd_utils import DeploymentSpec, _get_workspace_dir
 from tests.deploy.dgdr_utils import DGDRTestConfig, ManagedDGDR
@@ -27,6 +33,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     Shared options (--image, --namespace, --skip-service-restart) are
     defined in tests/conftest.py.
     """
+    parser.addoption(
+        "--runtime-version-from-source",
+        action="store_true",
+        default=False,
+        help="Declare this checkout's Dynamo version for CI images built from the same source revision.",
+    )
     parser.addoption(
         "--framework",
         type=str,
@@ -453,6 +465,13 @@ def deployment_spec(
     # Override image if provided
     if image:
         spec.set_image(image)
+
+    if request.config.getoption("--runtime-version-from-source"):
+        with (Path(_get_workspace_dir()) / "pyproject.toml").open("rb") as source:
+            version = Version(tomllib.load(source)["project"]["version"])
+        spec.set_runtime_version_override(
+            f"{version.major}.{version.minor}.{version.micro}"
+        )
 
     # Mount the shared model cache onto workers when a PVC is provided (CI on
     # clusters that provision it); otherwise workers download from HuggingFace.

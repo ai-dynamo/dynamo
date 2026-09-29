@@ -85,7 +85,9 @@ jobs:
           profile: ${{ matrix.profile }}
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ inputs.image_tag }}
           platform_arch: amd64
-          extra_pytest_args: -m framework_only
+          # CI images use commit tags; admission needs the runtime version from
+          # the same source checkout that produced those images.
+          extra_pytest_args: -m framework_only --runtime-version-from-source
           # Mount the shared model cache only when both endpoint vars are set
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}

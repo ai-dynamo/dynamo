@@ -602,6 +602,11 @@ class DeploymentSpec:
         for service in services:
             service.image = image
 
+    def set_runtime_version_override(self, version: str) -> None:
+        """Declare the Dynamo version when the test image uses a CI commit tag."""
+        for service in self.services:
+            service._spec["runtimeVersionOverride"] = version
+
     def mount_model_cache_pvc(
         self, pvc_name: str, mount_point: str = "/models"
     ) -> None:
