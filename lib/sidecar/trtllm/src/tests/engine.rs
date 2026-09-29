@@ -77,16 +77,7 @@ async fn cancellation_yields_a_cancelled_terminal() {
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
 }
 
-/// Pins the non-deferring side of the dispatch guard in `engine.rs`.
-///
-/// `cancellation_yields_a_cancelled_terminal` stops the context *after* the
-/// stream exists, so it exercises the streaming loop rather than the dispatch.
-/// Nothing covered the aggregated case where the context is already stopped
-/// before `generate` runs, which is why replacing the guard's condition with a
-/// constant `false` -- deferring always -- left the suite green.
-///
-/// The second assertion is the one that fails if the condition is dropped: an
-/// already-cancelled aggregated request must never reach the engine.
+/// A request cancelled before dispatch must not reach the engine.
 #[tokio::test]
 async fn an_aggregated_request_cancelled_before_dispatch_never_reaches_the_engine() {
     let server = FakeServer::start(FakeTrtllm::default()).await;

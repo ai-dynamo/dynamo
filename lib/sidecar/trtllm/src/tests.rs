@@ -30,6 +30,7 @@ use crate::proto as pb;
 /// Most tests exercise aggregated serving; the disaggregation tests name their
 /// mode explicitly.
 const AGG: DisaggregationMode = DisaggregationMode::Aggregated;
+const PREFILL: DisaggregationMode = DisaggregationMode::Prefill;
 
 // The tests themselves live in `tests/`, grouped by the surface they cover;
 // this file holds only the fakes and fixtures they share.

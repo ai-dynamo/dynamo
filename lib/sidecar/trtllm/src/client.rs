@@ -143,7 +143,7 @@ impl TrtllmClient {
             match timeout_at(deadline, self.get_model_info(model)).await {
                 Ok(Ok(limits)) if limits.context_length.is_some() => return Ok(limits),
                 Ok(Ok(_)) => last = "it reported no max_context_length".to_string(),
-                Ok(Err(status)) if answers_the_request_is_wrong(&status) => {
+                Ok(Err(status)) if is_request_itself_wrong(&status) => {
                     return Err(status_to_dynamo("GetModelInfo", status));
                 }
                 Ok(Err(status)) => last = format!("{}: {}", status.code(), status.message()),
@@ -189,7 +189,7 @@ impl TrtllmClient {
 /// Whether the server answered that the request itself is wrong -- a model it
 /// does not serve, or no Control service at all. Waiting cannot change any of
 /// these, so a startup probe stops rather than burning its whole deadline.
-fn answers_the_request_is_wrong(status: &tonic::Status) -> bool {
+fn is_request_itself_wrong(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
         tonic::Code::InvalidArgument | tonic::Code::NotFound | tonic::Code::Unimplemented

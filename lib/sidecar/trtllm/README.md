@@ -93,8 +93,14 @@ python -m pip install --extra-index-url https://buf.build/gen/python \
   "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e"
 
 python -m tensorrt_llm.commands.serve <model> \
-  --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051
+  --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051 \
+  --max_seq_len 4096
 ```
+
+Without `--max_seq_len` the servicer leaves `max_context_length` unset, and the
+sidecar below then has no context length from either source -- it retries until
+`--grpc-startup-deadline-secs` and exits. Pass it here, or pass
+`--context-length` to the sidecar.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
@@ -105,7 +111,8 @@ Start the Dynamo worker:
 ```bash
 dynamo-trtllm-sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
-  --model-path <model>
+  --model-path <model> \
+  --context-length 4096
 ```
 
 The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)

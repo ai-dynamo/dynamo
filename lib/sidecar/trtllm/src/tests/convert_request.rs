@@ -218,6 +218,33 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     );
 }
 
+/// The prefill leg runs the same check. It sends `max_tokens: 1` and would
+/// otherwise sail past a minimum the window cannot fit, produce a
+/// `KvSessionRef`, and leave the decode worker to reject the request -- with
+/// the transferred blocks already sent and nothing left to consume them.
+#[test]
+fn a_prefill_request_whose_minimum_cannot_fit_is_rejected_before_the_handoff() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    req.stop_conditions.min_tokens = Some(64);
+    let window = req.token_ids.len() as u32 + 8;
+
+    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+        .expect_err("prefill must refuse a minimum the decode leg cannot serve");
+}
+
+/// A prefill worker that cannot size the window still dispatches: only the
+/// decode worker's own context length governs the request it will run.
+#[test]
+fn a_prefill_request_is_served_when_this_worker_cannot_size_the_window() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = None;
+    req.stop_conditions.min_tokens = Some(64);
+
+    build_generate_request(&req, "req", "model", None, PREFILL)
+        .expect("an unknown window is the decode worker's problem, not a rejection here");
+}
+
 /// The same request is served when the window leaves room for the minimum --
 /// the guard must reject the contradiction, not every request that has one.
 #[test]
