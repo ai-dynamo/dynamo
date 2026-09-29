@@ -80,6 +80,7 @@ use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
+use crate::transports::zmq::ipv6_option_for;
 
 fn socket_limit_guidance(raw_errno: Option<i32>, guidance: &'static str) -> Option<&'static str> {
     (raw_errno == Some(libc::EMFILE)).then_some(guidance)
@@ -108,27 +109,6 @@ fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
         Some(guidance) => error_with_guidance(error, guidance),
         None => error.into(),
     }
-}
-
-/// Returns whether `endpoint` needs `ZMQ_IPV6`.
-///
-/// Rejects unbracketed IPv6 literals: without `ZMQ_IPV6`, libzmq resolves them
-/// as IPv4 and retries the connection forever without reporting an error.
-fn ipv6_option_for(endpoint: &str) -> Result<bool> {
-    let Some(address) = endpoint.strip_prefix("tcp://") else {
-        return Ok(false);
-    };
-    if address.starts_with('[') {
-        return Ok(true);
-    }
-    if let Some((host, _port)) = address.rsplit_once(':')
-        && host.parse::<std::net::Ipv6Addr>().is_ok()
-    {
-        anyhow::bail!(
-            "Invalid ZMQ endpoint '{endpoint}': IPv6 addresses must be bracketed, for example tcp://[{host}]:<port>"
-        );
-    }
-    Ok(false)
 }
 
 fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
@@ -813,30 +793,6 @@ mod tests {
         let original = error.to_string();
 
         assert_eq!(map_socket_creation_error(error).to_string(), original);
-    }
-
-    #[test]
-    fn ipv6_option_follows_endpoint_address_family() {
-        for (endpoint, expected) in [
-            ("tcp://[::1]:5555", true),
-            ("tcp://[::]:*", true),
-            ("tcp://[2001:db8::10]:5555", true),
-            ("tcp://127.0.0.1:5555", false),
-            ("tcp://0.0.0.0:*", false),
-            ("tcp://localhost:5555", false),
-            ("tcp://*:5555", false),
-            ("inproc://events", false),
-        ] {
-            assert_eq!(ipv6_option_for(endpoint).unwrap(), expected, "{endpoint}");
-        }
-
-        for endpoint in ["tcp://::1:5555", "tcp://2001:db8::10:5555"] {
-            let error = ipv6_option_for(endpoint).unwrap_err().to_string();
-            assert!(
-                error.contains("IPv6 addresses must be bracketed"),
-                "{endpoint}: {error}"
-            );
-        }
     }
 
     #[tokio::test]
