@@ -271,7 +271,11 @@ pub async fn from_hf_at_revision(
     // The direct-download fallback inside `download_from_model_express` reports no
     // resolved revision of its own, so when a full SHA was requested the snapshot's own
     // directory name is the only confirmation available that the pin was honored.
-    if is_hf_commit_sha(revision) && snapshot.file_name().and_then(|n| n.to_str()) != Some(revision)
+    if is_hf_commit_sha(revision)
+        && !snapshot
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(revision))
     {
         anyhow::bail!(
             "{model_name} resolved to {snapshot:?}, which is not the pinned revision {revision}"
@@ -800,6 +804,50 @@ pub(crate) mod tests {
     }
 
     const SHA: &str = "1a2b3c4d5e6f78901a2b3c4d5e6f78901a2b3c4d";
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn test_from_hf_at_revision_checks_snapshot_sha_case_insensitively() {
+        let temp = TempDir::new().unwrap();
+        let model = "test-org/pinned-revision";
+        let original = build_hf_cache(temp.path(), model, &["config.json", "tokenizer.json"]);
+        let snapshot = original.with_file_name(SHA);
+        fs::rename(original, &snapshot).unwrap();
+        let refs = snapshot.parent().unwrap().parent().unwrap().join("refs");
+        let uppercase = SHA.to_uppercase();
+        let other = "9f8e7d6c5b4a39209f8e7d6c5b4a39209f8e7d6c";
+        for revision in [SHA, uppercase.as_str(), other] {
+            fs::write(refs.join(revision), SHA).unwrap();
+        }
+
+        temp_env::async_with_vars(
+            [
+                (
+                    env_model::huggingface::HF_HUB_CACHE,
+                    Some(temp.path().to_str().unwrap()),
+                ),
+                (env_model::huggingface::HF_HUB_OFFLINE, Some("1")),
+                // An invalid endpoint forces the direct-download fallback without a connection.
+                (
+                    env_model::model_express::MODEL_EXPRESS_URL,
+                    Some("://invalid"),
+                ),
+            ],
+            async {
+                for revision in [SHA, uppercase.as_str()] {
+                    let result = from_hf_at_revision(model, revision, None, true)
+                        .await
+                        .unwrap();
+                    assert_eq!(result, snapshot);
+                }
+                let error = from_hf_at_revision(model, other, None, true)
+                    .await
+                    .unwrap_err();
+                assert!(error.to_string().contains("is not the pinned revision"));
+            },
+        )
+        .await;
+    }
 
     #[test]
     fn test_revision_unconfirmed_by_the_server_is_not_honored() {

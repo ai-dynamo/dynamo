@@ -42,7 +42,7 @@ def _make_prefill_handler():
         dyn_tool_call_parser=None,
         dyn_reasoning_parser=None,
         engine_args=SimpleNamespace(
-            block_size=16, max_loras=4, model="/models/base", revision=None
+            block_size=16, max_loras=4, model="/models/base", revision="base-sha"
         ),
         use_kv_events=True,
     )
@@ -109,6 +109,7 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     assert kwargs["worker_type"] == WorkerType.Prefill
     assert kwargs["needs"] == [[WorkerType.Decode]]
     assert kwargs["ignore_weights"] is True
+    assert kwargs["revision"] == "base-sha"
     runtime_config = kwargs["runtime_config"]
     assert runtime_config.context_length == 8192
     assert json.loads(runtime_config.runtime_data["token_budget"]) == {
