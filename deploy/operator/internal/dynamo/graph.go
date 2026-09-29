@@ -1367,7 +1367,6 @@ func expandMultinodeGMSRoles(componentName string, numberOfNodes int32, totalEng
 // For short DGD names the PCS name equals the DGD name (backwards compatible).
 // For long names, the PCS name is truncated with a deterministic 4-char hash
 // suffix to guarantee uniqueness and reconcile-loop stability.
-// Delegated components do not contribute to the child resource name budget.
 func PCSNameForDGD(
 	dgd *v1beta1.DynamoGraphDeployment,
 	isDelegated func(*v1beta1.DynamoComponentDeploymentSharedSpec) bool,
