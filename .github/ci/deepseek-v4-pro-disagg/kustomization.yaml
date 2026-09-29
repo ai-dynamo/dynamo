@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dynamo-nightly-dsv4
+resources:
+- ../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/deploy.yaml
+- ../../../recipes/deepseek-v4/deepseek-v4-pro/vllm/disagg/gb200/perf.yaml
+images:
+- name: python
+  newName: docker.io/library/python
+  digest: sha256:44ff437bba879d4941b710a369a8f19266aea34b29002807f0c487fabc9eec9b
+patches:
+- path: patch-deploy.yaml
+- path: patch-perf.yaml
