@@ -360,22 +360,73 @@ func TestNormalizeVLLMFlags_BooleanFlagInEqualsFormIsNotRequested(t *testing.T) 
 	}
 }
 
-// TestNormalizeVLLMFlags_SizingFlagValuesAreNotTrimmed pins the deliberate limit on
-// trimShellTerminator: a shell terminator is dropped only from the two flags whose values
-// are compared as strings, never from a sizing flag. On this branch that limit is what
-// makes a terminated sizing value reach getFlagValue unparsed, so it is rejected outright
-// rather than silently resolving to a size vLLM will not use.
-func TestNormalizeVLLMFlags_SizingFlagValuesAreNotTrimmed(t *testing.T) {
+// TestNormalizeVLLMFlags_SizingFlagValuesAreShellResolved covers a sizing flag carrying a
+// shell terminator or quotes. Until this change the trim was restricted to the two
+// string-compared flags, so these reached strconv.ParseInt unresolved and the operator
+// sized the deployment from vLLM's default instead of the size the engine actually runs.
+func TestNormalizeVLLMFlags_SizingFlagValuesAreShellResolved(t *testing.T) {
 	for name, flags := range map[string]string{
-		"equals":    tensorParallelSizeFlag + "=4;",
-		"separated": tensorParallelSizeFlag + " 4;",
+		"terminator equals":    tensorParallelSizeFlag + "=4;",
+		"terminator separated": tensorParallelSizeFlag + " 4;",
+		"operator attached":    tensorParallelSizeFlag + "=4&&echo done",
+		"double quoted":        tensorParallelSizeFlag + "=\"4\"",
+		"single quoted":        tensorParallelSizeFlag + " '4'",
+		"short alias":          "-tp 4;",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := getFlagValue(getExpandedCommandLine(vllmShellContainer(flags)), tensorParallelSizeFlag)
-			if err == nil {
-				t.Errorf("getFlagValue(%q) = nil error, want a rejection -- a sizing value is "+
-					"never shell-trimmed, so %q does not parse", flags, "4;")
+			got, err := getFlagValue(getExpandedCommandLine(vllmShellContainer(flags)), tensorParallelSizeFlag)
+			if err != nil {
+				t.Fatalf("getFlagValue(%q) unexpected error: %v", flags, err)
+			}
+			if got != 4 {
+				t.Errorf("getFlagValue(%q) = %d, want 4 -- the shell delivers %q to the engine",
+					flags, got, "4")
 			}
 		})
+	}
+}
+
+// TestNormalizeVLLMFlags_QuotedValueKeepsItsContents pins the one case quoting must NOT be
+// treated as a terminator: inside quotes a control character is data, so the engine really
+// does receive "ray;" and rejects it. Truncating to "ray" would invent a value.
+func TestNormalizeVLLMFlags_QuotedValueKeepsItsContents(t *testing.T) {
+	if IsElasticEPRayLaunch(vllmShellContainer(enableElasticEPFlag + " " + dataParallelBackendFlag + "=\"ray;\"")) {
+		t.Error("a quoted \"ray;\" reaches argparse intact and is rejected; it must not resolve to ray")
+	}
+	if !IsElasticEPRayLaunch(vllmShellContainer(enableElasticEPFlag + " " + dataParallelBackendFlag + "=\"ray\"")) {
+		t.Error("a quoted \"ray\" is exactly ray to the engine and must qualify")
+	}
+}
+
+// TestNormalizeVLLMFlags_TerminatorOnValuelessFlagStillRequestsIt covers a terminator glued
+// to a flag that takes no value, which ends the word the same way it does after a value.
+func TestNormalizeVLLMFlags_TerminatorOnValuelessFlagStillRequestsIt(t *testing.T) {
+	if !IsElasticEPRayLaunch(vllmShellContainer(dataParallelBackendFlag + " ray " + enableElasticEPFlag + ";")) {
+		t.Fatalf("%s; is a request for elastic EP -- the shell ends the word at the terminator", enableElasticEPFlag)
+	}
+}
+
+// TestNormalizeVLLMFlags_UnrelatedTokenKeepsItsSpelling guards the valueless-flag trim from
+// rewriting anything this package does not read.
+func TestNormalizeVLLMFlags_UnrelatedTokenKeepsItsSpelling(t *testing.T) {
+	in := []string{"--some-future-flag;", "--trust-remote-code&&echo", "python3;"}
+	got := normalizeVLLMFlags(in)
+	for i := range in {
+		if got[i] != in[i] {
+			t.Errorf("token %d = %q, want it left alone as %q", i, got[i], in[i])
+		}
+	}
+}
+
+// TestNormalizeVLLMFlags_ExpansionValuesAreLeftAsWritten pins that a value the operator
+// cannot resolve is not guessed at. Its real value does not exist until the container runs,
+// so it is left intact for ValidateParallelismSizes to report.
+func TestNormalizeVLLMFlags_ExpansionValuesAreLeftAsWritten(t *testing.T) {
+	for _, value := range []string{"$(TENSOR_PARALLEL_SIZE)", "${TENSOR_PARALLEL_SIZE}", "$TP"} {
+		got := normalizeVLLMFlags([]string{dataParallelBackendFlag, value})
+		if got[1] != value {
+			t.Errorf("expansion %q normalized to %q, want it byte-for-byte intact -- trimming at "+
+				"\"(\" would leave only %q", value, got[1], "$")
+		}
 	}
 }
