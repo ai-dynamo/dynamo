@@ -107,12 +107,13 @@ jobs:
             --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}"
           "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
             --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD"
-      - name: Prepare model cache and aggregated ComputeDomain
+      - name: Prepare NATS, model cache, and aggregated ComputeDomain
         if: ${{ !inputs.preflight_only }}
         timeout-minutes: 45
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
+          "${k[@]}" wait deployment/kimi-k25-nats --for=condition=Available --timeout=120s
           until "${k[@]}" wait job/kimi-k25-model-download --for=condition=Complete --timeout=5s; do
             "${k[@]}" get job kimi-k25-model-download -o json |
               jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
@@ -158,11 +159,14 @@ jobs:
         timeout-minutes: 5
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s)
-          "${k[@]}" get dgd,job,configmap,computedomain -l "ci-run=$RUN_KEY" -o yaml > "$ARTIFACTS/resources.yaml" || true
+          "${k[@]}" get dgd,job,deployment,service,configmap,computedomain -l "ci-run=$RUN_KEY" -o yaml > "$ARTIFACTS/resources.yaml" || true
           "${k[@]}" get events --sort-by=.lastTimestamp > "$ARTIFACTS/events.txt" || true
           if [[ -n "$("${k[@]}" get dgd -l "ci-run=$RUN_KEY" -o name)" ]]; then
             "${k[@]}" logs -l nvidia.com/dynamo-graph-deployment-name=kimi-k25-trtllm-aggregate \
               --all-containers --prefix --tail=1000 > "$ARTIFACTS/deployment.log" 2>&1 || true
+          fi
+          if [[ -n "$("${k[@]}" get deployment -l "ci-run=$RUN_KEY" -o name)" ]]; then
+            "${k[@]}" logs deployment/kimi-k25-nats > "$ARTIFACTS/nats.log" 2>&1 || true
           fi
           for job in $("${k[@]}" get job -l "ci-run=$RUN_KEY" -o name); do
             "${k[@]}" logs "$job" --all-containers > "$ARTIFACTS/${job##*/}.log" 2>&1 || true
@@ -188,7 +192,7 @@ jobs:
           trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
           failed=0
           kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=0 \
-            delete job,dgd,configmap,computedomain -l "ci-run=$RUN_KEY" --cascade=foreground --wait=true --timeout=15m || failed=1
+            delete job,dgd,deployment,service,configmap,computedomain -l "ci-run=$RUN_KEY" --cascade=foreground --wait=true --timeout=15m || failed=1
           kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=30s \
             delete secret "hf-$RUN_KEY" "acr-$RUN_KEY" --ignore-not-found --wait=false || failed=1
           exit "$failed"

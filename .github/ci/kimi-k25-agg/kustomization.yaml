@@ -8,6 +8,7 @@ commonLabels:
   ci-run: local
 resources:
 - base.yaml
+- nats.yaml
 - perf.yaml
 - ../../../recipes/kimi-k2.5/model-cache/model-download.yaml
 patches:
@@ -25,6 +26,9 @@ patches:
     kind: DynamoGraphDeployment
     name: kimi-k25-trtllm-aggregate
   patch: |-
+    - op: add
+      path: /spec/envs/-
+      value: {name: NATS_SERVER, value: "nats://kimi-k25-nats:4222"}
     - op: add
       path: /spec/services/Worker/extraPodSpec/mainContainer/env/-
       value: {name: NCCL_SOCKET_IFNAME, value: eth0}
