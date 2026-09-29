@@ -1651,8 +1651,8 @@ mod tests {
                 max_num_seqs: 8,
                 max_num_batched_tokens: 256,
                 timing_model: TimingModelConfig::Fixed {
-                    prefill_ms: 100.0,
-                    decode_ms: 0.0,
+                    prefill_ms: 0.0,
+                    decode_ms: 100.0,
                 },
                 ..EngineConfig::default()
             },
@@ -1669,6 +1669,7 @@ mod tests {
             panic!("expected grouped pass start");
         };
         let group_duration_ms = started.end_ms - started.started_at_ms;
+        assert_eq!(group_duration_ms, 100.0);
 
         let handoff_id = HandoffId::from(Uuid::from_u128(72));
         handle

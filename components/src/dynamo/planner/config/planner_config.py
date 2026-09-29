@@ -17,9 +17,11 @@ import json
 import logging
 import math
 import os
+from copy import deepcopy
+from dataclasses import asdict
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Literal, Optional, Protocol
+from typing import Any, Dict, Literal, Optional, Protocol
 from urllib.parse import parse_qsl
 
 import yaml
@@ -34,7 +36,6 @@ from pydantic import (
 
 from dynamo.planner.config.aic_interpolation_spec import AICInterpolationSpec
 from dynamo.planner.config.defaults import SLAPlannerDefaults
-from dynamo.planner.config.parallelization import PickedParallelConfig
 from dynamo.planner.plugins.registry.config import PluginRegistrationConfig
 from dynamo.planner.plugins.types import HoldPolicy
 
@@ -96,29 +97,44 @@ class PlannerPreDeploymentSweepMode(str, Enum):
     Thorough = "thorough"
 
 
-class AICPerfModelSpec(BaseModel):
-    """Native AIC model identity used by Planner performance modeling.
+class AISPerfModelSpec(BaseModel):
+    """Role-indexed AISimulate canonical configurations.
 
-    Unlike ``AICInterpolationSpec``, this does not describe an AIC sweep.
-    It is the forward-pass model/backend/parallelism identity used for
-    real-time queries through the aiconfigurator-core wheel. Unsupported
-    native AIC configs are allowed: the AIC model falls back to FPM regression
-    and can still tune from observations.
+    The SDK owns the estimator schema. Dynamo binds each configuration to
+    its deployment role.
     """
 
-    hf_id: str = Field(description="HuggingFace model id, e.g. Qwen/Qwen3-32B")
-    system: str = Field(description="AIC system identifier, e.g. h200_sxm")
-    backend: Literal["trtllm", "vllm", "sglang"]
-    backend_version: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")
 
-    prefill_pick: Optional[PickedParallelConfig] = None
-    decode_pick: Optional[PickedParallelConfig] = None
+    roles: dict[Literal["prefill", "decode", "aggregated"], dict[str, Any]]
 
-    model_arch: Optional[str] = None
-    weight_dtype: Optional[str] = None
-    moe_dtype: Optional[str] = None
-    activation_dtype: Optional[str] = None
-    kv_cache_dtype: Optional[str] = None
+    @field_validator("roles")
+    @classmethod
+    def validate_role_identity(
+        cls, roles: dict[str, dict[str, Any]]
+    ) -> dict[str, dict[str, Any]]:
+        # Operator schema generation imports this module without the optional
+        # estimator runtime. Require AIS only when validating an AIS config.
+        from aisimulate_core import RustForwardPassPerfModel
+        from aisimulate_core.sdk import ForwardPassPerfModelConfig
+
+        result = {}
+        for role, config in roles.items():
+            config = deepcopy(config)
+            if config.get("worker_type", role) != role:
+                raise ValueError(f"AIS role {role!r} conflicts with worker_type")
+            config["worker_type"] = role
+            try:
+                # Use the installed SDK's fields/defaults; never duplicate its
+                # expanding schema or discard an unrecognized input field.
+                request = ForwardPassPerfModelConfig(**config)
+                RustForwardPassPerfModel.normalize_config(json.dumps(request.to_dict()))
+                # Keep authored roots portable and controls explicit; to_dict()
+                # resolves package/env roots on the machine doing validation.
+                result[role] = asdict(request)
+            except TypeError as error:
+                raise ValueError(f"invalid AIS config for {role}: {error}") from error
+        return result
 
 
 class ExternalPluginEntry(BaseModel):
@@ -401,7 +417,7 @@ class PlannerConfig(BaseModel):
             "depth and KV cache utilization — no SLA targets or profiling needed. "
             "'load' uses user-defined prefill queue token and decode KV "
             "utilization thresholds. "
-            "'sla' uses the AIC core performance model to target specific "
+            "'sla' uses the AISimulate performance model to target specific "
             "ttft_ms/itl_ms values."
         ),
     )
@@ -493,16 +509,24 @@ class PlannerConfig(BaseModel):
             "the legacy profile_results_dir file loader)."
         ),
     )
-    aic_perf_model: Optional[AICPerfModelSpec] = Field(
+    ais_perf_model: Optional[AISPerfModelSpec] = Field(
         default=None,
         description=(
-            "Native AIC forward-pass perf model identity for the Planner "
-            "engine-query layer. This enables real-time AIC estimates plus online "
-            "correction; unsupported native configs automatically fall back to "
-            "FPM regression in the AIC core wheel. This field does not trigger AIC "
-            "interpolation sweeps."
+            "Role-indexed AISimulate ForwardPassPerfModelConfig mappings. "
+            "The SDK owns estimator selection, tuning, and validation; "
+            "new configs default to auto selection with fallback denied."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_retired_perf_model_config(cls, values):
+        if isinstance(values, dict) and "aic_perf_model" in values:
+            raise ValueError(
+                "aic_perf_model is no longer supported; use ais_perf_model.roles "
+                "with canonical AISimulate configurations"
+            )
+        return values
 
     ttft_ms: float = Field(
         default=SLAPlannerDefaults.ttft_ms,
@@ -993,8 +1017,8 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode is 'none' or unset while "
-                    "throughput scaling is enabled; the AIC core performance model "
-                    "will start from native AIC estimates when available or "
+                    "throughput scaling is enabled; the AISimulate performance model "
+                    "will start from native AISimulate estimates when available or "
                     "from live FPM regression after enough observations."
                 )
             if (
@@ -1003,28 +1027,23 @@ class PlannerConfig(BaseModel):
             ):
                 logger.warning(
                     "pre_deployment_sweeping_mode='rapid' but aic_interpolation "
-                    "is not set; planner will use aic_perf_model, live FPM "
+                    "is not set; planner will use ais_perf_model, live FPM "
                     "tuning, or profile_results_dir files if the "
                     "get_perf_metrics endpoint is unavailable."
                 )
 
-        if self.aic_perf_model is not None:
-            if (
-                self.mode in ("disagg", "prefill")
-                and self.aic_perf_model.prefill_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.prefill_pick is required for prefill "
-                    f"perf queries in mode={self.mode!r}"
-                )
-            if (
-                self.mode in ("disagg", "decode", "agg")
-                and self.aic_perf_model.decode_pick is None
-            ):
-                raise ValueError(
-                    "aic_perf_model.decode_pick is required for decode/agg "
-                    f"perf queries in mode={self.mode!r}"
-                )
+        if self.ais_perf_model is not None:
+            required_roles = {
+                "disagg": ("prefill", "decode"),
+                "prefill": ("prefill",),
+                "decode": ("decode",),
+                "agg": ("aggregated",),
+            }[self.mode]
+            for role in required_roles:
+                if role not in self.ais_perf_model.roles:
+                    raise ValueError(
+                        f"ais_perf_model.roles.{role} is required for mode={self.mode!r}"
+                    )
 
         intervals = [float(self.load_adjustment_interval_seconds)]
         if self.enable_throughput_scaling:

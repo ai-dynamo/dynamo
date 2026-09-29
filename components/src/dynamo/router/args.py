@@ -8,9 +8,9 @@ import os
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
-from dynamo.common.configuration.groups.aic_perf_args import (
-    AicPerfArgGroup,
-    AicPerfConfigBase,
+from dynamo.common.configuration.groups.ais_perf_args import (
+    AisPerfArgGroup,
+    AisPerfConfigBase,
 )
 from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterArgGroup,
@@ -18,10 +18,10 @@ from dynamo.common.configuration.groups.kv_router_args import (
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
 from dynamo.common.utils.namespace import get_worker_namespace
-from dynamo.llm import AicPerfConfig, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 
 
-class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
+class DynamoRouterConfig(KvRouterConfigBase, AisPerfConfigBase):
     """Typed configuration for the standalone KV router (router-owned options only)."""
 
     namespace: str
@@ -55,23 +55,15 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
             raise ValueError(
                 "--serve-indexer and --use-remote-indexer are mutually exclusive"
             )
-        if self.router_prefill_load_model == "aic":
-            missing = [
-                flag
-                for flag, value in (
-                    ("--aic-backend", self.aic_backend),
-                    ("--aic-system", self.aic_system),
-                    ("--aic-model-path", self.aic_model_path),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError(
-                    "--router-prefill-load-model=aic requires " + ", ".join(missing)
-                )
+        if self.ais_perf_config is not None and self.router_prefill_load_model != "ais":
+            raise ValueError(
+                "--ais-perf-config requires --router-prefill-load-model=ais"
+            )
+        if self.router_prefill_load_model == "ais":
+            self.ais_perf_kwargs()
             if not self.router_track_prefill_tokens:
                 raise ValueError(
-                    "--router-prefill-load-model=aic requires "
+                    "--router-prefill-load-model=ais requires "
                     "--router-track-prefill-tokens"
                 )
         if (
@@ -124,7 +116,7 @@ class DynamoRouterArgGroup(ArgGroup):
 
         # KV router options (shared with dynamo.frontend)
         KvRouterArgGroup().add_arguments(parser)
-        AicPerfArgGroup().add_arguments(parser)
+        AisPerfArgGroup().add_arguments(parser)
 
 
 def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
@@ -132,12 +124,12 @@ def build_kv_router_config(router_config: DynamoRouterConfig) -> KvRouterConfig:
     return KvRouterConfig(**router_config.kv_router_kwargs())
 
 
-def build_aic_perf_config(
+def build_ais_perf_config(
     router_config: DynamoRouterConfig,
-) -> AicPerfConfig | None:
-    if router_config.router_prefill_load_model != "aic":
+) -> AisPerfConfig | None:
+    if router_config.router_prefill_load_model != "ais":
         return None
-    return AicPerfConfig(**router_config.aic_perf_kwargs())
+    return AisPerfConfig(**router_config.ais_perf_kwargs())
 
 
 def parse_args(argv: Optional[list[str]] = None) -> DynamoRouterConfig:

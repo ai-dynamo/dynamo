@@ -10,7 +10,6 @@ drained. There is no separate replay mode.
 Supported backends are:
 
 - `nested-map` (`PositionalIndexer`)
-- `concurrent-radix-tree`
 - `concurrent-radix-tree-compressed`
 
 The benchmark rejects single-threaded radix, branch-sharded CRTC, approximate

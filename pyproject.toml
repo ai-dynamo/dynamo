@@ -14,7 +14,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.6.0",
-    "aisimulate==0.12.0; python_version >= '3.11' and python_version < '3.14'",
+    "aisimulate==0.13.0.dev202609270000000058 ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",
@@ -51,7 +51,7 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.3.0rc27",
+    "tensorrt-llm==1.3.0rc28",
     # tensorrt-llm declares an uncapped `mpmath>=1.3.0`; under `--pre` the resolver
     # picks mpmath 1.5.0a0 (mpmath.libmp.bitcount removed) and backtracks sympy to
     # the uncapped 1.14.0rc1, which still imports bitcount -> torch._dynamo dies at
@@ -62,7 +62,7 @@ trtllm =[
 vllm = [
     "uvloop",
     "nixl[cu13]==1.3.2",
-    "vllm[flashinfer,runai,otel]==0.29.0",
+    "vllm[flashinfer,runai,otel]==0.30.0",
     # vllm-omni is not part of ai-dynamo[vllm]: container builds inherit the
     # framework stack from vllm/vllm-openai, and pip/uv dependency resolution
     # for omni can override the vLLM torch stack.
@@ -113,6 +113,9 @@ vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
 triton_tests = "dynamo.triton.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
+
+[project.entry-points."vllm.general_plugins"]
+dynamo_kv_cache_metadata = "dynamo.vllm.kv_cache_metadata_compat:register"
 
 [project.entry-points."aisimulate.sweep_config_providers"]
 "dynamo.planner" = "dynamo.planner.simulation:create_provider"
@@ -241,9 +244,9 @@ xfail_strict = true
 log_cli_level = "INFO"
 filterwarnings = [
     "error",
-    # DGDR still uses AISimulate 0.12's supported legacy sweep API until its
+    # DGDR still uses AISimulate's supported legacy sweep API until its
     # migration to the new Sweeper API is implemented.
-    'ignore:`aiconfigurator\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is deprecated:DeprecationWarning',
+    'ignore:`aisimulate\.sdk\.sweep\.sweep_(agg|disagg)\(\)` is a deprecated sweep API:DeprecationWarning',
     # chardet 6.x is pulled in transitively but requests 2.32.x only supports chardet <6;
     # charset_normalizer is used at runtime so the warning is benign.
     "ignore:.*doesn't match a supported version",
@@ -300,13 +303,13 @@ filterwarnings = [
     # SGLang quantization warnings on CPU-only runners
     "ignore:Only CUDA, HIP and XPU support AWQ currently.*:UserWarning",
     "ignore:Only CUDA support GGUF quantization currently.*:UserWarning",
-    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; aiconfigurator hits it
+    # pandas 2.3 emits this from pd.concat on empty/all-NA frames; AISimulate hits it
     # during disagg pareto search and re-raises as RuntimeError, breaking planner tests.
     "ignore:The behavior of DataFrame concatenation with empty or all-NA entries is deprecated.*:FutureWarning",
-    # pandas 2.3 emits this from aiconfigurator pareto filtering under filterwarnings=error.
+    # pandas 2.3 emits this from AISimulate pareto filtering under filterwarnings=error.
     "ignore:Downcasting behavior in `replace` is deprecated.*:FutureWarning",
     # pandas 2.3 emits this from the bundled compatibility report path on fillna.
-    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aiconfigurator.cli.report_and_save",
+    "ignore:Downcasting object dtype arrays on .fillna.*:FutureWarning:aisimulate.legacy_cli.report_and_save",
 ]
 
 

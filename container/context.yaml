@@ -38,12 +38,25 @@ dynamo:
   # the epp image carries) add on top.
   frontend_baseline_sbom: ubuntu@7291df36
   planner_build_image: python
-  planner_build_image_tag: 3.12-slim
+  planner_build_image_tag: 3.13-slim
   planner_runtime_image: nvcr.io/nvidia/distroless/python
-  planner_runtime_image_tag: 3.12-v4.0.9
+  planner_runtime_image_tag: 3.13-v4.1.4
   # Self-baseline of the distroless-python runtime; the licenses stage subtracts
   # it so planner NOTICES attribute only what the builder adds on top.
-  planner_baseline_sbom: python@ec133be9
+  planner_baseline_sbom: python@eb5be985
+  # Planner-scoped interpreter. The planner uses a separate, newer CPython line
+  # from the global python_version below because it is the only stage whose
+  # interpreter is decoupled from the framework/runtime bases: the build stage
+  # FROMs python:${planner_build_image_tag} (Docker Hub), and the runtime
+  # stage FROMs nvcr.io/nvidia/distroless/python:${planner_runtime_image_tag}.
+  # Neither of those images pin the frontend or framework stacks. The global
+  # python_version cannot follow because (a) frontend.Dockerfile apt-installs
+  # python${PYTHON_VERSION}-dev on nvcr.io/nvidia/base/ubuntu:noble (Ubuntu
+  # 24.04 ships python3.12 with no python3.13 in its archive), and (b) the
+  # framework runtime images (vllm/vllm-openai, lmsysorg/sglang,
+  # nvcr.io/nvidia/tensorrt-llm/release) ship python3.12 with cp312 ABI wheels
+  # for torch/vllm/sglang/tensorrt-llm. Moving those is a separate change.
+  planner_python_version: "3.13"
   python_version: "3.12"
   # Every stage must use the same uv: stages share one BuildKit uv cache mount,
   # and uv rejects cache entries written by a newer version.
@@ -77,7 +90,8 @@ vllm:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: vllm/vllm-openai
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
-    runtime_image_tag: v0.29.0-ubuntu2404
+    runtime_image_tag: v0.30.0-ubuntu2404
+    vllm_omni_ref: "v0.30.0rc1"
     # Baseline is vllm-openai's TRUE base, nvidia/cuda:13.0.2-base-ubuntu24.04
     # (Docker Hub), NOT a self-baseline of the third-party vllm/vllm-openai image.
     # vllm-openai is built FROM nvidia/cuda, so this attributes everything vLLM
@@ -108,7 +122,7 @@ vllm:
   enable_gpu_memory_service: "true"
   enable_kvbm: "true"
   enable_modelexpress: "true"
-  modelexpress_version: "0.5.0"
+  modelexpress_version: "0.6.0"
   # aws-sdk-cpp tag for the NIXL OBJ / S3 backend (built in wheel_builder).
   aws_sdk_cpp_version: "1.11.760"
 
@@ -150,16 +164,16 @@ sglang:
   enable_gpu_memory_service: "true"
   enable_kvbm: "false"
   enable_modelexpress: "true"
-  modelexpress_version: "0.5.0"
+  modelexpress_version: "0.6.0"
 
 trtllm:
   cuda13.1:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tensorrt-llm/release
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
-    runtime_image_tag: 1.3.0rc27
+    runtime_image_tag: 1.3.0rc28
     # Per-arch baseline stem (re-captured against tensorrt-llm/release, both arches).
-    baseline_sbom: release@2af29022
+    baseline_sbom: release@a1f43376
   nixl_ref: v1.3.1
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"

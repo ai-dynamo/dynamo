@@ -64,6 +64,37 @@ fn seeded_selection_matches_reference_across_cache_and_load_shapes() {
 }
 
 #[test]
+fn empty_prompt_routes_by_load() {
+    // Workers 0 and 1 sit on the prefill floor with decode backlog. Worker 2 is one
+    // prefill block above the floor with no decode backlog, so it must win.
+    let (workers, mut request) = fixture(3, 0);
+    request.overlap = Default::default();
+    for (worker, load) in &mut request.worker_loads {
+        let unloaded = worker.worker_id == 2;
+        *load = dynamo_kv_router::WorkerLoadProjection {
+            active_prefill_tokens: if unloaded { 1616 } else { 1600 },
+            active_decode_blocks: if unloaded { 0 } else { 50 },
+            ..Default::default()
+        };
+    }
+    for overlap_score_credit_decay in [0.0, 1.0] {
+        let config = KvRouterConfig {
+            router_temperature: 0.0,
+            overlap_score_credit_decay,
+            ..Default::default()
+        };
+        let plugin = DefaultWorkerSelector::new_seeded(Some(config), "test", 42);
+        let result = plugin
+            .select_worker(support::selection_input(&workers, &request, 16))
+            .unwrap();
+        assert_eq!(
+            result.worker.worker_id, 2,
+            "decay={overlap_score_credit_decay}"
+        );
+    }
+}
+
+#[test]
 fn unseeded_sampling_matches_reference_with_the_same_random_draw() {
     for count in [1, 8, 64] {
         for temperature in [0.1, 0.7, 1.0, 2.0] {

@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Verify Dynamo consumes AIC through the consolidated AISimulate release."""
+"""Verify Dynamo consumes the canonical AISimulate wheel and namespaces."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
-from importlib import metadata
+import textwrap
+from importlib import metadata, resources
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,49 @@ CARGO_LOCKFILES = (
     ROOT / "lib/bindings/python/Cargo.lock",
     ROOT / "lib/bindings/kvbm/Cargo.lock",
 )
+
+
+@pytest.mark.timeout(30)
+def test_operator_schemas_do_not_load_aisimulate_runtime() -> None:
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import runpy
+        import sys
+
+        class WithoutAIS(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname.split('.')[0] in {'aisimulate', 'aisimulate_core'}:
+                    raise ModuleNotFoundError('AIS runtime is unavailable', name=fullname)
+
+        sys.meta_path.insert(0, WithoutAIS())
+        namespace = runpy.run_path(sys.argv[1], run_name='__main__')
+        try:
+            namespace['PlannerConfig'](
+                mode='decode',
+                ais_perf_model={'roles': {'decode': {
+                    'model': 'model', 'system': 'system', 'backend': 'vllm',
+                }}},
+            )
+        except ModuleNotFoundError as error:
+            assert error.name == 'aisimulate_core'
+        else:
+            raise AssertionError('Explicit AIS configuration requires its runtime')
+        """
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(ROOT / "deploy/operator/api/scripts/validate_pydantic_models.py"),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _requirement_names(requirements: list[str]) -> set[str]:
@@ -91,15 +136,16 @@ def test_no_manifest_installs_retired_aic_distributions() -> None:
         with lockfile.open("rb") as handle:
             packages = tomllib.load(handle)["package"]
         assert all(package["name"] != "aiconfigurator-core" for package in packages)
-    assert features["aic-forward-pass"] == ["dep:aisimulate-core"]
+    assert features["ais-forward-pass"] == ["dep:aisimulate-core"]
+    assert "aic-forward-pass" not in features
     assert dependencies["aisimulate-core"] == {
-        "version": "=0.12.0",
+        "version": "=0.13.0-dev.202609270000000058",
         "optional": True,
         "features": ["python"],
     }
 
 
-def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
+def test_aisimulate_wheel_uses_canonical_import_namespaces() -> None:
     if sys.version_info < (3, 11) or sys.version_info >= (3, 14):
         pytest.skip("AISimulate supports Python 3.11 through 3.13")
 
@@ -108,14 +154,22 @@ def test_aisimulate_wheel_preserves_aic_import_namespaces() -> None:
     release_files = {str(path) for path in release.files or []}
 
     assert not (release_requirements & LEGACY_DISTRIBUTIONS)
-    assert "aiconfigurator/__init__.py" in release_files
-    assert "aiconfigurator_core/__init__.py" in release_files
+    assert "aisimulate/__init__.py" in release_files
+    assert "aisimulate_core/__init__.py" in release_files
+    assert not any(
+        path.split("/", 1)[0] in {"aiconfigurator", "aiconfigurator_core"}
+        for path in release_files
+    )
 
-    import aiconfigurator
-    import aiconfigurator_core
-    from aiconfigurator_core.sdk import RustForwardPassPerfModel
-    from aisimulate_core.sdk import RustForwardPassPerfModel as PublicPerfModel
+    from aisimulate.sdk.task_v2 import Task
+    from aisimulate_core.sdk import RustForwardPassPerfModel
 
-    assert aiconfigurator is not None
-    assert aiconfigurator_core is not None
-    assert RustForwardPassPerfModel is PublicPerfModel
+    assert Task is not None
+    assert callable(RustForwardPassPerfModel.best_available)
+    core_root = resources.files("aisimulate_core")
+    assert core_root.joinpath("model_configs/Qwen--Qwen3-32B_config.json").is_file()
+    assert core_root.joinpath("systems/h200_sxm.yaml").is_file()
+    legacy_cli = next(
+        entry for entry in release.entry_points if entry.name == "aiconfigurator"
+    )
+    assert legacy_cli.value == "aisimulate.legacy_cli.entrypoint:main"
