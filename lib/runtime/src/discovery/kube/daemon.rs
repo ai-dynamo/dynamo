@@ -431,6 +431,10 @@ async fn event_loop(
             }
             event = readiness_rx.recv() => {
                 let Some(event) = event else {
+                    // Child cancellation can close the channel before select observes it.
+                    if cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
                     anyhow::bail!("Readiness reflector stream stopped");
                 };
                 if matches!(event, ReadinessEvent::Rebuild) {
@@ -446,6 +450,10 @@ async fn event_loop(
             }
             event = cr_rx.recv() => {
                 let Some(event) = event else {
+                    // Child cancellation can close the channel before select observes it.
+                    if cancel_token.is_cancelled() {
+                        return Ok(());
+                    }
                     anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
                 };
                 if matches!(event, CrEvent::Rebuild) {
@@ -818,6 +826,8 @@ mod tests {
                 *state_rx.borrow(),
                 DaemonState::Failed(expected.to_string())
             );
+        } else {
+            assert_eq!(*state_rx.borrow(), DaemonState::Stopped);
         }
     }
 

@@ -7,6 +7,7 @@ import importlib.util
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 pytestmark = [
     pytest.mark.unit,
@@ -316,7 +317,9 @@ def test_tito_adapter_rejects_unsupported_execution_paths(
 def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
     from dynamo.vllm.engine_generate import adapt_engine_generate_request
 
-    with pytest.raises(TypeError, match="hashes and placeholders must be lists"):
+    # Newer native protocols reject mismatched modalities before the adapter's
+    # list check. Both supported protocol versions must reject this payload.
+    with pytest.raises((TypeError, ValidationError)) as exc_info:
         adapt_engine_generate_request(
             _request(features=features, sampling_params={"max_tokens": 1}),
             enable_multimodal=True,
@@ -324,6 +327,17 @@ def test_tito_adapter_rejects_asymmetric_image_feature_objects(features):
             vllm_config=_vllm_config(),
             default_sampling_params={},
         )
+    if isinstance(exc_info.value, ValidationError):
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert errors[0]["loc"] == ("features",)
+        assert errors[0]["type"] == "value_error"
+        assert (
+            "mm_hashes and mm_placeholders must use the same modalities"
+            in errors[0]["msg"]
+        )
+    else:
+        assert str(exc_info.value) == "TITO image hashes and placeholders must be lists"
 
 
 def test_tito_adapter_rejects_routing_hash_count_mismatch():
