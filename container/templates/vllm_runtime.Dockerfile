@@ -87,6 +87,10 @@ COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 {% if device == "cuda" %}
+# Motif's image adds rsync and its popt dependencies above the PyTorch base.
+# They are not needed for serving; remove them before final-image compliance.
+RUN apt-get purge -y rsync libpopt-dev libpopt0
+
 # Bring base-image OS packages up to the current patch releases published in
 # the distro archives. --only-upgrade skips anything not already installed, so
 # no new packages are added; versions are left unpinned so a cache-busted

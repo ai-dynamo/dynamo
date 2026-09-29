@@ -148,6 +148,25 @@
       "from_image": "nvcr.io/nvidia/distroless/go",
       "from_tag": "v4.0.9",
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:bbc2b67e2533edd63ff1496bb1ed00a00338cdc1478af6c1a0bf9f4b369977e7",
+      "baseline_image": "nvcr.io/nvidia/pytorch",
+      "baseline_sbom": "pytorch@bbc2b67e-amd64.cdx.json",
+      "baseline_tag": "26.02-py3",
+      "capture_note": "Syft scanned the effective filesystem inside each local image to avoid a large docker-save export.",
+      "delta_validation_deferred": "The vLLM runtime removes rsync, libpopt-dev and libpopt0. FlashAttention and Supervisor metadata is resolved by the runtime Python generator. The mandatory final-image license and codec gates remain enabled and must pass before publishing.",
+      "delta_validation_findings": [
+        "  [python] flash-attn@2.8.3: license is UNKNOWN and policy.licenses.unknown = 'deny' (SPDX: 'UNKNOWN')",
+        "  [dpkg] libpopt-dev@1.19+dfsg-1build1: contains denied license(s): ['GPL-2.0-only', 'GPL-2.0-or-later'] (SPDX: 'GPL-2.0-only AND GPL-2.0-or-later AND MIT')",
+        "  [dpkg] libpopt0@1.19+dfsg-1build1: contains denied license(s): ['GPL-2.0-only', 'GPL-2.0-or-later'] (SPDX: 'GPL-2.0-only AND GPL-2.0-or-later AND MIT')",
+        "  [dpkg] rsync@3.2.7-1ubuntu1.5: license is UNKNOWN and policy.licenses.unknown = 'deny' (SPDX: 'UNKNOWN')",
+        "  [python] supervisor@4.3.0: no allowed license in expression; not in allow list: ['LicenseRef-BSD-derived-http-www.repoze.org-LICENSE.txt'] (SPDX: 'LicenseRef-BSD-derived-http-www.repoze.org-LICENSE.txt')"
+      ],
+      "from_digest": "sha256:c90d471174ec29a0f6c5ecba718a6905a4180be72f2c6d37ce9dad4d799fa836",
+      "from_image": "ghcr.io/motiftechnologies/vllm",
+      "from_tag": "v0.26.0-motif3",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -161,7 +180,7 @@
     "layer_prefix_check_skipped": "(optional) true if the engineer opted out at capture time",
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
-  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-13T18:50:01+00:00",
+  "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 8 MB per file.",
+  "generated_at": "2026-09-29T00:41:19+00:00",
   "schema_version": 2
 }

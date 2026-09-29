@@ -68,7 +68,9 @@ vllm:
     base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
     runtime_image_tag: v0.26.0-motif3@sha256:c90d471174ec29a0f6c5ecba718a6905a4180be72f2c6d37ce9dad4d799fa836
     enable_vllm_omni: "false"
-    # No baseline subtraction: compliance scans the full Motif-derived image.
+    # Verified parent: all 81 PyTorch layers are inherited unchanged by Motif.
+    # Audit everything Motif and Dynamo add above this NVIDIA-owned base.
+    baseline_sbom: pytorch@bbc2b67e
   xpu:
     base_image: vllm/vllm-openai-xpu
     runtime_image: vllm/vllm-openai-xpu
