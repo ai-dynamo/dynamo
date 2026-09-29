@@ -726,7 +726,6 @@ fn apply_cr_event(
             let mut next: HashMap<String, CachedCrMetadata> = HashMap::new();
             let mut observed: HashSet<String> = HashSet::new();
             for cr in items {
-                // Use same validation as scan_cr_store via read path
                 if let Some((cr_name, cached)) = read_cr_object(&cr, valid_cr_cache) {
                     observed.insert(cr_name.clone());
                     if let Some(cached) = cached {
