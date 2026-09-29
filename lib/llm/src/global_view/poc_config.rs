@@ -56,6 +56,8 @@ struct PoolConfig {
     datacenter: Option<String>,
     runtime_namespace: String,
     model: String,
+    #[serde(default)]
+    stats_only_aggregated: bool,
     private_frontend_base_url: String,
     relay_grpc_url: String,
     stats_grpc_url: String,
@@ -102,6 +104,7 @@ impl PocRouterConfig {
                     frontend_endpoint: pool.private_frontend_base_url,
                 },
                 model: pool.model,
+                stats_only_aggregated: pool.stats_only_aggregated,
                 subscriber_id: pool.subscriber_id,
                 relay_channel: channel(&pool.relay_grpc_url).context("configure Relay channel")?,
                 stats_channel: channel(&pool.stats_grpc_url)

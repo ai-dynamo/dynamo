@@ -31,8 +31,8 @@ struct ActiveCkf {
 
 struct Epoch {
     assembler: Arc<PoolObservationAssembler>,
-    catalog_lease: PlaneLease,
-    readiness_lease: PlaneLease,
+    catalog_lease: Option<PlaneLease>,
+    readiness_lease: Option<PlaneLease>,
     active_ckf: Option<ActiveCkf>,
     stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
 }
@@ -41,14 +41,20 @@ impl Epoch {
     fn new(
         assembler: Arc<PoolObservationAssembler>,
         stats_catalog_tx: Option<watch::Sender<Option<StatsCatalog>>>,
+        stats_only: bool,
     ) -> Result<Self> {
-        let catalog_lease = assembler.open(SourcePlane::Catalog)?;
-        let readiness_lease = match assembler.open(SourcePlane::Readiness) {
-            Ok(lease) => lease,
-            Err(error) => {
-                assembler.disconnect(catalog_lease);
-                return Err(error.into());
-            }
+        let (catalog_lease, readiness_lease) = if stats_only {
+            (None, None)
+        } else {
+            let catalog_lease = assembler.open(SourcePlane::Catalog)?;
+            let readiness_lease = match assembler.open(SourcePlane::Readiness) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    assembler.disconnect(catalog_lease);
+                    return Err(error.into());
+                }
+            };
+            (Some(catalog_lease), Some(readiness_lease))
         };
         Ok(Self {
             assembler,
@@ -72,8 +78,12 @@ impl Drop for Epoch {
         if let Some(tx) = &self.stats_catalog_tx {
             tx.send_replace(None);
         }
-        self.assembler.disconnect(self.catalog_lease);
-        self.assembler.disconnect(self.readiness_lease);
+        if let Some(lease) = self.catalog_lease {
+            self.assembler.disconnect(lease);
+        }
+        if let Some(lease) = self.readiness_lease {
+            self.assembler.disconnect(lease);
+        }
     }
 }
 
@@ -86,6 +96,7 @@ async fn run_relay_view_publishing(
     channel: Channel,
     scope: RelayPoolScope,
     model: String,
+    stats_only: bool,
     subscriber_id: String,
     assembler: Arc<PoolObservationAssembler>,
     store: Arc<RelayCkfOverlapStore>,
@@ -111,6 +122,7 @@ async fn run_relay_view_publishing(
             channel.clone(),
             scope.clone(),
             model.clone(),
+            stats_only,
             subscriber_id.clone(),
             Arc::clone(&assembler),
             Arc::clone(&store),
@@ -148,6 +160,7 @@ pub async fn run_relay_view_with_stats(
     stats_channel: Channel,
     scope: RelayPoolScope,
     model: String,
+    stats_only: bool,
     subscriber_id: String,
     assembler: Arc<PoolObservationAssembler>,
     store: Arc<RelayCkfOverlapStore>,
@@ -159,13 +172,20 @@ pub async fn run_relay_view_with_stats(
             relay_channel,
             scope,
             model,
+            stats_only,
             subscriber_id,
             Arc::clone(&assembler),
             store,
             cancel.child_token(),
             Some(catalog_tx),
         ),
-        run_stats_view(stats_channel, catalog_rx, assembler, cancel.child_token()),
+        run_stats_view(
+            stats_channel,
+            catalog_rx,
+            assembler,
+            cancel.child_token(),
+            stats_only
+        ),
     )?;
     Ok(())
 }
@@ -184,6 +204,7 @@ pub async fn run_relay_view(
         channel,
         scope,
         model,
+        false,
         subscriber_id,
         assembler,
         store,
@@ -203,6 +224,7 @@ async fn run_relay_view_epoch_publishing(
     channel: Channel,
     scope: RelayPoolScope,
     model: String,
+    stats_only: bool,
     subscriber_id: String,
     assembler: Arc<PoolObservationAssembler>,
     store: Arc<RelayCkfOverlapStore>,
@@ -212,7 +234,7 @@ async fn run_relay_view_epoch_publishing(
     if model.trim().is_empty() {
         bail!("Global View model must be non-empty");
     }
-    let mut epoch = Epoch::new(assembler, stats_catalog_tx)?;
+    let mut epoch = Epoch::new(assembler, stats_catalog_tx, stats_only)?;
     let mut catalog_client = wire::KvEventRelayClient::new(channel.clone());
     let mut readiness_client = wire::KvEventRelayClient::new(channel.clone());
     let mut catalog_stream = catalog_client
@@ -251,18 +273,29 @@ async fn run_relay_view_epoch_publishing(
                     if last_catalog_snapshot.as_ref() != update.snapshot.as_ref() {
                         bail!("Relay catalog changed without advancing its revision");
                     }
-                    if !epoch.assembler.apply(epoch.catalog_lease, projection.observation)? {
+                    if let Some(lease) = epoch.catalog_lease
+                        && !epoch.assembler.apply(lease, projection.observation)?
+                    {
                         bail!("Relay catalog heartbeat was superseded");
                     }
                     continue;
                 }
                 last_catalog_revision = Some(update.revision);
                 last_catalog_snapshot = update.snapshot.clone();
+                if stats_only && update.snapshot.as_ref().is_some_and(|snapshot| !snapshot.pools.is_empty()) {
+                    bail!("stats-only aggregated Relay published KV producers; refusing ambiguous attribution");
+                }
                 let selected = projection.sole_aggregated_overlap_producer(&model).cloned();
                 let stats_catalog = relay_key.and_then(|relay| {
-                    StatsCatalog::from_projection(&projection, &model, relay)
+                    if stats_only {
+                        Some(StatsCatalog::kvless_aggregated(relay, &model, &scope.frontend_endpoint))
+                    } else {
+                        StatsCatalog::from_projection(&projection, &model, relay)
+                    }
                 });
-                if !epoch.assembler.apply(epoch.catalog_lease, projection.observation.clone())? {
+                if let Some(lease) = epoch.catalog_lease
+                    && !epoch.assembler.apply(lease, projection.observation.clone())?
+                {
                     bail!("Relay catalog observation was superseded");
                 }
                 if let Some(tx) = &epoch.stats_catalog_tx {
@@ -316,7 +349,12 @@ async fn run_relay_view_epoch_publishing(
                     last_readiness_revision = Some(update.revision);
                     last_readiness_entries = Some(update.entries.clone());
                 }
-                if !epoch.assembler.apply(epoch.readiness_lease, observation)? {
+                if stats_only && !update.entries.is_empty() {
+                    bail!("stats-only aggregated Relay published serving topology; refusing ambiguous readiness");
+                }
+                if let Some(lease) = epoch.readiness_lease
+                    && !epoch.assembler.apply(lease, observation)?
+                {
                     bail!("Relay readiness observation was superseded");
                 }
             }
@@ -343,6 +381,7 @@ pub async fn run_relay_view_epoch(
         channel,
         scope,
         model,
+        false,
         subscriber_id,
         assembler,
         store,

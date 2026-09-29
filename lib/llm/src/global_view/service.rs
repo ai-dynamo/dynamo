@@ -134,6 +134,7 @@ mod tests {
                         frontend_endpoint: "http://127.0.0.1:1".into(),
                     },
                     model: "model".into(),
+                    stats_only_aggregated: false,
                     subscriber_id: "global-router-ohio".into(),
                     relay_channel: channel.clone(),
                     stats_channel: channel,

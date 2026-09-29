@@ -3,7 +3,9 @@
 
 //! Independent PR #13187 stats stream lifecycle for one configured DGD.
 
-use super::projection::{StatsCatalog, combined_capacity, project_load, project_usage};
+use super::projection::{
+    StatsCatalog, combined_capacity, project_kvless_frontend, project_load, project_usage,
+};
 use super::proto;
 
 use std::sync::Arc;
@@ -22,10 +24,12 @@ struct StatsPlanes {
     capacity: PlaneLease,
     load: PlaneLease,
     usage: PlaneLease,
+    catalog: Option<PlaneLease>,
+    readiness: Option<PlaneLease>,
 }
 
 impl StatsPlanes {
-    fn new(assembler: Arc<PoolObservationAssembler>) -> Result<Self> {
+    fn new(assembler: Arc<PoolObservationAssembler>, stats_only: bool) -> Result<Self> {
         let capacity = assembler.open(SourcePlane::Capacity)?;
         let load = match assembler.open(SourcePlane::Load) {
             Ok(lease) => lease,
@@ -42,11 +46,21 @@ impl StatsPlanes {
                 return Err(error.into());
             }
         };
+        let (catalog, readiness) = if stats_only {
+            (
+                Some(assembler.open(SourcePlane::Catalog)?),
+                Some(assembler.open(SourcePlane::Readiness)?),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
             assembler,
             capacity,
             load,
             usage,
+            catalog,
+            readiness,
         })
     }
 
@@ -54,6 +68,10 @@ impl StatsPlanes {
         self.capacity = self.assembler.open(SourcePlane::Capacity)?;
         self.load = self.assembler.open(SourcePlane::Load)?;
         self.usage = self.assembler.open(SourcePlane::KvUsage)?;
+        if self.catalog.is_some() {
+            self.catalog = Some(self.assembler.open(SourcePlane::Catalog)?);
+            self.readiness = Some(self.assembler.open(SourcePlane::Readiness)?);
+        }
         Ok(())
     }
 
@@ -63,7 +81,15 @@ impl StatsPlanes {
             SourcePlane::Capacity => &mut self.capacity,
             SourcePlane::Load => &mut self.load,
             SourcePlane::KvUsage => &mut self.usage,
-            _ => bail!("invalid stats plane"),
+            SourcePlane::Catalog => self
+                .catalog
+                .as_mut()
+                .context("stats catalog plane is disabled")?,
+            SourcePlane::Readiness => self
+                .readiness
+                .as_mut()
+                .context("stats readiness plane is disabled")?,
+            SourcePlane::KvOverlap => bail!("invalid stats plane"),
         };
         *slot = lease;
         if let Some(observation) = observation
@@ -80,6 +106,12 @@ impl Drop for StatsPlanes {
         self.assembler.disconnect(self.capacity);
         self.assembler.disconnect(self.load);
         self.assembler.disconnect(self.usage);
+        if let Some(lease) = self.catalog {
+            self.assembler.disconnect(lease);
+        }
+        if let Some(lease) = self.readiness {
+            self.assembler.disconnect(lease);
+        }
     }
 }
 
@@ -90,6 +122,7 @@ pub async fn run_stats_view(
     catalog_rx: watch::Receiver<Option<StatsCatalog>>,
     assembler: Arc<PoolObservationAssembler>,
     cancel: CancellationToken,
+    stats_only: bool,
 ) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
     loop {
@@ -99,6 +132,7 @@ pub async fn run_stats_view(
             catalog_rx.clone(),
             Arc::clone(&assembler),
             cancel.child_token(),
+            stats_only,
         )
         .await;
         if cancel.is_cancelled() {
@@ -129,8 +163,9 @@ pub async fn run_stats_epoch(
     mut catalog_rx: watch::Receiver<Option<StatsCatalog>>,
     assembler: Arc<PoolObservationAssembler>,
     cancel: CancellationToken,
+    stats_only: bool,
 ) -> Result<()> {
-    let mut planes = StatsPlanes::new(assembler)?;
+    let mut planes = StatsPlanes::new(assembler, stats_only)?;
     let mut usage_client = proto::kv_dc_relay_client::KvDcRelayClient::new(channel.clone());
     let mut load_client = proto::kv_dc_relay_client::KvDcRelayClient::new(channel);
     let mut usage_stream = usage_client.watch_kv_usage(()).await?.into_inner();
@@ -167,6 +202,11 @@ pub async fn run_stats_epoch(
                 load = project_load(&snapshot, current, now_unix_ms());
                 planes.replace(SourcePlane::Load, load.as_ref().and_then(|value| value.load.clone()))?;
                 planes.replace(SourcePlane::Capacity, combined_capacity(usage.as_ref(), load.as_ref(), now_unix_ms()))?;
+                if current.is_kvless() {
+                    let projected = project_kvless_frontend(&snapshot, current, now_unix_ms());
+                    planes.replace(SourcePlane::Catalog, projected.as_ref().map(|value| value.0.clone()))?;
+                    planes.replace(SourcePlane::Readiness, projected.map(|value| value.1))?;
+                }
             }
         }
     }

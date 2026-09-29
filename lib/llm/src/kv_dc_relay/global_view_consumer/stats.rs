@@ -11,5 +11,7 @@ pub mod proto {
 mod projection;
 mod stream;
 
-pub use projection::{StatsCatalog, combined_capacity, project_load, project_usage};
+pub use projection::{
+    StatsCatalog, combined_capacity, project_kvless_frontend, project_load, project_usage,
+};
 pub use stream::{run_stats_epoch, run_stats_view};

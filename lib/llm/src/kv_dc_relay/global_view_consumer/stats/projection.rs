@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use dynamo_kv_router::global_view::source::PoolObservation;
 use dynamo_kv_router::global_view::state::{
-    KvUsage, ModelRequestLoad, PoolCapacity, PoolRole, SchedulerLoad, SignalState, SignalStatus,
+    KvUsage, ModelRequestLoad, PoolCapacity, PoolRole, SchedulerLoad, ServingReadiness,
+    SignalState, SignalStatus,
 };
 
 use crate::global_view::CatalogProjection;
@@ -73,6 +74,7 @@ pub struct StatsCatalog {
     producer: Option<PoolKey>,
     scoped_pools: Vec<PoolKey>,
     model: String,
+    frontend_endpoint: Option<String>,
 }
 
 impl StatsCatalog {
@@ -107,7 +109,24 @@ impl StatsCatalog {
             producer,
             scoped_pools,
             model: model.to_owned(),
+            frontend_endpoint: None,
         })
+    }
+
+    /// Explicit mode for a dedicated Relay serving one KV-less aggregated DGD.
+    /// The Relay catalog is required to be empty before this is published.
+    pub fn kvless_aggregated(relay: (u64, u64), model: &str, frontend_endpoint: &str) -> Self {
+        Self {
+            relay,
+            producer: None,
+            scoped_pools: Vec::new(),
+            model: model.to_owned(),
+            frontend_endpoint: Some(frontend_endpoint.to_owned()),
+        }
+    }
+
+    pub fn is_kvless(&self) -> bool {
+        self.frontend_endpoint.is_some()
     }
 
     fn accepts(&self, pool: &proto::PoolIdentity) -> bool {
@@ -206,6 +225,58 @@ pub fn project_usage(
     })
 }
 
+/// In explicit KV-less mode, the dedicated Relay's complete single-model
+/// Frontend snapshot supplies catalog and readiness. A missing or partial
+/// snapshot withdraws both observations; configuration alone never makes a
+/// pool routable.
+pub fn project_kvless_frontend(
+    snapshot: &proto::LoadSnapshot,
+    catalog: &StatsCatalog,
+    received_at: u64,
+) -> Option<(PoolObservation, PoolObservation)> {
+    let endpoint = catalog.frontend_endpoint.as_ref()?;
+    if !catalog.accepts_metadata(snapshot.metadata.as_ref())
+        || !snapshot.pools.is_empty()
+        || snapshot.models.len() != 1
+    {
+        return None;
+    }
+    let model = &snapshot.models[0];
+    let registration = model.model.as_ref()?;
+    if registration.model != catalog.model
+        || registration.base_model != catalog.model
+        || registration.adapter.is_some()
+        || !model.serving_pools.is_empty()
+    {
+        return None;
+    }
+    let mut status = signal_status(model.status, model.source_observed_at_unix_ms, received_at)?;
+    status.expected_sources = Some(u64::from(model.expected_frontends));
+    status.observed_sources = Some(u64::from(model.observed_frontends));
+    let ready = status.state == SignalState::Complete
+        && model.expected_frontends > 0
+        && model.expected_frontends == model.observed_frontends
+        && model.ready_frontends.is_some_and(|count| count > 0);
+    let readiness = if ready {
+        ServingReadiness::Ready
+    } else {
+        ServingReadiness::Unavailable
+    };
+    Some((
+        PoolObservation::Catalog {
+            models: vec![catalog.model.clone()],
+            roles: vec![PoolRole::Aggregated],
+            frontend_endpoint: Some(endpoint.clone()),
+            hardware: Vec::new(),
+            status: status.clone(),
+        },
+        PoolObservation::Readiness {
+            models: BTreeMap::from([(catalog.model.clone(), readiness)]),
+            status,
+        },
+    ))
+}
+
 pub fn project_load(
     snapshot: &proto::LoadSnapshot,
     catalog: &StatsCatalog,
@@ -253,11 +324,17 @@ pub fn project_load(
     }
     let model_status = model
         .filter(|model| {
-            !model.serving_pools.is_empty()
-                && model
-                    .serving_pools
-                    .iter()
-                    .all(|identity| catalog.accepts_scoped(identity))
+            if catalog.is_kvless() {
+                snapshot.pools.is_empty()
+                    && snapshot.models.len() == 1
+                    && model.serving_pools.is_empty()
+            } else {
+                !model.serving_pools.is_empty()
+                    && model
+                        .serving_pools
+                        .iter()
+                        .all(|identity| catalog.accepts_scoped(identity))
+            }
         })
         .and_then(|model| {
             signal_status(model.status, model.source_observed_at_unix_ms, received_at).map(
@@ -408,6 +485,7 @@ mod tests {
                 dc_id: 9,
             }],
             model: "m".into(),
+            frontend_endpoint: None,
         }
     }
 
@@ -538,6 +616,66 @@ mod tests {
         let mut duplicate = multi_pool;
         duplicate.models.push(model);
         assert!(project_load(&duplicate, &same_dgd, 200).is_none());
+    }
+
+    #[test]
+    fn kvless_frontend_requires_complete_single_model_and_withdraws_when_not_ready() {
+        let catalog = StatsCatalog::kvless_aggregated((5, 7), "m", "http://frontend:8000");
+        let model = proto::ModelLoad {
+            model: Some(registration()),
+            ready_frontends: Some(1),
+            pending_first_output_requests: Some(3),
+            output_generation_requests: Some(2),
+            expected_frontends: 1,
+            observed_frontends: 1,
+            status: proto::DataStatus::Complete as i32,
+            source_observed_at_unix_ms: 100,
+            ..Default::default()
+        };
+        let mut snapshot = proto::LoadSnapshot {
+            metadata: metadata(),
+            models: vec![model],
+            ..Default::default()
+        };
+        let (catalog_observation, readiness) =
+            project_kvless_frontend(&snapshot, &catalog, 200).unwrap();
+        assert!(
+            matches!(catalog_observation, PoolObservation::Catalog { models, roles, .. }
+            if models == vec!["m"] && roles == vec![PoolRole::Aggregated])
+        );
+        assert!(
+            matches!(readiness, PoolObservation::Readiness { models, .. }
+            if models["m"] == ServingReadiness::Ready)
+        );
+        let load = project_load(&snapshot, &catalog, 200).unwrap();
+        assert!(
+            matches!(load.load, Some(PoolObservation::Load { request_plane, .. })
+            if request_plane["m"].pending_first_output_requests == Some(3))
+        );
+
+        snapshot.models[0].ready_frontends = Some(0);
+        let (_, readiness) = project_kvless_frontend(&snapshot, &catalog, 201).unwrap();
+        assert!(
+            matches!(readiness, PoolObservation::Readiness { models, .. }
+            if models["m"] == ServingReadiness::Unavailable)
+        );
+        snapshot.models[0].ready_frontends = Some(1);
+        snapshot.models[0].observed_frontends = 0;
+        let (_, readiness) = project_kvless_frontend(&snapshot, &catalog, 202).unwrap();
+        assert!(
+            matches!(readiness, PoolObservation::Readiness { models, .. }
+            if models["m"] == ServingReadiness::Unavailable)
+        );
+        snapshot.models[0].observed_frontends = 1;
+        snapshot.models.push(snapshot.models[0].clone());
+        assert!(project_kvless_frontend(&snapshot, &catalog, 203).is_none());
+        assert!(project_load(&snapshot, &catalog, 203).is_none());
+        snapshot.models.pop();
+        snapshot.models[0].serving_pools.push(pool());
+        assert!(project_kvless_frontend(&snapshot, &catalog, 204).is_none());
+        snapshot.models[0].serving_pools.clear();
+        snapshot.pools.push(proto::PoolLoad::default());
+        assert!(project_kvless_frontend(&snapshot, &catalog, 205).is_none());
     }
 
     #[test]
