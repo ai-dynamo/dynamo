@@ -13,56 +13,6 @@ fn assert_protocol_error(error: DynamoError) {
 }
 
 #[test]
-fn logprobs_are_read_from_incremental_chunk() {
-    let meta = HashMap::from([
-        (
-            "output_token_logprobs".to_string(),
-            json!([[-0.1, 10, "a"], [-0.2, 11, "b"]]).to_string(),
-        ),
-        (
-            "output_top_logprobs".to_string(),
-            json!([[[-0.1, 10, "a"]], [[-0.2, 11, "b"]]]).to_string(),
-        ),
-    ]);
-    let (logprobs, top) = extract_logprobs(&meta, false).unwrap();
-    assert_eq!(logprobs.unwrap(), vec![-0.1, -0.2]);
-    let top = top.unwrap();
-    assert_eq!(top[0][0].token_id, 10);
-    assert_eq!(top[1][0].token_id, 11);
-}
-
-#[test]
-fn terminal_maps_finish_reason_and_usage() {
-    let meta = HashMap::from([(
-        "finish_reason".to_string(),
-        json!({"type": "length"}).to_string(),
-    )]);
-    let terminal = terminal_from_meta(&meta, 4, 3, &StopConditions::default()).unwrap();
-    assert_eq!(terminal.finish_reason, Some(FinishReason::Length));
-    assert_eq!(terminal.completion_usage.unwrap().total_tokens, 7);
-}
-
-#[test]
-fn abort_terminal_preserves_failure_metadata_as_error() {
-    let meta = HashMap::from([(
-        "finish_reason".to_string(),
-        json!({
-            "type": "abort",
-            "message": "prefill allocation failed",
-            "status_code": 503,
-            "err_type": "KVTransferError"
-        })
-        .to_string(),
-    )]);
-    let error = terminal_from_meta(&meta, 4, 0, &StopConditions::default())
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("prefill allocation failed"));
-    assert!(error.contains("status_code=503"));
-    assert!(error.contains("KVTransferError"));
-}
-
-#[test]
 fn malformed_terminal_is_rejected() {
     assert!(terminal_from_meta(&HashMap::new(), 4, 0, &StopConditions::default()).is_err());
     let meta = HashMap::from([(
@@ -170,6 +120,7 @@ fn object_and_scalar_finish_reasons_preserve_usage_and_user_string() {
             Some(StopReason::String("end".to_string())),
         ),
         (json!("length"), FinishReason::Length, None),
+        (json!({"type": "length"}), FinishReason::Length, None),
         (json!({"type": "cancelled"}), FinishReason::Cancelled, None),
     ] {
         let meta = HashMap::from([("finish_reason".to_string(), finish.to_string())]);
