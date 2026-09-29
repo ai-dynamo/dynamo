@@ -755,6 +755,41 @@ impl Client {
         Ok(instances)
     }
 
+    /// Wait for at least one discovered instance to be published as routable.
+    pub async fn wait_for_routable_instances(&self) -> Result<Vec<Instance>> {
+        tracing::trace!(
+            endpoint = %self.endpoint.id(),
+            "Waiting for routable instances"
+        );
+        let mut discovered = self.instance_source.as_ref().clone();
+        let mut available = self.instance_avail_watcher();
+        loop {
+            // Discovery and routing publish on separate tasks. Returning only
+            // after their views overlap prevents a subsequent route seeing no workers.
+            let instances: Vec<Instance> = {
+                let available = available.borrow_and_update();
+                discovered
+                    .borrow_and_update()
+                    .iter()
+                    .filter(|instance| available.contains(&instance.id()))
+                    .cloned()
+                    .collect()
+            };
+            if !instances.is_empty() {
+                tracing::debug!(
+                    endpoint = %self.endpoint.id(),
+                    instances = instances.len(),
+                    "Routable instances are ready"
+                );
+                return Ok(instances);
+            }
+            tokio::select! {
+                result = discovered.changed() => result?,
+                result = available.changed() => result?,
+            }
+        }
+    }
+
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: u64) {
         if self.reconcile_interval.is_zero() {
@@ -1132,6 +1167,58 @@ mod tests {
             inhibited_duration_from_env(|_| Some("invalid".to_string())),
             Duration::from_secs(DEFAULT_INHIBITED_DURATION_SECS)
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_routable_instances_waits_for_routing_publication() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_wait_routing".to_string())
+            .unwrap()
+            .component("backend".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let instance = Instance {
+            namespace: "test_wait_routing".into(),
+            component: "backend".into(),
+            endpoint: "generate".into(),
+            instance_id: 1,
+            transport: TransportType::Nats("test.subject".into()),
+            device_type: None,
+            request_plane_codec: None,
+        };
+        let (source_tx, source_rx) = tokio::sync::watch::channel(vec![instance.clone()]);
+        let source =
+            EndpointDiscoverySource::new(source_rx.clone(), CancellationToken::new().drop_guard());
+        let (routing, available) = RoutingInstancesState::new(vec![]);
+        let client = Client {
+            endpoint,
+            endpoint_discovery_source: Arc::new(source),
+            instance_source: Arc::new(source_rx),
+            routing_instances: Arc::new(routing),
+            instance_avail_owner: Arc::new(available),
+            reconcile_interval: Duration::ZERO,
+        };
+
+        // Discovery publishes first; the routing monitor has not consumed it yet.
+        assert_eq!(
+            client.wait_for_instances().await.unwrap(),
+            vec![instance.clone()]
+        );
+        let ready = client.wait_for_routable_instances();
+        tokio::pin!(ready);
+        assert!(futures::poll!(ready.as_mut()).is_pending());
+        client.routing_instances.reconcile_discovered(vec![1]);
+        assert_eq!(ready.await.unwrap(), vec![instance]);
+        assert_eq!(client.instance_ids_avail(), vec![1]);
+
+        client.routing_instances.reconcile_discovered(vec![]);
+        drop(source_tx);
+        assert!(client.wait_for_routable_instances().await.is_err());
+        rt.shutdown();
     }
 
     #[tokio::test]

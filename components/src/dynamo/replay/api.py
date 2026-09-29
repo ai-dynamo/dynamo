@@ -54,7 +54,7 @@ class _CommonReplayOptions(TypedDict, total=False):
     prefill_engine_args: Any
     decode_engine_args: Any
     router_config: Any
-    aic_perf_config: Any
+    ais_perf_config: Any
     num_workers: int
     num_prefill_workers: int
     num_decode_workers: int
@@ -187,7 +187,7 @@ def run_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -237,7 +237,7 @@ def run_trace_replay(
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
@@ -366,7 +366,7 @@ def run_synthetic_trace_replay(
     prefill_engine_args=None,
     decode_engine_args=None,
     router_config=None,
-    aic_perf_config=None,
+    ais_perf_config=None,
     num_workers=1,
     num_prefill_workers=1,
     num_decode_workers=1,
@@ -398,7 +398,7 @@ def run_synthetic_trace_replay(
         "prefill_engine_args": prefill_engine_args,
         "decode_engine_args": decode_engine_args,
         "router_config": router_config,
-        "aic_perf_config": aic_perf_config,
+        "ais_perf_config": ais_perf_config,
         "num_workers": num_workers,
         "num_prefill_workers": num_prefill_workers,
         "num_decode_workers": num_decode_workers,
