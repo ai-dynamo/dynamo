@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_schedule_uses_weighted_cached_tokens_for_active_tracking() {
+    async fn test_schedule_excludes_lower_tier_cached_tokens_from_active_tracking() {
         let mut workers = HashMap::new();
         workers.insert(
             0,
@@ -1299,7 +1299,10 @@ mod tests {
                 Some("req-1".to_string()),
                 64,
                 Some(vec![1, 2, 3, 4]),
-                TierOverlapBlocks::default(),
+                TierOverlapBlocks {
+                    host_pinned: FxHashMap::from_iter([(worker, 1)]),
+                    ..Default::default()
+                },
                 FxHashMap::from_iter([(worker, 0.75)]),
                 FxHashMap::from_iter([(worker, 48)]),
                 None,
@@ -1321,8 +1324,8 @@ mod tests {
         assert_eq!(response.effective_overlap_blocks, 0.75);
         assert_eq!(
             slots.active_tokens(Instant::now()).get(&worker).copied(),
-            Some(16),
-            "weighted cached tokens should reduce tracked prefill load",
+            Some(0),
+            "lower-tier cached tokens are transfer work, not active prefill compute",
         );
 
         cancel_token.cancel();

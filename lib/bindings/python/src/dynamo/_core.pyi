@@ -1757,6 +1757,7 @@ class RouterConfig:
         enforce_disagg: bool = False,
         session_affinity_ttl_secs: Optional[int] = None,
         session_affinity_mode: str = "hard",
+        remote_kv_waiting_tokens_threshold: Optional[int] = None,
     ) -> None:
         """
         Create a RouterConfig.
@@ -1770,6 +1771,7 @@ class RouterConfig:
             enforce_disagg: Deprecated and ignored. Routing topology and readiness come from registered worker types.
             session_affinity_ttl_secs: Router-local session-affinity idle TTL in seconds.
             session_affinity_mode: Session binding behavior: ``hard`` or ``soft``.
+            remote_kv_waiting_tokens_threshold: Transfer-backlog token threshold for WAITING_FOR_REMOTE_KVS
         """
         ...
 
@@ -1779,6 +1781,7 @@ class LoadThresholdConfig:
     active_decode_blocks_threshold: Optional[float]
     active_prefill_tokens_threshold: Optional[int]
     active_prefill_tokens_threshold_frac: Optional[float]
+    remote_kv_waiting_tokens_threshold: Optional[int]
 
     def __init__(
         self,
@@ -1786,6 +1789,7 @@ class LoadThresholdConfig:
         active_decode_blocks_threshold: Optional[float] = None,
         active_prefill_tokens_threshold: Optional[int] = None,
         active_prefill_tokens_threshold_frac: Optional[float] = None,
+        remote_kv_waiting_tokens_threshold: Optional[int] = None,
     ) -> None:
         ...
 

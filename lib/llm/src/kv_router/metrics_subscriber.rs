@@ -97,6 +97,8 @@ impl PendingActiveLoads {
                 dp_rank: _,
                 active_decode_blocks,
                 active_prefill_tokens,
+                remote_kv_waiting_requests,
+                remote_kv_waiting_tokens,
                 kv_used_blocks,
             } = load;
             if active_decode_blocks.is_some() {
@@ -104,6 +106,12 @@ impl PendingActiveLoads {
             }
             if active_prefill_tokens.is_some() {
                 pending.active_prefill_tokens = active_prefill_tokens;
+            }
+            if remote_kv_waiting_requests.is_some() {
+                pending.remote_kv_waiting_requests = remote_kv_waiting_requests;
+            }
+            if remote_kv_waiting_tokens.is_some() {
+                pending.remote_kv_waiting_tokens = remote_kv_waiting_tokens;
             }
             if kv_used_blocks.is_some() {
                 pending.kv_used_blocks = kv_used_blocks;
@@ -341,6 +349,8 @@ mod tests {
             dp_rank,
             active_decode_blocks,
             active_prefill_tokens,
+            remote_kv_waiting_requests: None,
+            remote_kv_waiting_tokens: None,
             kv_used_blocks,
         }
     }
