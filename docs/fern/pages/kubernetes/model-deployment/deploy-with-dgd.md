@@ -48,9 +48,10 @@ spec:
 > [!NOTE]
 > For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves the declared order when
 > it combines DGD-level `spec.env` with component `podTemplate` environment variables. Standard
-> component and infrastructure defaults precede that user list. A user variable can reference an
-> earlier default or user variable with `$(NAME)`, and a later user entry with the same name overrides
-> a default. Older DGDs retain their existing rendered order after an operator upgrade.
+> component, infrastructure, and inference-backend defaults precede that user list. A user variable
+> can reference an earlier default or user variable with `$(NAME)`, and a later user entry with the
+> same name overrides a default. Older DGDs retain their existing rendered order after an operator
+> upgrade.
 
 For every backend, a component's `name` is its stable identifier within the DGD. The operator
 uses that name to derive Kubernetes resource names and sets it on the

@@ -1521,8 +1521,9 @@ const (
 	roleLaunchOwnedByPodTemplate
 )
 
-// Backend interface for modular backend logic
-// Each backend (SGLang, VLLM, etc.) implements this interface.
+// Backend applies framework-specific container and pod mutations. UpdateContainer
+// may inspect existing environment variables but must append any new variables
+// without reordering or removing existing entries.
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
 	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
@@ -1806,7 +1807,13 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		}
 	}
 
+	orderedEnvironment := compatibility.OrderedEnvironmentVariables.Enabled(annotations)
+	userEnvironmentCount := 0
 	if main := GetMainContainer(component); main != nil {
+		if orderedEnvironment {
+			userEnvironmentCount = len(main.Env)
+		}
+
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
 
@@ -1867,6 +1874,8 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 
+	backendEnvironmentStart := len(container.Env)
+
 	// Native engines retain their authored launch, probes, and ports.
 	if !nativeSidecar {
 		if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
@@ -1879,6 +1888,17 @@ func generateBasePodSpecWithDefaultsAndOwnership(
 		container.Env = append(container.Env, corev1.EnvVar{Name: "VLLM_CACHE_ROOT", Value: component.CompilationCache.MountPath})
 	}
 
+	// Backends inspect the effective environment and append their own variables.
+	// Move those additions before the user suffix for ordered composition so
+	// user references and overrides retain Kubernetes list semantics.
+	if orderedEnvironment && len(container.Env) > backendEnvironmentStart {
+		systemEnvironmentEnd := backendEnvironmentStart - userEnvironmentCount
+		container.Env = slices.Concat(
+			container.Env[:systemEnvironmentEnd],
+			container.Env[backendEnvironmentStart:],
+			container.Env[systemEnvironmentEnd:backendEnvironmentStart],
+		)
+	}
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
