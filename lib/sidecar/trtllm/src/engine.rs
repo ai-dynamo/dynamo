@@ -174,10 +174,18 @@ impl LLMEngine for TrtllmSidecarEngine {
                 let reported = match client.model_limits(&model.source).await {
                     Ok(reported) => reported,
                     Err(error) => {
+                        // Tolerated because some OpenEngine servicer builds ship
+                        // without Control, which is what --context-length exists
+                        // for. UNIMPLEMENTED also fits an engine left on the
+                        // default --grpc-protocol smg, where Generate will fail
+                        // too -- name both so the log points at the real fix.
                         tracing::warn!(
                             %error,
                             configured_context_length = configured,
-                            "Control.GetModelInfo failed; using the configured --context-length"
+                            "Control.GetModelInfo failed; using the configured \
+                             --context-length. If this is UNIMPLEMENTED, the engine either \
+                             ships no Control service or was started without \
+                             --grpc-protocol openengine"
                         );
                         ModelLimits::default()
                     }

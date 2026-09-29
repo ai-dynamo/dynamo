@@ -233,6 +233,20 @@ fn a_prefill_request_whose_minimum_cannot_fit_is_rejected_before_the_handoff() {
         .expect_err("prefill must refuse a minimum the decode leg cannot serve");
 }
 
+/// The shape the prefill router actually sends: it overwrites `max_tokens` with
+/// 1 before dispatch, so a minimum above that one token is not a conflict --
+/// the decode worker derives the real budget from the window.
+#[test]
+fn a_prefill_request_the_router_clamped_to_one_token_still_serves_its_minimum() {
+    let mut req = request();
+    req.stop_conditions.max_tokens = Some(1);
+    req.stop_conditions.min_tokens = Some(8);
+    let window = req.token_ids.len() as u32 + 64;
+
+    build_generate_request(&req, "req", "model", limits(window), PREFILL)
+        .expect("the router's one-token prefill budget is not a conflicting minimum");
+}
+
 /// A prefill worker that cannot size the window still dispatches: only the
 /// decode worker's own context length governs the request it will run.
 #[test]

@@ -16,8 +16,12 @@
 # engine-to-engine over the cache transceiver, never through the sidecars, so
 # both engines need `cache_transceiver_config` (the ConfigMaps below).
 #
-# This sidecar publishes no KV events, so use the default router (not
-# --router-mode kv).
+# Use the default router, not --router-mode kv. Missing KV events would only
+# make KV routing ineffective; the blocker is harder than that. KV mode stamps
+# routing.dp_rank on every request -- Some(0) for a single-rank worker -- and
+# this sidecar rejects any dp-rank targeting, because the OpenEngine servicer
+# answers `openengine-target-dp-rank` with UNIMPLEMENTED. So every KV-routed
+# request fails, and adding KV events later will not change that on its own.
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 # The cache transceiver binds a separate port on the pod IP, which is what the

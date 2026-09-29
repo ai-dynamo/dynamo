@@ -87,10 +87,13 @@ Error: Failed to import OpenEngine support: No module named 'openengine'.
 # 768a93c7b44e, the revision `proto/` was generated from. The protobuf package
 # is additionally pinned by gencode version -- a gencode newer than the image's
 # protobuf runtime fails at import -- so raise it only with the image's
-# protobuf.
+# protobuf. The `-pyi` package is pinned because the protobuf wheel requires it
+# with no upper bound and the name is unregistered on PyPI, which under
+# `--extra-index-url` would let anyone claiming it there run code here.
 python -m pip install --extra-index-url https://buf.build/gen/python \
   "openengine-openengine-grpc-python==1.78.1.1.20260730172104+768a93c7b44e" \
-  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e"
+  "openengine-openengine-protocolbuffers-python==33.5.0.1.20260730172104+768a93c7b44e" \
+  "openengine-openengine-protocolbuffers-pyi==36.2.0.1.20260730172104+768a93c7b44e"
 
 python -m tensorrt_llm.commands.serve <model> \
   --grpc --grpc-protocol openengine --host 127.0.0.1 --port 50051 \
@@ -178,8 +181,9 @@ interpreted between the two workers. See `src/disagg.rs`.
 
 `deploy/agg.yaml` runs a frontend and one worker pod serving `Qwen/Qwen3-0.6B`
 on one GPU. `deploy/disagg.yaml` runs prefill and decode as separate worker
-pods. Read the disaggregated manifest's header before applying it: it requests
-`rdma/ib` on both engines, which you drop if your fabric does not expose it.
+pods. Read the disaggregated manifest's header before applying it: it runs the
+engines over TCP/CUDA-IPC and requests no `rdma/ib`, which you add on a fabric
+that provides it.
 
 You need a cluster on **v1.29+** (or v1.28 with the `SidecarContainers` gate)
 with the Dynamo operator and a GPU node — the engine runs as a native sidecar —

@@ -223,10 +223,10 @@ fn reject_impossible_minimum_before_prefill(
         Some(cap) => remaining.min(cap),
         None => remaining,
     };
-    let derived = match request.stop_conditions.max_tokens {
-        Some(explicit) => explicit,
-        None => derived,
-    };
+    // Deliberately ignore `stop_conditions.max_tokens`: the prefill router
+    // overwrites it with 1 before dispatch (`prefill_router/mod.rs:412`), so it
+    // describes this leg's one-token context phase, not the budget the decode
+    // worker will derive and check the minimum against.
     reject_impossible_minimum(request, derived, context_length, prompt_len)
 }
 
@@ -871,10 +871,12 @@ pub(crate) fn engine_error(error: pb::EngineError) -> DynamoError {
              sidecar's --disaggregation-mode matches how its engine was started)"
         )),
         // The handoff named a context worker this engine could not reach or
-        // whose session is gone. Deliberately not migratable: a retry would
-        // replay the same dead handoff and fail identically on the next worker.
-        // Recovering properly means re-running prefill, which the frontend
-        // cannot be asked for from here.
+        // whose session is gone. Migration is linked above the prefill router
+        // (`entrypoint/input/common.rs:501-505`), so a retry would re-run
+        // prefill and get a fresh handoff rather than replay this one -- this
+        // is recoverable in principle. Kept non-migratable for now because the
+        // common cause is a transceiver both engines lack, where retrying
+        // across every worker buries the one error that names the fix.
         pb::ErrorCode::KvSessionNotFound | pb::ErrorCode::KvTransferFailed => {
             client::engine_error(format!(
                 "{message} (the prefill handoff could not be resolved: check that both engines \

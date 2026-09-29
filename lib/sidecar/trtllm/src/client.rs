@@ -126,12 +126,14 @@ impl TrtllmClient {
     /// `deadline` passes.
     ///
     /// Used only when no `--context-length` was supplied, which makes the engine
-    /// the sole source. TensorRT-LLM binds its gRPC port before the model
-    /// finishes loading, so the early calls can fail outright or answer without
-    /// limits; waiting is what lets a large engine finish loading. An answer
-    /// that says the request itself is wrong ends the wait immediately -- no
-    /// amount of waiting fixes a model the server does not serve, or a server
-    /// with no Control service.
+    /// the sole source. TensorRT-LLM binds its gRPC port only once the model has
+    /// loaded, so waiting is for the engine not being up yet, and only transport
+    /// failures are worth retrying. An engine that answers has finished loading:
+    /// if that answer carries no window it was started without `--max_seq_len`
+    /// and will say the same thing at the deadline, so fail now with the fix
+    /// rather than polling for half an hour and then blaming a slow load. An
+    /// answer that says the request itself is wrong ends the wait for the same
+    /// reason.
     pub(crate) async fn wait_for_model_limits(
         &self,
         model: &str,
@@ -142,7 +144,14 @@ impl TrtllmClient {
         loop {
             match timeout_at(deadline, self.get_model_info(model)).await {
                 Ok(Ok(limits)) if limits.context_length.is_some() => return Ok(limits),
-                Ok(Ok(_)) => last = "it reported no max_context_length".to_string(),
+                Ok(Ok(_)) => {
+                    return Err(protocol_error(format!(
+                        "TensorRT-LLM answered GetModelInfo for {model} with no \
+                         max_context_length, which means it was started without \
+                         --max_seq_len. Start the engine with --max_seq_len, or give the \
+                         sidecar --context-length."
+                    )));
+                }
                 Ok(Err(status)) if is_request_itself_wrong(&status) => {
                     return Err(status_to_dynamo("GetModelInfo", status));
                 }
@@ -153,13 +162,13 @@ impl TrtllmClient {
             if next_attempt >= deadline {
                 break;
             }
-            tracing::debug!(model, reason = %last, "waiting for TensorRT-LLM GetModelInfo");
+            tracing::info!(model, reason = %last, "waiting for TensorRT-LLM GetModelInfo");
             sleep_until(next_attempt).await;
         }
         Err(connection_timeout(format!(
-            "TensorRT-LLM did not report a model context length before the gRPC startup \
-             deadline ({last}). Raise --grpc-startup-deadline-secs if the engine is still \
-             loading, or pin the window with --context-length."
+            "TensorRT-LLM never answered GetModelInfo before the gRPC startup deadline \
+             ({last}). Raise --grpc-startup-deadline-secs if the engine is still starting, \
+             or pin the window with --context-length."
         )))
     }
 

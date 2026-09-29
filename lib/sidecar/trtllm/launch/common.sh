@@ -26,6 +26,13 @@
 # images ship. Raise it only together with the image's protobuf.
 TRTLLM_OPENENGINE_PROTOBUF_VERSION="33.5.0.1.20260730172104+768a93c7b44e"
 TRTLLM_OPENENGINE_GRPC_VERSION="1.78.1.1.20260730172104+768a93c7b44e"
+# Pinned because the protobuf wheel requires it with no upper bound, and the
+# name is unregistered on PyPI: under --extra-index-url pip would take the
+# highest version from either index, so anyone claiming the name there could
+# run code in the engine's environment. A `+local` version cannot come from
+# PyPI, so pinning it exactly closes that. TensorRT-LLM's
+# requirements-openengine.txt pins it the same way.
+TRTLLM_OPENENGINE_PROTOBUF_PYI_VERSION="36.2.0.1.20260730172104+768a93c7b44e"
 
 # Installs the bindings unless they are already importable. Set
 # TRTLLM_SKIP_BINDINGS_INSTALL=1 on an air-gapped host or one whose
@@ -44,7 +51,8 @@ trtllm_ensure_openengine_bindings() {
     "$python" -m pip install --no-cache-dir \
         --extra-index-url https://buf.build/gen/python \
         "openengine-openengine-grpc-python==${TRTLLM_OPENENGINE_GRPC_VERSION}" \
-        "openengine-openengine-protocolbuffers-python==${TRTLLM_OPENENGINE_PROTOBUF_VERSION}"
+        "openengine-openengine-protocolbuffers-python==${TRTLLM_OPENENGINE_PROTOBUF_VERSION}" \
+        "openengine-openengine-protocolbuffers-pyi==${TRTLLM_OPENENGINE_PROTOBUF_PYI_VERSION}"
 }
 
 # Keeps the engine and the sidecar on one number. Started without
