@@ -3,8 +3,10 @@
 # Results, 2026-09-28/29
 
 This is a prototype using Dynamo GMS **V1**, SGLang's Engine API, and the qualified
-Snapshot/PageBroker composition. It does not yet exercise Dynamo's distributed
-frontend or a DynamoGraphDeployment. Large-model inference has passed with the constraints described below; the
+Snapshot/PageBroker composition. The latest discovery comparison deploys through
+the Dynamo operator using a DynamoGraphDeployment; earlier trials created Pods
+directly. Dynamo's distributed frontend and native checkpointRef/GMS rendering
+are not exercised by this retained Engine API capture. Large-model inference has passed with the constraints described below; the
 RAM-staged measurements are not cold-NFS comparisons.
 
 The earlier best repeated PVC setting reached **27.624 s mean pod-to-coherent-readiness**
@@ -13,6 +15,23 @@ The earlier best repeated PVC setting reached **27.624 s mean pod-to-coherent-re
 All 448 GiB of matching allocation data is read from the PVC export with
 `O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
 comparison is 46.083 s serialized versus 29.562 s overlapping.
+
+## Discovery through the Dynamo operator (2026-09-29)
+
+The latest [DGD restore comparison](DISCOVERY-RESTORE.md) fixes Snapshot's
+virtual/host runtime identity mismatch and compares both discovery paths through
+operator-created workloads. It records the complete DGD ownership chain,
+separate child-Pod/restore timing, exact PVC/O_DIRECT publication and coherent
+inference. The agent and PageBroker remain resident throughout the A/B series.
+The first 8 GiB shared-memory qualification pair is retained separately from
+three matched pairs with explicit 32 GiB capacity.
+
+Mean DGD request→workload Ready fell **27.742 → 24.951 s** (2.790 s, 10.1%).
+Restore handler entry moved **+5.689 → +2.712 s**. The engine now waits
+3.099 s on average for GMS publication; weight availability is on the critical
+path. Child-Pod observation was about +0.74 s in both groups, with no multi-second
+Dynamo operator reconciliation gate. All eight restores passed both inference
+checks with PVC/O_DIRECT artifacts.
 
 ## Full restore with tuned buffers and CPU (2026-09-29)
 

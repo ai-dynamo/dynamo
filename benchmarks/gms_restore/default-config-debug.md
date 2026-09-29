@@ -230,3 +230,49 @@ ready log before trial clocks, and label the Gantt accordingly.
   NUMA balancing restored to 1, retained GLM and Qwen snapshots Ready. Ruff check
   and format pass for all 30 benchmark Python scripts; all nine full restores
   are the GPU validation for the new buffer/CPU harness controls.
+
+## Runtime sandbox discovery experiment (2026-09-29)
+
+User requested implementing discovery correction and measuring whether earlier
+restore dispatch reduces total time when PVC transfers may remain critical.
+Use the existing tuned 128 MiB / CPU request 1 limit 8 composition. Match CRI
+sandbox identity by the current virtual Pod UID/name/namespace, then require a
+running main container in that sandbox; do not guess translated names. A
+prototype annotation will select the new path so alternating A/B trials share
+one resident agent/PageBroker instance. Preserve status fallback and test stale
+incarnations, ambiguity, unrelated containers and native Pod identity.
+
+- User directed measurement through Dynamo operator. Added DGD podTemplate mode,
+  with actual DGD→DCD→Deployment→ReplicaSet→Pod ownership validation and separate
+  DGD request/Pod timing. Explicit probes target the captured Engine API sentinel;
+  native checkpointRef/GMS feature integration is not asserted for this old
+  manually generated capture. Operator deployment remains unchanged.
+- New Snapshot agent source 8536a8b1; runtime/controller/executor tests passed.
+  Same resident agent supports old path and experimental runtime-discovery opt-in.
+  Live CRI sandbox identity fields were checked using an exact six-key allowlist.
+- First DGD qualification found operator-managed shared memory defaults to 8 GiB
+  despite an explicit dshm Pod volume. Added component sharedMemorySize=32Gi.
+  control-1/runtime-1 were already rendered at 8 GiB; retain both as qualification.
+  Main comparison is cases 2/3/4 at explicit 32 GiB, six runs total. This exclusion
+  is configuration-based and decided before inspecting the matched-run outcomes.
+- First control DGD POST returned +0.264 s; child Pod observed +0.727 s. Object
+  creation timestamps all occupy one server second, so subtraction may be
+  negative due to precision. DGD Ready observed 13 ms after Pod Ready observation.
+  No multi-second Dynamo operator gate was observed in that qualification.
+
+- Final matched result: DGD request→workload Ready 27.742→24.951 s (−2.790 s,
+  10.1%); handler entry +5.689→+2.712 s. Three same-capacity pairs all improve.
+  Eight total restores (six comparison, two qualification) pass both inference
+  checks, authoritative rank/publication validation and 112 O_DIRECT payloads.
+- Main-runtime engine wake waits 3.139/3.186/2.970 s, passing 85–92 ms after the
+  last publication. Weight availability is now on the critical path. CRIU and
+  GMS span also improved under changed overlap; do not assign all total-time
+  change exclusively to discovery call duration.
+- Dynamo operator child-Pod observation averages +0.752/+0.737 s; no multi-second
+  reconciliation gate found. Native checkpointRef compatibility and actual
+  Dynamo runtime/frontend registration remain a separate capture/integration.
+- Independent cleanup checks pass: no test DGD/DCD/Pod/claim, original Snapshot
+  stack/settings restored, Dynamo operator deployment unchanged, mounts removed,
+  NUMA balancing restored, retained GLM/Qwen snapshots Ready. Ruff passes; targeted
+  Go tests pass and the experiment agent was built from source 8536a8b1. Full
+  raw evidence, operator-generated manifests and updated Gantt are retained.

@@ -134,3 +134,10 @@ observed about 3.25–4.15 s after container start, with no comparable extra del
 between host and virtual status. Correcting virtual-to-host runtime identity
 is the next targeted change; faster reconciliation alone would keep repeating
 the mismatched lookup.
+
+The [discovery follow-up](DISCOVERY-RESTORE.md) now implements that change and
+deploys each workload through the Dynamo operator. It validates the generated
+DGD→DCD→Deployment→ReplicaSet→Pod ownership chain and measures child-Pod
+observation separately. The existing captured Engine API uses an explicit
+podTemplate, probes and experimental Snapshot/GMS wiring; native checkpointRef
+and Dynamo runtime/frontend restoration require a new compatible capture.

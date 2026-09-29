@@ -36,7 +36,8 @@ def summarize(path):
     entry = next(
         x
         for x in reversed(lines)
-        if "Restore timing summary" in x and "gms-v1-glm-restore-0928" in x
+        if "Restore timing summary" in x
+        and timing.get("pod_name", "gms-v1-glm-restore-0928") in x
     )
     agent = json.loads(entry[entry.index("{") :])["restore"]
     plan = json.loads((path / "plan.json").read_text())

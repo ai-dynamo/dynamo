@@ -22,6 +22,11 @@ root = a.case
 t = json.loads((root / "timing.json").read_text())
 pub = json.loads((root / "publications.json").read_text())
 zero = t["create_epoch"]
+origin_name = (
+    "DGD creation request"
+    if t.get("deployment_mode") == "dgd"
+    else "pod creation request"
+)
 entries = []
 for line in (root / "agent.txt").read_text().splitlines():
     if "{" not in line:
@@ -59,7 +64,17 @@ def row(label, segments):
     rows.append((label, segments))
 
 
-row("Pod startup", [(zero, min(x["started_epoch"] for x in pub), "agent")])
+startup_origin = zero
+if t.get("deployment_mode") == "dgd":
+    observed = [
+        json.loads(line)["observed_epoch"]
+        for line in (root / "virtual-watch.jsonl").read_text().splitlines()
+        if "observed_epoch" in json.loads(line)
+    ]
+    if observed:
+        startup_origin = min(observed)
+        row("DGD → child Pod observed", [(zero, startup_origin, "gate")])
+row("Pod startup", [(startup_origin, min(x["started_epoch"] for x in pub), "agent")])
 watch_path = root / "host-watch.jsonl"
 if watch_path.exists():
     for line in watch_path.read_text().splitlines():
@@ -124,13 +139,13 @@ for y, (label, segments) in enumerate(rows):
 ax.set_yticks(range(len(rows)), [x[0] for x in rows])
 ax.invert_yaxis()
 ax.set_xlim(0, t["ready_epoch"] - zero + 0.3)
-ax.set_xlabel("Seconds since pod creation request")
+ax.set_xlabel(f"Seconds since {origin_name}")
 ax.grid(axis="x", alpha=0.2)
 ax.set_axisbelow(True)
 ax.axvline(t["trigger_epoch"] - zero, color="#555", linestyle="--", linewidth=0.8)
 ax.axvline(last - zero, color="#59a14f", linestyle=":", linewidth=1)
 fig.suptitle(
-    f"GLM TP8 restore — {root.name}\n{t.get('storage', 'RAM-staged weights; PVC engine checkpoint')} | {t['pod_create_to_ready_s']:.2f} s to coherent readiness",
+    f"GLM TP8 restore — {root.name}\n{t.get('storage', 'RAM-staged weights; PVC engine checkpoint')} | {t['ready_epoch'] - zero:.2f} s to coherent readiness",
     fontsize=15,
 )
 ax.legend(

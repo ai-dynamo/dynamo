@@ -1,0 +1,15 @@
+{
+  "no_experiment_pods": true,
+  "no_experiment_claims": true,
+  "config_restored": true,
+  "agent_template_restored": true,
+  "operator_template_restored": true,
+  "original_operator_available": true,
+  "dynamo_operator_deployment_unchanged": true,
+  "no_experiment_dgd": true,
+  "no_experiment_dcd": true,
+  "gms-v1-glm-default-0929_retained_ready": true,
+  "gms-v1-qwen-0928_retained_ready": true,
+  "private_nfs_mounts_removed": true,
+  "numa_balancing_restored": true
+}

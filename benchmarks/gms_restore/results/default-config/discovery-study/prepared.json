@@ -1,0 +1,7 @@
+{
+  "ready_verified_epoch": 1790657900.3572962,
+  "agent": "dynamo-snapshot-agent-6k7ck",
+  "host_agent": "dynamo-snapshot-agent-6k7ck-x-schwinns-vcluster-x-sc-ed6ab70f47",
+  "claim": "gms-v1-glm-source-0928",
+  "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198"
+}

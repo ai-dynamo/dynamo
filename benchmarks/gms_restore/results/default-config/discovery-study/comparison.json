@@ -1,0 +1,1832 @@
+{
+  "notes": [
+    "t0 is the client DGD creation request; the main endpoint is observed workload Pod Ready after coherent generation, distinct from the DGD Ready condition.",
+    "Pod creationTimestamp and container startedAt have one-second precision. Pod creation offsets may be negative by rounding; Pod-to-Ready has that uncertainty.",
+    "Watch receipt times include remote observation latency and cross-host clock uncertainty.",
+    "Agent restore handler entry is per-request dispatch, not daemon startup.",
+    "CRIU/CUDA durations are agent phase measurements; CUDA includes PageBroker work.",
+    "Main-series adjacent pairs follow B A / A B / A B. Deltas are runtime minus control; negative values mean faster with identity discovery.",
+    "The first A/B pair used the operator default 8Gi /dev/shm and is qualification only. Main-series groups use explicit 32Gi, classified from the rendered DGD and actual Pod mount.",
+    "This small same-node series uses preallocated DRA, cached images and PVC O_DIRECT; NFS server cache state is uncontrolled."
+  ],
+  "expected_sequence": [
+    "control-1",
+    "runtime-1",
+    "runtime-2",
+    "control-2",
+    "control-3",
+    "runtime-3",
+    "control-4",
+    "runtime-4"
+  ],
+  "complete": true,
+  "incomplete_cases": [],
+  "cases": [
+    {
+      "case": "discovery-dgd-control-1",
+      "group": "control",
+      "cohort": "qualification_8Gi",
+      "shared_memory_size": "8Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-3b504908-55844f6cd9-rf9bq",
+      "pod_uid": "0a39d52e-25e9-4805-b66c-f822b61e6729",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790657922.1627953,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 29.405383348464966,
+      "pod_to_ready_s": 29.56817865371704,
+      "dgd_to_pod_create_s": -0.1627953052520752,
+      "dgd_create_return_s": 0.26391005516052246,
+      "dgd_to_handler_s": 5.966961622238159,
+      "pod_to_handler_s": 6.129756927490234,
+      "restore_operation_s": 20.494359205,
+      "dgd_to_operation_end_s": 26.46132779121399,
+      "criu_s": 8.156388884,
+      "cuda_s": 9.63406748,
+      "gms_span_s": 19.736725091934204,
+      "dgd_to_first_gms_s": 3.3193740844726562,
+      "dgd_to_all_published_s": 23.05609917640686,
+      "gms_init_mean_s": 0.29573991894721985,
+      "gms_rank_load_mean_s": 18.08001270890236,
+      "dgd_to_wake_gate_entered_s": 26.740373373031616,
+      "dgd_to_wake_gate_passed_s": 26.74038863182068,
+      "wake_gate_wait_s": 1.52587890625e-05,
+      "publication_to_gate_passed_s": 3.6842894554138184,
+      "gate_passed_to_ready_s": 2.664994716644287,
+      "resident_service_start_offsets_s": {
+        "agent": -55.162795305252075,
+        "pagebroker": -55.162795305252075
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-3b504908-55844f6cd9-rf9bq",
+          "namespace": "schwinns-vcluster",
+          "uid": "0a39d52e-25e9-4805-b66c-f822b61e6729",
+          "creationTimestamp": "2026-09-29T04:58:42+00:00",
+          "creation_epoch": 1790657922.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-3b504908-55844f6cd9",
+              "uid": "33acf7d4-4927-44e8-a068-2aa7f287a799"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-3b504908-55844f6cd9",
+          "namespace": "schwinns-vcluster",
+          "uid": "33acf7d4-4927-44e8-a068-2aa7f287a799",
+          "creationTimestamp": "2026-09-29T04:58:42+00:00",
+          "creation_epoch": 1790657922.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-3b504908",
+              "uid": "80547984-4789-44df-93fd-2714982e638a"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-3b504908",
+          "namespace": "schwinns-vcluster",
+          "uid": "80547984-4789-44df-93fd-2714982e638a",
+          "creationTimestamp": "2026-09-29T04:58:42+00:00",
+          "creation_epoch": 1790657922.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-3b504908",
+              "uid": "1f13a607-5bd7-493b-8064-37b3b0b3168f"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-3b504908",
+          "namespace": "schwinns-vcluster",
+          "uid": "1f13a607-5bd7-493b-8064-37b3b0b3168f",
+          "creationTimestamp": "2026-09-29T04:58:42Z",
+          "creation_epoch": 1790657922.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "e405c392-e418-4eac-8dd0-c90841d26ebf"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "e405c392-e418-4eac-8dd0-c90841d26ebf",
+          "creationTimestamp": "2026-09-29T04:58:42Z",
+          "creation_epoch": 1790657922.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": false,
+      "runtime_discovery_logs": [],
+      "dgd_to_host_pod_observed_s": 0.9120206832885742,
+      "dgd_to_host_main_start_s": 2.837204694747925,
+      "dgd_to_host_main_status_observed_s": 6.079982280731201,
+      "host_main_start_to_handler_s": 3.1297569274902344,
+      "host_main_status_observed_to_handler_s": -0.11302065849304199,
+      "dgd_to_virtual_pod_observed_s": 0.7272498607635498,
+      "dgd_to_virtual_main_start_s": 2.837204694747925,
+      "dgd_to_virtual_main_status_observed_s": 6.110732555389404,
+      "virtual_main_start_to_handler_s": 3.1297569274902344,
+      "virtual_main_status_observed_to_handler_s": -0.14377093315124512,
+      "dgd_to_dgd_ready_observed_s": 29.41812038421631,
+      "workload_ready_to_dgd_ready_observed_s": 0.012737035751342773
+    },
+    {
+      "case": "discovery-dgd-runtime-1",
+      "group": "runtime",
+      "cohort": "qualification_8Gi",
+      "shared_memory_size": "8Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-af3e71c2-57c756fd99-ntmx6",
+      "pod_uid": "baf87afd-a56a-48c5-8328-300174af370e",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658006.6968646,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 25.533756494522095,
+      "pod_to_ready_s": 25.230621099472046,
+      "dgd_to_pod_create_s": 0.30313539505004883,
+      "dgd_create_return_s": 0.2674696445465088,
+      "dgd_to_handler_s": 2.92971134185791,
+      "pod_to_handler_s": 2.6265759468078613,
+      "restore_operation_s": 15.32051409,
+      "dgd_to_operation_end_s": 18.25023341178894,
+      "criu_s": 4.771393707,
+      "cuda_s": 7.354379446,
+      "gms_span_s": 18.744919300079346,
+      "dgd_to_first_gms_s": 3.183622121810913,
+      "dgd_to_all_published_s": 21.92854142189026,
+      "gms_init_mean_s": 0.2948282063007355,
+      "gms_rank_load_mean_s": 17.152528643608093,
+      "dgd_to_wake_gate_entered_s": 18.976421117782593,
+      "dgd_to_wake_gate_passed_s": 22.01697874069214,
+      "wake_gate_wait_s": 3.040557622909546,
+      "publication_to_gate_passed_s": 0.08843731880187988,
+      "gate_passed_to_ready_s": 3.516777753829956,
+      "resident_service_start_offsets_s": {
+        "agent": -139.69686460494995,
+        "pagebroker": -139.69686460494995
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-af3e71c2-57c756fd99-ntmx6",
+          "namespace": "schwinns-vcluster",
+          "uid": "baf87afd-a56a-48c5-8328-300174af370e",
+          "creationTimestamp": "2026-09-29T05:00:07+00:00",
+          "creation_epoch": 1790658007.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-af3e71c2-57c756fd99",
+              "uid": "08a379ee-c726-4e0a-8af4-c21f7a325788"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-af3e71c2-57c756fd99",
+          "namespace": "schwinns-vcluster",
+          "uid": "08a379ee-c726-4e0a-8af4-c21f7a325788",
+          "creationTimestamp": "2026-09-29T05:00:07+00:00",
+          "creation_epoch": 1790658007.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-af3e71c2",
+              "uid": "93984933-44af-4986-a667-c0a676a66daf"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-af3e71c2",
+          "namespace": "schwinns-vcluster",
+          "uid": "93984933-44af-4986-a667-c0a676a66daf",
+          "creationTimestamp": "2026-09-29T05:00:07+00:00",
+          "creation_epoch": 1790658007.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-af3e71c2",
+              "uid": "d1f7b1b0-bb0c-4b5c-b6d3-7668e569e95a"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-af3e71c2",
+          "namespace": "schwinns-vcluster",
+          "uid": "d1f7b1b0-bb0c-4b5c-b6d3-7668e569e95a",
+          "creationTimestamp": "2026-09-29T05:00:07Z",
+          "creation_epoch": 1790658007.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "5b221526-2786-48c8-ac9c-19eafbcf99c3"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "5b221526-2786-48c8-ac9c-19eafbcf99c3",
+          "creationTimestamp": "2026-09-29T05:00:06Z",
+          "creation_epoch": 1790658006.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": true,
+      "runtime_discovery_logs": [
+        {
+          "offset_s": 2.9246463775634766,
+          "pod_uid": "baf87afd-a56a-48c5-8328-300174af370e",
+          "identity_discovery": true,
+          "container_id": "ce81ea19fa96b0ee9cf8795597e67fdad08da2cd4e4ed97a4bf84aaf47559b77"
+        }
+      ],
+      "dgd_to_host_pod_observed_s": 0.9572834968566895,
+      "dgd_to_host_main_start_s": 2.303135395050049,
+      "dgd_to_host_main_status_observed_s": 5.956033945083618,
+      "host_main_start_to_handler_s": 0.6265759468078613,
+      "host_main_status_observed_to_handler_s": -3.026322603225708,
+      "dgd_to_virtual_pod_observed_s": 0.7481534481048584,
+      "dgd_to_virtual_main_start_s": 2.303135395050049,
+      "dgd_to_virtual_main_status_observed_s": 5.960899591445923,
+      "virtual_main_start_to_handler_s": 0.6265759468078613,
+      "virtual_main_status_observed_to_handler_s": -3.0311882495880127,
+      "dgd_to_dgd_ready_observed_s": 24.844945430755615,
+      "workload_ready_to_dgd_ready_observed_s": -0.6888110637664795
+    },
+    {
+      "case": "discovery-dgd-runtime-2",
+      "group": "runtime",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-hz7xh",
+      "pod_uid": "666093a9-ac56-4c1c-9c92-44c5b0bbae89",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658084.5337205,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 24.054466247558594,
+      "pod_to_ready_s": 23.588186740875244,
+      "dgd_to_pod_create_s": 0.4662795066833496,
+      "dgd_create_return_s": 0.24480152130126953,
+      "dgd_to_handler_s": 2.528606414794922,
+      "pod_to_handler_s": 2.0623269081115723,
+      "restore_operation_s": 15.330871312,
+      "dgd_to_operation_end_s": 17.859485387802124,
+      "criu_s": 5.040732977,
+      "cuda_s": 8.310471086,
+      "gms_span_s": 19.107643127441406,
+      "dgd_to_first_gms_s": 2.7888593673706055,
+      "dgd_to_all_published_s": 21.89650249481201,
+      "gms_init_mean_s": 0.3151216208934784,
+      "gms_rank_load_mean_s": 17.49145069718361,
+      "dgd_to_wake_gate_entered_s": 18.84201192855835,
+      "dgd_to_wake_gate_passed_s": 21.981371641159058,
+      "wake_gate_wait_s": 3.139359712600708,
+      "publication_to_gate_passed_s": 0.0848691463470459,
+      "gate_passed_to_ready_s": 2.073094606399536,
+      "resident_service_start_offsets_s": {
+        "agent": -217.53372049331665,
+        "pagebroker": -217.53372049331665
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-hz7xh",
+          "namespace": "schwinns-vcluster",
+          "uid": "666093a9-ac56-4c1c-9c92-44c5b0bbae89",
+          "creationTimestamp": "2026-09-29T05:01:25+00:00",
+          "creation_epoch": 1790658085.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+              "uid": "db810956-0ec8-4de7-af82-24b41cbc748d"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+          "namespace": "schwinns-vcluster",
+          "uid": "db810956-0ec8-4de7-af82-24b41cbc748d",
+          "creationTimestamp": "2026-09-29T05:01:25+00:00",
+          "creation_epoch": 1790658085.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "cb757f63-7ce3-4647-a25f-41cc19606de5"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "cb757f63-7ce3-4647-a25f-41cc19606de5",
+          "creationTimestamp": "2026-09-29T05:01:25+00:00",
+          "creation_epoch": 1790658085.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "7cbbba1f-cc86-4d4c-b66d-eb11b4708d35"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "7cbbba1f-cc86-4d4c-b66d-eb11b4708d35",
+          "creationTimestamp": "2026-09-29T05:01:24Z",
+          "creation_epoch": 1790658084.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "9ed03a93-2e02-4a55-b1aa-1867743c42dd"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "9ed03a93-2e02-4a55-b1aa-1867743c42dd",
+          "creationTimestamp": "2026-09-29T05:01:24Z",
+          "creation_epoch": 1790658084.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": true,
+      "runtime_discovery_logs": [
+        {
+          "offset_s": 2.524010419845581,
+          "pod_uid": "666093a9-ac56-4c1c-9c92-44c5b0bbae89",
+          "identity_discovery": true,
+          "container_id": "92091726ff82443c42505befce12fe99a89a329767dcbee6009ebfd2fd627b0a"
+        }
+      ],
+      "dgd_to_host_pod_observed_s": 1.015489101409912,
+      "dgd_to_host_main_start_s": 2.4662795066833496,
+      "dgd_to_host_main_status_observed_s": 5.490158557891846,
+      "host_main_start_to_handler_s": 0.062326908111572266,
+      "host_main_status_observed_to_handler_s": -2.961552143096924,
+      "dgd_to_virtual_pod_observed_s": 0.6991920471191406,
+      "dgd_to_virtual_main_start_s": 2.4662795066833496,
+      "dgd_to_virtual_main_status_observed_s": 5.494955539703369,
+      "virtual_main_start_to_handler_s": 0.062326908111572266,
+      "virtual_main_status_observed_to_handler_s": -2.9663491249084473,
+      "dgd_to_dgd_ready_observed_s": 23.64147639274597,
+      "workload_ready_to_dgd_ready_observed_s": -0.41298985481262207
+    },
+    {
+      "case": "discovery-dgd-control-2",
+      "group": "control",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-m9kwc",
+      "pod_uid": "7cc42f93-cc2a-4729-a8ef-fd31577f076d",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658161.2555528,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 27.969582557678223,
+      "pod_to_ready_s": 28.225135326385498,
+      "dgd_to_pod_create_s": -0.2555527687072754,
+      "dgd_create_return_s": 0.24191021919250488,
+      "dgd_to_handler_s": 5.985340118408203,
+      "pod_to_handler_s": 6.2408928871154785,
+      "restore_operation_s": 18.825163874,
+      "dgd_to_operation_end_s": 24.81050729751587,
+      "criu_s": 6.956612019,
+      "cuda_s": 9.595655556,
+      "gms_span_s": 20.484812021255493,
+      "dgd_to_first_gms_s": 3.3911213874816895,
+      "dgd_to_all_published_s": 23.875933408737183,
+      "gms_init_mean_s": 0.28005000948905945,
+      "gms_rank_load_mean_s": 18.716509222984314,
+      "dgd_to_wake_gate_entered_s": 25.314003229141235,
+      "dgd_to_wake_gate_passed_s": 25.314024686813354,
+      "wake_gate_wait_s": 2.1457672119140625e-05,
+      "publication_to_gate_passed_s": 1.4380912780761719,
+      "gate_passed_to_ready_s": 2.655557870864868,
+      "resident_service_start_offsets_s": {
+        "agent": -294.2555527687073,
+        "pagebroker": -294.2555527687073
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-m9kwc",
+          "namespace": "schwinns-vcluster",
+          "uid": "7cc42f93-cc2a-4729-a8ef-fd31577f076d",
+          "creationTimestamp": "2026-09-29T05:02:41+00:00",
+          "creation_epoch": 1790658161.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+              "uid": "85697493-cad2-488c-aff0-5b5434132fcf"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+          "namespace": "schwinns-vcluster",
+          "uid": "85697493-cad2-488c-aff0-5b5434132fcf",
+          "creationTimestamp": "2026-09-29T05:02:41+00:00",
+          "creation_epoch": 1790658161.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "06d12918-3212-440a-887e-e66477e3ee5b"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "06d12918-3212-440a-887e-e66477e3ee5b",
+          "creationTimestamp": "2026-09-29T05:02:41+00:00",
+          "creation_epoch": 1790658161.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "d4d55e8d-5faa-4521-bc61-46e39480feb4"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "d4d55e8d-5faa-4521-bc61-46e39480feb4",
+          "creationTimestamp": "2026-09-29T05:02:41Z",
+          "creation_epoch": 1790658161.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "8d1a28d5-665e-4262-a5fa-eeaae1787afc"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "8d1a28d5-665e-4262-a5fa-eeaae1787afc",
+          "creationTimestamp": "2026-09-29T05:02:41Z",
+          "creation_epoch": 1790658161.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": false,
+      "runtime_discovery_logs": [],
+      "dgd_to_host_pod_observed_s": 0.9248843193054199,
+      "dgd_to_host_main_start_s": 2.7444472312927246,
+      "dgd_to_host_main_status_observed_s": 6.1332972049713135,
+      "host_main_start_to_handler_s": 3.2408928871154785,
+      "host_main_status_observed_to_handler_s": -0.14795708656311035,
+      "dgd_to_virtual_pod_observed_s": 0.7088842391967773,
+      "dgd_to_virtual_main_start_s": 2.7444472312927246,
+      "dgd_to_virtual_main_status_observed_s": 6.162380695343018,
+      "virtual_main_start_to_handler_s": 3.2408928871154785,
+      "virtual_main_status_observed_to_handler_s": -0.17704057693481445,
+      "dgd_to_dgd_ready_observed_s": 27.758397102355957,
+      "workload_ready_to_dgd_ready_observed_s": -0.21118545532226562
+    },
+    {
+      "case": "discovery-dgd-control-3",
+      "group": "control",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-sdlbs",
+      "pod_uid": "85f2c1c3-582f-40a4-8ae7-64d8d7d7f326",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658242.0639756,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 27.355409860610962,
+      "pod_to_ready_s": 27.41938543319702,
+      "dgd_to_pod_create_s": -0.06397557258605957,
+      "dgd_create_return_s": 0.24276113510131836,
+      "dgd_to_handler_s": 5.585360527038574,
+      "pod_to_handler_s": 5.649336099624634,
+      "restore_operation_s": 18.259649119,
+      "dgd_to_operation_end_s": 23.845014333724976,
+      "criu_s": 6.508637516,
+      "cuda_s": 7.715340941,
+      "gms_span_s": 20.828940391540527,
+      "dgd_to_first_gms_s": 2.9800939559936523,
+      "dgd_to_all_published_s": 23.80903434753418,
+      "gms_init_mean_s": 0.2929779589176178,
+      "gms_rank_load_mean_s": 18.71003022789955,
+      "dgd_to_wake_gate_entered_s": 24.688798904418945,
+      "dgd_to_wake_gate_passed_s": 24.688814878463745,
+      "wake_gate_wait_s": 1.5974044799804688e-05,
+      "publication_to_gate_passed_s": 0.8797805309295654,
+      "gate_passed_to_ready_s": 2.666594982147217,
+      "resident_service_start_offsets_s": {
+        "agent": -375.06397557258606,
+        "pagebroker": -375.06397557258606
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-sdlbs",
+          "namespace": "schwinns-vcluster",
+          "uid": "85f2c1c3-582f-40a4-8ae7-64d8d7d7f326",
+          "creationTimestamp": "2026-09-29T05:04:02+00:00",
+          "creation_epoch": 1790658242.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+              "uid": "e35eb28d-8b60-42b8-aed7-2f30a48d57fb"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+          "namespace": "schwinns-vcluster",
+          "uid": "e35eb28d-8b60-42b8-aed7-2f30a48d57fb",
+          "creationTimestamp": "2026-09-29T05:04:02+00:00",
+          "creation_epoch": 1790658242.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "dcb04180-0e97-4d9b-8f70-ce8f7b4b9f15"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "dcb04180-0e97-4d9b-8f70-ce8f7b4b9f15",
+          "creationTimestamp": "2026-09-29T05:04:02+00:00",
+          "creation_epoch": 1790658242.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "0c8c6a13-ad95-4a4e-b358-3fb470d19fe4"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "0c8c6a13-ad95-4a4e-b358-3fb470d19fe4",
+          "creationTimestamp": "2026-09-29T05:04:02Z",
+          "creation_epoch": 1790658242.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "667ade78-386f-4d1a-a4ca-3dfd4ecde857"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "667ade78-386f-4d1a-a4ca-3dfd4ecde857",
+          "creationTimestamp": "2026-09-29T05:04:02Z",
+          "creation_epoch": 1790658242.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": false,
+      "runtime_discovery_logs": [],
+      "dgd_to_host_pod_observed_s": 0.9901494979858398,
+      "dgd_to_host_main_start_s": 1.9360244274139404,
+      "dgd_to_host_main_status_observed_s": 5.726558685302734,
+      "host_main_start_to_handler_s": 3.649336099624634,
+      "host_main_status_observed_to_handler_s": -0.14119815826416016,
+      "dgd_to_virtual_pod_observed_s": 0.7823688983917236,
+      "dgd_to_virtual_main_start_s": 1.9360244274139404,
+      "dgd_to_virtual_main_status_observed_s": 5.745061159133911,
+      "virtual_main_start_to_handler_s": 3.649336099624634,
+      "virtual_main_status_observed_to_handler_s": -0.15970063209533691,
+      "dgd_to_dgd_ready_observed_s": 26.90389609336853,
+      "workload_ready_to_dgd_ready_observed_s": -0.45151376724243164
+    },
+    {
+      "case": "discovery-dgd-runtime-3",
+      "group": "runtime",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-2c5lg",
+      "pod_uid": "67723cc9-5704-4fb1-b81e-b0f9f3299a99",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658319.7355978,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 24.8250572681427,
+      "pod_to_ready_s": 24.560655117034912,
+      "dgd_to_pod_create_s": 0.2644021511077881,
+      "dgd_create_return_s": 0.23949813842773438,
+      "dgd_to_handler_s": 2.4214181900024414,
+      "pod_to_handler_s": 2.1570160388946533,
+      "restore_operation_s": 15.7118085,
+      "dgd_to_operation_end_s": 18.133233070373535,
+      "criu_s": 3.935253472,
+      "cuda_s": 9.602834871,
+      "gms_span_s": 19.263128519058228,
+      "dgd_to_first_gms_s": 2.6591930389404297,
+      "dgd_to_all_published_s": 21.922321557998657,
+      "gms_init_mean_s": 0.5855203866958618,
+      "gms_rank_load_mean_s": 17.54104655981064,
+      "dgd_to_wake_gate_entered_s": 18.824888706207275,
+      "dgd_to_wake_gate_passed_s": 22.01111650466919,
+      "wake_gate_wait_s": 3.186227798461914,
+      "publication_to_gate_passed_s": 0.08879494667053223,
+      "gate_passed_to_ready_s": 2.8139407634735107,
+      "resident_service_start_offsets_s": {
+        "agent": -452.7355978488922,
+        "pagebroker": -452.7355978488922
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-2c5lg",
+          "namespace": "schwinns-vcluster",
+          "uid": "67723cc9-5704-4fb1-b81e-b0f9f3299a99",
+          "creationTimestamp": "2026-09-29T05:05:20+00:00",
+          "creation_epoch": 1790658320.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+              "uid": "9605dba5-00ab-408e-a203-9ee7c1afdab1"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+          "namespace": "schwinns-vcluster",
+          "uid": "9605dba5-00ab-408e-a203-9ee7c1afdab1",
+          "creationTimestamp": "2026-09-29T05:05:20+00:00",
+          "creation_epoch": 1790658320.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "d913119c-edf7-49a3-b204-cf5c7d9262f4"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "d913119c-edf7-49a3-b204-cf5c7d9262f4",
+          "creationTimestamp": "2026-09-29T05:05:20+00:00",
+          "creation_epoch": 1790658320.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "eb796c90-d331-4da8-8146-e3317a1a14d4"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "eb796c90-d331-4da8-8146-e3317a1a14d4",
+          "creationTimestamp": "2026-09-29T05:05:20Z",
+          "creation_epoch": 1790658320.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "e4bd419c-b41f-42e0-a869-f23a03019c41"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "e4bd419c-b41f-42e0-a869-f23a03019c41",
+          "creationTimestamp": "2026-09-29T05:05:19Z",
+          "creation_epoch": 1790658319.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": true,
+      "runtime_discovery_logs": [
+        {
+          "offset_s": 2.417384147644043,
+          "pod_uid": "67723cc9-5704-4fb1-b81e-b0f9f3299a99",
+          "identity_discovery": true,
+          "container_id": "b0a5295614b96607622a5ab81e5e3985a3476742cc989d1b2c737ec3aa911d62"
+        }
+      ],
+      "dgd_to_host_pod_observed_s": 0.9673745632171631,
+      "dgd_to_host_main_start_s": 2.264402151107788,
+      "dgd_to_host_main_status_observed_s": 5.479318141937256,
+      "host_main_start_to_handler_s": 0.15701603889465332,
+      "host_main_status_observed_to_handler_s": -3.0578999519348145,
+      "dgd_to_virtual_pod_observed_s": 0.7423450946807861,
+      "dgd_to_virtual_main_start_s": 2.264402151107788,
+      "dgd_to_virtual_main_status_observed_s": 5.460745334625244,
+      "virtual_main_start_to_handler_s": 0.15701603889465332,
+      "virtual_main_status_observed_to_handler_s": -3.0393271446228027,
+      "dgd_to_dgd_ready_observed_s": 24.77154040336609,
+      "workload_ready_to_dgd_ready_observed_s": -0.05351686477661133
+    },
+    {
+      "case": "discovery-dgd-control-4",
+      "group": "control",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-5z4fw",
+      "pod_uid": "7199529a-19a0-4da2-90db-dc3be2dba083",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658467.3622313,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 27.90001153945923,
+      "pod_to_ready_s": 27.262242794036865,
+      "dgd_to_pod_create_s": 0.6377687454223633,
+      "dgd_create_return_s": 0.2421121597290039,
+      "dgd_to_handler_s": 5.496846675872803,
+      "pod_to_handler_s": 4.8590779304504395,
+      "restore_operation_s": 19.04315074,
+      "dgd_to_operation_end_s": 24.540000677108765,
+      "criu_s": 6.102828373,
+      "cuda_s": 10.627538018,
+      "gms_span_s": 20.414714097976685,
+      "dgd_to_first_gms_s": 2.877805471420288,
+      "dgd_to_all_published_s": 23.292519569396973,
+      "gms_init_mean_s": 0.28872206807136536,
+      "gms_rank_load_mean_s": 18.32959571480751,
+      "dgd_to_wake_gate_entered_s": 25.284785509109497,
+      "dgd_to_wake_gate_passed_s": 25.284801244735718,
+      "wake_gate_wait_s": 1.5735626220703125e-05,
+      "publication_to_gate_passed_s": 1.9922816753387451,
+      "gate_passed_to_ready_s": 2.6152102947235107,
+      "resident_service_start_offsets_s": {
+        "agent": -600.3622312545776,
+        "pagebroker": -600.3622312545776
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f-5z4fw",
+          "namespace": "schwinns-vcluster",
+          "uid": "7199529a-19a0-4da2-90db-dc3be2dba083",
+          "creationTimestamp": "2026-09-29T05:07:48+00:00",
+          "creation_epoch": 1790658468.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+              "uid": "3ed0f5f0-6337-413c-aead-4f74615e83c8"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20-68b6c9b99f",
+          "namespace": "schwinns-vcluster",
+          "uid": "3ed0f5f0-6337-413c-aead-4f74615e83c8",
+          "creationTimestamp": "2026-09-29T05:07:48+00:00",
+          "creation_epoch": 1790658468.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "427322af-7a05-40d0-82ba-5af32f350abe"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "427322af-7a05-40d0-82ba-5af32f350abe",
+          "creationTimestamp": "2026-09-29T05:07:47+00:00",
+          "creation_epoch": 1790658467.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+              "uid": "d76eb439-11be-4bf1-8fa8-9297ebc80b1e"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f3de9a20",
+          "namespace": "schwinns-vcluster",
+          "uid": "d76eb439-11be-4bf1-8fa8-9297ebc80b1e",
+          "creationTimestamp": "2026-09-29T05:07:47Z",
+          "creation_epoch": 1790658467.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "08b9ebd8-bd6a-44e1-88f2-bb8b67472400"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "08b9ebd8-bd6a-44e1-88f2-bb8b67472400",
+          "creationTimestamp": "2026-09-29T05:07:47Z",
+          "creation_epoch": 1790658467.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": false,
+      "runtime_discovery_logs": [],
+      "dgd_to_host_pod_observed_s": 0.9806725978851318,
+      "dgd_to_host_main_start_s": 1.6377687454223633,
+      "dgd_to_host_main_status_observed_s": 5.6320106983184814,
+      "host_main_start_to_handler_s": 3.8590779304504395,
+      "host_main_status_observed_to_handler_s": -0.1351640224456787,
+      "dgd_to_virtual_pod_observed_s": 0.7656877040863037,
+      "dgd_to_virtual_main_start_s": 1.6377687454223633,
+      "dgd_to_virtual_main_status_observed_s": 5.610223770141602,
+      "virtual_main_start_to_handler_s": 3.8590779304504395,
+      "virtual_main_status_observed_to_handler_s": -0.11337709426879883,
+      "dgd_to_dgd_ready_observed_s": 27.525792598724365,
+      "workload_ready_to_dgd_ready_observed_s": -0.3742189407348633
+    },
+    {
+      "case": "discovery-dgd-runtime-4",
+      "group": "runtime",
+      "cohort": "main_32Gi",
+      "shared_memory_size": "32Gi",
+      "pod_name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-mjnk6",
+      "pod_uid": "b0376710-48b5-43af-9b83-b264f907264a",
+      "timer_origin": "dgd_create_request",
+      "start_epoch": 1790658549.2352843,
+      "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+      "dgd_to_ready_s": 25.974697828292847,
+      "pod_to_ready_s": 26.20998215675354,
+      "dgd_to_pod_create_s": -0.23528432846069336,
+      "dgd_create_return_s": 0.24029278755187988,
+      "dgd_to_handler_s": 3.18472957611084,
+      "pod_to_handler_s": 3.420013904571533,
+      "restore_operation_s": 15.972788042,
+      "dgd_to_operation_end_s": 19.157524585723877,
+      "criu_s": 4.821330018,
+      "cuda_s": 8.907531802,
+      "gms_span_s": 18.936774253845215,
+      "dgd_to_first_gms_s": 3.4317758083343506,
+      "dgd_to_all_published_s": 22.368550062179565,
+      "gms_init_mean_s": 0.2848740816116333,
+      "gms_rank_load_mean_s": 16.943413466215134,
+      "dgd_to_wake_gate_entered_s": 19.49088144302368,
+      "dgd_to_wake_gate_passed_s": 22.460973501205444,
+      "wake_gate_wait_s": 2.9700920581817627,
+      "publication_to_gate_passed_s": 0.0924234390258789,
+      "gate_passed_to_ready_s": 3.5137243270874023,
+      "resident_service_start_offsets_s": {
+        "agent": -682.2352843284607,
+        "pagebroker": -682.2352843284607
+      },
+      "resident_services_ready_before_timer": true,
+      "unique_direct_payload_files": 112,
+      "weights_bytes": 481036337152,
+      "ownership_chain": [
+        {
+          "apiVersion": "v1",
+          "kind": "Pod",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c-mjnk6",
+          "namespace": "schwinns-vcluster",
+          "uid": "b0376710-48b5-43af-9b83-b264f907264a",
+          "creationTimestamp": "2026-09-29T05:09:09+00:00",
+          "creation_epoch": 1790658549.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "ReplicaSet",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+              "uid": "f46a0286-735e-4b22-824f-01659b52999c"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "ReplicaSet",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9-ffb5bcc6c",
+          "namespace": "schwinns-vcluster",
+          "uid": "f46a0286-735e-4b22-824f-01659b52999c",
+          "creationTimestamp": "2026-09-29T05:09:09+00:00",
+          "creation_epoch": 1790658549.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "apps/v1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "Deployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "cdfd1f98-f3fa-4118-923e-db26c295844b"
+            }
+          ]
+        },
+        {
+          "apiVersion": "apps/v1",
+          "kind": "Deployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "cdfd1f98-f3fa-4118-923e-db26c295844b",
+          "creationTimestamp": "2026-09-29T05:09:09+00:00",
+          "creation_epoch": 1790658549.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoComponentDeployment",
+              "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+              "uid": "79671fcd-dcab-41a9-868a-866586b7fd19"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoComponentDeployment",
+          "name": "gms-v1-glm-dgd-0929-engine-f791eaa9",
+          "namespace": "schwinns-vcluster",
+          "uid": "79671fcd-dcab-41a9-868a-866586b7fd19",
+          "creationTimestamp": "2026-09-29T05:09:09Z",
+          "creation_epoch": 1790658549.0,
+          "ownerReferences": [
+            {
+              "apiVersion": "nvidia.com/v1beta1",
+              "blockOwnerDeletion": true,
+              "controller": true,
+              "kind": "DynamoGraphDeployment",
+              "name": "gms-v1-glm-dgd-0929",
+              "uid": "4c1f96c3-a16a-48ba-b761-695900a3338c"
+            }
+          ]
+        },
+        {
+          "apiVersion": "nvidia.com/v1beta1",
+          "kind": "DynamoGraphDeployment",
+          "name": "gms-v1-glm-dgd-0929",
+          "namespace": "schwinns-vcluster",
+          "uid": "4c1f96c3-a16a-48ba-b761-695900a3338c",
+          "creationTimestamp": "2026-09-29T05:09:09Z",
+          "creation_epoch": 1790658549.0,
+          "ownerReferences": []
+        }
+      ],
+      "ownership_validated": true,
+      "inference_correct": true,
+      "runtime_discovery_observed": true,
+      "runtime_discovery_logs": [
+        {
+          "offset_s": 3.1788907051086426,
+          "pod_uid": "b0376710-48b5-43af-9b83-b264f907264a",
+          "identity_discovery": true,
+          "container_id": "1f954035866f166a6e60f1ddaab8713fe95c3afba033c4f8964e98f4f9619b79"
+        }
+      ],
+      "dgd_to_host_pod_observed_s": 0.9767003059387207,
+      "dgd_to_host_main_start_s": 2.7647156715393066,
+      "dgd_to_host_main_status_observed_s": 6.18681788444519,
+      "host_main_start_to_handler_s": 0.4200139045715332,
+      "host_main_status_observed_to_handler_s": -3.0020883083343506,
+      "dgd_to_virtual_pod_observed_s": 0.7706553936004639,
+      "dgd_to_virtual_main_start_s": 2.7647156715393066,
+      "dgd_to_virtual_main_status_observed_s": 6.195774078369141,
+      "virtual_main_start_to_handler_s": 0.4200139045715332,
+      "virtual_main_status_observed_to_handler_s": -3.011044502258301,
+      "dgd_to_dgd_ready_observed_s": 25.350317001342773,
+      "workload_ready_to_dgd_ready_observed_s": -0.6243808269500732
+    }
+  ],
+  "groups": {
+    "control": {
+      "n": 3,
+      "cases": [
+        "discovery-dgd-control-2",
+        "discovery-dgd-control-3",
+        "discovery-dgd-control-4"
+      ],
+      "metrics": {
+        "criu_s": {
+          "mean": 6.522692636,
+          "range": [
+            6.102828373,
+            6.956612019
+          ]
+        },
+        "cuda_s": {
+          "mean": 9.312844838333334,
+          "range": [
+            7.715340941,
+            10.627538018
+          ]
+        },
+        "dgd_create_return_s": {
+          "mean": 0.24226117134094238,
+          "range": [
+            0.24191021919250488,
+            0.24276113510131836
+          ]
+        },
+        "dgd_to_all_published_s": {
+          "mean": 23.659162441889446,
+          "range": [
+            23.292519569396973,
+            23.875933408737183
+          ]
+        },
+        "dgd_to_dgd_ready_observed_s": {
+          "mean": 27.396028598149616,
+          "range": [
+            26.90389609336853,
+            27.758397102355957
+          ]
+        },
+        "dgd_to_first_gms_s": {
+          "mean": 3.0830069382985434,
+          "range": [
+            2.877805471420288,
+            3.3911213874816895
+          ]
+        },
+        "dgd_to_handler_s": {
+          "mean": 5.68918244043986,
+          "range": [
+            5.496846675872803,
+            5.985340118408203
+          ]
+        },
+        "dgd_to_host_main_start_s": {
+          "mean": 2.1060801347096763,
+          "range": [
+            1.6377687454223633,
+            2.7444472312927246
+          ]
+        },
+        "dgd_to_host_main_status_observed_s": {
+          "mean": 5.83062219619751,
+          "range": [
+            5.6320106983184814,
+            6.1332972049713135
+          ]
+        },
+        "dgd_to_host_pod_observed_s": {
+          "mean": 0.9652354717254639,
+          "range": [
+            0.9248843193054199,
+            0.9901494979858398
+          ]
+        },
+        "dgd_to_operation_end_s": {
+          "mean": 24.398507436116535,
+          "range": [
+            23.845014333724976,
+            24.81050729751587
+          ]
+        },
+        "dgd_to_pod_create_s": {
+          "mean": 0.1060801347096761,
+          "range": [
+            -0.2555527687072754,
+            0.6377687454223633
+          ]
+        },
+        "dgd_to_ready_s": {
+          "mean": 27.741667985916138,
+          "range": [
+            27.355409860610962,
+            27.969582557678223
+          ]
+        },
+        "dgd_to_virtual_main_start_s": {
+          "mean": 2.1060801347096763,
+          "range": [
+            1.6377687454223633,
+            2.7444472312927246
+          ]
+        },
+        "dgd_to_virtual_main_status_observed_s": {
+          "mean": 5.839221874872844,
+          "range": [
+            5.610223770141602,
+            6.162380695343018
+          ]
+        },
+        "dgd_to_virtual_pod_observed_s": {
+          "mean": 0.7523136138916016,
+          "range": [
+            0.7088842391967773,
+            0.7823688983917236
+          ]
+        },
+        "dgd_to_wake_gate_entered_s": {
+          "mean": 25.09586254755656,
+          "range": [
+            24.688798904418945,
+            25.314003229141235
+          ]
+        },
+        "dgd_to_wake_gate_passed_s": {
+          "mean": 25.095880270004272,
+          "range": [
+            24.688814878463745,
+            25.314024686813354
+          ]
+        },
+        "gate_passed_to_ready_s": {
+          "mean": 2.6457877159118652,
+          "range": [
+            2.6152102947235107,
+            2.666594982147217
+          ]
+        },
+        "gms_init_mean_s": {
+          "mean": 0.28725001215934753,
+          "range": [
+            0.28005000948905945,
+            0.2929779589176178
+          ]
+        },
+        "gms_rank_load_mean_s": {
+          "mean": 18.585378388563793,
+          "range": [
+            18.32959571480751,
+            18.716509222984314
+          ]
+        },
+        "gms_span_s": {
+          "mean": 20.5761555035909,
+          "range": [
+            20.414714097976685,
+            20.828940391540527
+          ]
+        },
+        "host_main_start_to_handler_s": {
+          "mean": 3.583102305730184,
+          "range": [
+            3.2408928871154785,
+            3.8590779304504395
+          ]
+        },
+        "host_main_status_observed_to_handler_s": {
+          "mean": -0.14143975575764975,
+          "range": [
+            -0.14795708656311035,
+            -0.1351640224456787
+          ]
+        },
+        "pod_to_handler_s": {
+          "mean": 5.583102305730184,
+          "range": [
+            4.8590779304504395,
+            6.2408928871154785
+          ]
+        },
+        "pod_to_ready_s": {
+          "mean": 27.635587851206463,
+          "range": [
+            27.262242794036865,
+            28.225135326385498
+          ]
+        },
+        "publication_to_gate_passed_s": {
+          "mean": 1.4367178281148274,
+          "range": [
+            0.8797805309295654,
+            1.9922816753387451
+          ]
+        },
+        "restore_operation_s": {
+          "mean": 18.709321244333335,
+          "range": [
+            18.259649119,
+            19.04315074
+          ]
+        },
+        "virtual_main_start_to_handler_s": {
+          "mean": 3.583102305730184,
+          "range": [
+            3.2408928871154785,
+            3.8590779304504395
+          ]
+        },
+        "virtual_main_status_observed_to_handler_s": {
+          "mean": -0.1500394344329834,
+          "range": [
+            -0.17704057693481445,
+            -0.11337709426879883
+          ]
+        },
+        "wake_gate_wait_s": {
+          "mean": 1.7722447713216145e-05,
+          "range": [
+            1.5735626220703125e-05,
+            2.1457672119140625e-05
+          ]
+        },
+        "workload_ready_to_dgd_ready_observed_s": {
+          "mean": -0.3456393877665202,
+          "range": [
+            -0.45151376724243164,
+            -0.21118545532226562
+          ]
+        }
+      },
+      "runtime_discovery_proof_count": 0
+    },
+    "runtime": {
+      "n": 3,
+      "cases": [
+        "discovery-dgd-runtime-2",
+        "discovery-dgd-runtime-3",
+        "discovery-dgd-runtime-4"
+      ],
+      "metrics": {
+        "criu_s": {
+          "mean": 4.599105489,
+          "range": [
+            3.935253472,
+            5.040732977
+          ]
+        },
+        "cuda_s": {
+          "mean": 8.940279253,
+          "range": [
+            8.310471086,
+            9.602834871
+          ]
+        },
+        "dgd_create_return_s": {
+          "mean": 0.2415308157602946,
+          "range": [
+            0.23949813842773438,
+            0.24480152130126953
+          ]
+        },
+        "dgd_to_all_published_s": {
+          "mean": 22.062458038330078,
+          "range": [
+            21.89650249481201,
+            22.368550062179565
+          ]
+        },
+        "dgd_to_dgd_ready_observed_s": {
+          "mean": 24.587777932484943,
+          "range": [
+            23.64147639274597,
+            25.350317001342773
+          ]
+        },
+        "dgd_to_first_gms_s": {
+          "mean": 2.9599427382151284,
+          "range": [
+            2.6591930389404297,
+            3.4317758083343506
+          ]
+        },
+        "dgd_to_handler_s": {
+          "mean": 2.711584726969401,
+          "range": [
+            2.4214181900024414,
+            3.18472957611084
+          ]
+        },
+        "dgd_to_host_main_start_s": {
+          "mean": 2.4984657764434814,
+          "range": [
+            2.264402151107788,
+            2.7647156715393066
+          ]
+        },
+        "dgd_to_host_main_status_observed_s": {
+          "mean": 5.718764861424764,
+          "range": [
+            5.479318141937256,
+            6.18681788444519
+          ]
+        },
+        "dgd_to_host_pod_observed_s": {
+          "mean": 0.986521323521932,
+          "range": [
+            0.9673745632171631,
+            1.015489101409912
+          ]
+        },
+        "dgd_to_operation_end_s": {
+          "mean": 18.38341434796651,
+          "range": [
+            17.859485387802124,
+            19.157524585723877
+          ]
+        },
+        "dgd_to_pod_create_s": {
+          "mean": 0.1651324431101481,
+          "range": [
+            -0.23528432846069336,
+            0.4662795066833496
+          ]
+        },
+        "dgd_to_ready_s": {
+          "mean": 24.951407114664715,
+          "range": [
+            24.054466247558594,
+            25.974697828292847
+          ]
+        },
+        "dgd_to_virtual_main_start_s": {
+          "mean": 2.4984657764434814,
+          "range": [
+            2.264402151107788,
+            2.7647156715393066
+          ]
+        },
+        "dgd_to_virtual_main_status_observed_s": {
+          "mean": 5.717158317565918,
+          "range": [
+            5.460745334625244,
+            6.195774078369141
+          ]
+        },
+        "dgd_to_virtual_pod_observed_s": {
+          "mean": 0.7373975118001302,
+          "range": [
+            0.6991920471191406,
+            0.7706553936004639
+          ]
+        },
+        "dgd_to_wake_gate_entered_s": {
+          "mean": 19.052594025929768,
+          "range": [
+            18.824888706207275,
+            19.49088144302368
+          ]
+        },
+        "dgd_to_wake_gate_passed_s": {
+          "mean": 22.151153882344563,
+          "range": [
+            21.981371641159058,
+            22.460973501205444
+          ]
+        },
+        "gate_passed_to_ready_s": {
+          "mean": 2.80025323232015,
+          "range": [
+            2.073094606399536,
+            3.5137243270874023
+          ]
+        },
+        "gms_init_mean_s": {
+          "mean": 0.39517202973365784,
+          "range": [
+            0.2848740816116333,
+            0.5855203866958618
+          ]
+        },
+        "gms_rank_load_mean_s": {
+          "mean": 17.325303574403126,
+          "range": [
+            16.943413466215134,
+            17.54104655981064
+          ]
+        },
+        "gms_span_s": {
+          "mean": 19.10251530011495,
+          "range": [
+            18.936774253845215,
+            19.263128519058228
+          ]
+        },
+        "host_main_start_to_handler_s": {
+          "mean": 0.2131189505259196,
+          "range": [
+            0.062326908111572266,
+            0.4200139045715332
+          ]
+        },
+        "host_main_status_observed_to_handler_s": {
+          "mean": -3.007180134455363,
+          "range": [
+            -3.0578999519348145,
+            -2.961552143096924
+          ]
+        },
+        "pod_to_handler_s": {
+          "mean": 2.546452283859253,
+          "range": [
+            2.0623269081115723,
+            3.420013904571533
+          ]
+        },
+        "pod_to_ready_s": {
+          "mean": 24.786274671554565,
+          "range": [
+            23.588186740875244,
+            26.20998215675354
+          ]
+        },
+        "publication_to_gate_passed_s": {
+          "mean": 0.08869584401448567,
+          "range": [
+            0.0848691463470459,
+            0.0924234390258789
+          ]
+        },
+        "restore_operation_s": {
+          "mean": 15.671822618,
+          "range": [
+            15.330871312,
+            15.972788042
+          ]
+        },
+        "virtual_main_start_to_handler_s": {
+          "mean": 0.2131189505259196,
+          "range": [
+            0.062326908111572266,
+            0.4200139045715332
+          ]
+        },
+        "virtual_main_status_observed_to_handler_s": {
+          "mean": -3.005573590596517,
+          "range": [
+            -3.0393271446228027,
+            -2.9663491249084473
+          ]
+        },
+        "wake_gate_wait_s": {
+          "mean": 3.098559856414795,
+          "range": [
+            2.9700920581817627,
+            3.186227798461914
+          ]
+        },
+        "workload_ready_to_dgd_ready_observed_s": {
+          "mean": -0.36362918217976886,
+          "range": [
+            -0.6243808269500732,
+            -0.05351686477661133
+          ]
+        }
+      },
+      "runtime_discovery_proof_count": 3
+    }
+  },
+  "qualification_cases": [
+    "discovery-dgd-control-1",
+    "discovery-dgd-runtime-1"
+  ],
+  "pairs": [
+    {
+      "pair": 1,
+      "cohort": "qualification_8Gi",
+      "order": "A B",
+      "control": "discovery-dgd-control-1",
+      "runtime": "discovery-dgd-runtime-1",
+      "runtime_minus_control_s": {
+        "criu_s": -3.3849951770000004,
+        "cuda_s": -2.2796880340000003,
+        "dgd_create_return_s": 0.003559589385986328,
+        "dgd_to_all_published_s": -1.1275577545166016,
+        "dgd_to_dgd_ready_observed_s": -4.573174953460693,
+        "dgd_to_first_gms_s": -0.13575196266174316,
+        "dgd_to_handler_s": -3.037250280380249,
+        "dgd_to_host_main_start_s": -0.534069299697876,
+        "dgd_to_host_main_status_observed_s": -0.12394833564758301,
+        "dgd_to_host_pod_observed_s": 0.045262813568115234,
+        "dgd_to_operation_end_s": -8.211094379425049,
+        "dgd_to_pod_create_s": 0.465930700302124,
+        "dgd_to_ready_s": -3.871626853942871,
+        "dgd_to_virtual_main_start_s": -0.534069299697876,
+        "dgd_to_virtual_main_status_observed_s": -0.14983296394348145,
+        "dgd_to_virtual_pod_observed_s": 0.020903587341308594,
+        "dgd_to_wake_gate_entered_s": -7.763952255249023,
+        "dgd_to_wake_gate_passed_s": -4.72340989112854,
+        "gate_passed_to_ready_s": 0.851783037185669,
+        "gms_init_mean_s": -0.000911712646484375,
+        "gms_rank_load_mean_s": -0.9274840652942657,
+        "gms_span_s": -0.9918057918548584,
+        "host_main_start_to_handler_s": -2.503180980682373,
+        "host_main_status_observed_to_handler_s": -2.913301944732666,
+        "pod_to_handler_s": -3.503180980682373,
+        "pod_to_ready_s": -4.337557554244995,
+        "publication_to_gate_passed_s": -3.5958521366119385,
+        "restore_operation_s": -5.173845114999999,
+        "virtual_main_start_to_handler_s": -2.503180980682373,
+        "virtual_main_status_observed_to_handler_s": -2.8874173164367676,
+        "wake_gate_wait_s": 3.0405423641204834,
+        "workload_ready_to_dgd_ready_observed_s": -0.7015480995178223
+      }
+    },
+    {
+      "pair": 2,
+      "cohort": "main_32Gi",
+      "order": "B A",
+      "control": "discovery-dgd-control-2",
+      "runtime": "discovery-dgd-runtime-2",
+      "runtime_minus_control_s": {
+        "criu_s": -1.9158790419999994,
+        "cuda_s": -1.2851844700000008,
+        "dgd_create_return_s": 0.0028913021087646484,
+        "dgd_to_all_published_s": -1.979430913925171,
+        "dgd_to_dgd_ready_observed_s": -4.116920709609985,
+        "dgd_to_first_gms_s": -0.602262020111084,
+        "dgd_to_handler_s": -3.4567337036132812,
+        "dgd_to_host_main_start_s": -0.278167724609375,
+        "dgd_to_host_main_status_observed_s": -0.6431386470794678,
+        "dgd_to_host_pod_observed_s": 0.09060478210449219,
+        "dgd_to_operation_end_s": -6.951021909713745,
+        "dgd_to_pod_create_s": 0.721832275390625,
+        "dgd_to_ready_s": -3.915116310119629,
+        "dgd_to_virtual_main_start_s": -0.278167724609375,
+        "dgd_to_virtual_main_status_observed_s": -0.6674251556396484,
+        "dgd_to_virtual_pod_observed_s": -0.009692192077636719,
+        "dgd_to_wake_gate_entered_s": -6.471991300582886,
+        "dgd_to_wake_gate_passed_s": -3.332653045654297,
+        "gate_passed_to_ready_s": -0.582463264465332,
+        "gms_init_mean_s": 0.035071611404418945,
+        "gms_rank_load_mean_s": -1.225058525800705,
+        "gms_span_s": -1.377168893814087,
+        "host_main_start_to_handler_s": -3.1785659790039062,
+        "host_main_status_observed_to_handler_s": -2.8135950565338135,
+        "pod_to_handler_s": -4.178565979003906,
+        "pod_to_ready_s": -4.636948585510254,
+        "publication_to_gate_passed_s": -1.353222131729126,
+        "restore_operation_s": -3.494292562000002,
+        "virtual_main_start_to_handler_s": -3.1785659790039062,
+        "virtual_main_status_observed_to_handler_s": -2.789308547973633,
+        "wake_gate_wait_s": 3.139338254928589,
+        "workload_ready_to_dgd_ready_observed_s": -0.20180439949035645
+      }
+    },
+    {
+      "pair": 3,
+      "cohort": "main_32Gi",
+      "order": "A B",
+      "control": "discovery-dgd-control-3",
+      "runtime": "discovery-dgd-runtime-3",
+      "runtime_minus_control_s": {
+        "criu_s": -2.5733840440000004,
+        "cuda_s": 1.8874939300000007,
+        "dgd_create_return_s": -0.0032629966735839844,
+        "dgd_to_all_published_s": -1.8867127895355225,
+        "dgd_to_dgd_ready_observed_s": -2.1323556900024414,
+        "dgd_to_first_gms_s": -0.32090091705322266,
+        "dgd_to_handler_s": -3.163942337036133,
+        "dgd_to_host_main_start_s": 0.32837772369384766,
+        "dgd_to_host_main_status_observed_s": -0.24724054336547852,
+        "dgd_to_host_pod_observed_s": -0.022774934768676758,
+        "dgd_to_operation_end_s": -5.71178126335144,
+        "dgd_to_pod_create_s": 0.32837772369384766,
+        "dgd_to_ready_s": -2.5303525924682617,
+        "dgd_to_virtual_main_start_s": 0.32837772369384766,
+        "dgd_to_virtual_main_status_observed_s": -0.284315824508667,
+        "dgd_to_virtual_pod_observed_s": -0.0400238037109375,
+        "dgd_to_wake_gate_entered_s": -5.86391019821167,
+        "dgd_to_wake_gate_passed_s": -2.6776983737945557,
+        "gate_passed_to_ready_s": 0.14734578132629395,
+        "gms_init_mean_s": 0.292542427778244,
+        "gms_rank_load_mean_s": -1.168983668088913,
+        "gms_span_s": -1.5658118724822998,
+        "host_main_start_to_handler_s": -3.4923200607299805,
+        "host_main_status_observed_to_handler_s": -2.9167017936706543,
+        "pod_to_handler_s": -3.4923200607299805,
+        "pod_to_ready_s": -2.8587303161621094,
+        "publication_to_gate_passed_s": -0.7909855842590332,
+        "restore_operation_s": -2.5478406189999987,
+        "virtual_main_start_to_handler_s": -3.4923200607299805,
+        "virtual_main_status_observed_to_handler_s": -2.879626512527466,
+        "wake_gate_wait_s": 3.1862118244171143,
+        "workload_ready_to_dgd_ready_observed_s": 0.3979969024658203
+      }
+    },
+    {
+      "pair": 4,
+      "cohort": "main_32Gi",
+      "order": "A B",
+      "control": "discovery-dgd-control-4",
+      "runtime": "discovery-dgd-runtime-4",
+      "runtime_minus_control_s": {
+        "criu_s": -1.281498355,
+        "cuda_s": -1.7200062159999998,
+        "dgd_create_return_s": -0.0018193721771240234,
+        "dgd_to_all_published_s": -0.9239695072174072,
+        "dgd_to_dgd_ready_observed_s": -2.175475597381592,
+        "dgd_to_first_gms_s": 0.5539703369140625,
+        "dgd_to_handler_s": -2.312117099761963,
+        "dgd_to_host_main_start_s": 1.1269469261169434,
+        "dgd_to_host_main_status_observed_s": 0.554807186126709,
+        "dgd_to_host_pod_observed_s": -0.003972291946411133,
+        "dgd_to_operation_end_s": -5.382476091384888,
+        "dgd_to_pod_create_s": -0.8730530738830566,
+        "dgd_to_ready_s": -1.9253137111663818,
+        "dgd_to_virtual_main_start_s": 1.1269469261169434,
+        "dgd_to_virtual_main_status_observed_s": 0.5855503082275391,
+        "dgd_to_virtual_pod_observed_s": 0.004967689514160156,
+        "dgd_to_wake_gate_entered_s": -5.793904066085815,
+        "dgd_to_wake_gate_passed_s": -2.8238277435302734,
+        "gate_passed_to_ready_s": 0.8985140323638916,
+        "gms_init_mean_s": -0.0038479864597320557,
+        "gms_rank_load_mean_s": -1.3861822485923767,
+        "gms_span_s": -1.4779398441314697,
+        "host_main_start_to_handler_s": -3.4390640258789062,
+        "host_main_status_observed_to_handler_s": -2.866924285888672,
+        "pod_to_handler_s": -1.4390640258789062,
+        "pod_to_ready_s": -1.0522606372833252,
+        "publication_to_gate_passed_s": -1.8998582363128662,
+        "restore_operation_s": -3.070362698000002,
+        "virtual_main_start_to_handler_s": -3.4390640258789062,
+        "virtual_main_status_observed_to_handler_s": -2.897667407989502,
+        "wake_gate_wait_s": 2.970076322555542,
+        "workload_ready_to_dgd_ready_observed_s": -0.25016188621520996
+      }
+    }
+  ]
+}

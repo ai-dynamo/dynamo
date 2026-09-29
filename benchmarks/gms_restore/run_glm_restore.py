@@ -14,6 +14,13 @@ import subprocess
 import time
 from pathlib import Path
 
+from dgd_restore import (
+    DGD_NAME,
+    TRIAL_LABEL,
+    build_dgd,
+    ownership_chain,
+    timestamp_epoch,
+)
 from kubernetes import client, config
 from resolve_plan import resolve_destinations
 
@@ -32,6 +39,8 @@ p.add_argument("--same-claim", action="store_true")
 p.add_argument("--fast-gate", action="store_true")
 p.add_argument("--overlap", action="store_true")
 p.add_argument("--early-trigger", action="store_true")
+p.add_argument("--dgd", action="store_true", help="Create the workload through Dynamo")
+p.add_argument("--runtime-discovery", action="store_true")
 p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
 if not 0 < a.gms_cpu_request <= a.gms_cpu_limit:
@@ -48,6 +57,8 @@ if a.isolated_pvc_transport and not a.qualified_pvc_mount:
     p.error("--isolated-pvc-transport requires --qualified-pvc-mount")
 if a.early_trigger and not (a.overlap and a.fast_gate):
     p.error("--early-trigger requires --overlap --fast-gate")
+if a.dgd and not a.early_trigger:
+    p.error("--dgd requires --early-trigger")
 root = Path(__file__).parent
 capture_dir = a.capture_dir or root / "results/glm"
 out = capture_dir / a.case
@@ -56,6 +67,7 @@ config.load_kube_config(os.environ["GMS_VCLUSTER_KUBECONFIG"])
 api = client.ApiClient()
 core = client.CoreV1Api()
 custom = client.CustomObjectsApi()
+apps = client.AppsV1Api()
 ns = "schwinns-vcluster"
 name = "gms-v1-glm-restore-0928"
 claimname = "gms-v1-glm-source-0928" if a.same_claim else "gms-v1-glm-target-0928"
@@ -165,6 +177,10 @@ except client.ApiException as e:
     core.patch_namespaced_config_map(cm["metadata"]["name"], ns, {"data": cm["data"]})
 pod = copy.deepcopy(source["items"][2])
 pod["metadata"]["name"] = name
+if a.runtime_discovery:
+    pod["metadata"].setdefault("annotations", {})[
+        "nvidia.com/gms-prototype-runtime-discovery"
+    ] = "true"
 pod["spec"]["nodeSelector"] = {
     "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
 }
@@ -307,9 +323,49 @@ if a.early_trigger:
         "nvidia.com/gms-prototype-restore-from"
     ] = capture["capture_id"]
     save(out / "manifest.json", pod)
+dgd = build_dgd(pod) if a.dgd else None
+if a.dgd:
+    save(out / "dgd-manifest.json", dgd)
 started = time.time()
-core.create_namespaced_pod(ns, pod)
-pod_create_returned = time.time()
+if a.dgd:
+    created_dgd = custom.create_namespaced_custom_object(
+        "nvidia.com", "v1beta1", ns, "dynamographdeployments", dgd
+    )
+    create_returned = time.time()
+    save(out / "dgd-created.json", created_dgd)
+    end = time.monotonic() + 120
+    while time.monotonic() < end:
+        children = core.list_namespaced_pod(
+            ns, label_selector=f"{TRIAL_LABEL}={DGD_NAME}"
+        ).items
+        active = [p for p in children if p.metadata.deletion_timestamp is None]
+        if len(active) > 1:
+            raise RuntimeError("DGD unexpectedly created multiple restore Pods")
+        if active:
+            generated_pod = active[0]
+            name = generated_pod.metadata.name
+            pod_created_epoch = timestamp_epoch(
+                generated_pod.metadata.creation_timestamp
+            )
+            save(out / "operator-created-pod.json", generated_pod)
+            owners = ownership_chain(generated_pod, api, apps, custom)
+            assert owners[-1]["uid"] == created_dgd["metadata"]["uid"]
+            save(out / "ownership.json", owners)
+            break
+        time.sleep(0.1)
+    else:
+        save(
+            out / "dgd-timeout.json",
+            custom.get_namespaced_custom_object(
+                "nvidia.com", "v1beta1", ns, "dynamographdeployments", DGD_NAME
+            ),
+        )
+        raise TimeoutError("Dynamo operator workload creation")
+    pod_create_returned = None
+else:
+    created_pod = core.create_namespaced_pod(ns, pod)
+    create_returned = pod_create_returned = time.time()
+    pod_created_epoch = timestamp_epoch(created_pod.metadata.creation_timestamp)
 if a.early_trigger:
     triggered = started
     publication_observed = None
@@ -416,6 +472,13 @@ else:
     raise TimeoutError("engine readiness")
 ready = time.time()
 save(out / "ready-pod.json", current)
+if a.dgd:
+    save(
+        out / "dgd-ready.json",
+        custom.get_namespaced_custom_object(
+            "nvidia.com", "v1beta1", ns, "dynamographdeployments", DGD_NAME
+        ),
+    )
 if a.early_trigger:
     host = host_name()
 if a.fast_gate:
@@ -440,6 +503,20 @@ result = {
     "gms_cpu_request": a.gms_cpu_request,
     "gms_cpu_limit": a.gms_cpu_limit,
     "early_trigger": a.early_trigger,
+    "runtime_discovery": a.runtime_discovery,
+    "deployment_mode": "dgd" if a.dgd else "pod",
+    "timer_origin": "dgd_create_request" if a.dgd else "pod_create_request",
+    "pod_name": name,
+    "dgd_name": DGD_NAME if a.dgd else None,
+    "dgd_shared_memory_size": dgd["spec"]["components"][0].get("sharedMemorySize")
+    if a.dgd
+    else None,
+    "dgd_create_epoch": started if a.dgd else None,
+    "dgd_create_return_epoch": create_returned if a.dgd else None,
+    "generated_pod_create_epoch": pod_created_epoch if a.dgd else None,
+    "generated_pod_timestamp_precision_s": 1 if a.dgd else None,
+    "dgd_create_to_pod_create_s": pod_created_epoch - started if a.dgd else None,
+    "dgd_create_to_ready_s": ready - started if a.dgd else None,
     "pod_create_return_epoch": pod_create_returned,
     "workers": a.workers if a.backend == "fused" else 16,
     "numa": a.numa,
@@ -455,7 +532,7 @@ result = {
     "publication_observed_epoch": publication_observed,
     "trigger_epoch": triggered,
     "ready_epoch": ready,
-    "pod_create_to_ready_s": ready - started,
+    "pod_create_to_ready_s": ready - (pod_created_epoch if a.dgd else started),
     "pod_create_to_publication_observed_s": None
     if publication_observed is None
     else publication_observed - started,

@@ -161,10 +161,20 @@ index c51fa755..4acce3f3 100644
              phase: Phase::Active,
              arena: None,
 diff --git a/agent/internal/controller/controller.go b/agent/internal/controller/controller.go
-index 3ffb5e8e..a375bc49 100644
+index 3ffb5e8e..9bc66963 100644
 --- a/agent/internal/controller/controller.go
 +++ b/agent/internal/controller/controller.go
-@@ -866,6 +866,18 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
+@@ -157,6 +157,9 @@ const (
+ 	restorePodFinalizer                = "snapshot/restore-protection"
+ 	snapshotEventComponent             = "snapshot"
+ 	restoreSafetyRequeueInterval       = 30 * time.Second
++	// Opt-in keeps the existing discovery path available as a same-agent
++	// control while measuring the experimental virtual-cluster runtime lookup.
++	restoreRuntimeDiscoveryAnnotation = "nvidia.com/gms-prototype-runtime-discovery"
+ 
+ 	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
+ 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
+@@ -866,12 +869,37 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
  	tick := time.NewTicker(restoreContainerResolveInterval)
  	defer tick.Stop()
  	for {
@@ -181,10 +191,31 @@ index 3ffb5e8e..a375bc49 100644
 +			}
 +		}
  		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
- 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
+-		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
++		var containerID string
++		var err error
++		if pod.Annotations[restoreRuntimeDiscoveryAnnotation] == "true" {
++			resolver, ok := w.runtime.(snapshotruntime.PodIdentityResolver)
++			if ok {
++				containerID, err = resolver.ResolveContainerIDByPodIdentity(resolveCtx, pod.Name, pod.Namespace, string(pod.UID), destination)
++			} else {
++				err = errors.New("runtime does not support pod identity discovery")
++			}
++		} else {
++			containerID, err = w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
++		}
  		cancel()
+ 		if err == nil && containerID != "" {
+-			w.log.V(1).Info("Resolved restore container via node runtime",
++			w.log.Info("Resolved restore container via node runtime",
+ 				"pod", podKey,
++				"pod_uid", pod.UID,
++				"identity_discovery", pod.Annotations[restoreRuntimeDiscoveryAnnotation] == "true",
+ 				"container", destination,
+ 				"container_id", containerID,
+ 			)
 diff --git a/agent/internal/controller/controller_test.go b/agent/internal/controller/controller_test.go
-index 04959c34..32b76db5 100644
+index 04959c34..9500d0dd 100644
 --- a/agent/internal/controller/controller_test.go
 +++ b/agent/internal/controller/controller_test.go
 @@ -53,6 +53,7 @@ type fakeRuntime struct {
@@ -205,7 +236,7 @@ index 04959c34..32b76db5 100644
  	r.mu.Lock()
  	defer r.mu.Unlock()
  	if r.containerIDByPod != "" {
-@@ -1042,6 +1046,43 @@ func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
+@@ -1042,6 +1046,94 @@ func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
  	assert.False(t, hasPodStatusApply(w))
  }
  
@@ -244,6 +275,57 @@ index 04959c34..32b76db5 100644
 +	id, requeue := w.resolveRestoreContainerID(ctx, pod, "main", "inference/restore-worker")
 +	assert.Empty(t, id)
 +	assert.False(t, requeue)
++}
++
++type identityFakeRuntime struct {
++	fakeRuntime
++	identityArgs []string
++	identityErr  error
++}
++
++func (r *identityFakeRuntime) ResolveContainerIDByPodIdentity(_ context.Context, pod, ns, uid, ctr string) (string, error) {
++	r.identityArgs = []string{pod, ns, uid, ctr}
++	if r.identityErr != nil {
++		return "", r.identityErr
++	}
++	return "identity-container", nil
++}
++
++func TestContainerPollingUsesCurrentPodIdentityWhenEnabled(t *testing.T) {
++	pod := restorePod(map[string]string{restoreRuntimeDiscoveryAnnotation: "true"})
++	pod.Status.ContainerStatuses[0].ContainerID = ""
++	rt := &identityFakeRuntime{fakeRuntime: fakeRuntime{containerIDByPod: "unsafe-name-only-container"}}
++	w := &NodeController{runtime: rt, log: testr.New(t)}
++	id, requeue := w.resolveRestoreContainerID(context.Background(), pod, "main", "inference/restore-worker")
++	assert.Equal(t, "identity-container", id)
++	assert.False(t, requeue)
++	assert.Equal(t, []string{pod.Name, pod.Namespace, string(pod.UID), "main"}, rt.identityArgs)
++}
++
++func TestContainerPollingIdentityFailureDoesNotFallBackToName(t *testing.T) {
++	pod := restorePod(map[string]string{restoreRuntimeDiscoveryAnnotation: "true"})
++	pod.Status.ContainerStatuses[0].ContainerID = ""
++	rt := &identityFakeRuntime{
++		fakeRuntime: fakeRuntime{containerIDByPod: "wrong-incarnation"},
++		identityErr: errors.New("no matching sandbox"),
++	}
++	w := &NodeController{runtime: rt, log: testr.New(t)}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	id, requeue := w.resolveRestoreContainerID(ctx, pod, "main", "inference/restore-worker")
++	assert.Empty(t, id)
++	assert.False(t, requeue)
++}
++
++func TestContainerPollingKeepsOriginalPathForControl(t *testing.T) {
++	pod := restorePod(nil)
++	pod.Status.ContainerStatuses[0].ContainerID = ""
++	rt := &identityFakeRuntime{fakeRuntime: fakeRuntime{containerIDByPod: "control-container"}}
++	w := &NodeController{runtime: rt, log: testr.New(t)}
++	id, requeue := w.resolveRestoreContainerID(context.Background(), pod, "main", "inference/restore-worker")
++	assert.Equal(t, "control-container", id)
++	assert.False(t, requeue)
++	assert.Empty(t, rt.identityArgs)
 +}
 +
  func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
@@ -384,6 +466,340 @@ index 830f3ebd..e37a0875 100644
  	)
  	if err != nil {
  		return nil, 0, err
+diff --git a/agent/internal/runtime/discovery.go b/agent/internal/runtime/discovery.go
+new file mode 100644
+index 00000000..058ea21e
+--- /dev/null
++++ b/agent/internal/runtime/discovery.go
+@@ -0,0 +1,114 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++package runtime
++
++import (
++	"context"
++	"errors"
++	"fmt"
++
++	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
++)
++
++// PodIdentityResolver is an optional runtime capability for discovering a
++// running container before Kubernetes publishes its ID. Including the pod UID
++// prevents a previous incarnation of the same named pod from being selected.
++type PodIdentityResolver interface {
++	ResolveContainerIDByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (string, error)
++}
++
++type podDiscoveryService interface {
++	ListPodSandbox(context.Context, *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error)
++	ListContainers(context.Context, *runtimeapi.ContainerFilter) ([]*runtimeapi.Container, error)
++}
++
++var (
++	_ PodIdentityResolver = (*ContainerdRuntime)(nil)
++	_ PodIdentityResolver = (*CRIORuntime)(nil)
++)
++
++func (r *ContainerdRuntime) ResolveContainerIDByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (string, error) {
++	return resolveContainerIDByPodIdentity(ctx, r.cri, pod, ns, uid, ctr)
++}
++
++func (r *CRIORuntime) ResolveContainerIDByPodIdentity(ctx context.Context, pod, ns, uid, ctr string) (string, error) {
++	return resolveContainerIDByPodIdentity(ctx, r.svc, pod, ns, uid, ctr)
++}
++
++func resolveContainerIDByPodIdentity(ctx context.Context, svc podDiscoveryService, pod, ns, uid, ctr string) (string, error) {
++	if pod == "" || ns == "" || uid == "" || ctr == "" {
++		return "", errors.New("pod name, namespace, UID, and container name are required for runtime discovery")
++	}
++	ctx, cancel := context.WithTimeout(ctx, criCallTimeout)
++	defer cancel()
++
++	// CRI carries the pod annotations in the sandbox. Unlike container labels,
++	// these retain the virtual identity when vcluster translates the host name.
++	// Inspect only identity keys; other annotations may contain credentials.
++	sandboxes, err := svc.ListPodSandbox(ctx, &runtimeapi.PodSandboxFilter{
++		State: &runtimeapi.PodSandboxStateValue{State: runtimeapi.PodSandboxState_SANDBOX_READY},
++	})
++	if err != nil {
++		return "", fmt.Errorf("list pod sandboxes for %s/%s: %w", ns, pod, err)
++	}
++	var matched *runtimeapi.PodSandbox
++	for _, sandbox := range sandboxes {
++		if !sandboxMatchesPodIdentity(sandbox, pod, ns, uid) {
++			continue
++		}
++		if matched != nil {
++			return "", fmt.Errorf("multiple ready sandboxes match pod %s/%s UID %s", ns, pod, uid)
++		}
++		matched = sandbox
++	}
++	if matched == nil {
++		return "", fmt.Errorf("no ready sandbox matches pod %s/%s UID %s", ns, pod, uid)
++	}
++
++	containers, err := svc.ListContainers(ctx, &runtimeapi.ContainerFilter{
++		PodSandboxId: matched.GetId(),
++		State:        &runtimeapi.ContainerStateValue{State: runtimeapi.ContainerState_CONTAINER_RUNNING},
++	})
++	if err != nil {
++		return "", fmt.Errorf("list containers for pod %s/%s sandbox %s: %w", ns, pod, matched.GetId(), err)
++	}
++	containerID := ""
++	for _, container := range containers {
++		// Recheck the response as well as sending filters: a sandbox match must
++		// never broaden to a similarly named container from another pod.
++		if container.GetId() == "" || container.GetPodSandboxId() != matched.GetId() ||
++			container.GetState() != runtimeapi.ContainerState_CONTAINER_RUNNING ||
++			container.GetMetadata().GetName() != ctr {
++			continue
++		}
++		if containerID != "" {
++			return "", fmt.Errorf("multiple running containers match pod %s/%s UID %s container %s", ns, pod, uid, ctr)
++		}
++		containerID = container.GetId()
++	}
++	if containerID == "" {
++		return "", fmt.Errorf("no running container matches pod %s/%s UID %s container %s", ns, pod, uid, ctr)
++	}
++	return containerID, nil
++}
++
++func sandboxMatchesPodIdentity(sandbox *runtimeapi.PodSandbox, pod, ns, uid string) bool {
++	metadata := sandbox.GetMetadata()
++	if sandbox.GetId() == "" || sandbox.GetState() != runtimeapi.PodSandboxState_SANDBOX_READY ||
++		metadata.GetName() == "" || metadata.GetNamespace() == "" || metadata.GetUid() == "" {
++		return false
++	}
++	if metadata.GetName() == pod && metadata.GetNamespace() == ns && metadata.GetUid() == uid {
++		return true
++	}
++	annotations := sandbox.GetAnnotations()
++	// Require both sides of the translation. Never infer vcluster's host name
++	// encoding, and never accept a same-name sandbox with a different virtual UID.
++	return annotations["vcluster.loft.sh/object-name"] == pod &&
++		annotations["vcluster.loft.sh/object-namespace"] == ns &&
++		annotations["vcluster.loft.sh/object-uid"] == uid &&
++		annotations["vcluster.loft.sh/object-kind"] == "/v1, Kind=Pod" &&
++		annotations["vcluster.loft.sh/object-host-name"] == metadata.GetName() &&
++		annotations["vcluster.loft.sh/object-host-namespace"] == metadata.GetNamespace()
++}
+diff --git a/agent/internal/runtime/discovery_test.go b/agent/internal/runtime/discovery_test.go
+new file mode 100644
+index 00000000..948ba664
+--- /dev/null
++++ b/agent/internal/runtime/discovery_test.go
+@@ -0,0 +1,208 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
++// SPDX-License-Identifier: Apache-2.0
++
++package runtime
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/stretchr/testify/require"
++	internalapi "k8s.io/cri-api/pkg/apis"
++	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
++	critesting "k8s.io/cri-api/pkg/apis/testing"
++)
++
++type discoveryRuntimeService struct {
++	*critesting.FakeRuntimeService
++	sandboxes       []*runtimeapi.PodSandbox
++	containers      []*runtimeapi.Container
++	sandboxFilter   *runtimeapi.PodSandboxFilter
++	containerFilter *runtimeapi.ContainerFilter
++	sandboxErr      error
++	containerErr    error
++	deadline        time.Time
++}
++
++func (s *discoveryRuntimeService) ListPodSandbox(ctx context.Context, filter *runtimeapi.PodSandboxFilter) ([]*runtimeapi.PodSandbox, error) {
++	s.sandboxFilter = filter
++	s.deadline, _ = ctx.Deadline()
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	return s.sandboxes, s.sandboxErr
++}
++
++func (s *discoveryRuntimeService) ListContainers(_ context.Context, filter *runtimeapi.ContainerFilter) ([]*runtimeapi.Container, error) {
++	s.containerFilter = filter
++	return s.containers, s.containerErr
++}
++
++func nativeDiscoverySandbox() *runtimeapi.PodSandbox {
++	return &runtimeapi.PodSandbox{
++		Id:       "sandbox-id",
++		State:    runtimeapi.PodSandboxState_SANDBOX_READY,
++		Metadata: &runtimeapi.PodSandboxMetadata{Name: "worker", Namespace: "inference", Uid: "current-pod-uid"},
++	}
++}
++
++func virtualDiscoverySandbox() *runtimeapi.PodSandbox {
++	return &runtimeapi.PodSandbox{
++		Id:       "sandbox-id",
++		State:    runtimeapi.PodSandboxState_SANDBOX_READY,
++		Metadata: &runtimeapi.PodSandboxMetadata{Name: "translated-host-name", Namespace: "host-namespace", Uid: "host-pod-uid"},
++		Annotations: map[string]string{
++			"vcluster.loft.sh/object-name":           "worker",
++			"vcluster.loft.sh/object-namespace":      "inference",
++			"vcluster.loft.sh/object-uid":            "current-pod-uid",
++			"vcluster.loft.sh/object-kind":           "/v1, Kind=Pod",
++			"vcluster.loft.sh/object-host-name":      "translated-host-name",
++			"vcluster.loft.sh/object-host-namespace": "host-namespace",
++		},
++	}
++}
++
++func discoveryContainer() *runtimeapi.Container {
++	return &runtimeapi.Container{
++		Id: "container-id", PodSandboxId: "sandbox-id",
++		State:    runtimeapi.ContainerState_CONTAINER_RUNNING,
++		Metadata: &runtimeapi.ContainerMetadata{Name: "main"},
++	}
++}
++
++func TestPodIdentityDiscoveryBackends(t *testing.T) {
++	backends := map[string]func(internalapi.RuntimeService) PodIdentityResolver{
++		"containerd": func(service internalapi.RuntimeService) PodIdentityResolver { return &ContainerdRuntime{cri: service} },
++		"cri-o":      func(service internalapi.RuntimeService) PodIdentityResolver { return &CRIORuntime{svc: service} },
++	}
++	identities := map[string]func() *runtimeapi.PodSandbox{
++		"native": nativeDiscoverySandbox, "virtual": virtualDiscoverySandbox,
++	}
++	for backend, build := range backends {
++		for identity, sandbox := range identities {
++			t.Run(backend+"/"+identity, func(t *testing.T) {
++				service := &discoveryRuntimeService{
++					FakeRuntimeService: critesting.NewFakeRuntimeService(),
++					sandboxes:          []*runtimeapi.PodSandbox{sandbox()},
++					containers:         []*runtimeapi.Container{discoveryContainer()},
++				}
++				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++				defer cancel()
++				deadline, _ := ctx.Deadline()
++				id, err := build(service).ResolveContainerIDByPodIdentity(ctx, "worker", "inference", "current-pod-uid", "main")
++				require.NoError(t, err)
++				require.Equal(t, "container-id", id)
++				require.Equal(t, deadline, service.deadline, "keep the controller's shorter attempt deadline")
++				require.Equal(t, runtimeapi.PodSandboxState_SANDBOX_READY, service.sandboxFilter.GetState().GetState())
++				require.Equal(t, "sandbox-id", service.containerFilter.GetPodSandboxId())
++				require.Equal(t, runtimeapi.ContainerState_CONTAINER_RUNNING, service.containerFilter.GetState().GetState())
++			})
++		}
++	}
++}
++
++func TestPodIdentityDiscoveryRejectsSandboxMismatch(t *testing.T) {
++	tests := map[string]func(*runtimeapi.PodSandbox){
++		"stale virtual UID":           func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-uid"] = "previous-pod-uid" },
++		"wrong virtual name":          func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-name"] = "other" },
++		"wrong virtual namespace":     func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-namespace"] = "other" },
++		"wrong object kind":           func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-kind"] = "/v1, Kind=Service" },
++		"conflicting host name":       func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-host-name"] = "other" },
++		"conflicting host namespace":  func(s *runtimeapi.PodSandbox) { s.Annotations["vcluster.loft.sh/object-host-namespace"] = "other" },
++		"missing translation":         func(s *runtimeapi.PodSandbox) { s.Annotations = nil },
++		"missing virtual UID":         func(s *runtimeapi.PodSandbox) { delete(s.Annotations, "vcluster.loft.sh/object-uid") },
++		"missing host UID":            func(s *runtimeapi.PodSandbox) { s.Metadata.Uid = "" },
++		"missing sandbox ID":          func(s *runtimeapi.PodSandbox) { s.Id = "" },
++		"missing metadata":            func(s *runtimeapi.PodSandbox) { s.Metadata = nil },
++		"not ready":                   func(s *runtimeapi.PodSandbox) { s.State = runtimeapi.PodSandboxState_SANDBOX_NOTREADY },
++		"native name with stale UID":  func(s *runtimeapi.PodSandbox) { *s = *nativeDiscoverySandbox(); s.Metadata.Uid = "previous-pod-uid" },
++		"native UID wrong namespace":  func(s *runtimeapi.PodSandbox) { *s = *nativeDiscoverySandbox(); s.Metadata.Namespace = "other" },
++		"native UID wrong name":       func(s *runtimeapi.PodSandbox) { *s = *nativeDiscoverySandbox(); s.Metadata.Name = "other" },
++		"native UID missing metadata": func(s *runtimeapi.PodSandbox) { *s = *nativeDiscoverySandbox(); s.Metadata = nil },
++	}
++	for name, mutate := range tests {
++		t.Run(name, func(t *testing.T) {
++			sandbox := virtualDiscoverySandbox()
++			mutate(sandbox)
++			service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{nil, sandbox}}
++			id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, id)
++			require.ErrorContains(t, err, "no ready sandbox")
++			require.Nil(t, service.containerFilter, "never list containers for a mismatched pod")
++		})
++	}
++}
++
++func TestPodIdentityDiscoveryRejectsContainerMismatch(t *testing.T) {
++	tests := map[string]func(*runtimeapi.Container){
++		"other sandbox":    func(c *runtimeapi.Container) { c.PodSandboxId = "previous-sandbox" },
++		"other container":  func(c *runtimeapi.Container) { c.Metadata.Name = "gms-0" },
++		"not running":      func(c *runtimeapi.Container) { c.State = runtimeapi.ContainerState_CONTAINER_CREATED },
++		"missing metadata": func(c *runtimeapi.Container) { c.Metadata = nil },
++		"missing ID":       func(c *runtimeapi.Container) { c.Id = "" },
++	}
++	for name, mutate := range tests {
++		t.Run(name, func(t *testing.T) {
++			container := discoveryContainer()
++			mutate(container)
++			service := &discoveryRuntimeService{
++				sandboxes:  []*runtimeapi.PodSandbox{nativeDiscoverySandbox()},
++				containers: []*runtimeapi.Container{nil, container},
++			}
++			id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++			require.Empty(t, id)
++			require.ErrorContains(t, err, "no running container")
++		})
++	}
++}
++
++func TestPodIdentityDiscoveryRejectsAmbiguity(t *testing.T) {
++	t.Run("sandboxes", func(t *testing.T) {
++		service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{nativeDiscoverySandbox(), virtualDiscoverySandbox()}}
++		id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, id)
++		require.ErrorContains(t, err, "multiple ready sandboxes")
++		require.Nil(t, service.containerFilter)
++	})
++	t.Run("containers", func(t *testing.T) {
++		service := &discoveryRuntimeService{
++			sandboxes:  []*runtimeapi.PodSandbox{nativeDiscoverySandbox()},
++			containers: []*runtimeapi.Container{discoveryContainer(), discoveryContainer()},
++		}
++		id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, id)
++		require.ErrorContains(t, err, "multiple running containers")
++	})
++}
++
++func TestPodIdentityDiscoveryErrors(t *testing.T) {
++	t.Run("missing identity", func(t *testing.T) {
++		service := &discoveryRuntimeService{}
++		id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "", "main")
++		require.Empty(t, id)
++		require.ErrorContains(t, err, "UID")
++		require.Nil(t, service.sandboxFilter)
++	})
++	t.Run("canceled context", func(t *testing.T) {
++		ctx, cancel := context.WithCancel(context.Background())
++		cancel()
++		id, err := resolveContainerIDByPodIdentity(ctx, &discoveryRuntimeService{}, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, id)
++		require.ErrorIs(t, err, context.Canceled)
++	})
++	t.Run("sandbox RPC", func(t *testing.T) {
++		failure := errors.New("sandbox RPC failed")
++		id, err := resolveContainerIDByPodIdentity(context.Background(), &discoveryRuntimeService{sandboxErr: failure}, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, id)
++		require.ErrorIs(t, err, failure)
++	})
++	t.Run("container RPC", func(t *testing.T) {
++		failure := errors.New("container RPC failed")
++		service := &discoveryRuntimeService{sandboxes: []*runtimeapi.PodSandbox{nativeDiscoverySandbox()}, containerErr: failure}
++		id, err := resolveContainerIDByPodIdentity(context.Background(), service, "worker", "inference", "current-pod-uid", "main")
++		require.Empty(t, id)
++		require.ErrorIs(t, err, failure)
++	})
++}
 diff --git a/api/podcontract/protocol.go b/api/podcontract/protocol.go
 index 1c45a1a1..d4e3a83c 100644
 --- a/api/podcontract/protocol.go

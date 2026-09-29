@@ -1,0 +1,354 @@
+[
+  {
+    "rank": 0,
+    "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657925.4847844,
+      "stat": {
+        "usage_usec": 155328,
+        "user_usec": 41491,
+        "system_usec": 113836,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=366\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=366\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657943.8811808,
+      "stat": {
+        "usage_usec": 7610365,
+        "user_usec": 379367,
+        "system_usec": 7230998,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 182,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2367\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2367\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657925.4821694,
+    "published_epoch": 1790657943.8807025,
+    "elapsed_s": 18.39853310585022
+  },
+  {
+    "rank": 1,
+    "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657925.7092204,
+      "stat": {
+        "usage_usec": 159547,
+        "user_usec": 38864,
+        "system_usec": 120683,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=439\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=439\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657943.7737489,
+      "stat": {
+        "usage_usec": 6392461,
+        "user_usec": 340195,
+        "system_usec": 6052266,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 178,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2863\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2863\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657925.7066665,
+    "published_epoch": 1790657943.7732613,
+    "elapsed_s": 18.06659483909607
+  },
+  {
+    "rank": 2,
+    "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657925.982931,
+      "stat": {
+        "usage_usec": 158064,
+        "user_usec": 45615,
+        "system_usec": 112448,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 1,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=326\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=326\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657944.7430336,
+      "stat": {
+        "usage_usec": 5539736,
+        "user_usec": 243659,
+        "system_usec": 5296076,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 187,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2191\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2191\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657925.9804075,
+    "published_epoch": 1790657944.7426043,
+    "elapsed_s": 18.7621967792511
+  },
+  {
+    "rank": 3,
+    "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657926.2060125,
+      "stat": {
+        "usage_usec": 158238,
+        "user_usec": 50348,
+        "system_usec": 107889,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=505\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=505\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657944.9075925,
+      "stat": {
+        "usage_usec": 5598303,
+        "user_usec": 251180,
+        "system_usec": 5347123,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 188,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=3146\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=3146\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657926.203262,
+    "published_epoch": 1790657944.9073274,
+    "elapsed_s": 18.704065322875977
+  },
+  {
+    "rank": 4,
+    "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657926.4758937,
+      "stat": {
+        "usage_usec": 154477,
+        "user_usec": 48953,
+        "system_usec": 105523,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=450\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=450\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657945.1079185,
+      "stat": {
+        "usage_usec": 5557284,
+        "user_usec": 250727,
+        "system_usec": 5306557,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 186,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=3211\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=3211\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657926.4732141,
+    "published_epoch": 1790657945.1075935,
+    "elapsed_s": 18.634379386901855
+  },
+  {
+    "rank": 5,
+    "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657926.7447011,
+      "stat": {
+        "usage_usec": 165133,
+        "user_usec": 44251,
+        "system_usec": 120882,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=276\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=275\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657945.1058965,
+      "stat": {
+        "usage_usec": 5552874,
+        "user_usec": 227304,
+        "system_usec": 5325570,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 185,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2426\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2426\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657926.7421536,
+    "published_epoch": 1790657945.1055727,
+    "elapsed_s": 18.36341905593872
+  },
+  {
+    "rank": 6,
+    "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657927.006623,
+      "stat": {
+        "usage_usec": 171567,
+        "user_usec": 44886,
+        "system_usec": 126680,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=437\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=437\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657945.2192423,
+      "stat": {
+        "usage_usec": 6408995,
+        "user_usec": 313368,
+        "system_usec": 6095626,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 183,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2532\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2532\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657927.0040362,
+    "published_epoch": 1790657945.2188945,
+    "elapsed_s": 18.214858293533325
+  },
+  {
+    "rank": 7,
+    "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+    "event": "published",
+    "chunk_mib": 128,
+    "workers": 16,
+    "cpu_before": {
+      "epoch": 1790657927.2678397,
+      "stat": {
+        "usage_usec": 158287,
+        "user_usec": 45224,
+        "system_usec": 113062,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 2,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=508\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=508\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "cpu_after": {
+      "epoch": 1790657945.1280222,
+      "stat": {
+        "usage_usec": 6371241,
+        "user_usec": 334163,
+        "system_usec": 6037078,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 179,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=2368\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=2368\n",
+      "max": "800000 100000",
+      "weight": "39"
+    },
+    "started_epoch": 1790657927.2653635,
+    "published_epoch": 1790657945.1273377,
+    "elapsed_s": 17.861974239349365
+  }
+]

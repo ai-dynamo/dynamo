@@ -1,0 +1,9 @@
+{
+  "agent_revision": "8536a8b1940711f6fc5518dc330c43e83b4c7198",
+  "agent_sha256": "3016fb495e54348586938e23c680311d1c6480c80c127a6a2e664fcb06638dfc",
+  "tests": {
+    "command": "CGO_ENABLED=0 go test ./agent/internal/controller ./agent/internal/runtime ./agent/internal/executor",
+    "result": "passed"
+  },
+  "build": "CGO_ENABLED=0 go build -o /tmp/gms-snapshot-agent-discovery ./agent/cmd/agent"
+}

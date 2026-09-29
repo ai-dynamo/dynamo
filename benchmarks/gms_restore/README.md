@@ -31,6 +31,11 @@ then repeated timing and checkpointed-GMS comparison.
 
 ## Recorded prototype
 
+[DISCOVERY-RESTORE.md](DISCOVERY-RESTORE.md) records the latest comparison through
+the Dynamo operator: DGD-owned workloads, CRI sandbox identity discovery,
+separate operator/restore timing, and Gantt charts. It uses the retained custom
+Engine API capture; native checkpointRef/GMS feature integration remains separate.
+
 [TUNED-RESTORE.md](TUNED-RESTORE.md) records nine full PVC/O_DIRECT restores
 with the agent and PageBroker resident before timing: buffer tuning, higher GMS
 CPU requests/limits, and container-discovery timing with an updated Gantt chart.

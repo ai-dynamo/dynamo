@@ -1,0 +1,31 @@
+{
+  "name": "dynamo-platform-dynamo-operator-controller-manager",
+  "uid": "c40398c5-04b2-44c1-b60a-13974f423730",
+  "resourceVersion": "10616856",
+  "generation": 38,
+  "containers": [
+    {
+      "name": "manager",
+      "image": "dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-08cb073632b4d5da986cfaab99a4997cab69acfb-vllm-runtime",
+      "command": [
+        "/checkpoints/patched/dynamo/operator-c943/manager"
+      ],
+      "args": [
+        "--config=/etc/dynamo-operator/config.yaml",
+        "--operator-version=1.5.0",
+        "--operator-image=dynamoci.azurecr.io/ai-dynamo/dynamo:1dfbcf5d9346374f7ff98f1a53b5424c5a3c8f8b-operator",
+        "--operator-image-pull-policy=Always"
+      ],
+      "resources": {
+        "limits": {
+          "cpu": "1024m",
+          "memory": "2Gi"
+        },
+        "requests": {
+          "cpu": "512m",
+          "memory": "1Gi"
+        }
+      }
+    }
+  ]
+}
