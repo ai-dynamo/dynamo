@@ -46,6 +46,51 @@ up to your target version. Each entry describes changes introduced in that relea
 categories without migration notes recorded here are omitted. For supported Grove and KAI Scheduler
 versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration).
 
+### v1.6.0
+
+#### Operator behavior breaking changes
+
+##### Environment variable order in newly created DGDs
+
+**Change:** For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves environment
+variable order and duplicate names when it combines operator defaults, DGD-level `spec.env`, and
+component `podTemplate` environment variables. Operator-provided variables precede user-provided
+variables. Previously, the operator sorted the combined list alphabetically and collapsed entries
+with the same name.
+
+Kubernetes expands `$(NAME)` references from earlier to later entries. The new behavior lets user
+variables reference operator-provided variables and lets a later user entry override an
+operator-provided value with the same name.
+
+**Affected:** Newly created DGDs whose environment lists depend on alphabetical sorting or contain
+duplicate names. A DGD that declares a reference before its source can render a different value than
+it did under the previous sorting behavior.
+
+**Action:** Review `spec.env` and each `podTemplate.spec.containers[*].env` list. Declare a source
+variable before variables that reference it, and remove unintended duplicate names. Keep an
+intentional override after the value it replaces. For example:
+
+```yaml
+spec:
+  env:
+    - name: MODEL_ROOT
+      value: /models
+  components:
+    - name: worker
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              env:
+                - name: MODEL_PATH
+                  value: $(MODEL_ROOT)/model
+```
+
+**Existing deployments:** DGDs created before Dynamo Operator 1.6.0 retain the legacy sorted and
+de-duplicated output. An operator-only upgrade does not reorder their rendered environment lists or
+roll their workloads for this change. Deleting and recreating a DGD under 1.6.0 or later opts it into
+the new behavior.
+
 ### v1.5.0
 
 #### CRD and admission breaking changes
