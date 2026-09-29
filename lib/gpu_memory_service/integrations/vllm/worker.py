@@ -170,6 +170,7 @@ class GMSWorker(Worker):
             device,
             mode=mode,
             tag="weights",
+            timeout_ms=self.gms_ro_connect_timeout_ms,
         )
         # Parent will set device again (harmless) and do memory checks
         super().init_device()
