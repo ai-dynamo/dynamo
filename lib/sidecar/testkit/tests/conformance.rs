@@ -268,35 +268,33 @@ async fn cancellation<F: SidecarFixture>() {
     fixture.shutdown().await;
 }
 
-async fn cleanup<F: SidecarFixture>(needs_unstarted_check: bool) {
+async fn cleanup<F: SidecarFixture>() {
     let control = Controller::<F::Protocol>::default();
     let mut fixture = bounded(
         "Mocker startup",
         F::start(control.clone(), FixtureConfig::default()),
     )
     .await;
-    if needs_unstarted_check {
-        let engine = bounded("sidecar construction", fixture.engine()).await;
-        let ctx = mock_context();
-        let handle = control.request(ctx.id(), RequestPlan::default());
-        failure(
-            collect(
-                &engine,
-                request("mocker-model", vec![11, 22, 33], 3),
-                GenerateContext::new(ctx, None),
-            )
-            .await,
-            &[],
-            BackendError::EngineShutdown,
-        );
-        bounded("cleanup before startup", engine.cleanup())
-            .await
-            .unwrap();
-        bounded("repeated cleanup before startup", engine.cleanup())
-            .await
-            .unwrap();
-        assert!(!handle.reached(Event::Received));
-    }
+    let engine = bounded("sidecar construction", fixture.engine()).await;
+    let ctx = mock_context();
+    let handle = control.request(ctx.id(), RequestPlan::default());
+    failure(
+        collect(
+            &engine,
+            request("mocker-model", vec![11, 22, 33], 3),
+            GenerateContext::new(ctx, None),
+        )
+        .await,
+        &[],
+        BackendError::EngineShutdown,
+    );
+    bounded("cleanup before startup", engine.cleanup())
+        .await
+        .unwrap();
+    bounded("repeated cleanup before startup", engine.cleanup())
+        .await
+        .unwrap();
+    assert!(!handle.reached(Event::Received));
 
     let engine = bounded("sidecar construction", fixture.engine()).await;
     bounded("sidecar startup", engine.start(0)).await.unwrap();
@@ -325,7 +323,7 @@ async fn cleanup<F: SidecarFixture>(needs_unstarted_check: bool) {
 }
 
 macro_rules! enroll {
-    ($backend:ident, $fixture:ty, $needs_unstarted_check:expr) => {
+    ($backend:ident, $fixture:ty) => {
         mod $backend {
             use super::*;
 
@@ -346,11 +344,11 @@ macro_rules! enroll {
 
             #[tokio::test]
             async fn cleanup_before_start_and_during_read() {
-                cleanup::<$fixture>($needs_unstarted_check).await;
+                cleanup::<$fixture>().await;
             }
         }
     };
 }
 
-enroll!(vllm, support::vllm::Fixture, false);
-enroll!(sglang, support::sglang::Fixture, true);
+enroll!(vllm, support::vllm::Fixture);
+enroll!(sglang, support::sglang::Fixture);

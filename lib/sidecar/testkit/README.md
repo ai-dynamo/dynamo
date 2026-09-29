@@ -113,7 +113,7 @@ simulates the engine's responses without loading a model. The existing
 backend integration coverage.
 
 ```sh
-cargo test --locked -p dynamo-sidecar-testkit --test conformance
+cargo test --locked -p dynamo-sidecar-testkit --lib --test conformance
 ```
 
 Testkit's integration fixtures and adapters stay separate from backend-local

@@ -40,7 +40,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
-#[cfg(any(feature = "custom-policy", feature = "select-service"))]
+#[cfg(feature = "select-service")]
 use dynamo_kv_router::plugins::RouterPluginRegistry;
 use dynamo_kv_router::{KvRouterConfig, plugins::RouterPlugins};
 use dynamo_llm::entrypoint::RouterConfig;
@@ -426,26 +426,29 @@ pub(crate) fn router_plugins(config: &KvRouterConfig) -> anyhow::Result<RouterPl
                 "request_classifier is configured, but no router plugin catalog is installed; rebuild with --features custom-policy"
             );
         }
-        Ok(RouterPlugins::default())
+        Ok(dynamo_llm::kv_router::plugins::router_plugin_registry().resolve_plugins(config)?)
     }
+}
+
+#[cfg(test)]
+#[test]
+fn builtin_default_does_not_require_custom_frontend() {
+    let config = KvRouterConfig::default();
+    let registry = dynamo_llm::kv_router::plugins::router_plugin_registry();
+    assert!(registry.resolve(&config).unwrap().is_some());
+    let plugins = router_plugins(&config).unwrap();
+    assert!(plugins.worker_selection().is_some());
+    assert!(!plugins.has_custom_plugins());
 }
 
 #[cfg(feature = "select-service")]
 pub(crate) fn linked_worker_selection_policy_registry() -> RouterPluginRegistry {
-    #[cfg(feature = "custom-policy")]
-    {
-        dynamo_llm::kv_router::plugins::router_plugin_registry()
-    }
-
-    #[cfg(not(feature = "custom-policy"))]
-    {
-        RouterPluginRegistry::default()
-    }
+    dynamo_llm::kv_router::plugins::router_plugin_registry()
 }
 
 #[cfg(feature = "custom-policy")]
 fn register_core_with_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    let mut registry = RouterPluginRegistry::default();
+    let mut registry = dynamo_kv_router::plugins::RouterPluginRegistry::default();
     // The policies Dynamo ships register first, so a replaced catalog that reuses one of their
     // type names fails here instead of silently overriding it.
     dynamo_custom_policy_builtin::register(&mut registry)

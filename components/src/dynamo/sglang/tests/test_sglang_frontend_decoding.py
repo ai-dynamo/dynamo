@@ -542,6 +542,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
 
     request = {
         "token_ids": [1, 2, 3],
+        "image_cache_scope": "session-42",
         "multi_modal_data": {"image_url": [{"Decoded": decoded_metadata}]},
     }
 
@@ -549,7 +550,7 @@ async def test_aggregated_fd_on_loads_decoded_variants_to_pil():
         pass
 
     image_loader.load_image_batch.assert_awaited_once_with(
-        [{"Decoded": decoded_metadata}]
+        [{"Decoded": decoded_metadata}], cache_scope="session-42"
     )
     assert captured["image_data"] == [pil_stub]
 
