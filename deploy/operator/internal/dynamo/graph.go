@@ -1627,6 +1627,12 @@ func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv
 	container.Env = MergeEnvs(tlsEnvVars, container.Env)
 }
 
+// usesMultinodeTopologyAliases keeps environment and command-line injection on
+// the same per-DGD compatibility boundary.
+func usesMultinodeTopologyAliases(annotations map[string]string) bool {
+	return compatibility.MultinodeTopologyAliases.Enabled(annotations)
+}
+
 // addMultinodeTopologyEnvVars injects backend-independent aliases for the
 // current pod's rank and leader address into newly created multinode DGDs.
 func addMultinodeTopologyEnvVars(
@@ -1636,7 +1642,7 @@ func addMultinodeTopologyEnvVars(
 	multinodeDeployer MultinodeDeployer,
 	annotations map[string]string,
 ) {
-	if numberOfNodes <= 1 || !compatibility.MultinodeTopologyAliases.Enabled(annotations) {
+	if numberOfNodes <= 1 || !usesMultinodeTopologyAliases(annotations) {
 		return
 	}
 

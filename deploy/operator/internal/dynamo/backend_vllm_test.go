@@ -245,6 +245,51 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			expectProbesRemoved: true,
 		},
 		{
+			name:          "new multinode leader uses topology aliases",
+			numberOfNodes: 2,
+			role:          RoleLeader,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			containerGPUs:     8,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag, "16",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", commonconsts.DynamoLeaderAddressEnvVarReference,
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			},
+			expectProbesRemoved: true,
+		},
+		{
+			name:          "new multinode worker uses topology aliases",
+			numberOfNodes: 2,
+			role:          RoleWorker,
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+			},
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialContainer:  &corev1.Container{Command: []string{"python3"}, Args: []string{"-m", "dynamo.vllm", tensorParallelSizeFlag, "16"}},
+			containerGPUs:     8,
+			expectedArgs: []string{
+				"-m", "dynamo.vllm", tensorParallelSizeFlag, "16",
+				"--distributed-executor-backend", "mp",
+				"--nnodes", "2",
+				"--master-addr", commonconsts.DynamoLeaderAddressEnvVarReference,
+				"--master-port", commonconsts.VLLMMpMasterPort,
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+				"--headless",
+			},
+			expectProbesRemoved: true,
+		},
+		{
 			name:          "multinode leader uses ray (explicit override despite new version)",
 			numberOfNodes: 2,
 			role:          RoleLeader,

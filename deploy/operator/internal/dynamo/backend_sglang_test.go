@@ -103,6 +103,7 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 		multinodeDeployer MultinodeDeployer
 		initialCommand    []string
 		initialArgs       []string
+		annotations       map[string]string
 		expectedCommand   []string
 		expectedArgs      []string
 		description       string
@@ -156,6 +157,44 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 			expectedCommand:   []string{"python3"},
 			expectedArgs:      []string{"-m", "dynamo.sglang", "--dist-init-addr", "$(LWS_LEADER_ADDRESS):29500", "--nnodes", "2", "--node-rank", "0"},
 			description:       "LWS leader with direct python command should append flags with kubelet-expanded leader hostname",
+		},
+		{
+			name:              "new multinode leader uses topology aliases",
+			numberOfNodes:     2,
+			role:              RoleLeader,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			expectedCommand: []string{"python3"},
+			expectedArgs: []string{
+				"-m", "dynamo.sglang",
+				"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
+				"--nnodes", "2",
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			},
+			description: "New leaders should use provider-independent topology aliases",
+		},
+		{
+			name:              "new multinode worker uses topology aliases",
+			numberOfNodes:     3,
+			role:              RoleWorker,
+			multinodeDeployer: &GroveMultinodeDeployer{},
+			initialCommand:    []string{"python3"},
+			initialArgs:       []string{"-m", "dynamo.sglang"},
+			annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			expectedCommand: []string{"python3"},
+			expectedArgs: []string{
+				"-m", "dynamo.sglang",
+				"--dist-init-addr", commonconsts.DynamoLeaderAddressEnvVarReference + ":29500",
+				"--nnodes", "3",
+				"--node-rank", commonconsts.DynamoRankEnvVarReference,
+			},
+			description: "New workers should use provider-independent topology aliases without a shell wrapper",
 		},
 		{
 			name:              "python command shell deployer - shell wrapping",
@@ -265,7 +304,9 @@ func TestSGLangBackend_PythonCommandInjection(t *testing.T) {
 				Args:    append([]string{}, tt.initialArgs...),
 			}
 
-			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0)))
+			require.NoError(t, backend.UpdateContainer(container, tt.numberOfNodes, tt.role, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				Annotations: tt.annotations,
+			}), "test-service", tt.multinodeDeployer, staticContainerGPUCount(0)))
 
 			if !reflect.DeepEqual(container.Command, tt.expectedCommand) {
 				t.Errorf("UpdateContainer() command = %v, want %v", container.Command, tt.expectedCommand)
@@ -498,7 +539,7 @@ func TestSGLangBackend_GetMultinodeFlags(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			flags, needsShell := backend.getMultinodeFlags(tt.numberOfNodes, tt.role, "test-service", tt.multinodeDeployer)
+			flags, needsShell := backend.getMultinodeFlags(tt.numberOfNodes, tt.role, "test-service", tt.multinodeDeployer, false)
 
 			if flags != tt.expectedFlags {
 				t.Errorf("getMultinodeFlags() flags = %q, want %q", flags, tt.expectedFlags)
