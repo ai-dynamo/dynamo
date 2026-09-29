@@ -13,14 +13,19 @@
 //! `dynamo-backend-common`, `tonic`/`prost`, `clap`, and tokio.
 
 pub mod args;
+#[path = "../src/client.rs"]
 pub mod client;
+#[path = "../src/engine.rs"]
 pub mod engine;
+#[path = "../src/native_http.rs"]
 mod native_http;
+mod startup;
 
 /// Generated SGLang gRPC types, temporarily exposed for the Mocker server
 /// until SGLang publishes its upstream protocol package.
 #[doc(hidden)]
 pub mod proto;
+#[path = "../src/protocol.rs"]
 mod protocol;
 
 pub use engine::SglangSidecarEngine;

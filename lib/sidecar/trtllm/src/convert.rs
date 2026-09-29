@@ -77,7 +77,7 @@ pub(crate) fn build_generate_request(
 }
 
 // Temporary workaround: TensorRT-LLM's gRPC `GenerateRequest.max_tokens` is
-// REQUIRED (see proto/trtllm_service.proto), so an omitted `max_tokens` — which
+// REQUIRED (see api/proto/trtllm_service.proto), so an omitted `max_tokens` — which
 // the Dynamo frontend forwards as `None` for the backend to default — has no
 // natural value. We mirror the in-process backend's text-only default,
 // `max(1, context_length - prompt_len)` (components/src/dynamo/trtllm

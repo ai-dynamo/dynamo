@@ -122,22 +122,22 @@ const testCases = [
 
   // Sidecar Rust and proto files should trigger Rust checks without unrelated E2E
   {
-    file: 'lib/sidecar/common/src/lib.rs',
+    file: 'lib/sidecar/common/api/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'common sidecar source avoids unrelated build and E2E filters'
   },
   {
-    file: 'lib/sidecar/trtllm/proto/trtllm_service.proto',
+    file: 'lib/sidecar/trtllm/api/proto/trtllm_service.proto',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sidecar proto contracts trigger Rust checks without backend E2E'
   },
   {
-    file: 'lib/sidecar/sglang/src/lib.rs',
+    file: 'lib/sidecar/sglang/api/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'sglang sidecar source avoids backend E2E'
   },
   {
-    file: 'lib/sidecar/trtllm/src/lib.rs',
+    file: 'lib/sidecar/trtllm/api/lib.rs',
     expect: { sidecar: true, rust: true, core: false, frontend: false, vllm: false, sglang: false, trtllm: false },
     desc: 'trtllm sidecar source does not route to sglang or trtllm E2E'
   },

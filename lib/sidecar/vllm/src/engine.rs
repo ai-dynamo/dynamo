@@ -12,7 +12,7 @@ use dynamo_backend_common::{
 };
 use dynamo_llm::lora::{LoRADownloader, lora_serving_enabled};
 use dynamo_runtime::component::Endpoint;
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::stream::BoxStream;
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
@@ -74,28 +74,7 @@ impl VllmSidecarEngine {
         }
     }
 
-    /// Parse arguments and synchronously discover the vLLM model.
-    ///
-    /// Call this before `dynamo_backend_common::run`. Async callers must use
-    /// `spawn_blocking` or a dedicated thread because discovery uses
-    /// `Runtime::block_on`.
-    pub fn from_args(argv: Option<Vec<String>>) -> Result<(Self, WorkerConfig), DynamoError> {
-        match argv {
-            Some(argv) => Self::try_from_args(argv).map_err(SidecarStartupError::into_dynamo),
-            None => Self::from_parsed(<Args as clap::Parser>::parse()),
-        }
-    }
-
-    /// Parse injected arguments while retaining Clap's structured exit error.
-    ///
-    /// Embedded callers use this to distinguish help and version output from
-    /// Dynamo startup failures without changing `from_args`'s error contract.
-    pub fn try_from_args(argv: Vec<String>) -> Result<(Self, WorkerConfig), SidecarStartupError> {
-        let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        Self::from_parsed(args).map_err(Into::into)
-    }
-
-    fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
+    pub(crate) fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
         if args.sidecar.common.dyn_tool_call_parser.is_some()
             || args.sidecar.common.dyn_reasoning_parser.is_some()
         {

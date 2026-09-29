@@ -11,6 +11,9 @@ homepage.workspace = true
 repository.workspace = true
 description = "Shared gRPC transport and CLI infrastructure for Dynamo sidecars"
 
+[lib]
+path = "api/lib.rs"
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
 
