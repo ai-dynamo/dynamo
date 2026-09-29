@@ -599,23 +599,21 @@ runs:
         # admission smoke tests below are the authoritative end-to-end gate.
         #
         # Require at least one ready Pod per operator rather than an exact Pod
-        # count. Pods rejected for node pressure stay in a terminal phase
-        # forever, so a total-count check can never converge even after the
-        # ReplicaSet lands a healthy replacement.
+        # count. A Pod in a terminal phase never becomes ready, so counting one
+        # keeps the gate from converging on the replacement the ReplicaSet
+        # creates.
         end=$((SECONDS + 600))
-        pressure_reported=false
         while true; do
           POD_STATE="$(
             kubectl get pods -n "${NAMESPACE}" \
               -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
               2>/dev/null
           )"
-          LIVE_STATE="$(
+          POD_SUMMARY="$(
             printf '%s\n' "${POD_STATE}" \
               | awk '
-                  $2 != "Failed" && $2 != "Succeeded" &&
-                  ( $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
-                    $1 ~ /^grove-operator-/ ) {
+                  $1 ~ /^dynamo-platform-dynamo-operator-controller-manager-/ ||
+                  $1 ~ /^grove-operator-/ {
                     printf "%s=%s/ready=%s ", $1, $2, ($3 == "" ? "unknown" : $3)
                   }
                 '
@@ -630,36 +628,16 @@ runs:
               | awk '$1 ~ /^grove-operator-/ && $2 == "Running" && $3 == "True"' \
               | wc -l | tr -d '[:space:]'
           )"
-          FAILED_PODS="$(
-            printf '%s\n' "${POD_STATE}" \
-              | awk '$2 == "Failed" {printf "%s ", $1}'
-          )"
 
           if [ "${DYNAMO_READY}" -ge 1 ] && [ "${GROVE_READY}" -ge 1 ]; then
-            echo "Dynamo and Grove operator containers ready (${LIVE_STATE:-none})"
+            echo "Dynamo and Grove operator containers ready (${POD_SUMMARY:-none})"
             break
           fi
-
-          # Report node pressure once, as soon as it appears. A rejected Pod is
-          # an infrastructure fault rather than a regression in the change under
-          # test, and the ReplicaSet often recovers from it on its own.
-          if [ -n "${FAILED_PODS}" ] && [ "${pressure_reported}" = false ]; then
-            pressure_reported=true
-            echo "::warning::Operator Pods were rejected or evicted on their node; waiting for the ReplicaSet to reschedule (${FAILED_PODS})"
-            kubectl get pods -n "${NAMESPACE}" \
-              -o custom-columns='POD:.metadata.name,PHASE:.status.phase,REASON:.status.reason,NODE:.spec.nodeName' \
-              2>/dev/null || true
-          fi
-
           if [ "${SECONDS}" -ge "${end}" ]; then
-            if [ -n "${FAILED_PODS}" ]; then
-              echo "::error::Operator Pods were not ready within 600s and Pods were rejected or evicted on their node (${FAILED_PODS}) — treat this as a cluster capacity fault such as DiskPressure, not a code regression"
-            else
-              echo "::error::Operator Pods were not ready within 600s (dynamo ready=${DYNAMO_READY}, grove ready=${GROVE_READY}, live Pods: ${LIVE_STATE:-not found})"
-            fi
+            echo "::error::Operator Pods were not ready within 600s (dynamo ready=${DYNAMO_READY}, grove ready=${GROVE_READY}, Pods: ${POD_SUMMARY:-not found})"
             exit 1
           fi
-          echo "Waiting for operator readiness... dynamo=${DYNAMO_READY} grove=${GROVE_READY} live=${LIVE_STATE:-not found}"
+          echo "Waiting for operator readiness... dynamo=${DYNAMO_READY} grove=${GROVE_READY} pods=${POD_SUMMARY:-not found}"
           sleep 15
         done
         echo "::endgroup::"
@@ -672,9 +650,8 @@ runs:
         set -euo pipefail
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
 
-        # Skip Pods in a terminal phase. A node-pressure rejection leaves Failed
-        # Pods behind, and selecting one would report the image identity of a
-        # container that never ran.
+        # Skip Pods in a terminal phase: selecting one would report the image
+        # identity of a container that is no longer running.
         OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" \
           -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' \
           | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "Running" {print "pod/" $1; exit}' \
@@ -764,6 +741,8 @@ runs:
           local ready_pod
           local restart_deadline
 
+          # Select a Pod that is actually running so we do not restart a
+          # terminal one left behind after a rejected scheduling attempt.
           old_pod=$(kubectl get pods -n "${NAMESPACE}" \
             -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null \
             | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "Running" {print $1; exit}' \
