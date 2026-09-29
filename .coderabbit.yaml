@@ -26,9 +26,6 @@ reviews:
       enabled: false
     unit_tests:
       enabled: false
-  tools:
-    golangci-lint:
-      config_file: "deploy/operator/.golangci.coderabbit.yml"
   path_instructions:
     - path: "**/*.py"
       instructions: "Review against .ai/python-guidelines.md"

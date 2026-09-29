@@ -73,7 +73,12 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     worker so it can pull from this prefill's bootstrap server."""
 
     def __init__(self, vllm_config: Any) -> None:
-        """Resolve the bootstrap helper and allocate this request's transfer ID."""
+        """Validate the bootstrap address and allocate this request's transfer ID.
+
+        A nonempty host override changes only the advertised host; vLLM still
+        supplies the port. Invalid hosts raise ``ValueError`` at request setup,
+        before prefill runs.
+        """
         super().__init__(vllm_config)
         # Resolve vLLM's canonical bootstrap-addr helper at construction so
         # missing-mooncake / renamed-path errors surface at request setup
@@ -91,7 +96,15 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
                 "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
                 "mooncake_connector.get_mooncake_bootstrap_addr"
             ) from e
-        self._get_bootstrap_addr = get_mooncake_bootstrap_addr
+        host, port = get_mooncake_bootstrap_addr(vllm_config)
+        # vLLM may return loopback for local registration in DP1 or external/hybrid
+        # load balancing. Only the address advertised to remote decoders changes.
+        advertised_host = os.environ.get("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST")
+        if advertised_host:
+            host = advertised_host
+        host = _bootstrap_url_host(host)
+        # http:// is required: decode does `remote_bootstrap_addr + "/query"`.
+        self._bootstrap_addr = f"http://{host}:{port}"
         self._transfer_id: str = str(uuid.uuid4())
 
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
@@ -107,23 +120,13 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     ) -> Optional[Dict[str, Any]]:
         """Advertise the bootstrap URL and transfer ID to the decode worker.
 
-        A nonempty host override changes only the advertised host; vLLM still
-        supplies the port. Invalid hosts raise ``ValueError`` before publication.
         The engine's prefill response is unused by this push-based protocol.
         """
-        host, port = self._get_bootstrap_addr(self._vllm_config)
-        # vLLM may return loopback for local registration in DP1 or external/hybrid
-        # load balancing. Only the address advertised to remote decoders changes.
-        advertised_host = os.environ.get("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST")
-        if advertised_host:
-            host = advertised_host
-        host = _bootstrap_url_host(host)
         return {
             "do_remote_decode": False,
             "do_remote_prefill": True,
             "transfer_id": self._transfer_id,
-            # http:// is required: decode does `remote_bootstrap_addr + "/query"`.
-            "remote_bootstrap_addr": f"http://{host}:{port}",
+            "remote_bootstrap_addr": self._bootstrap_addr,
             "remote_engine_id": self._vllm_config.kv_transfer_config.engine_id,
         }
 

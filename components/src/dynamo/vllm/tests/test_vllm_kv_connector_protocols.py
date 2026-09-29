@@ -197,7 +197,8 @@ def test_mooncake_decode_advertised_host_preserves_helper_port(
     expected_host = advertised_host or "127.0.0.1"
     assert params["remote_bootstrap_addr"] == f"http://{expected_host}:{port}"
     assert params["remote_engine_id"] == "eng-prefill-0"
-    assert proto._get_bootstrap_addr(cfg) == ("127.0.0.1", port)
+    helper = importlib.import_module(_MOONCAKE_MOD).get_mooncake_bootstrap_addr
+    assert helper(cfg) == ("127.0.0.1", port)
 
 
 def test_mooncake_decode_ignores_engine_kv_transfer_params(fake_mooncake):
@@ -236,18 +237,17 @@ def test_mooncake_init_raises_clear_error_when_vllm_mooncake_unavailable(
         MooncakeConnectorProtocol(_config("MooncakeConnector"))
 
 
-def test_mooncake_decode_does_not_reimport_per_call(fake_mooncake):
-    """Helper is resolved once in __init__ and cached on the instance, so
-    repeated decode calls don't re-enter the import machinery."""
+def test_mooncake_decode_uses_address_validated_at_request_setup(
+    monkeypatch, fake_mooncake
+):
+    """Decode keeps the validated URL even if the environment changes mid-request."""
     cfg = _config("MooncakeConnector", engine_id="eng-1")
     proto = MooncakeConnectorProtocol(cfg)
-    helper = proto._get_bootstrap_addr
-    # Calling decode multiple times must not rebind the helper.
+    monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", "invalid:host")
+    monkeypatch.setitem(sys.modules, _MOONCAKE_MOD, None)
     for _ in range(3):
-        proto.decode_request_kv_transfer_params(
-            SimpleNamespace(kv_transfer_params=None)
-        )
-    assert proto._get_bootstrap_addr is helper
+        params = proto.decode_request_kv_transfer_params(None)
+        assert params["remote_bootstrap_addr"] == "http://10.0.0.5:8998"
 
 
 # ---------------------------------------------------------------------------
@@ -664,11 +664,10 @@ def test_mooncake_bootstrap_url_host(monkeypatch, source, host, expected):
     ],
 )
 def test_mooncake_rejects_invalid_advertised_host(monkeypatch, fake_mooncake, host):
-    """Reject malformed hosts and URL components before publishing an address."""
+    """Reject malformed hosts at request setup, before prefill can run."""
     monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", host)
-    proto = MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="prefill"))
     with pytest.raises(ValueError, match="Invalid Mooncake bootstrap host"):
-        proto.decode_request_kv_transfer_params(None)
+        MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="prefill"))
 
 
 @pytest.mark.parametrize(
