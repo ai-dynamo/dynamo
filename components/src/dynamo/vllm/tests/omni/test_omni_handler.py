@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import io
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,6 +17,8 @@ try:
     from vllm.sampling_params import RequestOutputKind, SamplingParams
     from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 
+    from dynamo.common.http import HttpError
+    from dynamo.common.multimodal import ImageLoader
     from dynamo.common.protocols.audio_protocol import NvCreateAudioSpeechRequest
     from dynamo.common.protocols.image_protocol import NvCreateImageRequest
     from dynamo.common.protocols.video_protocol import NvCreateVideoRequest, VideoNvExt
@@ -1246,6 +1251,91 @@ class TestImageGenerationSizeValidation:
     def test_non_string_size_falls_back_to_defaults(self):
         # parse_size tolerates a non-string size; the error label must too.
         assert image_generation_size_from_request({"size": 1024}) == (1024, 1024)
+
+
+@pytest.fixture
+def image_request_handler():
+    handler = _make_handler()
+    handler.config.output_modalities = ["image"]
+    handler._image_loader = ImageLoader()
+    handler._image_loader.load_image = AsyncMock(wraps=handler._image_loader.load_image)
+    handler._abort_monitor = MagicMock(return_value=nullcontext())
+    # Capture engine inputs without loading weights or producing model outputs.
+    handler.engine_client.generate.return_value.__aiter__.return_value = []
+    return handler
+
+
+class TestImageReferenceInputs:
+    @pytest.mark.asyncio
+    async def test_references_reach_engine_and_do_not_leak(self, image_request_handler):
+        handler = image_request_handler
+        for index, color in enumerate(("red", "green", None)):
+            request = {"prompt": "a teapot", "size": "512x512"}
+            if color is not None:
+                reference = Image.new("RGB", (8, 8), color=color)
+                with io.BytesIO() as buffer:
+                    reference.save(buffer, format="PNG")
+                    encoded = base64.b64encode(buffer.getvalue()).decode()
+                request["input_reference"] = f"data:image/png;base64,{encoded}"
+
+            chunks = [
+                chunk
+                async for chunk in handler._generate_openai_mode(
+                    request, None, f"req-{index}"
+                )
+            ]
+            assert chunks == []
+            prompt = handler.engine_client.generate.call_args.kwargs["prompt"]
+            assert prompt["prompt"] == request["prompt"]
+            if color is None:
+                assert "multi_modal_data" not in prompt
+            else:
+                images = prompt["multi_modal_data"]["image"]
+                assert len(images) == 1
+                assert images[0].size == reference.size
+                assert images[0].tobytes() == reference.tobytes()
+
+        assert handler.engine_client.generate.call_count == 3
+        assert handler._image_loader.load_image.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "reference",
+        [
+            "data:image/png;base64,bm90IGFuIGltYWdl",
+            "data:image/png;base64,%%%",
+            "",
+        ],
+        ids=["invalid-image", "invalid-base64", "empty-reference"],
+    )
+    async def test_invalid_reference_rejected_before_generation(
+        self, image_request_handler, reference
+    ):
+        handler = image_request_handler
+        request = {"prompt": "a teapot", "input_reference": reference}
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reference_fetch_error_rejected_before_generation(
+        self, image_request_handler
+    ):
+        handler = image_request_handler
+        handler._image_loader.load_image.side_effect = HttpError("fetch failed")
+        request = {
+            "prompt": "a teapot",
+            "input_reference": "https://example.com/reference.png",
+        }
+
+        with pytest.raises(InvalidArgument, match="Failed to load input_reference"):
+            async for _ in handler._generate_openai_mode(request, None, "req-1"):
+                pass
+
+        handler.engine_client.generate.assert_not_called()
 
 
 class TestImageEndpointSizeValidation:
