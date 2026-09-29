@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -129,6 +129,64 @@ async def test_prefill_rejects_cache_uuid_before_building_media_kwargs(
             pass
 
     assert not build_media_kwargs_called
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize("allow_top", [False, True])
+@pytest.mark.parametrize(
+    "options, expected",
+    [
+        ({}, {}),
+        ({"logprobs": 0}, {"return_logprob": True, "top_logprobs_num": 0}),
+        ({"logprobs": 3}, {"return_logprob": True, "top_logprobs_num": 3}),
+        (
+            {"prompt_logprobs": 0},
+            {"return_logprob": True, "top_logprobs_num": 0, "logprob_start_len": 0},
+        ),
+    ],
+)
+async def test_prefill_forwards_first_token_logprob_options(
+    monkeypatch, wrapped, allow_top, options, expected
+):
+    monkeypatch.setenv("DYN_SGL_ALLOW_TOP_LOGPROBS", "1" if allow_top else "0")
+    calls = []
+
+    async def async_generate(**kwargs):
+        calls.append(kwargs)
+
+        async def results():
+            yield {"meta_info": {"id": "prefill-request"}}
+
+        return results()
+
+    handler = PrefillWorkerHandler.__new__(PrefillWorkerHandler)
+    handler.engine = SimpleNamespace(async_generate=async_generate)
+    handler.bootstrap_host = "prefill.invalid"
+    handler.bootstrap_port = None
+    handler.enable_trace = False
+    handler._generate_bootstrap_room = lambda: 1
+    handler._get_input_param = lambda request: {"input_ids": request["token_ids"]}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+    request = {"token_ids": [1, 2, 3], "output_options": options}
+    if wrapped:
+        request = {"request": request, "sampling_params": {"max_new_tokens": 4}}
+
+    context = SimpleNamespace(id=lambda: "request-id", trace_id="trace-id")
+    async with aclosing(handler.generate(request, context)) as stream:
+        if options.get("logprobs", 0) > 0 and not allow_top:
+            with pytest.raises(ValueError, match="DYN_SGL_ALLOW_TOP_LOGPROBS"):
+                await anext(stream)
+            assert not calls
+            return
+        await anext(stream)
+
+    assert len(calls) == 1
+    assert calls[0]["sampling_params"]["max_new_tokens"] == 1
+    assert {
+        key: value for key, value in calls[0].items() if "logprob" in key
+    } == expected
 
 
 def test_extract_media_urls_returns_none_for_missing_modality():
