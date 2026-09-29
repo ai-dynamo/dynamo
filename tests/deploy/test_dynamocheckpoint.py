@@ -194,6 +194,17 @@ CHECKPOINT_BACKENDS = {
                     "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so"
                 ),
             ),
+            # Keep the PTX JIT compiler matched to the preloaded host libcuda.
+            (
+                "LD_LIBRARY_PATH",
+                (
+                    "/opt/dynamo/mpi/lib:/usr/$LIB:"
+                    "/usr/local/lib/python3.12/dist-packages/torch/lib:"
+                    "/usr/local/lib/python3.12/dist-packages/torch_tensorrt/lib:"
+                    "/usr/local/cuda/compat/lib:/usr/local/nvidia/lib:"
+                    "/usr/local/nvidia/lib64"
+                ),
+            ),
         ),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
