@@ -170,6 +170,24 @@ def test_dynamo_mocker_wrapper_returns_public_replay_report(tmp_path):
     assert report.summary["completed_requests"] == 4
 
 
+def test_dynamo_mocker_wrapper_forwards_agentic_execution_model(tmp_path):
+    trace_path = _write_agentic_mooncake_trace(tmp_path)
+
+    report = run_mocker_trace_replay(
+        trace_path,
+        extra_engine_args=_vllm_args(),
+        trace_format="agentic_mooncake",
+        agentic_lanes=1,
+        execution_model="target-model",
+    )
+
+    assert isinstance(report, ReplayReport)
+    assert report.summary["completed_requests"] == 2
+    assert report.summary["agentic_model_projection"]["target_model"] == (
+        "target-model"
+    )
+
+
 def test_online_replay_keeps_summary_dictionary_result(tmp_path):
     trace_path = _write_multiturn_trace(tmp_path)
 
@@ -315,7 +333,7 @@ def test_online_trace_replay_emits_per_request_goodput_and_capacity(tmp_path):
     assert report["gpu_hours"] > 0.0
 
 
-def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
+def _write_agentic_mooncake_trace(tmp_path):
     trace_path = tmp_path / "agentic.jsonl"
     records = [
         {
@@ -323,7 +341,7 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
             "version": 2,
             "block_size": 64,
             "hash_id_scope": "local",
-            "source": {"format": "test-fixture", "digest": "online-replay"},
+            "source": {"format": "test-fixture", "digest": "agentic-replay"},
         },
         {
             "request_id": "root",
@@ -359,6 +377,12 @@ def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
         "\n".join(json.dumps(record) for record in records) + "\n",
         encoding="utf-8",
     )
+
+    return trace_path
+
+
+def test_online_trace_replay_supports_agentic_mooncake(tmp_path):
+    trace_path = _write_agentic_mooncake_trace(tmp_path)
 
     report = run_trace_replay(
         trace_path,

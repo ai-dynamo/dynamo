@@ -261,6 +261,41 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
     assert "native_report" not in report.metadata
 
 
+@pytest.mark.parametrize(
+    ("metadata_config", "engine_args"),
+    [
+        pytest.param({"model_path": " target-model "}, {}, id="metadata-model-path"),
+        pytest.param({"model": " target-model "}, {}, id="metadata-canonical-model"),
+        pytest.param({}, {"aic_model_path": " target-model "}, id="engine-aic-path"),
+        pytest.param(
+            {},
+            {"ais_perf_config": {"model": " target-model "}},
+            id="engine-ais-perf-config",
+        ),
+    ],
+)
+def test_weka_runner_resolves_each_execution_target_model_source(
+    metadata_config, engine_args
+) -> None:
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={"engine_type": "vllm", **engine_args},
+        num_workers=1,
+        performance_model_metadata={"aggregated": {"config": metadata_config}},
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "published-weka", "trace_format": "weka"},
+        goal={"target": "throughput"},
+    )
+
+    assert simulation.DynamoReplayRunner._execution_target_model(spec) == (
+        "target-model"
+    )
+
+
 def test_weka_runner_requires_a_configured_execution_target_model() -> None:
     deployment = BackendDeploymentSpec(
         deployment_mode="agg",
