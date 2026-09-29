@@ -143,7 +143,7 @@ fn unsafe_media_uuids_are_rejected() {
             DisaggregationMode::Encode,
         )
         .expect_err("unsafe UUID must be rejected");
-        assert!(error.to_string().contains("safe identifier"), "uuid={uuid}");
+        assert!(error.to_string().contains("safe identifier"));
     }
 }
 
