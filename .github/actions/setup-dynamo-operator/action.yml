@@ -599,16 +599,10 @@ runs:
         # container readiness reported by each webhook-aware probe; the
         # admission smoke tests below are the authoritative end-to-end gate.
         #
-        # Require at least one ready Pod per operator rather than an exact Pod
-        # count. A Pod in a terminal phase never becomes ready, so counting one
-        # keeps the gate from converging on the replacement the ReplicaSet
-        # creates.
-        #
-        # Select by the vCluster ownership labels the syncer stamps on every Pod
-        # it projects. Some clusters place concurrent runs in one shared host
-        # namespace, where the operator Pod names are identical across runs, so
-        # a name match alone can satisfy this run's gate with another run's
-        # operator.
+        # Count ready Pods, not total Pods: a terminal Pod never becomes ready,
+        # so an exact count cannot converge once one is left behind. Select on
+        # the syncer's ownership labels because a shared host namespace holds
+        # identically named operator Pods from concurrent runs.
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
         end=$((SECONDS + 600))
         while true; do
@@ -659,12 +653,10 @@ runs:
         set -euo pipefail
         VKUBECONFIG=${{ github.workspace }}/.kubeconfig-vcluster
 
-        # Scoped as in the readiness gate above; applies to every
-        # host-namespace Pod lookup in this step.
+        # Scoped as in the readiness gate; used by every lookup in this step.
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
 
-        # Skip Pods in a terminal phase: selecting one would report the image
-        # identity of a container that is no longer running.
+        # Skip terminal Pods: their image is not the one now running.
         OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" -l "${VCLUSTER_POD_SELECTOR}" \
           -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' \
           | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "Running" {print "pod/" $1; exit}' \
@@ -754,8 +746,7 @@ runs:
           local ready_pod
           local restart_deadline
 
-          # Select a Pod that is actually running so we do not restart a
-          # terminal one left behind after a rejected scheduling attempt.
+          # Restart a running Pod, not a terminal leftover.
           old_pod=$(kubectl get pods -n "${NAMESPACE}" -l "${VCLUSTER_POD_SELECTOR}" \
             -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' 2>/dev/null \
             | awk '$1 ~ /dynamo-platform-dynamo-operator-controller-manager/ && $2 == "Running" {print $1; exit}' \
