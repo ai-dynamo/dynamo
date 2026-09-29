@@ -34,6 +34,7 @@ use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 const DEFAULT_TOKENIZER_CACHE_BYTES: usize = 64 * 1024 * 1024;
+static TOKENIZER_CACHE: OnceLock<crate::tokenizers::SharedTokenizerCache> = OnceLock::new();
 
 fn append_runtime_contract_checksum(
     bytes: &mut Vec<u8>,
@@ -118,6 +119,23 @@ fn tokenizer_cache_bytes(value: Option<&str>) -> usize {
     }
 }
 
+fn shared_tokenizer_cache() -> &'static crate::tokenizers::SharedTokenizerCache {
+    TOKENIZER_CACHE.get_or_init(|| {
+        let cache_bytes =
+            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
+        tracing::info!(cache_bytes, "initializing process-wide tokenizer cache");
+        crate::tokenizers::SharedTokenizerCache::new(cache_bytes)
+    })
+}
+
+fn tokenizer_cache_namespace(checksum: &str, backend: &str) -> Vec<u8> {
+    let mut namespace = Vec::with_capacity(8 + checksum.len() + backend.len());
+    namespace.extend_from_slice(&(checksum.len() as u64).to_le_bytes());
+    namespace.extend_from_slice(checksum.as_bytes());
+    namespace.extend_from_slice(backend.as_bytes());
+    namespace
+}
+
 fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenUsageFn {
     let cached_tokens = dynamo_runtime::metrics::frontend_perf::TOKENIZER_CACHE_CACHED_TOKENS_TOTAL
         .with_label_values(&[model]);
@@ -134,12 +152,18 @@ fn tokenizer_cache_token_observer(model: &str) -> crate::tokenizers::CacheTokenU
 fn instrumented_tokenizer_cache(
     raw: Arc<dyn crate::tokenizers::traits::Tokenizer>,
     special_tokens: Vec<String>,
-    cache_bytes: usize,
+    shared_cache: &crate::tokenizers::SharedTokenizerCache,
     cache_extend: bool,
     model: &str,
+    namespace: &[u8],
 ) -> Result<Arc<dyn crate::tokenizers::traits::Tokenizer>> {
-    let cached = crate::tokenizers::CachedTokenizer::new(raw, special_tokens, cache_bytes)
-        .context("failed to initialize tokenizer prefix cache")?;
+    let cached = crate::tokenizers::CachedTokenizer::new_with_cache(
+        raw,
+        special_tokens,
+        shared_cache.clone(),
+        namespace,
+    )
+    .context("failed to initialize tokenizer prefix cache")?;
 
     Ok(Arc::new(
         cached
@@ -1298,7 +1322,9 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_FALLBACK=0` — fallback control for callers without explicit runtime config
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
-    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — L1 cache byte budget (default 64 MiB)
+    /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
+    ///   in this process (default 64 MiB), read when the shared cache is first created.
+    ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
     ///   turn of a growing multi-turn conversation hits deeper than the last, keeping
@@ -1329,8 +1355,6 @@ impl ModelDeploymentCard {
 
         let cache_enabled =
             tokenizer_cache_enabled(std::env::var("DYN_TOKENIZER_CACHE").ok().as_deref());
-        let cache_bytes =
-            tokenizer_cache_bytes(std::env::var("DYN_TOKENIZER_CACHE_BYTES").ok().as_deref());
         // Partial-hit extension is on by default; disable with DYN_TOKENIZER_CACHE_EXTEND=0.
         let cache_extend = !matches!(
             std::env::var("DYN_TOKENIZER_CACHE_EXTEND").ok().as_deref(),
@@ -1410,6 +1434,7 @@ impl ModelDeploymentCard {
                 };
 
                 // Pick the inner backend.
+                let mut cache_backend = "huggingface";
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
                     TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
                     TokenizerBackend::Fastokens => {
@@ -1417,6 +1442,7 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
+                                    cache_backend = "fastokens";
                                     Arc::new(fast)
                                 }
                                 Err(e) => {
@@ -1451,6 +1477,7 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
+                                    cache_backend = "basetenkenizer";
                                     Arc::new(baseten)
                                 }
                                 Err(e) => {
@@ -1483,8 +1510,10 @@ impl ModelDeploymentCard {
                 };
 
                 if cache_enabled && !options.add_special_tokens {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace = tokenizer_cache_namespace(self.mdcsum(), cache_backend);
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         specials = specials.len(),
                         "wrapping tokenizer in L1 prefix cache",
@@ -1492,9 +1521,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     // The prefix cache encodes text in boundary-delimited
@@ -1519,8 +1549,10 @@ impl ModelDeploymentCard {
                 let specials = tokenizer.special_tokens().to_vec();
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = Arc::new(tokenizer);
                 if cache_enabled {
+                    let shared_cache = shared_tokenizer_cache();
+                    let namespace = tokenizer_cache_namespace(self.mdcsum(), "tiktoken");
                     tracing::info!(
-                        cache_bytes,
+                        cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
                         boundaries = specials.len(),
                         "wrapping tiktoken tokenizer in L1 prefix cache",
@@ -1528,9 +1560,10 @@ impl ModelDeploymentCard {
                     instrumented_tokenizer_cache(
                         raw,
                         specials,
-                        cache_bytes,
+                        shared_cache,
                         cache_extend,
                         self.name(),
+                        &namespace,
                     )?
                 } else {
                     raw
@@ -2501,10 +2534,45 @@ mod tests {
             super::DEFAULT_TOKENIZER_CACHE_BYTES
         );
         assert_eq!(super::tokenizer_cache_bytes(Some("1024")), 1024);
+        assert_eq!(super::tokenizer_cache_bytes(Some("0")), 0);
         assert_eq!(
             super::tokenizer_cache_bytes(Some("invalid")),
             super::DEFAULT_TOKENIZER_CACHE_BYTES
         );
+    }
+
+    #[test]
+    fn tokenizer_cache_namespaces_separate_model_versions_and_backends() -> anyhow::Result<()> {
+        use std::sync::Arc;
+
+        use crate::tokenizers::traits::Encoder;
+        use crate::tokenizers::{CachedTokenizer, HuggingFaceTokenizer, SharedTokenizerCache};
+
+        let raw = Arc::new(HuggingFaceTokenizer::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
+        ))?);
+        let storage = SharedTokenizerCache::new(1024 * 1024);
+        let input = "<s>system\nHello</s><s>user\nWorld";
+        for (checksum, backend, expected_hits) in [
+            ("version-a", "huggingface", 0),
+            ("version-b", "huggingface", 0),
+            ("version-a", "fastokens", 0),
+            ("version-a", "huggingface", 1),
+        ] {
+            let cached = CachedTokenizer::new_with_cache(
+                raw.clone(),
+                vec!["<s>".into(), "</s>".into()],
+                storage.clone(),
+                &super::tokenizer_cache_namespace(checksum, backend),
+            )?;
+            assert_eq!(
+                cached.encode(input)?.token_ids(),
+                raw.encode(input)?.token_ids()
+            );
+            assert_eq!(cached.cache_stats().hits, expected_hits);
+        }
+        Ok(())
     }
 
     #[test]
