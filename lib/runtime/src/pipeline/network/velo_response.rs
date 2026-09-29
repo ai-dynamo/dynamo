@@ -358,8 +358,9 @@ impl VeloResponseService {
         if !self.prepared_peers.contains(&peer_id) {
             self.velo.register_peer(address.peer)?;
             if peer_id != self.velo.instance_id() {
-                // The Velo hello exchange also installs the reverse UCX
-                // address. Stream slot opens do not perform that peer
+                // Velo checks cached lifecycle support for this peer instance
+                // first. Its initial hello also installs the reverse UCX
+                // address; stream slot opens do not perform that peer
                 // handshake, so it runs once per peer, here.
                 tokio::time::timeout(
                     Duration::from_secs(10),

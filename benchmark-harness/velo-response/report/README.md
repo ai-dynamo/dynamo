@@ -2,6 +2,8 @@
 
 **Velo TCP improves throughput and CPU cost against Dynamo TCP. QUIC has the best throughput, CPU/request, and packet cost in this comparison. Velo RDMA gives no clear end-to-end gain over Velo TCP.** TCP remains the default.
 
+**September 28 follow-up:** these measurements include an unnecessary `_hello` handshake before generation on every remote Velo request, identified in [Ryan Olson's review comment](https://github.com/ai-dynamo/velo/pull/90#issuecomment-5848089760). Velo's `wait_for_handler` now checks its cached handler list first. The results below remain the baseline for the original implementation; they do not measure the effect of this fix. A matched performance rerun is still needed to measure that effect.
+
 All 16 measured runs are retained: four balanced repeats per mode, after one warmup/discard per mode. They exported **9,854,326 completed records**, including **five empty-content errors**. Each run has a complete export and all 2,048 KV sources active on both frontends. Every RDMA process used the selected `rc_mlx5` lane. The campaign used normal, non-preemptible allocations on the same five nodes; no backfill partition was used.
 
 ## Findings
