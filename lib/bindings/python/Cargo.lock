@@ -9301,7 +9301,7 @@ checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
 [[package]]
 name = "ucx-rs"
 version = "0.1.0+ucx.1.22.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=c5b6fb33df125fe18f0b5b74fc49faef734b766c#c5b6fb33df125fe18f0b5b74fc49faef734b766c"
+source = "git+https://github.com/ai-dynamo/velo?rev=bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48#bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48"
 dependencies = [
  "flate2",
  "sha2 0.10.9",
@@ -9618,8 +9618,8 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velo"
-version = "0.14.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=c5b6fb33df125fe18f0b5b74fc49faef734b766c#c5b6fb33df125fe18f0b5b74fc49faef734b766c"
+version = "0.17.0"
+source = "git+https://github.com/ai-dynamo/velo?rev=bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48#bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -9654,8 +9654,8 @@ dependencies = [
 
 [[package]]
 name = "velo-ext"
-version = "0.5.1"
-source = "git+https://github.com/ai-dynamo/velo?rev=c5b6fb33df125fe18f0b5b74fc49faef734b766c#c5b6fb33df125fe18f0b5b74fc49faef734b766c"
+version = "0.5.3"
+source = "git+https://github.com/ai-dynamo/velo?rev=bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48#bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48"
 dependencies = [
  "anyhow",
  "bytes",

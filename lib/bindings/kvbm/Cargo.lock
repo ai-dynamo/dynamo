@@ -8807,8 +8807,8 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "velo"
-version = "0.14.0"
-source = "git+https://github.com/ai-dynamo/velo?rev=c5b6fb33df125fe18f0b5b74fc49faef734b766c#c5b6fb33df125fe18f0b5b74fc49faef734b766c"
+version = "0.17.0"
+source = "git+https://github.com/ai-dynamo/velo?rev=bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48#bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -8840,8 +8840,8 @@ dependencies = [
 
 [[package]]
 name = "velo-ext"
-version = "0.5.1"
-source = "git+https://github.com/ai-dynamo/velo?rev=c5b6fb33df125fe18f0b5b74fc49faef734b766c#c5b6fb33df125fe18f0b5b74fc49faef734b766c"
+version = "0.5.3"
+source = "git+https://github.com/ai-dynamo/velo?rev=bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48#bee8b8e9e22e4a3bbaa133b2a785254f6fdf2a48"
 dependencies = [
  "anyhow",
  "bytes",
