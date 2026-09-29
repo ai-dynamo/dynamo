@@ -1,5 +1,6 @@
 {
   "case": "fused-ram-2",
+  "capture_id": "gms-v1-glm-retry-0928",
   "weights_bytes": 481036337152,
   "preload_span_s": 7.8403120040893555,
   "rank_preload_s": [
@@ -15,6 +16,7 @@
   "first_gms_start_to_ready_s": 27.33152961730957,
   "pod_create_to_ready_s": 30.53647804260254,
   "verification_orchestration_gap_s": 1.3959805965423584,
+  "agent_restore_s": 14.801838782,
   "agent": {
     "duration": "14.801838782s",
     "phases": {
@@ -29,5 +31,6 @@
       "unaccounted": "1.643553662s"
     },
     "started_to_complete": "14.8056822s"
-  }
+  },
+  "inference_recorded": true
 }

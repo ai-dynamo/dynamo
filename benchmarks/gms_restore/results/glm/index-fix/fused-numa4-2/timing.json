@@ -1,0 +1,17 @@
+{
+  "backend": "fused",
+  "workers": 4,
+  "numa": true,
+  "fast_gate": true,
+  "capture_id": "gms-v1-glm-index-0928",
+  "storage": "tmpfs weights; NFS engine checkpoint",
+  "create_epoch": 1790645288.3876448,
+  "publication_observed_epoch": 1790645297.9593744,
+  "trigger_epoch": 1790645299.7100413,
+  "ready_epoch": 1790645316.9870305,
+  "pod_create_to_ready_s": 28.599385738372803,
+  "pod_create_to_publication_observed_s": 9.57172966003418,
+  "verification_orchestration_gap_s": 1.750666856765747,
+  "trigger_to_ready_s": 17.276989221572876,
+  "restored_text": "Berlin. It is the largest city in Germany and is known for its rich history, diverse culture, and vibrant arts scene. Berlin is also a major political, economic, and cultural hub in Europe. It is home to numerous landmarks such as the Brandenburg Gate, the Berlin Wall, and Museum Island. The city has a population of over 3.6 million people and attracts millions of tourists each year. Berlin is known for its tolerant and liberal atmosphere, making it a popular destination for artists,\n"
+}

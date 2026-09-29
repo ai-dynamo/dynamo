@@ -28,3 +28,55 @@ as total elapsed time against the 25–28 s baseline.
 Initial gates: DRA one-vs-eight GPU cuInit microbenchmark; GMS V1 artifact roundtrip;
 explicit UUID permutation correctness; engine snapshot and coherent inference;
 then repeated timing and checkpointed-GMS comparison.
+
+## Recorded prototype
+
+[RESULTS.md](RESULTS.md) records timing boundaries, failed trials and storage /
+communication differences. `results/` holds exact pod/claim/capture plans, logs
+and inference outputs. Large GPU payloads are not stored in Git.
+
+Dynamo changes add independent V1 socket and artifact device ordinals. The
+benchmark's fused server uses V1 admission/publication and an experimental pinned
+copy backend. `resolve_plan.py` joins the named DRA requests to ResourceSlice UUIDs
+and checks manifest hashes and allocation IDs/sizes. `publication_gate.py` performs
+those checks inside the placeholder, checks every server UUID and allocation list,
+and gates engine restoration on all publications. The agent consumes the same
+explicit UUID map from `SNAPSHOT_CUDA_DEVICE_MAP` in the placeholder OCI spec.
+
+`snapshot-prototype.patch` is against Snapshot d9b6bc72. Its worktree commits are
+865def41 (rank map), e021a725 (quiescent raw GMS imports) and 006a3823 (isolated
+experiment annotation and server raw-export experiment). The engine captures use
+the e021a725 core; the Go agent includes the isolated annotation from 006a3823.
+Preserve the shim's bytes and executable mode between capture and restore. The
+server export experiment is not a working checkpointed-GMS implementation.
+
+The cluster harness expects the qualified stack and matching source artifacts to
+already be staged. Set `GMS_VCLUSTER_KUBECONFIG` to a private kubeconfig; it is never
+recorded here. Host `kubectl` must reach translated pods. For an allocated and held
+claim, the repeated-trial entry point is:
+
+```sh
+python run_glm_restore.py --case fused-ram-N --backend fused --same-claim --fast-gate
+```
+
+`--capture-dir` selects a different captured generation. The harness intentionally
+pins the experiment's node/names and RAM artifact mount; adapt the manifests to a
+new cluster. Read the storage caveats before comparing these trials with the prior
+cold NFS results. `sglang-evidence-image.patch` is an **image-specific experiment**:
+it maps DSA index-buffer hooks to this image's older SGLang method names, disables
+its stalled multimem logits path, and trims unused libc pages at release. The
+source manifest also disables FlashInfer allreduce fusion. These changes retain
+CUDA graphs and use NCCL for the affected collectives.
+
+For the corrected capture and tuned loader, pass:
+
+```sh
+python run_glm_restore.py --capture-dir results/glm/index-fix \
+  --case fused-numa4-N --backend fused --workers 4 --numa --same-claim --fast-gate
+python summarize.py results/glm
+```
+
+Each trial must start with the preceding restore pod removed while a separate
+holder keeps the named claim allocated. Save that trial's agent log as `agent.txt`
+before the next restore; the summarizer uses the final matching restore entry.
+`summary.json` separates all-rank publication span, agent duration, and pod time.

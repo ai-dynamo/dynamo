@@ -1,0 +1,1 @@
+{"rank": 5, "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c", "started_epoch": 1790644095.984913, "published_epoch": 1790644253.653014, "elapsed_s": 157.66810083389282}

@@ -1,5 +1,6 @@
 {
   "case": "nixl-ram-1",
+  "capture_id": "gms-v1-glm-retry-0928",
   "weights_bytes": 481036337152,
   "preload_span_s": 10.32913851737976,
   "rank_preload_s": [
@@ -15,6 +16,7 @@
   "first_gms_start_to_ready_s": 30.726540088653564,
   "pod_create_to_ready_s": 34.005462408065796,
   "verification_orchestration_gap_s": 1.3559556007385254,
+  "agent_restore_s": 14.712358573,
   "agent": {
     "duration": "14.712358573s",
     "phases": {
@@ -29,5 +31,6 @@
       "unaccounted": "1.656733772s"
     },
     "started_to_complete": "14.717330907s"
-  }
+  },
+  "inference_recorded": true
 }

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Experimental CUDA Python bridge through LD_PRELOAD's VMM entrypoints.
 
-The evidence image's cuda-python dispatch bypasses the interposed allocation
-entrypoints (the captured GMS cuinterpose state contains zero memory blocks).
-Explicitly route only the VMM ownership APIs through the loaded frontend.
+Tests whether explicitly routing the VMM ownership APIs through the loaded
+frontend fixes the server export failure. This experiment did not fix exports
+after restore; it does not establish a dispatch-bypass root cause.
 Must be installed before any VMM allocations. Benchmark-only, CUDA/Linux only.
 """
 

@@ -1,0 +1,1018 @@
+{
+  "snapshots": [
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"PodSnapshot\",\"metadata\":{\"annotations\":{},\"name\":\"gms-v1-glm-0928\",\"namespace\":\"schwinns-vcluster\"},\"spec\":{\"source\":{\"podRef\":{\"containers\":[\"main\"],\"name\":\"gms-v1-glm-source-0928\",\"uid\":\"14958d6b-41d8-43bf-b469-79ee2b56c7e9\"}}}}\n"
+        },
+        "creationTimestamp": "2026-09-29T00:43:33Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:annotations": {
+                  ".": {},
+                  "f:kubectl.kubernetes.io/last-applied-configuration": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "kubectl-client-side-apply",
+            "operation": "Update",
+            "time": "2026-09-29T00:43:33Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:43:33Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:43:33Z"
+          }
+        ],
+        "name": "gms-v1-glm-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11493630",
+        "uid": "350fb6cc-b685-401a-b2c4-426a69c712b0"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-350fb6cc-b685-401a-b2c4-426a69c712b0",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:43:33Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/4ec711d2-3ed9-4c13-99c0-d8797cdc39a1]",
+            "reason": "CheckpointFailed",
+            "status": "False",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-29T00:43:33Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/4ec711d2-3ed9-4c13-99c0-d8797cdc39a1]",
+            "reason": "CheckpointFailed",
+            "status": "True",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"PodSnapshot\",\"metadata\":{\"annotations\":{},\"name\":\"gms-v1-glm-index-0928\",\"namespace\":\"schwinns-vcluster\"},\"spec\":{\"source\":{\"podRef\":{\"containers\":[\"main\"],\"name\":\"gms-v1-glm-source-0928\",\"uid\":\"733ee1d2-256c-40d5-b012-1759e077668e\"}}}}\n"
+        },
+        "creationTimestamp": "2026-09-29T01:12:01Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:annotations": {
+                  ".": {},
+                  "f:kubectl.kubernetes.io/last-applied-configuration": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "kubectl-client-side-apply",
+            "operation": "Update",
+            "time": "2026-09-29T01:12:01Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T01:12:01Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T01:15:58Z"
+          }
+        ],
+        "name": "gms-v1-glm-index-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11498098",
+        "uid": "8f238a14-4147-4e78-8573-0cfb3b98ec24"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "733ee1d2-256c-40d5-b012-1759e077668e"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-8f238a14-4147-4e78-8573-0cfb3b98ec24",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T01:15:58Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-29T01:15:58Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "annotations": {
+          "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"PodSnapshot\",\"metadata\":{\"annotations\":{},\"name\":\"gms-v1-glm-retry-0928\",\"namespace\":\"schwinns-vcluster\"},\"spec\":{\"source\":{\"podRef\":{\"containers\":[\"main\"],\"name\":\"gms-v1-glm-source-0928\",\"uid\":\"14958d6b-41d8-43bf-b469-79ee2b56c7e9\"}}}}\n"
+        },
+        "creationTimestamp": "2026-09-29T00:53:44Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:annotations": {
+                  ".": {},
+                  "f:kubectl.kubernetes.io/last-applied-configuration": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "kubectl-client-side-apply",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:44Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:44Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:57:42Z"
+          }
+        ],
+        "name": "gms-v1-glm-retry-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11495735",
+        "uid": "7cffb7a3-f54a-447f-8e8a-17fa1e18fd49"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-7cffb7a3-f54a-447f-8e8a-17fa1e18fd49",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:57:42Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-29T00:57:42Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:52:28Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-29T00:52:28Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:52:28Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:52:28Z"
+          }
+        ],
+        "name": "gms-v1-server-bridge-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11494578",
+        "uid": "b70f2a1f-4552-48f1-8981-2e0319c9c663"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-server-bridge-source-0928",
+            "uid": "4e75bca9-27c8-4530-a2cc-6e0f0f35f368"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-b70f2a1f-4552-48f1-8981-2e0319c9c663",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:52:28Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/7411c668-e10f-4327-8595-2a52d8318e0d]",
+            "reason": "CheckpointFailed",
+            "status": "False",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-29T00:52:28Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/7411c668-e10f-4327-8595-2a52d8318e0d]",
+            "reason": "CheckpointFailed",
+            "status": "True",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:53:32Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:32Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:32Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:53:56Z"
+          }
+        ],
+        "name": "gms-v1-server-bridge-retry-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11494733",
+        "uid": "ecc284c8-1dd8-457a-9c40-5225d99ecb80"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-server-bridge-source-0928",
+            "uid": "4e75bca9-27c8-4530-a2cc-6e0f0f35f368"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-ecc284c8-1dd8-457a-9c40-5225d99ecb80",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:53:56Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-29T00:53:56Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    }
+  ],
+  "contents": [
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:43:33Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:43:33Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:43:33Z"
+          }
+        ],
+        "name": "podsnapshotcontent-350fb6cc-b685-401a-b2c4-426a69c712b0",
+        "resourceVersion": "11493629",
+        "uid": "0be93375-67ce-42fd-ae8b-32d7853bc5c2"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "gms-v1-glm-0928",
+          "namespace": "schwinns-vcluster",
+          "uid": "350fb6cc-b685-401a-b2c4-426a69c712b0"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:43:33Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/4ec711d2-3ed9-4c13-99c0-d8797cdc39a1]",
+            "reason": "CheckpointFailed",
+            "status": "True",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:53:44Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:44Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:57:42Z"
+          }
+        ],
+        "name": "podsnapshotcontent-7cffb7a3-f54a-447f-8e8a-17fa1e18fd49",
+        "resourceVersion": "11495734",
+        "uid": "bcd6efe8-0aed-418d-b4d9-3b8054cb147c"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "gms-v1-glm-retry-0928",
+          "namespace": "schwinns-vcluster",
+          "uid": "7cffb7a3-f54a-447f-8e8a-17fa1e18fd49"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "14958d6b-41d8-43bf-b469-79ee2b56c7e9"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:57:42Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T01:12:01Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T01:12:01Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T01:15:58Z"
+          }
+        ],
+        "name": "podsnapshotcontent-8f238a14-4147-4e78-8573-0cfb3b98ec24",
+        "resourceVersion": "11498097",
+        "uid": "a05e1b18-6051-4a8f-a2e7-04bf3fd2dfa7"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "gms-v1-glm-index-0928",
+          "namespace": "schwinns-vcluster",
+          "uid": "8f238a14-4147-4e78-8573-0cfb3b98ec24"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-glm-source-0928",
+            "uid": "733ee1d2-256c-40d5-b012-1759e077668e"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T01:15:58Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:52:28Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:52:28Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:52:28Z"
+          }
+        ],
+        "name": "podsnapshotcontent-b70f2a1f-4552-48f1-8981-2e0319c9c663",
+        "resourceVersion": "11494577",
+        "uid": "4ead2a2b-2465-429c-a052-86bffec71eba"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "gms-v1-server-bridge-0928",
+          "namespace": "schwinns-vcluster",
+          "uid": "b70f2a1f-4552-48f1-8981-2e0319c9c663"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-server-bridge-source-0928",
+            "uid": "4e75bca9-27c8-4530-a2cc-6e0f0f35f368"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:52:28Z",
+            "message": "checkpoint: prepare PageBroker checkpoint: PageBroker STORAGE_ERROR: filesystem error: cannot create directory: Disk quota exceeded [/checkpoints/.cs-matrix-staging/cluster-0967a26d-pool-14bee067-prctr-s2877/checkpoint/7411c668-e10f-4327-8595-2a52d8318e0d]",
+            "reason": "CheckpointFailed",
+            "status": "True",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T00:53:32Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-29T00:53:32Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-29T00:53:56Z"
+          }
+        ],
+        "name": "podsnapshotcontent-ecc284c8-1dd8-457a-9c40-5225d99ecb80",
+        "resourceVersion": "11494731",
+        "uid": "8058601e-1750-450b-9328-c8f0d9a50462"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "gms-v1-server-bridge-retry-0928",
+          "namespace": "schwinns-vcluster",
+          "uid": "ecc284c8-1dd8-457a-9c40-5225d99ecb80"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "gms-v1-server-bridge-source-0928",
+            "uid": "4e75bca9-27c8-4530-a2cc-6e0f0f35f368"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-29T00:53:56Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    }
+  ]
+}

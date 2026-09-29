@@ -1,0 +1,48 @@
+{
+  "apiVersion": "nvidia.com/v1alpha1",
+  "kind": "PodSnapshot",
+  "metadata": {
+    "annotations": {
+      "kubectl.kubernetes.io/last-applied-configuration": "{\"apiVersion\":\"nvidia.com/v1alpha1\",\"kind\":\"PodSnapshot\",\"metadata\":{\"annotations\":{},\"name\":\"gms-v1-glm-index-0928\",\"namespace\":\"schwinns-vcluster\"},\"spec\":{\"source\":{\"podRef\":{\"containers\":[\"main\"],\"name\":\"gms-v1-glm-source-0928\",\"uid\":\"733ee1d2-256c-40d5-b012-1759e077668e\"}}}}\n"
+    },
+    "creationTimestamp": "2026-09-29T01:12:01Z",
+    "finalizers": [
+      "nvidia.com/podsnapshotcontent-cleanup"
+    ],
+    "generation": 1,
+    "name": "gms-v1-glm-index-0928",
+    "namespace": "schwinns-vcluster",
+    "resourceVersion": "11498098",
+    "uid": "8f238a14-4147-4e78-8573-0cfb3b98ec24"
+  },
+  "spec": {
+    "source": {
+      "podRef": {
+        "containers": [
+          "main"
+        ],
+        "name": "gms-v1-glm-source-0928",
+        "uid": "733ee1d2-256c-40d5-b012-1759e077668e"
+      }
+    }
+  },
+  "status": {
+    "boundSnapshotContentName": "podsnapshotcontent-8f238a14-4147-4e78-8573-0cfb3b98ec24",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T01:15:58Z",
+        "message": "Checkpoint captured and verified",
+        "reason": "Captured",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T01:15:58Z",
+        "message": "Checkpoint captured and verified",
+        "reason": "Captured",
+        "status": "False",
+        "type": "Failed"
+      }
+    ]
+  }
+}

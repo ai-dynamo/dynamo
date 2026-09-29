@@ -1,0 +1,2 @@
+{"event": "sockets", "elapsed_s": 0.13409829139709473, "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"}
+{"rank": 0, "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f", "event": "published", "started_epoch": 1790644895.160431, "published_epoch": 1790644899.3622987, "elapsed_s": 4.2018678188323975}

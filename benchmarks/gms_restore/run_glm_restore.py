@@ -18,6 +18,8 @@ from kubernetes import client, config
 
 p = argparse.ArgumentParser()
 p.add_argument("--case", required=True)
+p.add_argument("--workers", type=int, default=4)
+p.add_argument("--numa", action="store_true")
 p.add_argument("--capture-dir", type=Path)
 p.add_argument("--same-claim", action="store_true")
 p.add_argument("--fast-gate", action="store_true")
@@ -156,6 +158,7 @@ pod["spec"]["volumes"].append(
     }
 )
 main = pod["spec"]["containers"][0]
+main["imagePullPolicy"] = "IfNotPresent"
 main["command"] = (
     ["python3", "-u", "/snapshot-app/publication_gate.py"]
     if a.fast_gate
@@ -175,6 +178,7 @@ map_value = ",".join(
 )
 main["env"].append({"name": "SNAPSHOT_CUDA_DEVICE_MAP", "value": map_value})
 for rank, c in enumerate(pod["spec"]["containers"][1:]):
+    c["imagePullPolicy"] = "IfNotPresent"
     c["env"].append({"name": "GMS_PROTOTYPE_BUFFERED_READS", "value": "1"})
     c["volumeMounts"] = [v for v in c["volumeMounts"] if v["name"] != "ram-weights"]
     c["volumeMounts"].append(
@@ -190,6 +194,10 @@ for rank, c in enumerate(pod["spec"]["containers"][1:]):
         "--artifact-root",
         str(Path(capture["ranks"][0]["artifact"]).parent),
     ]
+    if a.backend == "fused":
+        c["command"] += ["--workers", str(a.workers)]
+        if a.numa:
+            c["command"].append("--numa")
     if a.backend == "nixl":
         c["command"] += ["--mode", "load"]
     c["readinessProbe"] = {
@@ -320,6 +328,11 @@ text = remote(["cat", "/snapshot-control/sglang-restore-ready"], "main")
 assert "berlin" in text.lower(), text
 result = {
     "backend": a.backend,
+    "workers": a.workers,
+    "numa": a.numa,
+    "fast_gate": a.fast_gate,
+    "capture_id": capture["capture_id"],
+    "storage": "tmpfs weights; NFS engine checkpoint",
     "create_epoch": started,
     "publication_observed_epoch": publication_observed,
     "trigger_epoch": triggered,

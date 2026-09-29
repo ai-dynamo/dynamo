@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -15,6 +16,8 @@ from threading import Event
 started = time.time()
 p = argparse.ArgumentParser()
 p.add_argument("--rank", type=int, required=True)
+p.add_argument("--workers", type=int, default=4)
+p.add_argument("--numa", action="store_true")
 p.add_argument("--artifact-root", required=True)
 p.add_argument("--checkpoint-target", action="store_true")
 p.add_argument("--retain-anchors", action="store_true")
@@ -34,6 +37,41 @@ if os.environ.get("GMS_PROTOTYPE_INTERPOSE_CUDA_PYTHON") == "1":
 init_vmm(VMMDeviceType.CUDA)
 vmm = get_vmm()
 uuid = get_device_uuid(0)
+if a.numa:
+    rows = subprocess.check_output(
+        ["nvidia-smi", "--query-gpu=uuid,pci.bus_id", "--format=csv,noheader"],
+        text=True,
+    )
+    pci = next(
+        line.split(",")[1].strip()
+        for line in rows.splitlines()
+        if line.split(",")[0].strip() == uuid
+    )
+    domain, rest = pci.split(":", 1)
+    pci = f"{int(domain, 16):04x}:{rest}".lower()
+    node = int(Path(f"/sys/bus/pci/devices/{pci}/numa_node").read_text())
+    if node < 0:
+        raise RuntimeError("GPU NUMA node unknown")
+    cpus = set()
+    for part in (
+        Path(f"/sys/devices/system/node/node{node}/cpulist")
+        .read_text()
+        .strip()
+        .split(",")
+    ):
+        limits = [int(x) for x in part.split("-")]
+        cpus.update(range(limits[0], limits[-1] + 1))
+    os.sched_setaffinity(0, cpus & os.sched_getaffinity(0))
+    print(
+        json.dumps(
+            {
+                "event": "numa_affinity",
+                "node": node,
+                "cpus": sorted(os.sched_getaffinity(0)),
+            }
+        ),
+        flush=True,
+    )
 root = Path(os.environ["GMS_SOCKET_DIR"])
 root.mkdir(exist_ok=True)
 lifecycle = GMSCheckpointLifecycle()
@@ -65,7 +103,7 @@ with ExitStack() as stack:
                 get_socket_path(a.rank),
                 0,
                 transfer_backend="posix-direct",
-                max_workers=4,
+                max_workers=a.workers,
             )
             published = time.time()
             record = {

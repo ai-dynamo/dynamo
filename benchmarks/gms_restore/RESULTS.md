@@ -89,7 +89,7 @@ NFS/PageBroker stack. These results cannot establish a cold-storage speedup.
 
 Engine GPU checkpoint payload was 147,958,267,904 bytes (18,494,783,488 per rank),
 with about 57 GiB of CPU pages. Agent capture took 228.354 s, of which CRIU was
-211.515 s. The next experiment fixes the image's DSA cache hook name and trims
+211.515 s. The subsequent experiment fixes the image's DSA cache hook name and trims
 unused libc allocations before capture. Initial-capture artifacts in tmpfs were
 retired after these completed trials to make room for the improved capture;
 all initial plans, manifests and measured outputs remain in this branch.
@@ -107,6 +107,56 @@ When a stalled source pod released its claim, another namespace allocated all
 8 source-node GPUs. No foreign workloads or agents were changed. The large-model
 trial moved to s2877; the measured GLM restores used same-node capture/restore. Cross-node mapping
 correctness was established only by the Qwen test above.
+
+## GLM TP8, corrected cache-release hook
+
+The image uses SGLang 0.5.16's `_create_index_buffers`, whereas the plugin expected
+`_create_index_key_cache`. Matching the release/recreation hook to the image
+reduced the native GPU payload to **44,275,073,024 bytes** (5,534,384,128 per rank),
+70.1% below the first GMS capture. Trimming libc allocations had little effect:
+CPU pages remained about 56 GiB. Agent capture took 237.282 s, including 226.557 s
+CRIU and 9.190 s CUDA checkpoint. The exact 448 GiB GMS allocation set was saved
+again for this capture; artifacts from the previous capture were not substituted.
+
+The fused loader starts one V1 server per named DRA rank, uses local `cuda:0`, and
+copies through pinned buffers. NUMA mode sets CPU affinity to the GPU's NUMA node
+before creating loader threads and pinned buffers. All transfers finish and all
+ranks publish before the engine restore trigger. The manifest/UUID/ID/size gate
+runs inside the placeholder; no CUDA initialization is needed for that gate.
+
+| Trial | All-rank preload span | Agent engine restore | Pod creation to coherent readiness |
+|---|---:|---:|---:|
+| fused-default4-2 | 6.850 s | 13.573 s | 31.583 s |
+| fused-numa4-1 | 5.930 s | 13.335 s | 28.407 s |
+| fused-numa4-2 | 5.968 s | 14.209 s | 28.599 s |
+| fused-numa4-3 | 6.064 s | 14.800 s | 28.875 s |
+| fused-numa8-1 | 7.635 s | 13.512 s | 32.248 s |
+| fused-numa8-2 | 6.454 s | 15.015 s | 29.026 s |
+| fused-ram-1 | 8.084 s | 13.639 s | 37.470 s |
+
+The three four-worker NUMA trials averaged **28.627 s** pod-to-readiness
+(range 28.407–28.875 s), with mean preload
+5.987 s and mean agent restore 14.115 s.
+
+These are warm-node, pre-staged-weight trials. The first two revised-capture
+trials used `Always` image pulls; subsequent trials use `IfNotPresent` with the
+same digest-pinned images already cached. Container startup skew contributes to
+the all-rank preload span and pod duration. Four workers per rank with NUMA
+affinity is the recommended prototype setting from this small sample; eight
+workers did not improve the measured whole pipeline.
+
+All revised-capture trials passed Berlin generation before readiness and a second
+Rayleigh-scattering request afterward, with CUDA graphs enabled. They are
+same-node GLM trials; the independent Qwen trial establishes cross-node rank
+permutation correctness. Agent-only improvement must not be represented as an
+end-to-end improvement over the prior 25.14 s **agent-only** baseline. A fair cold
+storage comparison and full Dynamo frontend/worker deployment remain open.
+
+Next steps are to repeat on a durable local-NVMe or sufficiently provisioned NFS
+artifact tier, use the same communication settings for a no-GMS control, and
+integrate the rank plan and publication gate into the production controller.
+Checkpointed GMS needs a working post-restore CUDA allocation export/import path
+before performance comparison is meaningful.
 
 ## Prototype boundaries
 
@@ -129,3 +179,14 @@ unknown-marker warnings); CUDA/executor/podcontract Go tests passed; 14 Rust cor
 tests passed. Benchmark scripts pass Ruff. GMS server export remained broken in
 an additional explicit ctypes dispatch experiment; no checkpointed-server timing
 is counted as a functional result.
+
+## Artifact retention and cleanup
+
+Trial logs, rank plans, manifests, timing summaries, inference outputs, and
+retired snapshot metadata are committed here. Large CUDA/CRIU payloads are not
+Git artifacts. The temporary GLM RAM weight sets and their associated snapshots
+were retired after the completed trials, so replay requires a fresh matching
+capture. The smaller Qwen checkpoint and its durable matching artifacts were
+retained. Experiment pods and GPU claims are released, and the original agent,
+operator, configuration, node levers and private NFS mounts are restored; see
+`results/cleanup.txt` for the recorded cleanup outcome.

@@ -1,0 +1,8 @@
+{
+  "agent_template": true,
+  "agent_update_strategy": true,
+  "operator_template": true,
+  "config_data": true,
+  "no_experiment_pods": true,
+  "no_experiment_claims": true
+}
