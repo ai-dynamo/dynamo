@@ -274,6 +274,7 @@ fn registry_error(error: RegistryError) -> Response {
     let status = match &error {
         RegistryError::InvalidBlockSize
         | RegistryError::InvalidDpSize
+        | RegistryError::DpSizeTooLarge { .. }
         | RegistryError::InvalidDpRange { .. } => StatusCode::BAD_REQUEST,
         RegistryError::BlockSizeMismatch { .. } | RegistryError::DuplicateWorker { .. } => {
             StatusCode::CONFLICT
