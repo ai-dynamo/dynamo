@@ -129,6 +129,7 @@ where
     T: tmq::FromZmqSocket<T>,
 {
     builder
+        .set_ipv6(true)
         .set_sndhwm(ZMQ_SNDHWM)
         .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
@@ -147,7 +148,10 @@ fn configure_subscribe_builder_with_hwm<T>(
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    builder
+        .set_ipv6(true)
+        .set_rcvhwm(rcvhwm)
+        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -1058,14 +1062,24 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    #[case("inproc")]
+    #[case("tcp://127.0.0.1:0")]
+    #[case("tcp://[::1]:0")]
     #[tokio::test]
-    async fn dynamic_sub_socket_adds_and_removes_publishers() {
+    async fn dynamic_sub_socket_adds_and_removes_publishers(#[case] endpoint: &str) {
         let process = std::process::id();
-        let endpoint_a = format!("inproc://dynamo-zmq-dynamic-a-{process}");
-        let endpoint_b = format!("inproc://dynamo-zmq-dynamic-b-{process}");
+        let (endpoint_a, endpoint_b) = if endpoint == "inproc" {
+            (
+                format!("inproc://dynamo-zmq-dynamic-a-{process}"),
+                format!("inproc://dynamo-zmq-dynamic-b-{process}"),
+            )
+        } else {
+            (endpoint.to_string(), endpoint.to_string())
+        };
         let topic = "dynamic-subscriber";
-        let (publisher_a, _) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
-        let (publisher_b, _) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
+        let (publisher_a, endpoint_a) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
+        let (publisher_b, endpoint_b) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
         let mut subscriber =
             DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint_a, topic, ZMQ_RCVHWM).unwrap();
         subscriber.add_endpoint(&endpoint_b).unwrap();

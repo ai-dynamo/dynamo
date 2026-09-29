@@ -41,10 +41,7 @@ lib/sidecar/
 │       ├── request_tests.rs    # Request fields, public refusals, routing and rendezvous
 │       └── response_tests.rs   # Token/logprob conversion, stops, usage and errors
 └── testkit/
-    ├── src/                    # Integration helpers: server, controls and assertions
-    └── tests/
-        ├── conformance.rs      # Shared vLLM/SGLang integration scenarios
-        └── support/            # Integration fixture interface and backend adapters
+    └── README.md               # This guide to sidecar testing
 ```
 
 Small suites use an inline `#[cfg(test)] mod tests` in their production module.
@@ -120,16 +117,10 @@ nightly Rust coverage. There are no per-test lane markers or custom unit runner.
 
 ## Integration boundary
 
-Testkit's `tests/conformance.rs` checks streaming, failures, cancellation and
-cleanup against both real sidecars connected to local Mocker servers. A Mocker
-simulates the engine's responses without loading a model. The existing
-`lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` suites retain additional
-backend integration coverage.
+The existing `lib/mocker/servers/{vllm,sglang}/tests/sidecar.rs` suites connect
+real sidecars to local Mocker servers. A Mocker simulates the engine's responses
+without loading a model. These checks cover interactions across components;
+real-engine compatibility and GPU behavior require their own integration tests.
 
-```sh
-cargo test --locked -p dynamo-sidecar-testkit --lib --test conformance
-```
-
-Testkit's integration fixtures and adapters stay separate from backend-local
-unit fixtures. Real-engine compatibility and GPU behavior require their own
-integration tests.
+Shared integration helpers and scenarios will be documented here when they are
+added. They do not need to share the backend-local unit fixtures.

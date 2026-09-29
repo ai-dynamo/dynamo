@@ -1287,3 +1287,46 @@ fn preprocessed_features_cannot_mix_with_raw_media() {
     .expect_err("raw media and preprocessed features must not be mixed");
     assert!(error.to_string().contains("cannot be mixed"));
 }
+
+#[test]
+fn frontend_router_metadata_does_not_require_engine_support() {
+    let baseline = build_generate_request(
+        request(),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap();
+    for (fields, is_supported) in [
+        (json!(["worker_id", "timing"]), true),
+        (json!(["worker_id", "engine_data"]), false),
+    ] {
+        let mut request = request();
+        request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = fields;
+        let result = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        );
+        if is_supported {
+            assert_eq!(result.unwrap(), baseline);
+        } else {
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[test]
+fn frontend_router_metadata_rejects_non_array_fields() {
+    let mut request = request();
+    request.extra_args.as_mut().unwrap()["nvext"]["extra_fields"] = json!("worker_id");
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "InvalidRequest: extra_args.nvext.extra_fields must be an array"
+    );
+}
