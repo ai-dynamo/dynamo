@@ -78,6 +78,6 @@ spec:
             - --disaggregation-mode
             - prefill
             - --kv-transfer-config
-            - '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+            - '{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
             - --kv-events-config
             - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
