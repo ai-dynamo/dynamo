@@ -26,8 +26,7 @@ pub(crate) fn build_generate_request(
         .token_ids
         .iter()
         .map(|token| {
-            i32::try_from(*token)
-                .map_err(|_| client::invalid_arg(format!("token id {token} does not fit in i32")))
+            i32::try_from(*token).map_err(|_| client::invalid_request("token ids must fit in i32"))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let max_new_tokens = if mode.is_prefill() {
@@ -38,7 +37,7 @@ pub(crate) fn build_generate_request(
             .max_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_arg("max_tokens does not fit in i32"))?
+            .map_err(|_| client::invalid_request("max_tokens does not fit in i32"))?
     };
     let min_new_tokens = if mode.is_prefill() {
         None
@@ -48,7 +47,7 @@ pub(crate) fn build_generate_request(
             .min_tokens
             .map(i32::try_from)
             .transpose()
-            .map_err(|_| client::invalid_arg("min_tokens does not fit in i32"))?
+            .map_err(|_| client::invalid_request("min_tokens does not fit in i32"))?
     };
 
     let mut stop_token_ids = Vec::new();
@@ -60,9 +59,8 @@ pub(crate) fn build_generate_request(
     .flatten()
     {
         for token in tokens {
-            let token = i32::try_from(*token).map_err(|_| {
-                client::invalid_arg(format!("stop token id {token} does not fit in i32"))
-            })?;
+            let token = i32::try_from(*token)
+                .map_err(|_| client::invalid_request("stop token ids must fit in i32"))?;
             if !stop_token_ids.contains(&token) {
                 stop_token_ids.push(token);
             }
@@ -102,7 +100,7 @@ pub(crate) fn build_generate_request(
             .max(output_options.prompt_logprobs.unwrap_or(0))
     };
     let top_logprobs_num = i32::try_from(top_logprobs_num)
-        .map_err(|_| client::invalid_arg("requested logprobs does not fit in i32"))?;
+        .map_err(|_| client::invalid_request("requested logprobs does not fit in i32"))?;
     let logprob_start_len = if mode.is_prefill() {
         -1
     } else {
@@ -111,7 +109,7 @@ pub(crate) fn build_generate_request(
     let routed_dp_rank = routed_dp_rank(request, mode)
         .map(i32::try_from)
         .transpose()
-        .map_err(|_| client::invalid_arg("routed dp_rank does not fit in i32"))?;
+        .map_err(|_| client::invalid_request("routed dp_rank does not fit in i32"))?;
     let lora_path = request
         .routing
         .as_ref()
@@ -156,47 +154,50 @@ pub(crate) fn routed_dp_rank(
 }
 
 fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
-    if request.token_ids.is_empty() {
-        return Err(client::invalid_arg("token_ids must not be empty"));
-    }
+    // prompt_embeds requests arrive with empty token_ids, so check them first.
     if request.prompt_embeds.is_some() {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "prompt_embeds are not supported by SGLang's native gRPC proto",
         ));
     }
+    if request.token_ids.is_empty() {
+        return Err(client::invalid_request("token_ids must not be empty"));
+    }
     if request.multi_modal_data.is_some() || request.mm_processor_kwargs.is_some() {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "multimodal payloads are not supported by SGLang's native Generate RPC",
         ));
     }
     if request.sampling_options.n.unwrap_or(1) != 1 {
-        return Err(client::invalid_arg("n must be 1 for the SGLang sidecar"));
+        return Err(client::invalid_request(
+            "n must be 1 for the SGLang sidecar",
+        ));
     }
     if request.sampling_options.best_of.unwrap_or(1) != 1 {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "best_of is not represented by SGLang's native gRPC proto",
         ));
     }
     if request.sampling_options.use_beam_search.unwrap_or(false) {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "beam search is not represented by SGLang's native gRPC proto",
         ));
     }
     if let Some(penalty) = request.sampling_options.length_penalty
         && (penalty - 1.0).abs() > f32::EPSILON
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "length_penalty is not represented by SGLang's native gRPC proto",
         ));
     }
     if request.sampling_options.seed.is_some() {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "seed is not represented by SGLang's native gRPC proto",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
-        return Err(client::invalid_arg(
-            "max_thinking_tokens is not represented by SGLang's native gRPC proto",
+        return Err(client::invalid_request(
+            "thinking_token_budget (max_thinking_tokens) is not represented by SGLang's native gRPC proto",
         ));
     }
     if request
@@ -204,7 +205,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .include_stop_str_in_output
         .unwrap_or(false)
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "include_stop_str_in_output is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -214,7 +215,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .as_ref()
         .is_some_and(|tokens| !tokens.is_empty())
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "visible stop-token semantics are not represented by SGLang's native gRPC proto",
         ));
     }
@@ -231,7 +232,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
             || guided.whitespace_pattern.is_some()
             || guided.structural_tag.is_some())
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "the native SGLang gRPC proto currently supports only JSON-schema and regex guided decoding",
         ));
     }
@@ -242,7 +243,7 @@ fn validate_request(request: &PreprocessedRequest) -> Result<(), DynamoError> {
         .unwrap_or(0)
         != 0
     {
-        return Err(client::invalid_arg(
+        return Err(client::invalid_request(
             "engine priority is not represented by SGLang's native gRPC proto",
         ));
     }
@@ -821,9 +822,48 @@ mod tests {
 
     #[test]
     fn decode_requires_rendezvous_params() {
-        assert!(
-            build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None,)
-                .is_err()
+        let error =
+            build_generate_request(&request(), "rid-3", DisaggregationMode::Decode, None, None)
+                .unwrap_err();
+        assert_eq!(error.public_message(), None);
+    }
+
+    #[test]
+    fn request_refusal_is_public() {
+        let mut refused = request();
+        refused.mm_processor_kwargs = Some(json!({}));
+        let error = build_generate_request(
+            &refused,
+            "rid-5",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.public_message(),
+            Some("multimodal payloads are not supported by SGLang's native Generate RPC")
+        );
+
+        let mut embeds = request();
+        embeds.token_ids = Vec::new().into();
+        embeds.prompt_embeds = Some("embeds".to_string());
+        let error =
+            build_generate_request(&embeds, "rid-6", DisaggregationMode::Aggregated, None, None)
+                .unwrap_err();
+        assert_eq!(
+            error.public_message(),
+            Some("prompt_embeds are not supported by SGLang's native gRPC proto")
+        );
+
+        let mut stop = request();
+        stop.stop_conditions.stop_token_ids = Some(vec![u32::MAX]);
+        let error =
+            build_generate_request(&stop, "rid-7", DisaggregationMode::Aggregated, None, None)
+                .unwrap_err();
+        assert_eq!(
+            error.public_message(),
+            Some("stop token ids must fit in i32")
         );
     }
 
