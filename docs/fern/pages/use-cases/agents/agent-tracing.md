@@ -8,7 +8,7 @@ subtitle: Export Dynamo request traces, tool-call metadata, and Perfetto timelin
 Agent tracing captures request timing, token counts, worker placement, finish metadata, and replay hashes for eligible LLM requests. Requests with [session identity](session-ids.mdx) also carry agent context, which lets analysis tools group LLM turns and tool activity into the same run.
 
 > [!IMPORTANT]
-> Request traces contain metadata, not payloads. Dynamo does not store prompts, responses, or tool-call arguments in these traces.
+> Default request traces do not capture prompt, response, or tool-call argument bodies. However, `agent_context.agent_headers` contains unredacted, client-supplied values and can include arbitrary data. These headers appear on `request_end` rows independently of `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST`, which applies only to optional `request_payload` rows. Do not send secrets or prompt content in agent metadata headers. See [Request Trace Reference](../../reference/observability/request-traces.mdx#request_end) for the capture boundary.
 
 <a id="enable-output"></a>
 

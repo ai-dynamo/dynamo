@@ -40,10 +40,12 @@ Custom filters, scorers, and pickers can also read opaque agent headers from the
 ```rust
 use dynamo_kv_router::plugins::worker_selection::SessionContext;
 
-fn raw_prompt_ids(session: &SessionContext) -> Option<&[String]> {
-    session.agent_headers().get("x-claude-code-prompt-id").map(Vec::as_slice)
+fn raw_request_class(session: &SessionContext) -> Option<&[String]> {
+    session.agent_headers().get("x-claude-code-request-class").map(Vec::as_slice)
 }
 ```
+
+For example, Claude Code can send `main` or `subagent` as the request class. The slice preserves repeated header values; the plugin decides how to interpret them and must tolerate unknown values.
 
 Header values are untrusted observations for the current request. Missing keys mean no value was captured. The map preserves unknown names within supported header families and repeated values. A plugin owns any cross-agent normalization; Dynamo does not classify raw compaction or request-class headers. Capture limits are documented in [Agent Harnesses](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx#compaction-signals).
 
