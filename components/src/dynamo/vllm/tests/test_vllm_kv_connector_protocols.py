@@ -44,6 +44,7 @@ _MOONCAKE_MOD = (
 
 @pytest.fixture(autouse=True)
 def clear_mooncake_advertise_host(monkeypatch):
+    """Isolate each test from advertised-host overrides in the environment."""
     monkeypatch.delenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", raising=False)
 
 
@@ -119,6 +120,7 @@ def test_nixl_decode_returns_none_when_engine_omits():
 
 
 def test_mooncake_prefill_request_shape(fake_mooncake):
+    """Prefill sends only direction flags and a nonempty transfer ID."""
     proto = MooncakeConnectorProtocol(_config("MooncakeConnector"))
     params = proto.prefill_request_kv_transfer_params()
     assert params["do_remote_decode"] is True
@@ -180,6 +182,7 @@ def test_mooncake_decode_uses_vllm_bootstrap_helper_and_prefixes_http(
 def test_mooncake_decode_advertised_host_preserves_helper_port(
     monkeypatch, advertised_host, port
 ):
+    """Host overrides preserve the helper port and local registration address."""
     # These ports are only serialized into URLs; no sockets are opened.
     _install_fake_mooncake(monkeypatch, "127.0.0.1", port)
     if advertised_host is not None:
@@ -631,6 +634,7 @@ def test_real_vllm_mooncake_helper_signature_is_compatible():
     ],
 )
 def test_mooncake_bootstrap_url_host(monkeypatch, source, host, expected):
+    """Helper and override hosts produce parseable URLs, including IPv6 literals."""
     _install_fake_mooncake(
         monkeypatch, host if source == "helper" else "127.0.0.1", 9123
     )
@@ -660,6 +664,7 @@ def test_mooncake_bootstrap_url_host(monkeypatch, source, host, expected):
     ],
 )
 def test_mooncake_rejects_invalid_advertised_host(monkeypatch, fake_mooncake, host):
+    """Reject malformed hosts and URL components before publishing an address."""
     monkeypatch.setenv("DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST", host)
     proto = MooncakeConnectorProtocol(_config("MooncakeConnector", engine_id="prefill"))
     with pytest.raises(ValueError, match="Invalid Mooncake bootstrap host"):
@@ -704,6 +709,7 @@ def test_mooncake_rejects_invalid_advertised_host(monkeypatch, fake_mooncake, ho
 def test_mooncake_real_bootstrap_helper(
     monkeypatch, parallel_kwargs, expected_host, override
 ):
+    """Preserve bootstrap ownership and transfer metadata across real vLLM modes."""
     # Use the installed engine's configuration and helper, never the fake fixture.
     monkeypatch.setenv("VLLM_DP_MASTER_IP", "127.0.0.1")
     config_module = pytest.importorskip("vllm.config")

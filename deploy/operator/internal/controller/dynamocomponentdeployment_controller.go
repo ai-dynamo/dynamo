@@ -907,7 +907,6 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 
 	renderer := r.workloadRenderer()
 	containerGPUs := renderer.containerGPUCount(ctx, opt.dynamoComponentDeployment)
-	// nolint: gosimple
 	podTemplateSpec, err := renderer.generatePodTemplateSpec(ctx, opt.dynamoComponentDeployment, dynamo.RoleMain, containerGPUs)
 	if err != nil {
 		return

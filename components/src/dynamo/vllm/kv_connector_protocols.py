@@ -73,6 +73,7 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     worker so it can pull from this prefill's bootstrap server."""
 
     def __init__(self, vllm_config: Any) -> None:
+        """Resolve the bootstrap helper and allocate this request's transfer ID."""
         super().__init__(vllm_config)
         # Resolve vLLM's canonical bootstrap-addr helper at construction so
         # missing-mooncake / renamed-path errors surface at request setup
@@ -94,6 +95,7 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
         self._transfer_id: str = str(uuid.uuid4())
 
     def prefill_request_kv_transfer_params(self) -> Dict[str, Any]:
+        """Start the prefill transfer using the ID shared with the decode request."""
         return {
             "do_remote_decode": True,
             "do_remote_prefill": False,
@@ -103,6 +105,12 @@ class MooncakeConnectorProtocol(KvConnectorProtocol):
     def decode_request_kv_transfer_params(
         self, prefill_response: Any
     ) -> Optional[Dict[str, Any]]:
+        """Advertise the bootstrap URL and transfer ID to the decode worker.
+
+        A nonempty host override changes only the advertised host; vLLM still
+        supplies the port. Invalid hosts raise ``ValueError`` before publication.
+        The engine's prefill response is unused by this push-based protocol.
+        """
         host, port = self._get_bootstrap_addr(self._vllm_config)
         # vLLM may return loopback for local registration in DP1 or external/hybrid
         # load balancing. Only the address advertised to remote decoders changes.

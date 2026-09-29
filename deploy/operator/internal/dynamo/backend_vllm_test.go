@@ -1365,16 +1365,20 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 	}
 }
 
+// TestVLLMBackend_MooncakeAdvertiseHost verifies opt-in host overrides survive rendering.
 func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 	t.Log("Define explicit prefill overrides and components that must remain unchanged")
-	const envName = "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST"
+	const (
+		envName      = "DYN_VLLM_MOONCAKE_BOOTSTRAP_ADVERTISE_HOST"
+		podNameField = "metadata.name"
+	)
 	podIP := corev1.EnvVar{Name: envName, ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "status.podIP"},
 	}}
 	literal := corev1.EnvVar{Name: envName, Value: "10.42.1.17"}
 	empty := corev1.EnvVar{Name: envName, Value: ""}
 	customRef := corev1.EnvVar{Name: envName, ValueFrom: &corev1.EnvVarSource{
-		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"},
+		FieldRef: &corev1.ObjectFieldSelector{FieldPath: podNameField},
 	}}
 	tests := []struct {
 		name          string
@@ -1387,9 +1391,9 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 		{"prefill user literal", v1beta1.ComponentTypePrefill, &literal, &literal},
 		{"prefill user empty", v1beta1.ComponentTypePrefill, &empty, &empty},
 		{"prefill user reference", v1beta1.ComponentTypePrefill, &customRef, &customRef},
-		{"decode", v1beta1.ComponentTypeDecode, nil, nil},
-		{"worker", v1beta1.ComponentTypeWorker, nil, nil},
-		{"frontend", v1beta1.ComponentTypeFrontend, nil, nil},
+		{"decode unchanged without opt in", v1beta1.ComponentTypeDecode, nil, nil},
+		{"worker unchanged without opt in", v1beta1.ComponentTypeWorker, nil, nil},
+		{"frontend unchanged without opt in", v1beta1.ComponentTypeFrontend, nil, nil},
 		{"unspecified", "", nil, nil},
 	}
 	for _, tt := range tests {
@@ -1404,7 +1408,7 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 
 			t.Log("Render twice to verify no default is added and explicit values are preserved")
 			for range 2 {
-				require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, "prefill", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+				require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, component, string(v1beta1.ComponentTypePrefill), &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 				require.Equal(t, tt.want, findEnvVar(container.Env, envName))
 				require.Equal(t, "keep", findEnvVar(container.Env, "EXISTING").Value)
 				if tt.want != nil {
@@ -1417,9 +1421,16 @@ func TestVLLMBackend_MooncakeAdvertiseHost(t *testing.T) {
 	}
 }
 
+// TestVLLMBackend_MooncakeOperatorUpgradePreservesOldRender guards against operator-only rollouts.
 func TestVLLMBackend_MooncakeOperatorUpgradePreservesOldRender(t *testing.T) {
+	t.Log("Cover workloads created before and after advertised-host support")
+	const (
+		legacyOriginVersion  = "1.4.0"
+		currentOriginVersion = "1.5.0"
+	)
+
 	for _, connector := range []string{"MooncakeConnector", "NixlConnector"} {
-		for _, origin := range []string{"", "1.4.0", "1.5.0"} {
+		for _, origin := range []string{"", legacyOriginVersion, currentOriginVersion} {
 			t.Run(connector+"/"+origin, func(t *testing.T) {
 				t.Log("Use the pre-change single-node prefill container render, without an advertised-host env")
 				oldRender := &corev1.Container{
@@ -1429,7 +1440,7 @@ func TestVLLMBackend_MooncakeOperatorUpgradePreservesOldRender(t *testing.T) {
 					Env:     []corev1.EnvVar{{Name: "EXISTING", Value: "keep"}},
 				}
 				component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: "prefill",
+					ComponentType: string(v1beta1.ComponentTypePrefill),
 					Annotations:   map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin},
 				})
 
@@ -1438,7 +1449,7 @@ func TestVLLMBackend_MooncakeOperatorUpgradePreservesOldRender(t *testing.T) {
 				t.Log("Reconcile the old render through the updated backend and require exact container preservation")
 				current := oldRender.DeepCopy()
 				backend := &VLLMBackend{}
-				require.NoError(t, backend.UpdateContainer(current, 1, RoleMain, component, "prefill", &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
+				require.NoError(t, backend.UpdateContainer(current, 1, RoleMain, component, string(v1beta1.ComponentTypePrefill), &GroveMultinodeDeployer{}, staticContainerGPUCount(0)))
 				require.Equal(t, oldRender, current)
 			})
 		}
