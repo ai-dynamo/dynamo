@@ -6,19 +6,18 @@ on:
 permissions:
   contents: read
 jobs:
-  probe:
-    runs-on: prod-deploy-tester-v1
-    timeout-minutes: 9
-    env:
-      PROBE_NAMESPACE: cuda-permission-${{ github.run_id }}-${{ github.run_attempt }}
+  build-helper:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-      - name: Run isolated permission comparison
+      - name: Compile helper
         shell: bash
         run: |
           set -euo pipefail
           command -v gcc dpkg-deb curl sha256sum
-          build_dir=$(mktemp -d "$RUNNER_TEMP/cuda-runtime-helper.XXXXXX")
+          build_dir="$RUNNER_TEMP/cuda-runtime-helper"
+          mkdir -p "$build_dir"
           curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-cudart-dev-13-0_13.0.96-1_amd64.deb \
             --output "$build_dir/cuda-headers.deb"
@@ -26,6 +25,28 @@ jobs:
           dpkg-deb --extract "$build_dir/cuda-headers.deb" "$build_dir/headers"
           gcc -std=gnu11 -O2 -Wall -Wextra -Werror .github/scripts/cuda-runtime-helper.c \
             -I "$build_dir/headers/usr/local/cuda-13.0/targets/x86_64-linux/include" -ldl -o "$build_dir/cuda-checkpoint-helper"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cuda-runtime-helper
+          path: ${{ runner.temp }}/cuda-runtime-helper/cuda-checkpoint-helper
+          if-no-files-found: error
+          retention-days: 1
+  probe:
+    needs: build-helper
+    runs-on: prod-deploy-tester-v1
+    timeout-minutes: 9
+    env:
+      PROBE_NAMESPACE: cuda-permission-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cuda-runtime-helper
+          path: ${{ runner.temp }}/cuda-runtime-helper
+      - name: Run isolated permission comparison
+        shell: bash
+        run: |
+          set -euo pipefail
           kubectl --request-timeout=10s create namespace "$PROBE_NAMESPACE"
           kubectl --request-timeout=10s label namespace "$PROBE_NAMESPACE" \
             nscleanup/enabled=true nscleanup/ttl=600 dynamo.github/run-id="${GITHUB_RUN_ID}"
@@ -33,7 +54,7 @@ jobs:
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-permission-probe \
             --from-file=.github/scripts/cuda-runtime-permission-probe.py
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-helper \
-            --from-file=cuda-checkpoint-helper="$build_dir/cuda-checkpoint-helper"
+            --from-file=cuda-checkpoint-helper="$RUNNER_TEMP/cuda-runtime-helper/cuda-checkpoint-helper"
           all_passed=true
           probe_node=""
           for mode in root-no-caps nonroot-no-caps; do
