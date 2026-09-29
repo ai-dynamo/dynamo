@@ -305,7 +305,7 @@ func (b *VLLMBackend) shouldInjectVLLMMpWaitLeaderInit(podSpec *corev1.PodSpec, 
 	}
 
 	args := parseVLLMLaunchArgs(getExpandedCommandLine(&podSpec.Containers[0]))
-	return args.DistributedExecutorBackendIsMp
+	return args.IsMpDistributedExecutorBackend
 }
 
 // updateVLLMMultinodeArgs dispatches to the appropriate injection function based on
@@ -323,7 +323,7 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, serviceName
 		injectMpDistributedLaunchFlags(container, role, serviceName, multinodeDeployer, numberOfNodes)
 	} else if needsDistributed {
 		injectRayDistributedLaunchFlags(container, role, serviceName, multinodeDeployer)
-	} else if args.EnableElasticEP {
+	} else if args.IsElasticEPEnabled {
 		// Elastic EP requires a single Ray cluster spanning all nodes.
 		// The operator's RPC-based DP coordination (--data-parallel-hybrid-lb) is
 		// explicitly incompatible with elastic EP — vLLM raises NotImplementedError
@@ -564,7 +564,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // these as equivalent, so any of them must trigger Ray-head injection.
 func IsElasticEPRayLaunch(container *corev1.Container) bool {
 	args := parseVLLMLaunchArgs(getExpandedCommandLine(container))
-	return args.EnableElasticEP && args.DataParallelBackendIsRay
+	return args.IsElasticEPEnabled && args.IsRayDataParallelBackend
 }
 
 // getExpandedCommandLine flattens Command and Args and splits any space-joined
@@ -592,16 +592,11 @@ var vllmShortFlagAliases = map[string]string{
 }
 
 // vllmNormalizedFlags is the set of canonical long flags this package's readers (hasFlag,
-// hasArg, getFlagValue) actually look for. Two things in normalizeVLLMFlags are restricted
-// to this set:
-//   - Underscore-to-dash rewriting: vLLM's FlexibleArgumentParser treats "_" and "-" as
-//     interchangeable in long option names ("--tensor_parallel_size" == "--tensor-parallel-size"),
-//     so a token is only rewritten when its dashed form is one of these -- an unrelated flag's
-//     spelling is left alone.
-//   - Equals-form splitting: an unrelated option's value can never be mistaken for one of
-//     these after normalization -- e.g. "--served-model-name=--enable-elastic-ep" must stay
-//     one token, not become a standalone "--enable-elastic-ep" that IsElasticEPRayLaunch would
-//     match.
+// hasArg, getFlagValue) actually look for. Underscore-to-dash rewriting in
+// normalizeVLLMFlags is restricted to this set: vLLM's FlexibleArgumentParser treats "_"
+// and "-" as interchangeable in long option names ("--tensor_parallel_size" ==
+// "--tensor-parallel-size"), so a token is only rewritten when its dashed form is one of
+// these -- an unrelated flag's spelling is left alone.
 var vllmNormalizedFlags = map[string]bool{
 	tensorParallelSizeFlag:    true,
 	pipelineParallelSizeFlag:  true,
@@ -612,29 +607,107 @@ var vllmNormalizedFlags = map[string]bool{
 	distributedExecutorFlag:   true,
 }
 
+// vllmValueFlags is the subset of vllmNormalizedFlags that take a value, and is what
+// equals-form splitting is restricted to. Splitting anything outside it would invent a
+// flag that vLLM never sees:
+//   - An unrelated option carrying one of these as its value must stay whole:
+//     "--served-model-name=--enable-elastic-ep" must not become a standalone
+//     "--enable-elastic-ep" that IsElasticEPRayLaunch would match.
+//   - --enable-elastic-ep itself is absent because vLLM registers it with
+//     argparse.BooleanOptionalAction, so it takes no argument and
+//     "--enable-elastic-ep=false" is not a request for elastic EP.
+var vllmValueFlags = map[string]bool{
+	tensorParallelSizeFlag:    true,
+	pipelineParallelSizeFlag:  true,
+	dataParallelSizeFlag:      true,
+	dataParallelSizeLocalFlag: true,
+	dataParallelBackendFlag:   true,
+	distributedExecutorFlag:   true,
+}
+
+// shellControlChars are the POSIX shell control operators and redirection characters.
+// strings.Fields has already consumed whitespace, so one of these surviving inside a token
+// means the shell ended the word there -- everything from it on is the next command, and
+// the engine only ever sees "ray" in "--data-parallel-backend=ray;".
+const shellControlChars = ";&|<>()"
+
+// vllmStringValueFlags is the subset of vllmValueFlags whose value hasArg compares as a
+// string, and is the only place a shell terminator is trimmed.
+//
+// Trimming is kept to these two because they are the two whose values were previously
+// matched by substring, which tolerated a terminator glued to the value; the numeric flags
+// have always gone through strconv.ParseInt, which does not. Restricting the trim the same
+// way leaves every numeric flag resolving exactly as it does today.
+//
+// It is safe here because every legal value of these two is a backend name (ray, mp, uni,
+// external_launcher) or a Python dotted import path, none of which can contain a shell
+// control character. This is deliberately not a shell parser: a quoted value ("ray") or
+// one built by expansion ($(BACKEND)) reads the same as it does today.
+var vllmStringValueFlags = map[string]bool{
+	dataParallelBackendFlag: true,
+	distributedExecutorFlag: true,
+}
+
+// trimShellTerminator returns the part of value that the shell would actually pass to the
+// program.
+func trimShellTerminator(value string) string {
+	if i := strings.IndexAny(value, shellControlChars); i >= 0 {
+		return value[:i]
+	}
+	return value
+}
+
 // normalizeVLLMFlags standardizes tokenized command-line arguments into a
 // single format: "--long-flag" followed by a separate "value" token. It
 // expands short aliases (e.g., "-dp" to "--data-parallel-size"), rewrites
 // underscore spellings of the flags this package reads to their dashed
-// form (e.g., "--tensor_parallel_size" to "--tensor-parallel-size"), and
-// splits combined pairs (e.g., "--flag=value") for those same flags.
+// form (e.g., "--tensor_parallel_size" to "--tensor-parallel-size"), splits
+// combined pairs (e.g., "--flag=value") for the flags that take a value, and
+// drops a shell control operator a manifest glued to the value of a
+// vllmStringValueFlags flag.
 func normalizeVLLMFlags(expanded []string) []string {
 	normalized := make([]string, 0, len(expanded))
+	trimNextValue := false
 	for _, arg := range expanded {
+		if trimNextValue {
+			trimNextValue = false
+			// A token starting with "-" is the next flag, not the previous
+			// flag's value, so let it fall through and be canonicalized.
+			if !strings.HasPrefix(arg, "-") {
+				normalized = append(normalized, trimShellTerminator(arg))
+				continue
+			}
+		}
 		flag, value, hasEquals := strings.Cut(arg, "=")
 		if canonical, ok := vllmShortFlagAliases[flag]; ok {
 			flag = canonical
 		} else if dashed := strings.ReplaceAll(flag, "_", "-"); vllmNormalizedFlags[dashed] {
 			flag = dashed
 		}
-		if hasEquals && !vllmNormalizedFlags[flag] {
+		if hasEquals && !vllmValueFlags[flag] {
 			normalized = append(normalized, arg)
 			continue
 		}
-		normalized = append(normalized, flag)
 		if hasEquals {
-			normalized = append(normalized, value)
+			if vllmStringValueFlags[flag] {
+				value = trimShellTerminator(value)
+			}
+			// No legal value of these flags begins with "--", so a value that
+			// does is not a value. Keeping the token whole stops it becoming a
+			// standalone flag that an exact-match reader would honor.
+			if strings.HasPrefix(value, "--") {
+				normalized = append(normalized, arg)
+				continue
+			}
+			normalized = append(normalized, flag, value)
+			continue
 		}
+		normalized = append(normalized, flag)
+		// Only --distributed-executor-backend is trimmed in the separated form.
+		// It is the one flag whose space-separated spelling was previously read
+		// off the unsplit command string, where the substring match spanned the
+		// space and tolerated a terminator on the value.
+		trimNextValue = flag == distributedExecutorFlag
 	}
 	return normalized
 }
@@ -649,13 +722,9 @@ func hasFlag(expandedArgs []string, flag string) bool {
 	return false
 }
 
-// vllmLaunchArgs is the result of parsing a container's launch command line
-// exactly once. Every function in this package that needs to know a vLLM
-// launch flag reads a field here instead of re-scanning the command line
-// itself, so there is exactly one place that interprets vLLM's flag
-// semantics (aliases, equals and underscore spellings) and no risk of two
-// readers disagreeing or a reader accidentally bypassing normalizeVLLMFlags
-// altogether.
+// vllmLaunchArgs is the result of parsing a container's launch command line exactly once,
+// so one place interprets vLLM flag semantics (aliases, equals and underscore spellings)
+// and two readers cannot disagree.
 type vllmLaunchArgs struct {
 	TensorParallelSize   int64
 	PipelineParallelSize int64
@@ -663,29 +732,20 @@ type vllmLaunchArgs struct {
 	// HasDataParallelSize distinguishes "--data-parallel-size not present" from
 	// "present and equal to vLLM's default of 1" -- callers use this to avoid
 	// injecting a duplicate flag when one is already present (e.g. from the profiler).
-	HasDataParallelSize bool
-	// DataParallelBackendIsRay is true when --data-parallel-backend (or its -dpb
-	// alias) is set to "ray".
-	DataParallelBackendIsRay bool
-	EnableElasticEP          bool
-	// DistributedExecutorBackendIsMp is true when --distributed-executor-backend
-	// is set to "mp".
-	DistributedExecutorBackendIsMp bool
+	HasDataParallelSize            bool
+	IsRayDataParallelBackend       bool
+	IsElasticEPEnabled             bool
+	IsMpDistributedExecutorBackend bool
 }
 
-// WorldSize is the number of ranks one engine occupies: tensor-parallel size
-// times pipeline-parallel size.
+// WorldSize is the number of ranks one engine occupies.
 func (a vllmLaunchArgs) WorldSize() int64 {
 	return a.TensorParallelSize * a.PipelineParallelSize
 }
 
-// parseVLLMLaunchArgs parses an already-expanded, normalized argument list
-// (see getExpandedCommandLine) into a vllmLaunchArgs value.
+// parseVLLMLaunchArgs requires an already-normalized list -- see getExpandedCommandLine.
 func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
-	// Enum-style flags read the last occurrence's value rather than hasArg's
-	// any-occurrence semantics: with "--data-parallel-backend ray
-	// --data-parallel-backend mp", vLLM resolves to "mp", and an
-	// any-occurrence check would still report "ray".
+	// Resolve enum-style flags to the value vLLM applies: their final occurrence.
 	dataParallelBackend := getFlagStringValue(expandedArgs, dataParallelBackendFlag)
 	distributedExecutorBackend := getFlagStringValue(expandedArgs, distributedExecutorFlag)
 
@@ -694,9 +754,9 @@ func parseVLLMLaunchArgs(expandedArgs []string) vllmLaunchArgs {
 		PipelineParallelSize:           getFlagValue(expandedArgs, pipelineParallelSizeFlag),
 		DataParallelSize:               getFlagValue(expandedArgs, dataParallelSizeFlag),
 		HasDataParallelSize:            hasFlag(expandedArgs, dataParallelSizeFlag),
-		DataParallelBackendIsRay:       dataParallelBackend == dataParallelBackendRay,
-		EnableElasticEP:                hasFlag(expandedArgs, enableElasticEPFlag),
-		DistributedExecutorBackendIsMp: distributedExecutorBackend == "mp",
+		IsRayDataParallelBackend:       dataParallelBackend == dataParallelBackendRay,
+		IsElasticEPEnabled:             hasFlag(expandedArgs, enableElasticEPFlag),
+		IsMpDistributedExecutorBackend: distributedExecutorBackend == "mp",
 	}
 }
 
@@ -790,11 +850,7 @@ func getFlagValue(expandedArgs []string, flag string) int64 {
 
 // getFlagStringValue returns the value of the last occurrence of flag in
 // expandedArgs, matching vLLM's FlexibleArgumentParser last-value-wins
-// precedence (the same rule getFlagValue applies to integers), or "" when
-// flag never appears. Using hasArg's any-occurrence semantics for an
-// enum-style flag like --data-parallel-backend would be wrong: with
-// "--data-parallel-backend ray --data-parallel-backend mp", vLLM resolves to
-// "mp", but an any-occurrence check would still report "ray".
+// precedence, or "" when flag never appears.
 func getFlagStringValue(expandedArgs []string, flag string) string {
 	value := ""
 	for i, arg := range expandedArgs {

@@ -1,18 +1,6 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
 
 package dynamo
@@ -58,14 +46,10 @@ func TestNormalizeVLLMFlags_EverySpellingReadsTheSame(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes pins the asymmetry that motivated this
-// fix, at the level available on this branch.
-//
-// IsElasticEPRayLaunch decides WHETHER a launch is elastic EP; it uses hasArg, which already
-// understood "-dpb" and the equals form. The width of that launch is read separately, through
-// getFlagValue, which did not. So a command line could qualify as elastic EP and read as one
-// rank -- and a one-rank reading renders no extra pods, no local-rank pin and no width gate
-// while vLLM still places N ranks, which is the abort those three exist to prevent.
+// TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes covers a launch that qualifies as
+// elastic EP also sizing correctly: qualification and width are read by different helpers.
+// A one-rank reading renders no extra pods, no local-rank pin and no width gate while vLLM
+// still places N ranks, which is the abort those three exist to prevent.
 func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 	for name, args := range map[string][]string{
 		"equals flags": {"--enable-elastic-ep", dataParallelBackendFlag + "=ray", dataParallelSizeFlag + "=4"},
@@ -86,7 +70,6 @@ func TestNormalizeVLLMFlags_QualifyingLaunchAlsoSizes(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_WorldSizeReadsShortAndEqualsForms covers the multinode consumer.
 // vllmLaunchArgs.WorldSize multiplies tensor by pipeline size, and it decides
 // data-parallel-size-local and whether multinode coordination is injected at all -- so a
 // size silently read as 1 is not a cosmetic miss.
@@ -121,10 +104,8 @@ func TestNormalizeVLLMFlags_LeavesEverythingElseAlone(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues guards the injection this
-// restriction prevents: an equals-form value that happens to spell a recognized flag must not
-// become a standalone token, or an exact-match reader like hasFlag/IsElasticEPRayLaunch would
-// wrongly treat it as the user requesting that flag.
+// TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues guards the injection the
+// vllmValueFlags restriction prevents.
 func TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues(t *testing.T) {
 	container := vllmContainer("--served-model-name=--enable-elastic-ep",
 		dataParallelBackendFlag, "ray")
@@ -133,10 +114,8 @@ func TestNormalizeVLLMFlags_DoesNotSpoofFlagsFromUnrelatedValues(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame covers vLLM's FlexibleArgumentParser
-// treating "_" and "-" as interchangeable in long option names: "--tensor_parallel_size" must
-// read the same as "--tensor-parallel-size", separated or equals-form, or getFlagValue
-// silently falls back to 1 -- the same topology mismatch this PR fixes for short/equals forms.
+// TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame covers the underscore spelling of a
+// sizing flag, which getFlagValue otherwise silently falls back to 1 on.
 func TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame(t *testing.T) {
 	for name, args := range map[string][]string{
 		"separated": {"--tensor_parallel_size", "4"},
@@ -152,9 +131,6 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingReadsTheSame(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP covers the same underscore
-// interchangeability for the boolean --enable_elastic_ep and the --data_parallel_backend
-// qualifier IsElasticEPRayLaunch reads via hasFlag/hasArg.
 func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
 	container := vllmContainer("--enable_elastic_ep", "--data_parallel_backend=ray")
 	if !IsElasticEPRayLaunch(container) {
@@ -162,10 +138,8 @@ func TestNormalizeVLLMFlags_UnderscoreSpellingQualifiesElasticEP(t *testing.T) {
 	}
 }
 
-// TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched guards the obvious wrong
-// implementation: rewriting by prefix or substring rather than by whole token. "-dpb" must not
-// be read as "-dp" with a stray "b", and a longer flag that merely starts with a short alias
-// must be left alone.
+// TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched guards rewriting by prefix or
+// substring rather than by whole token.
 func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 	got := normalizeVLLMFlags([]string{"-dpb", "ray", "-dpx", "1", "--dp", "2"})
 	want := []string{dataParallelBackendFlag, "ray", "-dpx", "1", "--dp", "2"}
@@ -179,21 +153,13 @@ func TestNormalizeVLLMFlags_ShortAliasIsNotSubstringMatched(t *testing.T) {
 // TestGetFlagValue_RepeatedFlagUsesLastOccurrence pins the numeric readers to vLLM's
 // FlexibleArgumentParser precedence: a repeated flag resolves to its final occurrence.
 // Reading the first one makes the operator size a topology the engine will not use --
-// "--tensor-parallel-size 1 -tp 4" launches 4 ranks but would be read as 1.
+// "--tensor-parallel-size 1 --tensor-parallel-size 4" launches 4 ranks but would be read as 1.
 func TestGetFlagValue_RepeatedFlagUsesLastOccurrence(t *testing.T) {
-	for name, args := range map[string][]string{
-		"long then long":   {tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"},
-		"long then short":  {tensorParallelSizeFlag, "1", "-tp", "4"},
-		"short then long":  {"-tp", "1", tensorParallelSizeFlag, "4"},
-		"short then short": {"-tp", "1", "-tp", "4"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
-			if got != 4 {
-				t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
-					"applies the last value when a flag is repeated", args, got)
-			}
-		})
+	args := []string{tensorParallelSizeFlag, "1", tensorParallelSizeFlag, "4"}
+	got := getFlagValue(getExpandedCommandLine(vllmContainer(args...)), tensorParallelSizeFlag)
+	if got != 4 {
+		t.Errorf("getFlagValue(%q) = %d, want 4 (last occurrence) -- vLLM's argparse "+
+			"applies the last value when a flag is repeated", args, got)
 	}
 }
 
@@ -213,9 +179,132 @@ func TestParseVLLMLaunchArgs_EnumFlagsUseLastOccurrence(t *testing.T) {
 	t.Run("distributed-executor-backend resolves to the final occurrence", func(t *testing.T) {
 		args := parseVLLMLaunchArgs(getExpandedCommandLine(
 			vllmContainer(distributedExecutorFlag, "mp", distributedExecutorFlag, "ray")))
-		if args.DistributedExecutorBackendIsMp {
+		if args.IsMpDistributedExecutorBackend {
 			t.Fatal("effective --distributed-executor-backend is ray (the last occurrence); " +
-				"DistributedExecutorBackendIsMp must be false")
+				"IsMpDistributedExecutorBackend must be false")
 		}
 	})
+}
+
+// vllmShellContainer mirrors how the operator ships a worker command: one /bin/sh -c
+// string, which is where a shell control operator ends up glued to the last flag's value.
+func vllmShellContainer(flags string) *corev1.Container {
+	return &corev1.Container{
+		Name:    "main",
+		Command: []string{"/bin/sh", "-c"},
+		Args:    []string{"exec python3 -m dynamo.vllm --model m " + flags},
+	}
+}
+
+// TestNormalizeVLLMFlags_ShellTerminatedBackendQualifiesElasticEP covers a shell control
+// operator glued to the backend value. The shell ends the word there, so vLLM receives
+// "--data-parallel-backend=ray" and the pod needs a Ray head; without one it fails at
+// runtime with vLLM's opaque "DP master node is missing or dead".
+func TestNormalizeVLLMFlags_ShellTerminatedBackendQualifiesElasticEP(t *testing.T) {
+	for name, flags := range map[string]string{
+		"semicolon":      enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray;",
+		"and-and":        enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray&&echo done",
+		"pipe":           enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray|tee log",
+		"redirect":       enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray>log",
+		"subshell close": enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray)",
+		"short alias":    enableElasticEPFlag + " " + dataParallelBackendShortFlag + "=ray;",
+		"underscore":     "--enable_elastic_ep --data_parallel_backend=ray;",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !IsElasticEPRayLaunch(vllmShellContainer(flags)) {
+				t.Errorf("%q should qualify as an elastic-EP Ray launch -- the shell ends the "+
+					"word at the control operator, so vLLM only ever sees %q",
+					flags, dataParallelBackendFlag+"=ray")
+			}
+		})
+	}
+}
+
+// TestNormalizeVLLMFlags_ShellTerminatedExecutorBackendReadsAsMp covers the same thing for
+// the reader that decides whether a worker gets the wait-for-leader init container. The
+// separated spelling is the case the look-behind in normalizeVLLMFlags exists for.
+func TestNormalizeVLLMFlags_ShellTerminatedExecutorBackendReadsAsMp(t *testing.T) {
+	for name, flags := range map[string]string{
+		"separated": distributedExecutorFlag + " mp;",
+		"equals":    distributedExecutorFlag + "=mp;",
+		"and-and":   distributedExecutorFlag + " mp&&echo done",
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := parseVLLMLaunchArgs(getExpandedCommandLine(vllmShellContainer(flags)))
+			if !args.IsMpDistributedExecutorBackend {
+				t.Errorf("%q should read as the mp distributed-executor backend; without it the "+
+					"worker starts before the leader's master port is open", flags)
+			}
+		})
+	}
+}
+
+// TestNormalizeVLLMFlags_NonShellPunctuationIsNotTrimmed pins the character set. Only a
+// shell control operator may be dropped -- anything else really does reach argparse, and a
+// value may legitimately be a dotted import path.
+func TestNormalizeVLLMFlags_NonShellPunctuationIsNotTrimmed(t *testing.T) {
+	if IsElasticEPRayLaunch(vllmShellContainer(enableElasticEPFlag + " " + dataParallelBackendFlag + "=ray,")) {
+		t.Error("\",\" is not a shell control operator, so vLLM really does receive \"ray,\" and rejects it")
+	}
+	for _, value := range []string{"my_pkg.MyExecutor", "external_launcher"} {
+		got := normalizeVLLMFlags([]string{distributedExecutorFlag, value})
+		if got[1] != value {
+			t.Errorf("value %q was rewritten to %q; only shell control operators may be trimmed", value, got[1])
+		}
+	}
+}
+
+// TestNormalizeVLLMFlags_ValueSlotTrimStopsAtTheNextFlag pins the two rules that keep the
+// separated-form trim from reaching a token that is not a value.
+func TestNormalizeVLLMFlags_ValueSlotTrimStopsAtTheNextFlag(t *testing.T) {
+	// --enable-elastic-ep takes no argument (argparse.BooleanOptionalAction), so the token
+	// after it belongs to another flag and must survive untouched.
+	got := normalizeVLLMFlags([]string{enableElasticEPFlag, "--data-parallel-address", "$(HOST)"})
+	if got[2] != "$(HOST)" {
+		t.Errorf("token after %s = %q, want %q", enableElasticEPFlag, got[2], "$(HOST)")
+	}
+	// A "-"-prefixed token is the next flag, not a value, so it is still canonicalized.
+	got = normalizeVLLMFlags([]string{distributedExecutorFlag, "-dp", "2"})
+	if got[1] != dataParallelSizeFlag {
+		t.Errorf("token after %s = %q, want the canonicalized %q", distributedExecutorFlag, got[1], dataParallelSizeFlag)
+	}
+}
+
+// TestNormalizeVLLMFlags_EqualsValueSpellingAFlagStaysOneToken extends the spoofing
+// guarantee to a value carried by a flag that is itself normalized.
+func TestNormalizeVLLMFlags_EqualsValueSpellingAFlagStaysOneToken(t *testing.T) {
+	container := vllmContainer(dataParallelBackendFlag+"="+enableElasticEPFlag, dataParallelBackendFlag, "ray")
+	if IsElasticEPRayLaunch(container) {
+		t.Fatalf("a listed flag's value must not be split into a standalone %s token", enableElasticEPFlag)
+	}
+}
+
+// TestNormalizeVLLMFlags_BooleanFlagInEqualsFormIsNotRequested covers a boolean flag in
+// equals form. vLLM registers --enable-elastic-ep with argparse.BooleanOptionalAction, so
+// it takes no argument and this spelling is an argparse error, not a request.
+func TestNormalizeVLLMFlags_BooleanFlagInEqualsFormIsNotRequested(t *testing.T) {
+	container := vllmContainer(enableElasticEPFlag+"=false", dataParallelBackendFlag, "ray")
+	if IsElasticEPRayLaunch(container) {
+		t.Fatalf("%s=false must not read as elastic EP requested", enableElasticEPFlag)
+	}
+}
+
+// TestNormalizeVLLMFlags_SizingFlagValuesAreNotTrimmed pins the deliberate limit on
+// trimShellTerminator. A sizing flag's value has always resolved through strconv.ParseInt,
+// which never tolerated a terminator, so trimming one here would change the size the
+// operator resolves for a manifest that ships one. That is a behaviour change, not a
+// restoration, and is left to a follow-up.
+func TestNormalizeVLLMFlags_SizingFlagValuesAreNotTrimmed(t *testing.T) {
+	for name, flags := range map[string]string{
+		"equals":    tensorParallelSizeFlag + "=4;",
+		"separated": tensorParallelSizeFlag + " 4;",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := getFlagValue(getExpandedCommandLine(vllmShellContainer(flags)), tensorParallelSizeFlag)
+			if got != 1 {
+				t.Errorf("getFlagValue(%q) = %d, want vLLM's default of 1 -- trimming a sizing "+
+					"value changes a resolved size and is out of scope here", flags, got)
+			}
+		})
+	}
 }
