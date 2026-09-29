@@ -35,6 +35,13 @@ export interface Publication {
 
 export const PUBLICATIONS: Publication[] = [
   {
+    title: "Building Pinterest's VLM Serving Stack on NVIDIA Dynamo",
+    url: "https://medium.com/pinterest-engineering/building-pinterests-vlm-serving-stack-on-nvidia-dynamo-0dce6e93d0f3",
+    partner: "Pinterest",
+    date: "Sep 11, 2026",
+    iso: "2026-09-11",
+  },
+  {
     title: "How We Cut Inference Cold Start to Seconds With NVIDIA Dynamo",
     url: "https://www.photoroom.com/inside-photoroom/how-we-cut-gpu-cold-starts-from-minutes-to-seconds-with-memory-checkpointing",
     partner: "Photoroom",
