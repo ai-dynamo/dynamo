@@ -143,6 +143,10 @@ sidecar_configs = {
             pytest.mark.gpu_1,
             pytest.mark.timeout(780),
             pytest.mark.pre_merge,
+            pytest.mark.skipif(
+                not _trtllm_serves_openengine(),
+                reason=TRTLLM_OPENENGINE_SKIP_REASON,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
