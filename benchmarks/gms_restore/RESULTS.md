@@ -7,6 +7,83 @@ Snapshot/PageBroker composition. It does not yet exercise Dynamo's distributed
 frontend or a DynamoGraphDeployment. Large-model inference has passed with the constraints described below; the
 RAM-staged measurements are not cold-NFS comparisons.
 
+## PVC O_DIRECT with overlapping restore (2026-09-29)
+
+The earlier **5.99 s** weight result was RAM-staged and is not a PVC result.
+The corrected experiment loads the complete **448 GiB** matching V1 allocation
+set from `snapshot-pvc`, with verified `O_DIRECT` on every payload descriptor.
+No tmpfs staging or buffered-read override is used. Five old experimental
+checkpoints were deleted through their controller, reclaiming about **1.9 TiB**;
+metadata is archived in `results/default-config/retired-old-checkpoints.json`.
+
+Default GLM communication settings now work before and after restore. Neither
+multimem logits nor FlashInfer fused allreduce is explicitly disabled. The old
+claim that their rendezvous sites were necessarily stalled was premature:
+native samples showed TVM-FFI compilation/lock waits, and clean initialization
+completed autotuning, graph capture, and coherent generation. Minimal 8-rank
+symmetric-memory probes also passed without the shim, with the shim, and with
+shim + live GMS weights. No cuInterpose change was needed for these successful
+runs. The qualified single-node capture environment still retains its existing
+`NCCL_IB_DISABLE=1` and monitoring/RAS settings. The existing automatic
+FABRIC-to-POSIX-FD transport fallback also appears
+in the previous baseline with the exact same image digest; it is separate from
+the explicit communication overrides used in the historical RAM experiments.
+See `default-config-debug.md` and its raw evidence for the profiling limitation.
+
+Three alternating serialized/overlapping pairs use the same default-config
+capture, claim, rank map, 112 payload files, and qualified Snapshot composition.
+Each completes Berlin generation before readiness and a second Rayleigh request.
+All durations below are seconds; overlapping phases must not be added together.
+
+| Standard V1 NIXL loader, three trials each | Serialized | Overlapping | Change |
+|---|---:|---:|---:|
+| Pod creation to coherent readiness | 46.083 | 29.562 | **−16.521** |
+| GMS first rank start to last publication | 23.397 | 25.031 | +1.634 |
+| GMS server initialization, mean rank | 0.227 | 0.259 | +0.032 |
+| Sockets bound to load return, mean rank | 21.261 | 22.770 | +1.509 |
+| CRIU | 3.879 | 5.320 | +1.441 |
+| CUDA phase | 7.761 | 8.729 | +0.968 |
+| Summed native CUDA prepare/restore calls | 7.363 | 8.398 | +1.035 |
+| Snapshot agent overall | 14.017 | 16.338 | +2.321 |
+
+There is repeatable phase inflation consistent with contention, but overlap still
+saves **35.9%** end to end. These measurements do not isolate the competing
+resource (NFS transport, CPU, memory bandwidth or PCIe). The PVC mount uses
+NFSv3, `nconnect=16`, 1 MiB read/write sizes, and one VAST address. The engine's
+qualified PageBroker path retains its separate 32-connection, four-address
+mount. `O_DIRECT` bypasses the client page cache; storage-server caches were not
+flushed. CPU checkpoint files received the baseline's `POSIX_FADV_DONTNEED`
+advice before every case. Images are already cached on the node.
+
+The publication gate moved from ahead of Snapshot to immediately before the
+captured engine calls `resume_memory_occupation`. A CPU-only sidecar verifies
+every rank's server UUID and allocation IDs/sizes against the authoritative
+restore plan. Only then does it write the gate. CRIU and CUDA restoration proceed
+while GMS loads; no engine weight use is allowed before verification. "All eight
+ranks published" means all eight V1 write sessions committed their exact captured
+allocation sets, not just that eight processes or sockets started.
+
+Against the historical qualified no-GMS baseline (four trials), CRIU was
+3.655 s, CUDA phase 20.467 s, native prepare calls 10.076 s, and agent overall
+25.143 s. The serialized PVC GMS run has similar CRIU time and substantially
+less CUDA work; overlapping loads raise CRIU to 5.320 s. The CUDA phase and native
+calls remain below the baseline. This is a historical comparison, not a fresh
+alternating no-GMS control; the baseline's 25–28 s is **agent-only**, so it must
+not be compared directly to the new pod-to-ready number.
+
+The fused direct loader with four workers and NUMA affinity was also tested in
+three alternating pairs on the ordinary PVC mount. Serialized means were
+51.467 s pod-to-ready, 28.875 s all-rank load, 3.729 s CRIU and 7.808 s CUDA;
+overlapping means were 33.474 s, 28.709 s, 4.844 s and 8.077 s respectively.
+Its load variability (one serialized load took 32.045 s) prevents attributing
+small loader deltas to overlap. It did not beat standard NIXL on that mount.
+
+Charts: [serialized](results/default-config/nixl-serial-1/timeline.html) and
+[overlapping](results/default-config/nixl-overlap-1/timeline.html), also PNG/SVG.
+The CRIU duration is measured but its plotted position is approximate; CUDA bars
+show PageBroker request intervals. `compare_trials.py` regenerates per-case
+summaries and `results/default-config/comparison.json` from raw evidence.
+
 ## Completed gates
 
 | Experiment | Result | Scope |
@@ -97,17 +174,14 @@ all initial plans, manifests and measured outputs remain in this branch.
 
 ### Communication compatibility
 
-GLM-5.2-NVFP4 TP8 loaded and committed its weights through V1, but stalled in
-PyTorch symmetric-memory rendezvous, first for the logits multimem gather and
-then for FlashInfer allreduce fusion. Python stack sampling identified the call
-sites. An experimental plugin patch forces the logits gather to NCCL; the third
-configuration also sets `enforce_disable_flashinfer_allreduce_fusion=True` while
-retaining CUDA graphs. This second switch disables the fused implementation; it
-is not evidence that every replacement allreduce used NCCL. The exact fallback
-backend for each operation was not instrumented. These are communication-layout
-changes from the baseline, and the underlying rendezvous hang was not root-caused.
-
-When a stalled source pod released its claim, another namespace allocated all
+The historical RAM experiments bypassed two suspected rendezvous stalls: an
+experimental plugin override routed logits gather to NCCL, and
+`enforce_disable_flashinfer_allreduce_fusion=True` disabled fused allreduce.
+The replacement backend for every allreduce was not instrumented. Stack locations
+alone did not establish deadlock. The subsequent default-config PVC experiments
+above completed both paths without these overrides, including restored inference;
+the previous "underlying rendezvous hang" diagnosis is withdrawn.
+When an earlier source pod released its claim, another namespace allocated all
 8 source-node GPUs. No foreign workloads or agents were changed. The large-model
 trial moved to s2877; the measured GLM restores used same-node capture/restore. Cross-node mapping
 correctness was established only by the Qwen test above.
@@ -169,12 +243,12 @@ All revised-capture trials passed Berlin generation before readiness and a secon
 Rayleigh-scattering request afterward, with CUDA graphs enabled. They are
 same-node GLM trials; the independent Qwen trial establishes cross-node rank
 permutation correctness. Agent-only improvement must not be represented as an
-end-to-end improvement over the prior 25.14 s **agent-only** baseline. A fair cold
-storage comparison and full Dynamo frontend/worker deployment remain open.
+end-to-end improvement over the prior 25.14 s **agent-only** baseline. These are historical RAM-only results. The later PVC/O_DIRECT experiment above
+supersedes them for storage and default-communication validation; full Dynamo
+frontend/worker deployment remains open.
 
-Next steps are to repeat on a durable local-NVMe or sufficiently provisioned NFS
-artifact tier, use the same communication settings for a no-GMS control, and
-integrate the rank plan and publication gate into the production controller.
+Further work is a freshly alternating no-GMS control, storage-path tuning, and
+production controller integration of the rank plan and publication gate.
 Checkpointed GMS needs a working post-restore CUDA allocation export/import path
 before performance comparison is meaningful.
 

@@ -1,0 +1,7 @@
+snapshot-pvc, PV pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21
+Observed inside gms-0 during PVC trials, 2026-09-29:
+192.168.0.221:/unikorn-identity-03cfadd31877-551/pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21 on /checkpoints
+NFSv3, rsize=1048576,wsize=1048576,proto=tcp,nconnect=16,hard,relatime
+Engine PageBroker uses the qualified private mount (nconnect=32, spread_reads, four remoteports).
+No client RAM staging. Payload O_DIRECT confirmed using F_GETFL in each loader log.
+Storage-server caches were not flushed.

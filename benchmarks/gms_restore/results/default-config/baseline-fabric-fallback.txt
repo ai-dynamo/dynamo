@@ -1,0 +1,9 @@
+Capturing batches (bs=1 avail_mem=48.84 GB):  98%|█████████▊| 51/52 [00:53<00:02,  3.00s/it][2026-09-26 06:47:26 TP5 EP5] FABRIC handle export failed on rank 5; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP3 EP3] FABRIC handle export failed on rank 3; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP4 EP4] FABRIC handle export failed on rank 4; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP6 EP6] FABRIC handle export failed on rank 6; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+Capturing batches (bs=1 avail_mem=48.84 GB): 100%|██████████| 52/52 [00:54<00:00,  2.42s/it][2026-09-26 06:47:26 TP2 EP2] FABRIC handle export failed on rank 2; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP0 EP0] FABRIC handle export failed on rank 0; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP1 EP1] FABRIC handle export failed on rank 1; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP7 EP7] FABRIC handle export failed on rank 7; falling back to POSIX fd transport: cuMemExportToShareableHandle(FABRIC): <CUresult.CUDA_ERROR_INVALID_VALUE: 1>
+[2026-09-26 06:47:26 TP0 EP0] Registered 86 cuda graph addresses via POSIX fd handles (7 unique allocations) in 85.3 ms

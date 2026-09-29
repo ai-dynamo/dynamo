@@ -1,0 +1,66 @@
+[
+  {
+    "rank": 0,
+    "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+    "event": "published",
+    "started_epoch": 1790649273.3546233,
+    "published_epoch": 1790649294.7788298,
+    "elapsed_s": 21.424206495285034
+  },
+  {
+    "rank": 1,
+    "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+    "event": "published",
+    "started_epoch": 1790649273.5868773,
+    "published_epoch": 1790649296.1571097,
+    "elapsed_s": 22.570232391357422
+  },
+  {
+    "rank": 2,
+    "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+    "event": "published",
+    "started_epoch": 1790649273.8436372,
+    "published_epoch": 1790649295.6608577,
+    "elapsed_s": 21.817220449447632
+  },
+  {
+    "rank": 3,
+    "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+    "event": "published",
+    "started_epoch": 1790649274.0836797,
+    "published_epoch": 1790649295.9892879,
+    "elapsed_s": 21.90560817718506
+  },
+  {
+    "rank": 4,
+    "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+    "event": "published",
+    "started_epoch": 1790649274.3649337,
+    "published_epoch": 1790649296.1728454,
+    "elapsed_s": 21.80791163444519
+  },
+  {
+    "rank": 5,
+    "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+    "event": "published",
+    "started_epoch": 1790649274.612064,
+    "published_epoch": 1790649295.7131824,
+    "elapsed_s": 21.101118564605713
+  },
+  {
+    "rank": 6,
+    "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+    "event": "published",
+    "started_epoch": 1790649274.8973978,
+    "published_epoch": 1790649295.9339056,
+    "elapsed_s": 21.036507844924927
+  },
+  {
+    "rank": 7,
+    "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+    "event": "published",
+    "started_epoch": 1790649275.1913805,
+    "published_epoch": 1790649296.0976477,
+    "elapsed_s": 20.906267166137695
+  }
+]

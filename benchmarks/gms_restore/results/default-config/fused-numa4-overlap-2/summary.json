@@ -1,0 +1,36 @@
+{
+  "case": "fused-numa4-overlap-2",
+  "capture_id": "gms-v1-glm-default-0929",
+  "weights_bytes": 481036337152,
+  "preload_span_s": 28.914157152175903,
+  "rank_preload_s": [
+    26.980021953582764,
+    27.79338026046753,
+    28.134478330612183,
+    27.599098920822144,
+    27.714473724365234,
+    27.542173862457275,
+    27.445634841918945,
+    27.07494878768921
+  ],
+  "first_gms_start_to_ready_s": 31.380395889282227,
+  "pod_create_to_ready_s": 33.99311375617981,
+  "verification_orchestration_gap_s": null,
+  "agent_restore_s": 14.14648666,
+  "agent": {
+    "duration": "14.14648666s",
+    "phases": {
+      "criu_prepare": "40.31993ms",
+      "criu_restore": "4.919256516s",
+      "cuda_restore": "7.25628492s",
+      "gpu_device_map": "93.360819ms",
+      "overlay_capture": "25.196406ms",
+      "pagebroker_commit": "434.871\u00b5s",
+      "pagebroker_mount": "0s",
+      "pagebroker_stage": "51.566402ms",
+      "unaccounted": "1.760066796s"
+    },
+    "started_to_complete": "14.151989422s"
+  },
+  "inference_recorded": true
+}

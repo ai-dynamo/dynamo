@@ -1,0 +1,991 @@
+{
+  "snapshots": [
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T09:05:18Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-21T09:05:18Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T09:05:18Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T09:10:28Z"
+          }
+        ],
+        "name": "pb-clean-sglang-snapshot",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "10410042",
+        "uid": "108583ed-dc15-46b4-ae44-eae7d4859858"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "pb-clean-sglang-source",
+            "uid": "e0ee2867-fb3f-43ce-a2e0-5b69f95b8a7f"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-108583ed-dc15-46b4-ae44-eae7d4859858",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T09:10:28Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-21T09:10:28Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T08:47:37Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-21T08:47:37Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T08:47:37Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T08:54:11Z"
+          }
+        ],
+        "name": "pb-clean-vllm-snapshot",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "10408233",
+        "uid": "8e5fc16f-1f2a-4213-bc35-a29c03b336f9"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "pb-clean-vllm-source",
+            "uid": "b9bd76fb-595b-4fa2-b7f2-16d473e595bc"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-8e5fc16f-1f2a-4213-bc35-a29c03b336f9",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T08:54:11Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-21T08:54:11Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:00:55Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-21T23:00:55Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:00:55Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:03:24Z"
+          }
+        ],
+        "name": "tp-matrix-tp4-glm45-air-snapshot",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "10495034",
+        "uid": "b19ea4c8-2f15-470d-88a6-17b9ba5a0abd"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp4-glm45-air-source",
+            "uid": "efe90506-675f-4e4a-8841-453007f2530a"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-b19ea4c8-2f15-470d-88a6-17b9ba5a0abd",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:03:24Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-21T23:03:24Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:54:01Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-21T23:54:01Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:54:01Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:58:43Z"
+          }
+        ],
+        "name": "tp-matrix-tp8-glm45-air-snapshot",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "10501502",
+        "uid": "37b30c75-fb0c-49a9-a7b2-f6783151d0e1"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp8-glm45-air-source",
+            "uid": "d5fdc205-a880-41d4-a251-aceac438aeb6"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-37b30c75-fb0c-49a9-a7b2-f6783151d0e1",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:58:43Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-21T23:58:43Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshot",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:17:43Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-cleanup"
+        ],
+        "generation": 1,
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:spec": {
+                ".": {},
+                "f:source": {
+                  ".": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "OpenAPI-Generator",
+            "operation": "Update",
+            "time": "2026-09-21T23:17:43Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-cleanup\"": {}
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:17:43Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:boundSnapshotContentName": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:20:06Z"
+          }
+        ],
+        "name": "tp-matrix-tp8-qwen25-72b-snapshot",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "10497023",
+        "uid": "803461c8-1d15-4306-b887-fb9d6782e2e2"
+      },
+      "spec": {
+        "source": {
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp8-qwen25-72b-source",
+            "uid": "cd51c179-ab6f-4498-a3d2-a8fd5d4272b1"
+          }
+        }
+      },
+      "status": {
+        "boundSnapshotContentName": "podsnapshotcontent-803461c8-1d15-4306-b887-fb9d6782e2e2",
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:20:06Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          },
+          {
+            "lastTransitionTime": "2026-09-21T23:20:06Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "False",
+            "type": "Failed"
+          }
+        ]
+      }
+    }
+  ],
+  "contents": [
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T09:05:18Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-l9nsv"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T09:05:18Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T09:10:28Z"
+          }
+        ],
+        "name": "podsnapshotcontent-108583ed-dc15-46b4-ae44-eae7d4859858",
+        "resourceVersion": "10410041",
+        "uid": "99b8ae67-40cf-4e5a-b126-c1d892707c18"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "pb-clean-sglang-snapshot",
+          "namespace": "schwinns-vcluster",
+          "uid": "108583ed-dc15-46b4-ae44-eae7d4859858"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-l9nsv",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "pb-clean-sglang-source",
+            "uid": "e0ee2867-fb3f-43ce-a2e0-5b69f95b8a7f"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T09:10:28Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:54:02Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:54:02Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:58:43Z"
+          }
+        ],
+        "name": "podsnapshotcontent-37b30c75-fb0c-49a9-a7b2-f6783151d0e1",
+        "resourceVersion": "10501501",
+        "uid": "760c52cd-32ab-4f2c-82d7-969c3605337c"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "tp-matrix-tp8-glm45-air-snapshot",
+          "namespace": "schwinns-vcluster",
+          "uid": "37b30c75-fb0c-49a9-a7b2-f6783151d0e1"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp8-glm45-air-source",
+            "uid": "d5fdc205-a880-41d4-a251-aceac438aeb6"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:58:43Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:17:43Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:17:43Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:20:06Z"
+          }
+        ],
+        "name": "podsnapshotcontent-803461c8-1d15-4306-b887-fb9d6782e2e2",
+        "resourceVersion": "10497022",
+        "uid": "0de5bc78-b348-4eee-ab36-6aa3750b60b0"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "tp-matrix-tp8-qwen25-72b-snapshot",
+          "namespace": "schwinns-vcluster",
+          "uid": "803461c8-1d15-4306-b887-fb9d6782e2e2"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp8-qwen25-72b-source",
+            "uid": "cd51c179-ab6f-4498-a3d2-a8fd5d4272b1"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:20:06Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T08:47:37Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-l9nsv"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T08:47:37Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T08:54:11Z"
+          }
+        ],
+        "name": "podsnapshotcontent-8e5fc16f-1f2a-4213-bc35-a29c03b336f9",
+        "resourceVersion": "10408232",
+        "uid": "0d1901eb-43ac-40f3-990e-adb3a884247c"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "pb-clean-vllm-snapshot",
+          "namespace": "schwinns-vcluster",
+          "uid": "8e5fc16f-1f2a-4213-bc35-a29c03b336f9"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-l9nsv",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "pb-clean-vllm-source",
+            "uid": "b9bd76fb-595b-4fa2-b7f2-16d473e595bc"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T08:54:11Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "nvidia.com/v1alpha1",
+      "kind": "PodSnapshotContent",
+      "metadata": {
+        "creationTimestamp": "2026-09-21T23:00:55Z",
+        "finalizers": [
+          "nvidia.com/podsnapshotcontent-artifact-cleanup"
+        ],
+        "generation": 1,
+        "labels": {
+          "nvidia.com/snapshot-node": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+        },
+        "managedFields": [
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:metadata": {
+                "f:finalizers": {
+                  ".": {},
+                  "v:\"nvidia.com/podsnapshotcontent-artifact-cleanup\"": {}
+                },
+                "f:labels": {
+                  ".": {},
+                  "f:nvidia.com/snapshot-node": {}
+                }
+              },
+              "f:spec": {
+                ".": {},
+                "f:snapshotRef": {
+                  ".": {},
+                  "f:name": {},
+                  "f:namespace": {},
+                  "f:uid": {}
+                },
+                "f:source": {
+                  ".": {},
+                  "f:nodeName": {},
+                  "f:podRef": {
+                    ".": {},
+                    "f:containers": {},
+                    "f:name": {},
+                    "f:uid": {}
+                  }
+                }
+              }
+            },
+            "manager": "manager",
+            "operation": "Update",
+            "time": "2026-09-21T23:00:55Z"
+          },
+          {
+            "apiVersion": "nvidia.com/v1alpha1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:status": {
+                ".": {},
+                "f:conditions": {}
+              }
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "subresource": "status",
+            "time": "2026-09-21T23:03:24Z"
+          }
+        ],
+        "name": "podsnapshotcontent-b19ea4c8-2f15-470d-88a6-17b9ba5a0abd",
+        "resourceVersion": "10495033",
+        "uid": "e4385e69-6a2f-455f-ae47-c1840bdefc5a"
+      },
+      "spec": {
+        "snapshotRef": {
+          "name": "tp-matrix-tp4-glm45-air-snapshot",
+          "namespace": "schwinns-vcluster",
+          "uid": "b19ea4c8-2f15-470d-88a6-17b9ba5a0abd"
+        },
+        "source": {
+          "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "podRef": {
+            "containers": [
+              "main"
+            ],
+            "name": "tp-matrix-tp4-glm45-air-source",
+            "uid": "efe90506-675f-4e4a-8841-453007f2530a"
+          }
+        }
+      },
+      "status": {
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-09-21T23:03:24Z",
+            "message": "Checkpoint captured and verified",
+            "reason": "Captured",
+            "status": "True",
+            "type": "Ready"
+          }
+        ]
+      }
+    }
+  ]
+}

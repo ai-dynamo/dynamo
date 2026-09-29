@@ -1,0 +1,44 @@
+{"event": "sockets", "elapsed_s": 0.289844274520874}
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_8
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_3
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_2
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_4
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_7
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_9
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_12
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_5
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_1
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_6
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_13
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_0
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_10
+2026-09-29 02:18:18 NIXL INFO    _api.py:268 Initialized NIXL agent: gms_nixl_0_1_7f87ea45eff0_11
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+2026-09-29 02:18:18 NIXL INFO    _api.py:390 Backend POSIX was instantiated
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0006.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0010.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0004.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0001.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0008.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0013.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0011.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0009.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0000.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0007.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0005.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0012.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0002.bin", "flags": 49152, "o_direct": true}
+{"event": "artifact_open", "path": "/checkpoints/gms-restore-0929/default-capture-2/device-5/shards/shard_0003.bin", "flags": 49152, "o_direct": true}
+{"rank": 5, "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c", "started_epoch": 1790648295.816243, "published_epoch": 1790648319.4624934, "elapsed_s": 23.6462504863739}

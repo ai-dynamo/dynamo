@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Cluster trial: publish all exact rank artifacts, then trigger engine restore.
+"""Cluster trial: restore exact rank artifacts and engine, optionally overlapping.
 
 Requires a captured source, staged prototype agent, and GMS_VCLUSTER_KUBECONFIG.
 The host kubectl context must reach translated vcluster pods. Never changes agents.
@@ -19,6 +19,8 @@ from kubernetes import client, config
 p = argparse.ArgumentParser()
 p.add_argument("--case", required=True)
 p.add_argument("--storage", choices=["pvc", "tmpfs"], default="pvc")
+p.add_argument("--qualified-pvc-mount", action="store_true")
+p.add_argument("--isolated-pvc-transport", action="store_true")
 p.add_argument("--workers", type=int, default=4)
 p.add_argument("--numa", action="store_true")
 p.add_argument("--capture-dir", type=Path)
@@ -29,6 +31,10 @@ p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
 if a.overlap and not a.fast_gate:
     p.error("--overlap requires --fast-gate")
+if a.qualified_pvc_mount and a.storage != "pvc":
+    p.error("--qualified-pvc-mount requires PVC storage")
+if a.isolated_pvc_transport and not a.qualified_pvc_mount:
+    p.error("--isolated-pvc-transport requires --qualified-pvc-mount")
 root = Path(__file__).parent
 capture_dir = a.capture_dir or root / "results/glm"
 out = capture_dir / a.case
@@ -166,6 +172,20 @@ if a.storage == "tmpfs":
             },
         }
     )
+if a.qualified_pvc_mount:
+    pod["spec"]["volumes"].append(
+        {
+            "name": "qualified-pvc",
+            "hostPath": {
+                "path": (
+                    "/var/lib/schwinns-gms-0928/gms-pvc-nfs"
+                    if a.isolated_pvc_transport
+                    else "/var/lib/snapshot-restore-perf-nfs"
+                ),
+                "type": "Directory",
+            },
+        }
+    )
 main = pod["spec"]["containers"][0]
 main["imagePullPolicy"] = "IfNotPresent"
 main["command"] = (
@@ -192,6 +212,11 @@ for rank, c in enumerate(pod["spec"]["containers"][1:]):
     if a.storage == "tmpfs":
         c["env"].append({"name": "GMS_PROTOTYPE_BUFFERED_READS", "value": "1"})
     c["volumeMounts"] = [v for v in c["volumeMounts"] if v["name"] != "ram-weights"]
+    if a.qualified_pvc_mount:
+        for mount in c["volumeMounts"]:
+            if mount["mountPath"] == "/checkpoints":
+                mount["name"] = "qualified-pvc"
+                mount["readOnly"] = True
     if a.storage == "tmpfs":
         c["volumeMounts"].append(
             {"name": "ram-weights", "mountPath": "/gms-artifacts", "readOnly": True}
@@ -373,8 +398,10 @@ text = remote(["cat", "/snapshot-control/sglang-restore-ready"], "main")
 assert "berlin" in text.lower(), text
 result = {
     "backend": a.backend,
-    "workers": a.workers,
+    "workers": a.workers if a.backend == "fused" else 16,
     "numa": a.numa,
+    "qualified_pvc_mount": a.qualified_pvc_mount,
+    "isolated_pvc_transport": a.isolated_pvc_transport,
     "fast_gate": a.fast_gate,
     "overlap": a.overlap,
     "capture_id": capture["capture_id"],
@@ -397,6 +424,15 @@ result = {
 }
 save(out / "timing.json", result)
 print(json.dumps(result), flush=True)
+mount = json.loads(
+    remote(["findmnt", "-J", "-T", "/checkpoints", "-o", "SOURCE,FSTYPE,OPTIONS"])
+)
+save(out / "pvc-mount.json", mount)
+if a.qualified_pvc_mount:
+    observed = mount["filesystems"][0]
+    assert observed["fstype"].startswith("nfs")
+    assert "pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21" in observed["source"]
+    assert "nconnect=32" in observed["options"]
 for c in ["gms-" + str(r) for r in range(8)]:
     (out / (c + ".txt")).write_text(
         subprocess.check_output(base + ["logs", host, "-c", c], text=True)

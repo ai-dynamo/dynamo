@@ -93,3 +93,29 @@ the UUID/allocation publication validator into a CPU-only sidecar. It requires a
 capture whose engine waits for `/gms/all-ready` before resuming memory occupation.
 Without `--overlap`, all publication and validation finish before Snapshot starts.
 The flag changes scheduling, not the rank mapping or the capture artifacts.
+
+`--qualified-pvc-mount` gives only GMS loaders a read-only bind of the existing
+qualified NFS mount at `/var/lib/snapshot-restore-perf-nfs`. This is the same
+`snapshot-pvc` export and exact files, with 32 connections and four NFS addresses;
+it is not RAM staging. The captured engine and publication validator retain their
+ordinary PVC volume. The shared PV mount configuration is not changed. The trial
+records `findmnt` output and requires an NFS mount of the expected export with
+`nconnect=32`. This option assumes that the qualified node setup is already done.
+
+After collecting each case's agent/main logs, generate summaries and charts:
+
+```bash
+python3 benchmarks/gms_restore/compare_trials.py benchmarks/gms_restore/results/default-config
+python3 benchmarks/gms_restore/timeline.py benchmarks/gms_restore/results/default-config/nixl-overlap-1
+```
+
+The chart generator requires Matplotlib. Generated HTML embeds the SVG and works
+without network access. CRIU placement is approximate; durations and CUDA broker
+intervals come from logged measurements. See `RESULTS.md` for historical versus
+current comparisons and cache-state limits.
+
+Add `--isolated-pvc-transport` to bind the identically configured second mount at
+`/var/lib/schwinns-gms-0928/gms-pvc-nfs` instead. Both private mounts use
+`nosharecache,nosharetransport`. This tests separate client transports for GMS and
+PageBroker while retaining the same PVC export, files, and O_DIRECT requirement.
+The benchmark setup/cleanup must create/unmount this experiment-owned mount.

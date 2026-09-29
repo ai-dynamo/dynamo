@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Default communication configuration investigation
 
-Date: 2026-09-29. Source: user follow-up. Status: investigating.
+Date: 2026-09-29. Source: user follow-up. Status: default configuration reproduced successfully; PVC contention trials in progress.
 Environment: nscale DRA, eight B200s, pinned Torch 2.11/SGLang 0.5.16 image
 and Snapshot d9b6bc72 with prototype external-GMS imports.
 
@@ -54,3 +54,21 @@ Use logged timestamps for a Gantt chart; distinguish observed from derived phase
   logs also show FABRIC-export rejection followed by POSIX-FD transport. This is
   not introduced by the external-import prototype. Historical evidence path:
   restore-profile-20260925/cases/conn2/source-app.log, lines 556–566.
+
+- Clean default capture `gms-v1-glm-default-0929` reached Ready; content UID
+  `859c4057-d1da-45d6-8565-39225861a5be`. CPU ~56 GiB, native GPU 44,275,073,024
+  bytes; exact GMS set 481,036,337,152 bytes on PVC `default-capture-2`.
+- All six standard NIXL PVC restores passed both coherence requests. Three-pair
+  means: serialized 46.083 s pod-to-ready, overlapping 29.562 s. Overlap increases
+  preload 1.634 s, CRIU 1.441 s, CUDA phase 0.968 s. This is consistent contention
+  evidence, not yet a resource-specific diagnosis. Default multimem/fused settings
+  remain enabled. Actual payload FDs all have O_DIRECT.
+
+- Three fused four-worker NUMA pairs completed too. Their ordinary-mount overlap
+  mean was 33.474 s, slower than NIXL's 29.562 s; RAM-stage advantages do not
+  transfer automatically to PVC. Every trial passed both inference checks.
+- Shared qualified NFS mount (same PVC export, O_DIRECT) made NIXL weight loading
+  faster: 19.343 s mean over two trials. CRIU rose to 11.875 s and total readiness
+  to 34.723 s. One fused eight-worker shared-mount trial reached 27.878 s; sixteen
+  workers reached 31.642 s. Testing independent NFS transport before selecting
+  and repeating the best configuration. No shared PV mount options were changed.

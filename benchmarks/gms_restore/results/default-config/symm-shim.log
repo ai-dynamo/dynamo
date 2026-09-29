@@ -1,0 +1,47 @@
+
+*****************************************
+Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+*****************************************
+{"rank": 5, "time": 1790646775.9671185, "event": "begin"}
+{"rank": 5, "time": 1790646775.9685445, "event": "group"}
+{"rank": 5, "time": 1790646776.2141373, "event": "allocated"}
+{"rank": 3, "time": 1790646776.6813533, "event": "begin"}
+{"rank": 3, "time": 1790646776.6828117, "event": "group"}
+{"rank": 7, "time": 1790646776.8502655, "event": "begin"}
+{"rank": 7, "time": 1790646776.8519375, "event": "group"}
+{"rank": 0, "time": 1790646776.8627846, "event": "begin"}
+{"rank": 0, "time": 1790646776.8641822, "event": "group"}
+{"rank": 3, "time": 1790646776.9049554, "event": "allocated"}
+{"rank": 1, "time": 1790646776.9125056, "event": "begin"}
+{"rank": 1, "time": 1790646776.914218, "event": "group"}
+{"rank": 2, "time": 1790646776.9457378, "event": "begin"}
+{"rank": 4, "time": 1790646776.9457636, "event": "begin"}
+{"rank": 6, "time": 1790646776.9463148, "event": "begin"}
+{"rank": 2, "time": 1790646776.947165, "event": "group"}
+{"rank": 4, "time": 1790646776.9472375, "event": "group"}
+{"rank": 6, "time": 1790646776.947932, "event": "group"}
+{"rank": 7, "time": 1790646777.079153, "event": "allocated"}
+{"rank": 0, "time": 1790646777.0871847, "event": "allocated"}
+{"rank": 1, "time": 1790646777.1406472, "event": "allocated"}
+{"rank": 2, "time": 1790646777.1690457, "event": "allocated"}
+{"rank": 4, "time": 1790646777.1723566, "event": "allocated"}
+{"rank": 6, "time": 1790646777.1791155, "event": "allocated"}
+{"rank": 6, "time": 1790646777.578049, "event": "rendezvous", "multicast_ptr": 134482371805184}
+{"rank": 0, "time": 1790646777.621123, "event": "rendezvous", "multicast_ptr": 130521875087360}
+{"rank": 1, "time": 1790646777.662016, "event": "rendezvous", "multicast_ptr": 137977401442304}
+{"rank": 5, "time": 1790646777.663917, "event": "rendezvous", "multicast_ptr": 129840585900032}
+{"rank": 3, "time": 1790646777.66405, "event": "rendezvous", "multicast_ptr": 138785392164864}
+{"rank": 2, "time": 1790646777.6644275, "event": "rendezvous", "multicast_ptr": 129801931194368}
+{"rank": 4, "time": 1790646777.6646357, "event": "rendezvous", "multicast_ptr": 138116451008512}
+{"rank": 7, "time": 1790646777.6655078, "event": "rendezvous", "multicast_ptr": 128501092974592}
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W929 01:52:57.938130891 ProcessGroupNCCL.cpp:5188] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+{"rank": 7, "time": 1790646780.8774884, "event": "done"}{"rank": 6, "time": 1790646780.877487, "event": "done"}{"rank": 5, "time": 1790646780.8774862, "event": "done"}
+
+
+{"rank": 3, "time": 1790646780.8775234, "event": "done"}
+{"rank": 0, "time": 1790646780.877554, "event": "done"}
+{"rank": 1, "time": 1790646780.8775651, "event": "done"}
+{"rank": 4, "time": 1790646780.8775928, "event": "done"}
+{"rank": 2, "time": 1790646780.8776655, "event": "done"}

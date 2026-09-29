@@ -8,6 +8,17 @@ import re
 from pathlib import Path
 
 
+def json_events(text):
+    """Read JSON log records, including adjacent prints from loader threads."""
+    decoder = json.JSONDecoder()
+    for line in text.splitlines():
+        remaining = line.strip()
+        while remaining.startswith("{"):
+            event, end = decoder.raw_decode(remaining)
+            yield event
+            remaining = remaining[end:].lstrip()
+
+
 def seconds(value):
     units = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1, "m": 60, "h": 3600}
     parts = re.findall(r"([0-9.]+)(ns|µs|us|ms|s|m|h)", value)

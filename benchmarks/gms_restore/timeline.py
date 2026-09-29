@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-from summarize import seconds
+from summarize import json_events, seconds
 
 p = argparse.ArgumentParser()
 p.add_argument("case", type=Path)
@@ -60,11 +60,7 @@ def row(label, segments):
 
 row("Pod startup", [(zero, min(x["started_epoch"] for x in pub), "agent")])
 for r in pub:
-    events = [
-        json.loads(l)
-        for l in (root / f"gms-{r['rank']}.txt").read_text().splitlines()
-        if l.startswith("{")
-    ]
+    events = list(json_events((root / f"gms-{r['rank']}.txt").read_text()))
     sockets = next((x["elapsed_s"] for x in events if x.get("event") == "sockets"), 0)
     s = r["started_epoch"]
     row(
@@ -89,6 +85,13 @@ for at, line, data in entries:
     pids.setdefault(data["pid"], []).append((at - data["duration"], at, op))
 for pid, segments in pids.items():
     row(f"CUDA process {pid}", segments)
+for line in (root / "main.txt").read_text().splitlines():
+    if line.startswith("GMS_WAKE_GATE "):
+        wake = json.loads(line.removeprefix("GMS_WAKE_GATE "))
+        row(
+            "Engine waits for published weights",
+            [(wake["entered_epoch"], wake["passed_epoch"], "gate")],
+        )
 row("Wake / generation / Ready observed", [(end, t["ready_epoch"], "gate")])
 fig, ax = plt.subplots(figsize=(15, 9), layout="constrained")
 for y, (label, segments) in enumerate(rows):
@@ -138,8 +141,15 @@ fig.savefig(root / "timeline.png", dpi=150)
 )
 svg = (root / "timeline.svg").read_text()
 svg = svg[svg.index("<svg") :]
+ordering = (
+    "GMS loads overlap CRIU and CUDA restoration. The captured engine waits for verified publication immediately before resuming weight use."
+    if t.get("overlap")
+    else "GMS loads run concurrently with each other and finish before the engine restore trigger."
+)
 (root / "timeline.html").write_text(
     '<!doctype html><meta charset="utf-8"><title>Restore timeline</title><style>body{margin:12px;font:14px system-ui}svg{width:100%;height:auto}</style>'
     + svg
-    + "<p>GMS loads run concurrently and finish before the restore trigger. PREPARE/TRANSFER/COMPLETE show measured broker request intervals. CRIU placement is approximate; its duration is measured. The final interval includes any publication wait, wake, generation and readiness observation.</p>"
+    + "<p>"
+    + ordering
+    + " PREPARE/TRANSFER/COMPLETE show measured broker request intervals. CRIU placement is approximate; its duration is measured. The final interval includes any publication wait, wake, generation and readiness observation.</p>"
 )

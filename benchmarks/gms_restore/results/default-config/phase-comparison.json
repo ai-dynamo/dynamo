@@ -1,0 +1,65 @@
+[
+  {
+    "agent_s": 24.94727711,
+    "criu_s": 3.786020631,
+    "cuda_phase_s": 20.08787921,
+    "prepare_sum_s": 10.229732,
+    "prepare_count": 10,
+    "run": "pr400-b-1",
+    "group": "baseline"
+  },
+  {
+    "agent_s": 24.521908498,
+    "criu_s": 3.679372943,
+    "cuda_phase_s": 19.881758182,
+    "prepare_sum_s": 8.620511,
+    "prepare_count": 10,
+    "run": "pr400-b-2",
+    "group": "baseline"
+  },
+  {
+    "agent_s": 26.204130814,
+    "criu_s": 3.60443226,
+    "cuda_phase_s": 21.579567683,
+    "prepare_sum_s": 11.640357,
+    "prepare_count": 10,
+    "run": "pr400-b-3",
+    "group": "baseline"
+  },
+  {
+    "agent_s": 24.896840604,
+    "criu_s": 3.551411392,
+    "cuda_phase_s": 20.317661137,
+    "prepare_sum_s": 9.812692,
+    "prepare_count": 10,
+    "run": "pr400-b-4",
+    "group": "baseline"
+  },
+  {
+    "agent_s": 13.335344847,
+    "criu_s": 3.737057614,
+    "cuda_phase_s": 7.827302545,
+    "prepare_sum_s": 7.49726,
+    "prepare_count": 10,
+    "run": "fused-numa4-1",
+    "group": "RAM_GMS"
+  },
+  {
+    "agent_s": 14.208961178,
+    "criu_s": 3.690351994,
+    "cuda_phase_s": 8.579428239,
+    "prepare_sum_s": 8.27634,
+    "prepare_count": 10,
+    "run": "fused-numa4-2",
+    "group": "RAM_GMS"
+  },
+  {
+    "agent_s": 14.7996823,
+    "criu_s": 3.604947095,
+    "cuda_phase_s": 8.847875831,
+    "prepare_sum_s": 8.541604,
+    "prepare_count": 10,
+    "run": "fused-numa4-3",
+    "group": "RAM_GMS"
+  }
+]

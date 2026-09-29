@@ -1,0 +1,1513 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceSlice",
+      "metadata": {
+        "creationTimestamp": "2026-09-09T19:21:15Z",
+        "generateName": "cluster-0967a26d-pool-14bee067-prctr-l9nsv-gpu.nvidia.com-",
+        "generation": 1,
+        "name": "cluster-0967a26d-pool-14bee067-prctr-l9nsv-gpu.nvidia.com-f8n4r",
+        "ownerReferences": [
+          {
+            "apiVersion": "v1",
+            "controller": true,
+            "kind": "Node",
+            "name": "cluster-0967a26d-pool-14bee067-prctr-l9nsv",
+            "uid": "12f3acd8-ef2c-4a7f-ae9d-0d28a3d093ee"
+          }
+        ],
+        "resourceVersion": "1376191661",
+        "uid": "bb2e8409-a7b8-42cf-93fe-dd4e75b9af4b"
+      },
+      "spec": {
+        "devices": [
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ba:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:b7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-fd77376f-599d-a407-48c4-e89927e80d3f"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-6"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ca:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:c7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-f9f66bb6-1527-586f-d438-aca8e5fecba0"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-7"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:18:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:15"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-c7473cee-8224-6a02-a763-4c4972e8a527"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-0"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:29:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:26"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-686152f7-c27c-ae8c-4354-8ef9abf75c99"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-1"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:3a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:37"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-df2d9af8-3862-8ca8-f201-1f1ddf134fbe"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-2"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:4b:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:48"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-0a6caa6b-560e-a317-6db1-1ebadd98b5e7"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-3"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:9a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:97"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-81cfc409-cc14-fde3-7d70-92e62fbb86e2"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-4"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:aa:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:a7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-390fa310-92a8-c15c-0b19-53e7cd287573"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-5"
+          }
+        ],
+        "driver": "gpu.nvidia.com",
+        "nodeName": "cluster-0967a26d-pool-14bee067-prctr-l9nsv",
+        "pool": {
+          "generation": 1,
+          "name": "cluster-0967a26d-pool-14bee067-prctr-l9nsv",
+          "resourceSliceCount": 1
+        }
+      }
+    },
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceSlice",
+      "metadata": {
+        "creationTimestamp": "2026-09-02T08:17:22Z",
+        "generateName": "cluster-0967a26d-pool-14bee067-prctr-s2877-gpu.nvidia.com-",
+        "generation": 1,
+        "name": "cluster-0967a26d-pool-14bee067-prctr-s2877-gpu.nvidia.com-wrfnv",
+        "ownerReferences": [
+          {
+            "apiVersion": "v1",
+            "controller": true,
+            "kind": "Node",
+            "name": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "uid": "b7550b43-10b9-4568-b55b-bb0b166820c8"
+          }
+        ],
+        "resourceVersion": "1335168479",
+        "uid": "b50d52c9-eb20-4920-92eb-b35fc4de0499"
+      },
+      "spec": {
+        "devices": [
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ba:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:b7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-6"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ca:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:c7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-7"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:18:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:15"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-0"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:29:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:26"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-1"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:3a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:37"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-2"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:4b:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:48"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-3"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:9a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:97"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-4"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:aa:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:a7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-5"
+          }
+        ],
+        "driver": "gpu.nvidia.com",
+        "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+        "pool": {
+          "generation": 1,
+          "name": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+          "resourceSliceCount": 1
+        }
+      }
+    },
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceSlice",
+      "metadata": {
+        "creationTimestamp": "2026-06-09T18:31:19Z",
+        "generateName": "cluster-0967a26d-pool-14bee067-prctr-tx5tk-gpu.nvidia.com-",
+        "generation": 1,
+        "name": "cluster-0967a26d-pool-14bee067-prctr-tx5tk-gpu.nvidia.com-9g94p",
+        "ownerReferences": [
+          {
+            "apiVersion": "v1",
+            "controller": true,
+            "kind": "Node",
+            "name": "cluster-0967a26d-pool-14bee067-prctr-tx5tk",
+            "uid": "26ee1a54-3422-437f-926f-a3a405489d9e"
+          }
+        ],
+        "resourceVersion": "885436486",
+        "uid": "bf319ecb-2488-4bfc-94ef-c80cfae30571"
+      },
+      "spec": {
+        "devices": [
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ca:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:c7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-9702d531-4c6f-99a0-eab6-1f7438365df4"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-7"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:18:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:15"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-390c745d-b113-45b5-8d1a-7873a74d8a29"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-0"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:29:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:26"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-e1508831-bc6f-f0ac-40be-370b1396d649"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-1"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:3a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:37"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-658e1235-c4ea-469b-2349-efdc39bc3612"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-2"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:4b:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:48"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-f939e931-9a8e-e3c8-2dc0-289b3f797bb1"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-3"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:9a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:97"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-7b11828a-3c4d-bb1b-3ca2-96fd26e8c54c"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-4"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:aa:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:a7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-59c40c7e-c1bc-ded1-8490-82439ed78c6d"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-5"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ba:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:b7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-3be0579d-41d8-2f3f-40c0-f7a77546b7aa"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-6"
+          }
+        ],
+        "driver": "gpu.nvidia.com",
+        "nodeName": "cluster-0967a26d-pool-14bee067-prctr-tx5tk",
+        "pool": {
+          "generation": 1,
+          "name": "cluster-0967a26d-pool-14bee067-prctr-tx5tk",
+          "resourceSliceCount": 1
+        }
+      }
+    },
+    {
+      "apiVersion": "resource.k8s.io/v1",
+      "kind": "ResourceSlice",
+      "metadata": {
+        "creationTimestamp": "2026-09-15T10:46:47Z",
+        "generateName": "cluster-0967a26d-pool-14bee067-prctr-w4xnn-gpu.nvidia.com-",
+        "generation": 1,
+        "name": "cluster-0967a26d-pool-14bee067-prctr-w4xnn-gpu.nvidia.com-gzfmw",
+        "ownerReferences": [
+          {
+            "apiVersion": "v1",
+            "controller": true,
+            "kind": "Node",
+            "name": "cluster-0967a26d-pool-14bee067-prctr-w4xnn",
+            "uid": "48002fa3-a714-4b98-8cd0-9f77515b21da"
+          }
+        ],
+        "resourceVersion": "1402662337",
+        "uid": "245b0031-6588-4dff-80c6-d57b89d03165"
+      },
+      "spec": {
+        "devices": [
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ca:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:c7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-60834423-c37e-a45c-5702-ff92426b0824"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-7"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:18:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:15"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-c1beaf71-dce9-8dba-8283-170da78dbeff"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-0"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:29:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:26"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-a4aa51a7-9c0f-e4bc-489f-90add7eff6a2"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-1"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:3a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:37"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-39f1ee05-79bc-0d5b-2b59-327f8b5df89d"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-2"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:4b:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:48"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-88214075-636a-e528-da9b-f484b0bea432"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-3"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:9a:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:97"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-581632f8-93e2-3eae-9d96-ed7ae3321d6d"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-4"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:aa:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:a7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-914cf2e0-35fb-42c3-f7c3-427e9a143d25"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-5"
+          },
+          {
+            "attributes": {
+              "addressingMode": {
+                "string": "HMM"
+              },
+              "architecture": {
+                "string": "Blackwell"
+              },
+              "brand": {
+                "string": "Nvidia"
+              },
+              "cudaComputeCapability": {
+                "version": "10.0.0"
+              },
+              "cudaDriverVersion": {
+                "version": "13.2.0"
+              },
+              "driverVersion": {
+                "version": "595.58.3"
+              },
+              "productName": {
+                "string": "NVIDIA B200"
+              },
+              "resource.kubernetes.io/pciBusID": {
+                "string": "0000:ba:00.0"
+              },
+              "resource.kubernetes.io/pcieRoot": {
+                "string": "pci0000:b7"
+              },
+              "type": {
+                "string": "gpu"
+              },
+              "uuid": {
+                "string": "GPU-10fcaf5c-ba01-ff75-29c5-6e036143a28f"
+              }
+            },
+            "capacity": {
+              "memory": {
+                "value": "183359Mi"
+              }
+            },
+            "name": "gpu-6"
+          }
+        ],
+        "driver": "gpu.nvidia.com",
+        "nodeName": "cluster-0967a26d-pool-14bee067-prctr-w4xnn",
+        "pool": {
+          "generation": 1,
+          "name": "cluster-0967a26d-pool-14bee067-prctr-w4xnn",
+          "resourceSliceCount": 1
+        }
+      }
+    }
+  ],
+  "kind": "List",
+  "metadata": {
+    "resourceVersion": ""
+  }
+}

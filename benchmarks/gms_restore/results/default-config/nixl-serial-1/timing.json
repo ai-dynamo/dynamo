@@ -1,0 +1,19 @@
+{
+  "backend": "nixl",
+  "workers": 16,
+  "numa": false,
+  "fast_gate": true,
+  "overlap": false,
+  "capture_id": "gms-v1-glm-default-0929",
+  "storage": "PVC O_DIRECT weights; PVC engine checkpoint",
+  "create_epoch": 1790647901.2153158,
+  "publication_observed_epoch": 1790647929.2226608,
+  "trigger_epoch": 1790647930.996077,
+  "ready_epoch": 1790647947.975092,
+  "pod_create_to_ready_s": 46.75977611541748,
+  "pod_create_to_publication_observed_s": 28.007344961166382,
+  "verification_orchestration_gap_s": 1.77341628074646,
+  "trigger_to_ready_s": 16.97901487350464,
+  "restored_text": "Berlin. It is the country's largest city in terms of area and population and the second most populous city. It is located in northeastern Germany. It is the center of the Berlin-Brandenburg Metropolitan Region. It is surrounded by the state of Brandenburg. It has a population of 3.5 million. The city spans an area of 891.85 square kilometers. The city experiences a temperate seasonal climate. The city is famous for its festivals, diverse architecture, nightlife, contemporary\n",
+  "metadata_correction": "NIXL used load_weights default max_workers=16; original harness recorded unused fused --workers default 4."
+}

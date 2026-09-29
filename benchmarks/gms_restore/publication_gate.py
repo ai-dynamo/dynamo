@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Placeholder-side gate: resolve actual claim, validate artifacts and all servers."""
+"""Publication gate: resolve actual claim, validate artifacts and all servers."""
 
 import json
 import os
