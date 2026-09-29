@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -1667,60 +1668,45 @@ func Test_overrideWithDynDeploymentConfig(t *testing.T) {
 	}
 }
 
-func Test_mergeEnvs(t *testing.T) {
-	type args struct {
-		common   []corev1.EnvVar
-		specific []corev1.EnvVar
+func TestMergeEnvsPreservesOrder(t *testing.T) {
+	system := []corev1.EnvVar{
+		{Name: "Z_SYSTEM", Value: "system"},
+		{Name: "SHARED", Value: "system"},
 	}
-	tests := []struct {
-		name string
-		args args
-		want []corev1.EnvVar
-	}{
-		{
-			name: "no_common_envs",
-			args: args{
-				common:   []corev1.EnvVar{},
-				specific: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "no_specific_envs",
-			args: args{
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-				specific: []corev1.EnvVar{},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "common_and_specific_envs",
-			args: args{
-				specific: []corev1.EnvVar{{Name: "BAZ", Value: "QUX"}},
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-			},
-			want: []corev1.EnvVar{{Name: "BAZ", Value: "QUX"}, {Name: "FOO", Value: "BAR"}},
-		},
-		{
-			name: "common_and_specific_envs_with_same_name",
-			args: args{
-				common:   []corev1.EnvVar{{Name: "FOO", Value: "BAR"}},
-				specific: []corev1.EnvVar{{Name: "FOO", Value: "QUX"}},
-			},
-			want: []corev1.EnvVar{{Name: "FOO", Value: "QUX"}},
-		},
+	user := []corev1.EnvVar{
+		{Name: "Z_BASE", Value: "expected"},
+		{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+		{Name: "SHARED", Value: "user"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := MergeEnvs(tt.args.common, tt.args.specific)
-			sort.Slice(got, func(i, j int) bool {
-				return got[i].Name < got[j].Name
-			})
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
-			}
-		})
+
+	require.Equal(t, append(slices.Clone(system), user...), MergeEnvs(system, user))
+}
+
+func TestMergeEnvsForOrigin(t *testing.T) {
+	system := []corev1.EnvVar{
+		{Name: "Z_SYSTEM", Value: "system"},
+		{Name: "SHARED", Value: "system"},
 	}
+	user := []corev1.EnvVar{
+		{Name: "Z_BASE", Value: "expected"},
+		{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+		{Name: "SHARED", Value: "user"},
+	}
+
+	t.Run("origin 1.6 preserves system then user order and duplicate names", func(t *testing.T) {
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0"}
+		require.Equal(t, append(slices.Clone(system), user...), MergeEnvsForOrigin(annotations, system, user))
+	})
+
+	t.Run("older origin preserves legacy sorted and de-duplicated output", func(t *testing.T) {
+		annotations := map[string]string{commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0"}
+		require.Equal(t, []corev1.EnvVar{
+			{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+			{Name: "SHARED", Value: "user"},
+			{Name: "Z_BASE", Value: "expected"},
+			{Name: "Z_SYSTEM", Value: "system"},
+		}, MergeEnvsForOrigin(annotations, system, user))
+	})
 }
 
 func TestAddStandardEnvVars_NATS(t *testing.T) {
@@ -1753,7 +1739,7 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 				},
 			}
 
-			AddStandardEnvVars(container, operatorConfig)
+			AddStandardEnvVars(container, operatorConfig, nil)
 			envByName := envVarsToMap(container.Env)
 
 			if tt.wantNATS {
@@ -1763,6 +1749,73 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
+	userEnv := []corev1.EnvVar{
+		{Name: "Z_BASE", Value: "expected"},
+		{Name: "A_DERIVED", Value: "$(Z_BASE)"},
+		{Name: "NATS_SERVER", Value: "nats://user:4222"},
+	}
+	operatorConfig := &configv1alpha1.OperatorConfiguration{
+		Infrastructure: configv1alpha1.InfrastructureConfiguration{
+			NATSAddress: "nats://system:4222",
+		},
+	}
+
+	render := func(t *testing.T, origin string) []corev1.EnvVar {
+		t.Helper()
+		component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker",
+			ComponentType: v1beta1.ComponentTypeWorker,
+			PodTemplate: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin,
+				}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "example/engine:1.6.0",
+					Env:   slices.Clone(userEnv),
+				}}},
+			},
+		}
+		podSpec, err := GenerateBasePodSpec(
+			component,
+			BackendFrameworkNoop,
+			&mockSecretsRetriever{},
+			"test-deployment",
+			"default",
+			RoleMain,
+			1,
+			operatorConfig,
+			commonconsts.MultinodeDeploymentTypeGrove,
+			"worker",
+			nil,
+			staticContainerGPUCount(0),
+		)
+		require.NoError(t, err)
+		require.Len(t, podSpec.Containers, 1)
+		return podSpec.Containers[0].Env
+	}
+
+	t.Run("origin 1.6 keeps injected env before user env in declared order", func(t *testing.T) {
+		env := render(t, "1.6.0")
+		require.GreaterOrEqual(t, len(env), len(userEnv)+1)
+		require.Equal(t, userEnv, env[len(env)-len(userEnv):])
+		require.Equal(t, corev1.EnvVar{Name: "NATS_SERVER", Value: "nats://system:4222"}, env[0])
+	})
+
+	t.Run("origin 1.5 retains legacy sorted and de-duplicated output", func(t *testing.T) {
+		env := render(t, "1.5.0")
+		require.True(t, sort.SliceIsSorted(env, func(i, j int) bool { return env[i].Name < env[j].Name }))
+		var nats []corev1.EnvVar
+		for _, item := range env {
+			if item.Name == "NATS_SERVER" {
+				nats = append(nats, item)
+			}
+		}
+		require.Equal(t, []corev1.EnvVar{{Name: "NATS_SERVER", Value: "nats://user:4222"}}, nats)
+	})
 }
 
 func TestAddTransportTLSEnvVars(t *testing.T) {
@@ -1798,7 +1851,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 				Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 			}
 			tc.set(&operatorConfig.Infrastructure)
-			AddTransportTLSEnvVars(container, operatorConfig)
+			AddTransportTLSEnvVars(container, operatorConfig, nil)
 			envByName := envVarsToMap(container.Env)
 			assert.Equal(t, tc.want, envByName[tc.env])
 		})
@@ -1810,7 +1863,7 @@ func TestAddTransportTLSEnvVars(t *testing.T) {
 		operatorConfig := &configv1alpha1.OperatorConfiguration{
 			Infrastructure: configv1alpha1.InfrastructureConfiguration{},
 		}
-		AddTransportTLSEnvVars(container, operatorConfig)
+		AddTransportTLSEnvVars(container, operatorConfig, nil)
 		envByName := envVarsToMap(container.Env)
 		for _, tc := range tlsCases {
 			assert.NotContains(t, envByName, tc.env)
