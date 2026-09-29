@@ -212,12 +212,37 @@ impl Drop for TaskLifecycleTerminal {
 }
 
 fn terminal_outcome_for_error_response(response: &ErrorResponse) -> TerminalOutcome {
-    match extract_error_type_from_response(response) {
+    terminal_outcome_for_status(response.0, extract_error_type_from_response(response))
+}
+
+fn terminal_outcome_for_status(status: StatusCode, error_type: ErrorType) -> TerminalOutcome {
+    match error_type {
         // Preserve explicit categories such as overload, even when configured as 504.
-        ErrorType::Internal if response.0 == StatusCode::GATEWAY_TIMEOUT => {
-            TerminalOutcome::TimedOut
-        }
+        ErrorType::Internal if status == StatusCode::GATEWAY_TIMEOUT => TerminalOutcome::TimedOut,
         error_type => terminal_outcome_for_error_type(error_type),
+    }
+}
+
+/// Outcome for a request preprocessing error, matching the request terminal
+/// outcome that [`ErrorMessage::from_anyhow`] produces for the same error.
+/// Cancellation and semantic errors use the same class-to-status policy;
+/// other errors are internal failures. Unlike `from_anyhow`, records no metrics.
+/// Router queue rejections/deadlines and backend `HttpError`s are not handled:
+/// they cannot arise during preprocessing, so do not reuse this for later stages.
+pub(crate) fn terminal_outcome_for_stage_error(
+    err: &(dyn std::error::Error + 'static),
+) -> TerminalOutcome {
+    if super::metrics::request_was_cancelled(err) {
+        return TerminalOutcome::Cancelled;
+    }
+    let Some(error) = find_canonical_error_in_chain(err) else {
+        return TerminalOutcome::Failed;
+    };
+    match http_action_for_error(error) {
+        ClientErrorAction::Respond { status, .. } => {
+            terminal_outcome_for_status(status, metric_error_type_for_class(error.class()))
+        }
+        ClientErrorAction::NoDelivery => TerminalOutcome::Cancelled,
     }
 }
 
@@ -7261,6 +7286,46 @@ mod tests {
                 terminal_outcome_for_error_response(&response),
                 TerminalOutcome::Rejected
             );
+        }
+    }
+
+    #[test]
+    fn stage_error_outcome_matches_request_outcome() {
+        let cases: [(fn() -> anyhow::Error, TerminalOutcome); 4] = [
+            (
+                || crate::preprocessor::invalid_argument_error("bad choice count"),
+                TerminalOutcome::Rejected,
+            ),
+            (
+                || {
+                    DynamoError::builder()
+                        .class(ErrorClass::DeadlineExceeded)
+                        .build()
+                        .into()
+                },
+                TerminalOutcome::TimedOut,
+            ),
+            (
+                || {
+                    DynamoError::builder()
+                        .class(ErrorClass::Internal)
+                        .build()
+                        .into()
+                },
+                TerminalOutcome::Failed,
+            ),
+            (
+                || anyhow::anyhow!("template render failed"),
+                TerminalOutcome::Failed,
+            ),
+        ];
+        for (error, expected) in cases {
+            let request = terminal_outcome_for_error_response(&ErrorMessage::from_anyhow(
+                error(),
+                "preprocessing failed",
+            ));
+            assert_eq!(request, expected);
+            assert_eq!(terminal_outcome_for_stage_error(error().as_ref()), request);
         }
     }
 

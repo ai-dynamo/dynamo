@@ -21,6 +21,7 @@
 mod anthropic;
 pub mod metadata;
 mod openai;
+pub(crate) use openai::terminal_outcome_for_stage_error;
 
 pub mod busy_threshold;
 pub mod disconnect;

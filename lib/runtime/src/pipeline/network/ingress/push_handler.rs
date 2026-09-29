@@ -464,6 +464,30 @@ struct ResponsePlaneModes {
     advertised: ResponsePlaneMode,
 }
 
+/// Report a response-plane mismatch to the frontend before admission is
+/// recorded as accepted, so a refused request is never traced as admitted.
+async fn reject_response_plane_mismatch<P: ResponsePublisher>(
+    response_modes: ResponsePlaneModes,
+    publisher: &mut P,
+) -> Result<(), PipelineError> {
+    let ResponsePlaneModes {
+        configured: configured_mode,
+        advertised: advertised_mode,
+    } = response_modes;
+
+    if configured_mode != advertised_mode {
+        let message = format!(
+            "response plane mismatch: frontend requested {}, worker configured {}",
+            advertised_mode.name(),
+            configured_mode.name()
+        );
+        let _ = publisher.send_prologue(Some(message.clone())).await;
+        let _ = publisher.finish().await;
+        return Err(PipelineError::Generic(message));
+    }
+    Ok(())
+}
+
 /// Per-shape strategy for turning a raw payload into a typed engine
 /// request. Captures the wire-shape divergence between the unary
 /// (`HeaderAndData`) and bidirectional (`HeaderOnly` + dial-in for the
@@ -692,22 +716,8 @@ where
         Self: IngressDispatch<Request = Req>,
         P: ResponsePublisher,
     {
-        let ResponsePlaneModes {
-            configured: configured_mode,
-            advertised: advertised_mode,
-        } = response_modes;
-
-        if configured_mode != advertised_mode {
-            let message = format!(
-                "response plane mismatch: frontend requested {}, worker configured {}",
-                advertised_mode.name(),
-                configured_mode.name()
-            );
-            let _ = publisher.send_prologue(Some(message.clone())).await;
-            let _ = publisher.finish().await;
-            return Err(PipelineError::Generic(message));
-        }
-
+        // The caller rejects mismatched response planes before admission.
+        let configured_mode = response_modes.configured;
         let request_context = request.context();
         tracing::trace!("calling generate");
         let worker_operation = lifecycle.start_worker_operation();
@@ -909,7 +919,7 @@ where
             ResponsePlaneMode::Tcp => {
                 worker_admission.record("dynamo.worker.admission.transport", "tcp");
                 tracing::trace!("creating tcp response stream");
-                let publisher = tcp::client::TcpClient::create_response_stream(
+                let mut publisher = tcp::client::TcpClient::create_response_stream(
                     request.context(),
                     response_connection_info,
                     cancellation_counter,
@@ -925,6 +935,11 @@ where
                     }
                     PipelineError::Generic(format!("Failed to create response stream: {error}"))
                 })?;
+                reject_response_plane_mismatch(response_modes, &mut publisher)
+                    .await
+                    .inspect_err(|_| {
+                        worker_admission.record("dynamo.worker.admission.result", "rejected");
+                    })?;
                 worker_admission.record("dynamo.worker.admission.result", "accepted");
                 drop(worker_admission);
                 self.generate_and_publish(
@@ -943,7 +958,7 @@ where
                 let response_pool = self.quic_response_client_pool().inspect_err(|_| {
                     worker_admission.record("dynamo.worker.admission.result", "failed");
                 })?;
-                let publisher = response_pool
+                let mut publisher = response_pool
                     .sender_with_cancellation_metric(
                         request.context(),
                         response_connection_info,
@@ -961,6 +976,11 @@ where
                         PipelineError::Generic(format!(
                             "Failed to create QUIC response stream: {error}"
                         ))
+                    })?;
+                reject_response_plane_mismatch(response_modes, &mut publisher)
+                    .await
+                    .inspect_err(|_| {
+                        worker_admission.record("dynamo.worker.admission.result", "rejected");
                     })?;
                 worker_admission.record("dynamo.worker.admission.result", "accepted");
                 drop(worker_admission);
@@ -1195,34 +1215,49 @@ mod tests {
         // Configuration is process-scoped. Isolate this enabled-mode test from
         // other tests which may have initialized the disabled default already.
         const CHILD: &str = "DYNAMO_LIFECYCLE_ADMISSION_TEST_CHILD";
+        // The configured response plane is also process-scoped, so a QUIC
+        // worker receiving a TCP response stream needs its own child.
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
-                .status()
-                .unwrap();
-            assert!(status.success(), "isolated admission regression failed");
+            for response_plane in ["tcp", "quic"] {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "pipeline::network::ingress::push_handler::tests::lifecycle_admission_closes_before_generation_and_skips_control_calls",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("DYN_LIFECYCLE_TRACE_ENABLED", "true")
+                    .env("DYN_RESPONSE_PLANE", response_plane)
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "isolated admission regression failed for {response_plane}"
+                );
+            }
             return;
         }
 
+        let response_plane = std::env::var("DYN_RESPONSE_PLANE").unwrap();
+        let plane_mismatch = ResponsePlaneMode::configured().unwrap() == ResponsePlaneMode::Quic;
         temp_env::async_with_vars(
             [
                 ("DYN_LIFECYCLE_TRACE_ENABLED", Some("true")),
-                ("DYN_RESPONSE_PLANE", Some("tcp")),
+                ("DYN_RESPONSE_PLANE", Some(response_plane.as_str())),
             ],
             async {
-                for (inference, rooted, invalid_transport) in [
-                    (true, true, false),
-                    (true, false, false),
-                    (false, true, false),
-                    (false, false, false),
-                    (true, true, true),
-                ] {
+                let cases: &[(bool, bool, bool)] = if plane_mismatch {
+                    &[(true, true, false)]
+                } else {
+                    &[
+                        (true, true, false),
+                        (true, false, false),
+                        (false, true, false),
+                        (false, false, false),
+                        (true, true, true),
+                    ]
+                };
+                for &(inference, rooted, invalid_transport) in cases {
                     let capture = AdmissionCapture::default();
                     let subscriber = tracing_subscriber::registry().with(capture.clone());
                     async {
@@ -1285,16 +1320,20 @@ mod tests {
                         .unwrap_err();
                         assert!(error.to_string().contains(if invalid_transport {
                             "unsupported response transport"
+                        } else if plane_mismatch {
+                            "response plane mismatch"
                         } else {
                             "admission probe finished"
                         }));
                         assert_eq!(
                             capture.outcome.lock().unwrap().as_deref(),
-                            (inference && rooted).then_some(if invalid_transport {
-                                "rejected"
-                            } else {
-                                "accepted"
-                            }),
+                            (inference && rooted).then_some(
+                                if invalid_transport || plane_mismatch {
+                                    "rejected"
+                                } else {
+                                    "accepted"
+                                }
+                            ),
                         );
                         peer.abort();
                         let _ = peer.await;
@@ -1373,26 +1412,19 @@ mod tests {
             (ResponsePlaneMode::Tcp, ResponsePlaneMode::Quic),
             (ResponsePlaneMode::Quic, ResponsePlaneMode::Tcp),
         ] {
-            let ingress = TestIngress::new();
-            let publisher = MismatchPublisher::default();
+            let mut publisher = MismatchPublisher::default();
             let prologue = publisher.prologue.clone();
             let finished = publisher.finished.clone();
-            let lifecycle = LifecycleTrace::new(false);
 
-            let error = ingress
-                .generate_and_publish(
-                    Context::new(serde_json::json!({})),
-                    RequestPlanePayloadCodec::Json,
-                    Instant::now(),
-                    ResponsePlaneModes {
-                        configured,
-                        advertised,
-                    },
-                    &lifecycle,
-                    publisher,
-                )
-                .await
-                .expect_err("mismatched response planes must fail");
+            let error = reject_response_plane_mismatch(
+                ResponsePlaneModes {
+                    configured,
+                    advertised,
+                },
+                &mut publisher,
+            )
+            .await
+            .expect_err("mismatched response planes must fail");
 
             let expected = format!(
                 "response plane mismatch: frontend requested {}, worker configured {}",

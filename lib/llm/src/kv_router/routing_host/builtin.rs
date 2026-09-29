@@ -373,17 +373,16 @@ impl RoutingHost {
             .flatten()
             .map(|trace| trace.as_ref().clone())
             .unwrap_or_else(|| LifecycleTrace::frontend_request_without_session(context_id));
-        let request_dispatch = lifecycle.start(LifecycleStage::RequestDispatch);
-        request_dispatch.record(
+        let request_dispatch = DispatchSpan::new(lifecycle.start(LifecycleStage::RequestDispatch));
+        request_dispatch.span.record(
             "dynamo.dispatch.route",
             self.inner.router_mode().telemetry_label(),
         );
-        request_dispatch.record("dynamo.dispatch.destination.worker.id", initial_worker);
+        request_dispatch
+            .span
+            .record("dynamo.dispatch.destination.worker.id", initial_worker);
         let prepare = |request: &mut PreprocessedRequest, target: AffinityTarget| {
-            request_dispatch.record("dynamo.dispatch.destination.worker.id", target.worker_id);
-            if let Some(dp_rank) = target.dp_rank {
-                request_dispatch.record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
-            }
+            request_dispatch.record_target(target);
             prepare(request, target)
         };
         self.request_metrics
@@ -416,7 +415,7 @@ impl RoutingHost {
                             prepare(request, target).map(|metadata| (metadata, target, occupancy))
                         },
                     )
-                    .instrument(request_dispatch.clone()),
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -426,7 +425,9 @@ impl RoutingHost {
             let metadata = match prepare(&mut request, target) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    request_dispatch.record("dynamo.dispatch.result", "failed");
+                    request_dispatch
+                        .span
+                        .record("dynamo.dispatch.result", "failed");
                     drop(request_dispatch);
                     guard.abort().await;
                     return Err(error);
@@ -440,7 +441,7 @@ impl RoutingHost {
                 &budget,
                 self.inner
                     .dispatch_exact(request, target.worker_id)
-                    .instrument(request_dispatch.clone()),
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -459,7 +460,7 @@ impl RoutingHost {
                         request.routing_mut().dp_rank = target.dp_rank;
                         prepare(request, target).map(|metadata| (metadata, target, occupancy))
                     })
-                    .instrument(request_dispatch.clone()),
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -483,7 +484,7 @@ impl RoutingHost {
                             prepare(request, target).map(|metadata| (metadata, target, occupancy))
                         },
                     )
-                    .instrument(request_dispatch.clone()),
+                    .instrument(request_dispatch.span.clone()),
             )
             .await
             .and_then(|result| result)
@@ -493,7 +494,7 @@ impl RoutingHost {
         let (metadata, target, final_occupancy, response_stream) = match dispatch_result {
             Ok(result) => result,
             Err(error) => {
-                request_dispatch.record(
+                request_dispatch.span.record(
                     "dynamo.dispatch.result",
                     if is_cancelled(&error) {
                         "cancelled"
@@ -518,7 +519,9 @@ impl RoutingHost {
                 return Err(error);
             }
         };
-        request_dispatch.record("dynamo.dispatch.result", "accepted");
+        request_dispatch
+            .span
+            .record("dynamo.dispatch.result", "accepted");
         drop(request_dispatch);
         guard.retarget_worker(target.worker_id);
         if let Some(telemetry) = device_aware_telemetry {
@@ -557,6 +560,47 @@ impl RoutingHost {
         guard.mark_dispatched();
         let stream = into_monitored_response(response_stream, guard);
         Ok((metadata, self.bind_affinity(operation, target, stream)?))
+    }
+}
+
+/// Owns the dispatch span and records the destination DP rank as it closes.
+/// A recorded span field cannot be cleared, so the rank is written once for
+/// the last attempted target: a retry to a worker without a DP rank must not
+/// inherit the previous target's rank. Recording on drop also covers a
+/// dispatch future dropped before it returns.
+struct DispatchSpan {
+    span: tracing::Span,
+    target: std::sync::Mutex<Option<AffinityTarget>>,
+}
+
+impl DispatchSpan {
+    fn new(span: tracing::Span) -> Self {
+        Self {
+            span,
+            target: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record_target(&self, target: AffinityTarget) {
+        self.span
+            .record("dynamo.dispatch.destination.worker.id", target.worker_id);
+        *self
+            .target
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(target);
+    }
+}
+
+impl Drop for DispatchSpan {
+    fn drop(&mut self) {
+        let target = *self
+            .target
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(dp_rank) = target.and_then(|target| target.dp_rank) {
+            self.span
+                .record("dynamo.dispatch.destination.dp.rank", dp_rank as u64);
+        }
     }
 }
 
