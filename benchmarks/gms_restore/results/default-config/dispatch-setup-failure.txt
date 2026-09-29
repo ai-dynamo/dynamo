@@ -1,0 +1,13 @@
+Traceback (most recent call last):
+  File "/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore/run_glm_restore.py", line 292, in <module>
+    assert resolve(capture, allocated, pre_slices)["cuda_device_map"] == map_value
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore/resolve_plan.py", line 57, in resolve
+    data = manifest.read_bytes()
+  File "/home/schwinns/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/pathlib/_abc.py", line 625, in read_bytes
+    with self.open(mode='rb') as f:
+         ~~~~~~~~~^^^^^^^^^^^
+  File "/home/schwinns/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/pathlib/_local.py", line 537, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/checkpoints/gms-restore-0929/default-capture-2/device-0/manifest.json'

@@ -23,7 +23,8 @@ def gpu_uuid(value):
     return value
 
 
-def resolve(capture, claim, slices):
+def resolve_destinations(capture, claim, slices):
+    """Resolve named DRA GPUs without opening remote artifact files."""
     ranks = capture["ranks"]
     if not ranks or sorted(r["rank"] for r in ranks) != list(range(len(ranks))):
         raise ValueError("capture must contain each logical rank exactly once")
@@ -50,6 +51,14 @@ def resolve(capture, claim, slices):
         ]
     if set(allocated) != {f"tp-{r['rank']}" for r in ranks}:
         raise ValueError("named DRA requests do not match captured ranks")
+    if len(set(allocated.values())) != len(allocated):
+        raise ValueError("duplicate destination_uuid")
+    return allocated
+
+
+def resolve(capture, claim, slices):
+    ranks = capture["ranks"]
+    allocated = resolve_destinations(capture, claim, slices)
     resolved = []
     for rank in sorted(ranks, key=lambda r: r["rank"]):
         gpu_uuid(rank["source_uuid"])

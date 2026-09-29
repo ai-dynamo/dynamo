@@ -1,0 +1,16 @@
+import sys,subprocess,time
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+from kubernetes import client
+agent=Path('/tmp/gms-restore-agent-virtual').read_text().strip();host=c.host_name(agent)
+subprocess.run(['kubectl','-n',c.NS,'exec','-i',host,'-c','agent','--','nsenter','-t','1','-m','--','sh','-c','cat > /var/lib/schwinns-gms-0928/snapshot-agent-early && chmod 755 /var/lib/schwinns-gms-0928/snapshot-agent-early'],input=Path('/tmp/gms-snapshot-agent-early').read_bytes(),check=True)
+apps=client.AppsV1Api();ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',c.NS);template=c.api.sanitize_for_serialization(ds.spec.template)
+for v in template['spec']['volumes']:
+ if v['name']=='gms-agent':v['hostPath']['path']='/var/lib/schwinns-gms-0928/snapshot-agent-early'
+apps.patch_namespaced_daemon_set(ds.metadata.name,c.NS,[{'op':'test','path':'/metadata/resourceVersion','value':ds.metadata.resource_version},{'op':'replace','path':'/spec/template','value':template}]);c.core.delete_namespaced_pod(agent,c.NS)
+for _ in range(120):
+ ps=[p for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name.endswith('s2877') and p.metadata.name!=agent and not p.metadata.deletion_timestamp and any(x.type=='Ready' and x.status=='True' for x in p.status.conditions or [])]
+ if ps:break
+ time.sleep(1)
+else:raise TimeoutError('updated agent readiness')
+agent=ps[0].metadata.name;Path('/tmp/gms-restore-agent-virtual').write_text(agent);Path('/tmp/gms-restore-agent-host').write_text(c.host_name(agent));print('new agent',agent)

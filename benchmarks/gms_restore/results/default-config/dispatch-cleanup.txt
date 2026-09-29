@@ -1,0 +1,8 @@
+deleted pod gms-v1-claim-hold-0928
+deleted claim gms-v1-glm-source-0928
+restored: numa_balancing=1
+
+original agent restored: dynamo-snapshot-agent-9p29p
+destination private NFS: 
+No source-node resources or private mounts changed in this trial series.
+Retained default GLM snapshot gms-v1-glm-default-0929 and exact PVC default-capture-2 weights; retained prior Qwen snapshot/artifacts.

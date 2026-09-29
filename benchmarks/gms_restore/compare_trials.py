@@ -5,6 +5,7 @@
 import argparse
 import json
 import statistics
+from datetime import datetime
 from pathlib import Path
 
 from summarize import json_events, seconds, summarize
@@ -72,6 +73,13 @@ for file in sorted(a.root.glob("*/timing.json")):
         "qualified_pvc_mount": timing.get("qualified_pvc_mount", False),
         "isolated_pvc_transport": timing.get("isolated_pvc_transport", False),
         "overlap": timing.get("overlap", False),
+        "early_trigger": timing.get("early_trigger", False),
+        "agent_revision": timing.get("agent_revision", "006a3823"),
+        "create_to_trigger_s": timing["trigger_epoch"] - timing["create_epoch"],
+        "create_to_agent_s": datetime.fromisoformat(
+            entries[start][0].split("\t")[0].replace("Z", "+00:00")
+        ).timestamp()
+        - timing["create_epoch"],
         "pod_s": timing["pod_create_to_ready_s"],
         "preload_span_s": summary["preload_span_s"],
         "server_init_mean_s": statistics.mean(init),
@@ -118,6 +126,8 @@ def group_key(r):
         r["qualified_pvc_mount"],
         r["isolated_pvc_transport"],
         r["overlap"],
+        r["early_trigger"],
+        r["agent_revision"],
     )
 
 

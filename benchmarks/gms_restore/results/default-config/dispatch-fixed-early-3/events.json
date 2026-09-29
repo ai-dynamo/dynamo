@@ -1,0 +1,2297 @@
+{
+  "apiVersion": "v1",
+  "items": [
+    {
+      "action": "RestoreRequested",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:36.052298+00:00",
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:36+00:00",
+      "message": "Restore requested from PodSnapshot gms-v1-glm-default-0929 for destination main",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:36+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-28xxl",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515073",
+        "uid": "66fa8b80-1608-445c-ae27-4e46aebec747"
+      },
+      "reason": "RestoreRequested",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "action": "PodIPPending",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:24.223414+00:00",
+      "firstTimestamp": "2026-09-29T03:20:24+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:24+00:00",
+      "message": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-restore-0928 to receive an IP address",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:24+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:24+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-2twgp",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515013",
+        "uid": "bc91775b-2d00-4b5a-b55e-b30fd776a07e"
+      },
+      "reason": "PodIPPending",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "action": "PodIPPending",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:24.259668+00:00",
+      "firstTimestamp": "2026-09-29T03:20:24+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:24+00:00",
+      "message": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-restore-0928 to receive an IP address",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:24+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:24+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-l598x",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515015",
+        "uid": "e5156f68-2818-4c12-89c9-efc0145714a3"
+      },
+      "reason": "PodIPPending",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "action": "RestoreSucceeded",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:52.163508+00:00",
+      "firstTimestamp": "2026-09-29T03:20:52+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:52+00:00",
+      "message": "Restored 1 destination container(s) from PodSnapshot gms-v1-glm-default-0929: main",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:52+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:52+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-lskps",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515121",
+        "uid": "feb36820-c38c-45b0-a8e6-31e3d3c67229"
+      },
+      "reason": "RestoreSucceeded",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "action": "PodIPPending",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:24.188692+00:00",
+      "firstTimestamp": "2026-09-29T03:20:24+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:24+00:00",
+      "message": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-restore-0928 to receive an IP address",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:24+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:24+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-ms49l",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515012",
+        "uid": "f88c8481-a962-44e2-9391-8a8367e45368"
+      },
+      "reason": "PodIPPending",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "action": "PodIPPending",
+      "count": 1,
+      "eventTime": "2026-09-29T03:20:24.479698+00:00",
+      "firstTimestamp": "2026-09-29T03:20:24+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:24+00:00",
+      "message": "Waiting for restore Pod schwinns-vcluster/gms-v1-glm-restore-0928 to receive an IP address",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:24+00:00",
+        "generateName": "gms-v1-glm-restore-0928-",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:action": {},
+              "f:count": {},
+              "f:eventTime": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:metadata": {
+                "f:generateName": {}
+              },
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "snapshot-agent",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:24+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928-qklpj",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515018",
+        "uid": "9469299a-99af-4421-bcfb-719e0cb19627"
+      },
+      "reason": "PodIPPending",
+      "reportingComponent": "snapshot",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "snapshot"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:24+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515007",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:24+00:00",
+      "message": "Successfully assigned schwinns-vcluster/gms-v1-glm-restore-0928 to cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:24+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:source": {
+                "f:component": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:24+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8757df49a3",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515009",
+        "uid": "14e82e94-1205-4d37-8bec-95e1a9fb1843"
+      },
+      "reason": "Scheduled",
+      "reportingComponent": "default-scheduler",
+      "reportingInstance": "",
+      "source": {
+        "component": "default-scheduler"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:29+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.initContainers{snapshot-cuda-install}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515017",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:29+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:29+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:29+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac88a175d626",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515028",
+        "uid": "841e2345-e894-4f99-a64b-d5fd63c992ba"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:29+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.initContainers{snapshot-cuda-install}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515017",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:29+00:00",
+      "message": "Created container: snapshot-cuda-install",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:29+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:29+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac88a2afb3ed",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515029",
+        "uid": "8617bfa1-1438-47e0-a16b-4774403b1dba"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:31+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.initContainers{snapshot-cuda-install}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515017",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:31+00:00",
+      "message": "Started container snapshot-cuda-install",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:31+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:31+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8922a88a8c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515033",
+        "uid": "7f78dbc3-0275-4ef9-80ad-6a8337a58ab5"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:32+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{main}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515036",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:32+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:32+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:32+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8962840cf8",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515038",
+        "uid": "ca772d99-d576-41c8-a700-b209b48e5189"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:32+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{main}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515036",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:32+00:00",
+      "message": "Created container: main",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:32+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:32+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89642f36bd",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515039",
+        "uid": "26afbf58-6169-4af6-b4ab-17584a72db6a"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{main}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Started container main",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8971eb6b86",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515042",
+        "uid": "15c2b088-f112-4229-8e24-06308170d73c"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-0}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8971f39709",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515043",
+        "uid": "947bf328-f470-4a0e-b202-622bf27e46ac"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-0}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Created container: gms-0",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8972ef282c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515044",
+        "uid": "bdaaf51e-d50f-4732-80a8-328237f24caa"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-0}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Started container gms-0",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac897f683abb",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515046",
+        "uid": "1e2f72d0-8588-4b2d-b660-1a16071b2bfe"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-1}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac897f6d9a6d",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515047",
+        "uid": "ca861233-9b24-4c5d-9cd4-6c4c8141df6d"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-1}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Created container: gms-1",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac898186aec3",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515048",
+        "uid": "478863d1-d725-45d1-88c9-5817454a5fb3"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-1}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Started container gms-1",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac898f4fa28f",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515049",
+        "uid": "4b610fc1-1a88-417c-8316-595e80b71b3b"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-2}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac898f5836d7",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515050",
+        "uid": "0ef0825b-7c4f-4ccd-ad73-78a7b6582d87"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-2}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Created container: gms-2",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89905152c5",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515051",
+        "uid": "3871e28b-ad9d-4fad-ab27-ea3cae6481cc"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-2}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Started container gms-2",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac899def963f",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515052",
+        "uid": "73cf3245-eade-4a76-aab7-f744dd80638f"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-3}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac899dfadc8c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515053",
+        "uid": "88e819b2-b9df-4224-b921-fc0cf1150ccf"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:33+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-3}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:33+00:00",
+      "message": "Created container: gms-3",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:33+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:33+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac899f07e4e7",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515054",
+        "uid": "2402c76a-3a30-4ad3-9034-7d36afcde08c"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-3}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Started container gms-3",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89ac7caf6c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515055",
+        "uid": "39b8f517-8148-4450-aa6a-573a819d7cbf"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-4}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89ac81a11a",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515056",
+        "uid": "2a8d64ea-52fc-4a6a-875b-f346af67f5eb"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-4}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Created container: gms-4",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89adc5d104",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515057",
+        "uid": "173dda21-6ded-4794-aca5-dad5e4ef8fa3"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-4}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Started container gms-4",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89bc4a7c23",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515059",
+        "uid": "b9b8505d-f1c6-48a1-b60c-7a7354ce78cd"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-5}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89bc51230e",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515060",
+        "uid": "8ae1b79b-2681-4955-96d1-fdf23ca7d10c"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-5}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Created container: gms-5",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89bdb1290f",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515061",
+        "uid": "6742aebb-cea5-4dd0-89a2-451221e41a0b"
+      },
+      "reason": "Created",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-5}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Started container gms-5",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89ccdca997",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515063",
+        "uid": "e232c397-09ba-4d73-9511-99226505c1f2"
+      },
+      "reason": "Started",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 1,
+      "firstTimestamp": "2026-09-29T03:20:34+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-6}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515040",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:34+00:00",
+      "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:34+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:34+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac89cce67e09",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515064",
+        "uid": "1068e5e5-7a5f-47c1-b662-bf771e06f635"
+      },
+      "reason": "Pulled",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Normal"
+    },
+    {
+      "count": 3,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-2}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a1a2995d3",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515085",
+        "uid": "91a4b529-f7c8-426c-b021-2e0a50059b6d"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 3,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{publication-gate}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a1a2b6c9c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515091",
+        "uid": "1eea8bb5-ceca-49bd-b345-115898291c26"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 3,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{main}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a1a2e430c",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515093",
+        "uid": "07ceca9d-ab4f-4489-ab2d-4316a3f3a6e1"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 3,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-7}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a1a2fe64b",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515088",
+        "uid": "eecda8b7-7543-4794-a9af-3004c7d1ab2f"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 3,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-5}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a1a32ce94",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515090",
+        "uid": "43b7ce0a-a185-44c5-ab9b-8f43e9b5afbf"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 2,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-6}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:36+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a5554adf8",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515092",
+        "uid": "a3dd7033-3b49-4ddd-8ee0-22913c30cb07"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 2,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-0}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:37+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a5557537e",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515089",
+        "uid": "c378b355-5d2e-4c58-b50f-00736b8fd073"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 2,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-4}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:37+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a55578206",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515086",
+        "uid": "f039a158-079c-4f0b-8006-7485bacd9ce0"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 2,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-1}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:37+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a55593d9e",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515094",
+        "uid": "b3c485c9-7153-4aa5-861d-5dfa5330713b"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    },
+    {
+      "count": 2,
+      "firstTimestamp": "2026-09-29T03:20:36+00:00",
+      "involvedObject": {
+        "apiVersion": "v1",
+        "fieldPath": "spec.containers{gms-3}",
+        "kind": "Pod",
+        "name": "gms-v1-glm-restore-0928",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515070",
+        "uid": "e4532b58-0835-471f-a66b-719aabe3bcf4"
+      },
+      "lastTimestamp": "2026-09-29T03:20:37+00:00",
+      "message": "Readiness probe failed: ",
+      "metadata": {
+        "creationTimestamp": "2026-09-29T03:20:37+00:00",
+        "managedFields": [
+          {
+            "apiVersion": "v1",
+            "fieldsType": "FieldsV1",
+            "fieldsV1": {
+              "f:count": {},
+              "f:firstTimestamp": {},
+              "f:involvedObject": {},
+              "f:lastTimestamp": {},
+              "f:message": {},
+              "f:reason": {},
+              "f:reportingComponent": {},
+              "f:reportingInstance": {},
+              "f:source": {
+                "f:component": {},
+                "f:host": {}
+              },
+              "f:type": {}
+            },
+            "manager": "vcluster",
+            "operation": "Update",
+            "time": "2026-09-29T03:20:37+00:00"
+          }
+        ],
+        "name": "gms-v1-glm-restore-0928.18d9ac8a5560298e",
+        "namespace": "schwinns-vcluster",
+        "resourceVersion": "11515095",
+        "uid": "f96f2bea-7336-4ebe-a5e0-4e59ade9c5be"
+      },
+      "reason": "Unhealthy",
+      "reportingComponent": "kubelet",
+      "reportingInstance": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+      "source": {
+        "component": "kubelet",
+        "host": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+      },
+      "type": "Warning"
+    }
+  ],
+  "kind": "EventList",
+  "metadata": {
+    "resourceVersion": "11515512"
+  }
+}

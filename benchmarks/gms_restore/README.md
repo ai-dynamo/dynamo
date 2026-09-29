@@ -119,3 +119,12 @@ Add `--isolated-pvc-transport` to bind the identically configured second mount a
 `nosharecache,nosharetransport`. This tests separate client transports for GMS and
 PageBroker while retaining the same PVC export, files, and O_DIRECT requirement.
 The benchmark setup/cleanup must create/unmount this experiment-owned mount.
+
+`--early-trigger --overlap --fast-gate` places restore intent on pod creation,
+validates the held claim's rank mapping beforehand, and performs evidence-only
+host-pod lookup after readiness. Snapshot can then resolve its target container
+without waiting for every GMS container's Running status. The captured wake gate
+still protects weight use. Snapshot patch bc42fb31 is required to avoid holding
+stale pod status through the runtime lookup timeout in this vcluster.
+See `DGD-RESTORE.md` for current operator behavior and the production integration
+plan; these tests are still the Engine API prototype, not a complete DGD run.

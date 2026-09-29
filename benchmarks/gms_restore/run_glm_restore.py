@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 from kubernetes import client, config
+from resolve_plan import resolve_destinations
 
 p = argparse.ArgumentParser()
 p.add_argument("--case", required=True)
@@ -27,6 +28,7 @@ p.add_argument("--capture-dir", type=Path)
 p.add_argument("--same-claim", action="store_true")
 p.add_argument("--fast-gate", action="store_true")
 p.add_argument("--overlap", action="store_true")
+p.add_argument("--early-trigger", action="store_true")
 p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
 if a.overlap and not a.fast_gate:
@@ -35,6 +37,8 @@ if a.qualified_pvc_mount and a.storage != "pvc":
     p.error("--qualified-pvc-mount requires PVC storage")
 if a.isolated_pvc_transport and not a.qualified_pvc_mount:
     p.error("--isolated-pvc-transport requires --qualified-pvc-mount")
+if a.early_trigger and not (a.overlap and a.fast_gate):
+    p.error("--early-trigger requires --overlap --fast-gate")
 root = Path(__file__).parent
 capture_dir = a.capture_dir or root / "results/glm"
 out = capture_dir / a.case
@@ -277,92 +281,113 @@ if a.overlap:
     }
     pod["spec"]["containers"].append(gate)
     save(out / "manifest.json", pod)
-started = time.time()
-core.create_namespaced_pod(ns, pod)
-end = time.monotonic() + 300
-while time.monotonic() < end:
-    current = core.read_namespaced_pod(name, ns)
-    states = current.status.container_statuses or []
-    if any(s.state.terminated for s in states):
-        raise RuntimeError("container exited before publication")
-    if a.overlap:
-        if len(states) == len(pod["spec"]["containers"]) and all(
-            s.state.running for s in states
-        ):
-            break
-    elif sum(s.ready for s in states if s.name.startswith("gms-")) == 8:
-        break
-    time.sleep(0.5)
-else:
-    raise TimeoutError("GMS publication")
-publication_observed = None if a.overlap else time.time()
-host = host_name()
-if a.fast_gate:
+if a.early_trigger:
+    # The held claim's allocation is immutable while reserved by the holder.
+    # Revalidate before creating the pod; no GPU enumeration or remote exec is needed.
     allocated = custom.get_namespaced_custom_object(
         "resource.k8s.io", "v1", ns, "resourceclaims", claimname
     )
     assert allocated["metadata"]["uid"] == preallocated["metadata"]["uid"]
     assert allocated["status"]["allocation"] == preallocated["status"]["allocation"]
+    destinations = resolve_destinations(capture, allocated, pre_slices)
+    assert all(destinations[f"tp-{rank}"] == uuid for rank, uuid in enumerate(targets))
     save(out / "claim.json", allocated)
     save(out / "slices.json", pre_slices)
+    pod["metadata"].setdefault("annotations", {})[
+        "nvidia.com/gms-prototype-restore-from"
+    ] = capture["capture_id"]
+    save(out / "manifest.json", pod)
+started = time.time()
+core.create_namespaced_pod(ns, pod)
+pod_create_returned = time.time()
+if a.early_trigger:
+    triggered = started
+    publication_observed = None
 else:
-    allocated = custom.get_namespaced_custom_object(
-        "resource.k8s.io", "v1", ns, "resourceclaims", claimname
-    )
-    slices = json.loads(
-        subprocess.check_output(["kubectl", "get", "resourceslices", "-o", "json"])
-    )
-    save(out / "claim.json", allocated)
-    save(out / "slices.json", slices)
-    for path, dst in [
-        (out / "claim.json", "/gms/claim.json"),
-        (out / "slices.json", "/gms/slices.json"),
-        (capture_dir / "capture.json", "/gms/capture.json"),
-    ]:
-        copy_file(path, dst)
-    plan = json.loads(
-        remote(
-            [
-                "python3",
-                "/snapshot-app/resolve_plan.py",
-                "--capture",
-                "/gms/capture.json",
-                "--claim",
-                "/gms/claim.json",
-                "--slices",
-                "/gms/slices.json",
-            ]
+    end = time.monotonic() + 300
+    while time.monotonic() < end:
+        current = core.read_namespaced_pod(name, ns)
+        states = current.status.container_statuses or []
+        if any(s.state.terminated for s in states):
+            raise RuntimeError("container exited before publication")
+        if a.overlap:
+            if len(states) == len(pod["spec"]["containers"]) and all(
+                s.state.running for s in states
+            ):
+                break
+        elif sum(s.ready for s in states if s.name.startswith("gms-")) == 8:
+            break
+        time.sleep(0.5)
+    else:
+        raise TimeoutError("GMS publication")
+    publication_observed = None if a.overlap else time.time()
+    host = host_name()
+    if a.fast_gate:
+        allocated = custom.get_namespaced_custom_object(
+            "resource.k8s.io", "v1", ns, "resourceclaims", claimname
         )
-    )
-    assert plan["cuda_device_map"] == map_value
-    save(out / "plan.json", plan)
-    copy_file(out / "plan.json", "/gms/plan.json")
-    verified = remote(
-        ["python3", "/snapshot-app/verify_publication.py", "/gms/plan.json"]
-    )
-    (out / "publication.txt").write_text(verified)
-    records = json.loads(
-        remote(
-            [
-                "python3",
-                "-c",
-                'import json;from pathlib import Path;print(json.dumps([json.loads(Path(f"/gms/rank-{r}.json").read_text()) for r in range(8)]))',
-            ]
+        assert allocated["metadata"]["uid"] == preallocated["metadata"]["uid"]
+        assert allocated["status"]["allocation"] == preallocated["status"]["allocation"]
+        save(out / "claim.json", allocated)
+        save(out / "slices.json", pre_slices)
+    else:
+        allocated = custom.get_namespaced_custom_object(
+            "resource.k8s.io", "v1", ns, "resourceclaims", claimname
         )
-    )
-    save(out / "publications.json", records)
-triggered = time.time()
-core.patch_namespaced_pod(
-    name,
-    ns,
-    {
-        "metadata": {
-            "annotations": {
-                "nvidia.com/gms-prototype-restore-from": capture["capture_id"]
+        slices = json.loads(
+            subprocess.check_output(["kubectl", "get", "resourceslices", "-o", "json"])
+        )
+        save(out / "claim.json", allocated)
+        save(out / "slices.json", slices)
+        for path, dst in [
+            (out / "claim.json", "/gms/claim.json"),
+            (out / "slices.json", "/gms/slices.json"),
+            (capture_dir / "capture.json", "/gms/capture.json"),
+        ]:
+            copy_file(path, dst)
+        plan = json.loads(
+            remote(
+                [
+                    "python3",
+                    "/snapshot-app/resolve_plan.py",
+                    "--capture",
+                    "/gms/capture.json",
+                    "--claim",
+                    "/gms/claim.json",
+                    "--slices",
+                    "/gms/slices.json",
+                ]
+            )
+        )
+        assert plan["cuda_device_map"] == map_value
+        save(out / "plan.json", plan)
+        copy_file(out / "plan.json", "/gms/plan.json")
+        verified = remote(
+            ["python3", "/snapshot-app/verify_publication.py", "/gms/plan.json"]
+        )
+        (out / "publication.txt").write_text(verified)
+        records = json.loads(
+            remote(
+                [
+                    "python3",
+                    "-c",
+                    'import json;from pathlib import Path;print(json.dumps([json.loads(Path(f"/gms/rank-{r}.json").read_text()) for r in range(8)]))',
+                ]
+            )
+        )
+        save(out / "publications.json", records)
+    triggered = time.time()
+    core.patch_namespaced_pod(
+        name,
+        ns,
+        {
+            "metadata": {
+                "annotations": {
+                    "nvidia.com/gms-prototype-restore-from": capture["capture_id"]
+                }
             }
-        }
-    },
-)
+        },
+    )
 end = time.monotonic() + 240
 while time.monotonic() < end:
     current = core.read_namespaced_pod(name, ns)
@@ -380,6 +405,9 @@ else:
     save(out / "timeout-pod.json", current)
     raise TimeoutError("engine readiness")
 ready = time.time()
+save(out / "ready-pod.json", current)
+if a.early_trigger:
+    host = host_name()
 if a.fast_gate:
     plan = json.loads(remote(["cat", "/gms/restore-plan.json"]))
     save(out / "plan.json", plan)
@@ -398,6 +426,8 @@ text = remote(["cat", "/snapshot-control/sglang-restore-ready"], "main")
 assert "berlin" in text.lower(), text
 result = {
     "backend": a.backend,
+    "early_trigger": a.early_trigger,
+    "pod_create_return_epoch": pod_create_returned,
     "workers": a.workers if a.backend == "fused" else 16,
     "numa": a.numa,
     "qualified_pvc_mount": a.qualified_pvc_mount,

@@ -160,6 +160,95 @@ index c51fa755..4acce3f3 100644
              next_virtual_allocation_handle: 1,
              phase: Phase::Active,
              arena: None,
+diff --git a/agent/internal/controller/controller.go b/agent/internal/controller/controller.go
+index 3ffb5e8e..a375bc49 100644
+--- a/agent/internal/controller/controller.go
++++ b/agent/internal/controller/controller.go
+@@ -866,6 +866,18 @@ func (w *NodeController) resolveRestoreContainerID(ctx context.Context, pod *cor
+ 	tick := time.NewTicker(restoreContainerResolveInterval)
+ 	defer tick.Stop()
+ 	for {
++		// Status may become available while a runtime lookup is pending (for
++		// example, when a virtual cluster and containerd use different pod names).
++		// Consume informer progress rather than holding the initial pod snapshot
++		// until the entire runtime lookup timeout expires.
++		if w.restorePodLister != nil {
++			latest, err := w.restorePodLister.Pods(pod.Namespace).Get(pod.Name)
++			if err == nil && latest.UID == pod.UID {
++				if id := restoreContainerIDFromStatus(latest, destination); id != "" {
++					return id, false
++				}
++			}
++		}
+ 		resolveCtx, cancel := restoreContainerResolveAttemptContext(ctx, deadlineAt)
+ 		containerID, err := w.runtime.ResolveContainerIDByPod(resolveCtx, pod.Name, pod.Namespace, destination)
+ 		cancel()
+diff --git a/agent/internal/controller/controller_test.go b/agent/internal/controller/controller_test.go
+index 04959c34..32b76db5 100644
+--- a/agent/internal/controller/controller_test.go
++++ b/agent/internal/controller/controller_test.go
+@@ -53,6 +53,7 @@ type fakeRuntime struct {
+ 	containerIDByPod     string
+ 	resolvedContainerIDs []string
+ 	resolveContainerPID  int
++	resolveContainerHook func()
+ }
+ 
+ var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
+@@ -68,6 +69,9 @@ func (r *fakeRuntime) ResolveContainer(_ context.Context, id string) (int, *spec
+ }
+ 
+ func (r *fakeRuntime) ResolveContainerIDByPod(_ context.Context, _, _, _ string) (string, error) {
++	if r.resolveContainerHook != nil {
++		r.resolveContainerHook()
++	}
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+ 	if r.containerIDByPod != "" {
+@@ -1042,6 +1046,43 @@ func TestContainerPollingDoesNotSetInProgressBeforeExecution(t *testing.T) {
+ 	assert.False(t, hasPodStatusApply(w))
+ }
+ 
++func TestContainerPollingConsumesNewInformerStatus(t *testing.T) {
++	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
++	pod.Status.ContainerStatuses[0].ContainerID = ""
++	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
++	latest := pod.DeepCopy()
++	latest.Status.ContainerStatuses[0].ContainerID = "containerd://new-container"
++	lookups := 0
++	rt := &fakeRuntime{resolveContainerHook: func() {
++		lookups++
++		require.NoError(t, indexer.Update(latest))
++	}}
++	w := &NodeController{runtime: rt, restorePodLister: corev1listers.NewPodLister(indexer), log: testr.New(t)}
++	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
++	defer cancel()
++	id, requeue := w.resolveRestoreContainerID(ctx, pod, "main", "inference/restore-worker")
++	assert.Equal(t, "new-container", id)
++	assert.False(t, requeue)
++	assert.Equal(t, 1, lookups)
++	assert.NoError(t, ctx.Err())
++}
++
++func TestContainerPollingRejectsStatusFromReplacementPod(t *testing.T) {
++	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
++	pod.Status.ContainerStatuses[0].ContainerID = ""
++	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
++	replacement := pod.DeepCopy()
++	replacement.UID = "replacement-uid"
++	replacement.Status.ContainerStatuses[0].ContainerID = "containerd://wrong-container"
++	require.NoError(t, indexer.Add(replacement))
++	w := &NodeController{runtime: &fakeRuntime{}, restorePodLister: corev1listers.NewPodLister(indexer), log: testr.New(t)}
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	id, requeue := w.resolveRestoreContainerID(ctx, pod, "main", "inference/restore-worker")
++	assert.Empty(t, id)
++	assert.False(t, requeue)
++}
++
+ func TestPreflightRestoreValidatesContentBacklink(t *testing.T) {
+ 	pod := restorePod(map[string]string{podcontract.RestoreFromAnnotation: "snapshot-a"})
+ 	tests := map[string]func(*snapshotv1alpha1.PodSnapshotContent){
 diff --git a/agent/internal/cuda/cuda.go b/agent/internal/cuda/cuda.go
 index 7c3e9602..af915adc 100644
 --- a/agent/internal/cuda/cuda.go

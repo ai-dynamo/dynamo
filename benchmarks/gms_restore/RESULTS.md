@@ -14,6 +14,68 @@ All 448 GiB of matching allocation data is read from the PVC export with
 `O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
 comparison is 46.083 s serialized versus 29.562 s overlapping.
 
+## Creation-time restore dispatch follow-up (2026-09-29)
+
+Production DGD admission already places restore intent on pod creation. The
+benchmark instead waited for all containers Running, looked up the translated
+host pod, revalidated the claim and then patched the restore annotation. Its
+representative request arrived 6.473 s after creation; agent dispatch followed
+0.173 s later. Added `--early-trigger` to remove that avoidable dependency while
+preserving the allocated claim/rank mapping and captured publication gate.
+
+A creation-time request exposed a Snapshot resolver bug: its in-flight 30 s
+runtime lookup used stale initial pod status and virtual pod names that did not
+match containerd's translated host identity. The first early request restored
+correctly but took 48.541 s, with agent start at 32.029 s. Snapshot commit
+`bc42fb31` consumes updated informer status during the lookup and checks pod UID
+before accepting a container ID. Its patch and regression tests are included in
+`snapshot-prototype.patch`. The CUDA shim and PageBroker remain unchanged.
+
+Three alternating pairs then used the fixed agent, same default capture, exact
+448 GiB PVC/O_DIRECT weights, one GPU per rank, fused 16-worker NUMA loader and
+separate qualified NFS transport. All six passed Berlin and Rayleigh inference.
+
+| Fixed agent, three runs each | Late request | Creation-time request |
+|---|---:|---:|
+| Pod-to-ready mean | 28.076 s | 28.619 s |
+| Pod-to-ready median | 28.082 s | 26.377 s |
+| Pod-to-ready range | 26.682–29.463 s | 26.370–33.111 s |
+| First GMS script start → agent start, mean | 4.487 s | 2.629 s |
+| Pod create → agent start, mean | 6.934 s | 7.364 s |
+| All-rank GMS load/publication span, mean | 21.622 s | 21.402 s |
+| Per-rank GMS initialization, mean | 0.286 s | 0.293 s |
+| Per-rank loader interval, mean | 19.985 s | 19.833 s |
+| CRIU, mean | 7.109 s | 6.786 s |
+| CUDA phase, mean | 8.970 s | 8.281 s |
+
+The first-GMS timestamp is a common application-start marker, not an exact
+sandbox-ready boundary. Relative to that marker, dispatch improved by 1.858 s.
+**This small sample does not establish an average end-to-end speedup.** The third
+early run's first GMS script started at 9.492 s versus roughly 2.2–2.8 s normally;
+its main container also started late. Retain this outlier in both means and
+charts. Events show cached images, CSI attach returning in about 2 ms, and the
+installer's recorded start/finish in the same one-second bucket. Available logs
+do not isolate the cause of the earlier sandbox/mount/runtime startup delay.
+Do not attribute the entire gap to the installer, DRA, CNI or NFS without more
+instrumentation. Relevant events and kubelet logs are archived with the case.
+
+Even normal early runs start the agent at 4.875–5.102 s, after main-container
+startup around 2 s. The fix removes the stale-status timeout; it does not bypass
+vcluster/kubelet status propagation. Correct host-side CRI identity and lifecycle
+notifications are the next dispatch targets. The captured app also has a
+one-second completion-sentinel poll; replacing it needs a new capture or restore
+notification hook. Warm images and preallocated DRA claims remain explicit
+conditions; these are not full DGD-create-to-ready measurements.
+
+See [DGD integration plan](DGD-RESTORE.md),
+[interactive dispatch Gantt charts](results/default-config/dispatch-timelines.html)
+and [all six paired measurements](results/default-config/dispatch-comparison.json).
+The charts include a representative early run, control, startup outlier and old
+agent timeout. CRIU duration is measured but its plotted placement is approximate.
+Cleanup was verified again: experiment pods/claims released, original agent and
+operator restored, NUMA balancing restored, private mounts removed, both valid
+snapshots retained Ready (`dispatch-cleanup-verification.json`).
+
 ## PVC O_DIRECT with overlapping restore (2026-09-29)
 
 The earlier **5.99 s** weight result was RAM-staged and is not a PVC result.

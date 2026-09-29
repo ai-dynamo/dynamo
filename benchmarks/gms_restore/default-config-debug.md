@@ -92,3 +92,47 @@ Use logged timestamps for a Gantt chart; distinguish observed from derived phase
   NFS mounts. Deleted the unused 448 GiB profiled-source weight set. The valid
   GLM default snapshot and Qwen snapshot still report Ready, with their exact
   durable artifacts retained. Verification is archived beside the trial evidence.
+
+## Creation-time dispatch follow-up (2026-09-29)
+
+User asked to minimize blank startup overhead for a real DGD. Representative
+prior case: request sent 6.473 s after pod creation; agent started 0.173 s later.
+The harness waited for all containers Running, performed host-pod lookup, and
+revalidated the claim before sending an already-planned restore request.
+
+- Added `--early-trigger` to put restore intent on pod creation. It requires the
+  existing overlap/wake gate, checks claim UID/allocation and rank→UUID mapping
+  before creation, and keeps full artifact/publication validation at weight use.
+- Initial pre-create validation incorrectly invoked the artifact-reading resolver
+  on the orchestration host, where the PVC is not mounted. It failed before pod
+  creation. Extracted the named-DRA mapping step; artifact verification still runs
+  against the actual PVC inside the pod. Existing rank-plan tests pass.
+- First creation-time request with the old agent restored correctly in 48.541 s,
+  but agent start was delayed to 32.029 s. The main container started around 2 s.
+  The inline runtime resolver holds an initial pod status for up to 30 s and
+  looks up virtual pod names in containerd, which stores translated host names.
+- Snapshot commit bc42fb31 consumes updated informer status during that loop and
+  checks Pod UID to reject IDs from replacement pods. Controller tests pass,
+  including late-status progress and replacement-UID rejection. A race-enabled
+  invocation could not run with this environment's CGO disabled; no race-test
+  success is claimed. The CUDA shim/broker remain unchanged from the capture.
+- First fixed-agent early case: agent start 5.102 s; coherent ready 26.370 s.
+  Matched control: agent start 6.562 s; coherent ready 26.682 s. CRIU inflation
+  offset much of the dispatch gain. Repeating three alternating pairs.
+- Current DGD admission already builds restore intent before creation; native
+  GMS sidecars have no startup probe. Snapshot+InterPod GMS is currently rejected;
+  its Grove startup edges are future integration work. See DGD-RESTORE.md.
+
+- Completed all three alternating fixed-agent pairs. Late/early mean readiness:
+  28.076/28.619 s; median 28.082/26.377 s. First-GMS-to-agent mean improved
+  4.487→2.629 s. No average end-to-end speedup claim: early-3's first GMS start
+  was 9.492 s and total 33.111 s; main-container startup was also late. Keep the
+  outlier. Cached images, fast attach and sub-second recorded installer duration
+  do not explain the earlier startup gap; exact resource cause remains unknown.
+- All eight follow-up restores (two old-agent, six fixed-agent) passed Berlin and
+  Rayleigh with the default communication configuration and exact PVC/O_DIRECT
+  allocation set. Charts and paired comparison preserve the two agent revisions.
+- Cleanup and independent verification complete: no experiment GPU owners,
+  original templates/config/operator restored, NUMA balancing 1, private NFS
+  mounts absent, retained GLM and Qwen snapshots Ready. DGD integration remains
+  a documented proposal; full DGD startup and allocation are not benchmarked.
