@@ -52,6 +52,11 @@ const FRONTEND_EVENT_CAPACITY: usize = 64;
 const CKF_POOL_EVENT_CAPACITY: usize = 1;
 const CKF_OUTPUT_CAPACITY: usize = 1;
 
+pub(super) struct StatsListenConfig {
+    pub(super) address: SocketAddr,
+    pub(super) allow_non_loopback: bool,
+}
+
 pub(super) struct RelayStatsRuntime {
     cancel: CancellationToken,
     supervisor: JoinHandle<()>,
@@ -63,14 +68,13 @@ impl RelayStatsRuntime {
         statuses: EndpointStatuses,
         pools: Arc<PoolRegistry>,
         publication_source: Arc<dyn RelayPublicationSource>,
-        listen_address: SocketAddr,
-        allow_non_loopback: bool,
+        listen: StatsListenConfig,
         fatal_cancel: CancellationToken,
         terminal: Arc<HostTerminalState>,
     ) -> anyhow::Result<Self> {
         let identity = publication_source.relay_identity();
-        validate_listen_address(listen_address, allow_non_loopback)?;
-        let listener = tokio::net::TcpListener::bind(listen_address).await?;
+        validate_listen_address(listen.address, listen.allow_non_loopback)?;
+        let listener = tokio::net::TcpListener::bind(listen.address).await?;
         let cancel = fatal_cancel.child_token();
         let metadata = relay_metadata(identity);
         let (usage_tx, usage_rx) = watch::channel(proto::KvUsageSnapshot {

@@ -59,7 +59,7 @@ use super::publication::{
     RelayPublicationSource,
 };
 use super::resolution::stable_dc_id;
-use super::stats::RelayStatsRuntime;
+use super::stats::{RelayStatsRuntime, StatsListenConfig};
 use super::topology::{TopologyPublisher, TopologySnapshot};
 use super::wan::grpc::{GrpcTransport, KvDcRelayGrpcConfig};
 use crate::discovery::{
@@ -765,8 +765,10 @@ impl KvDcRelay {
                 statuses.clone(),
                 pools.clone(),
                 publication_source.clone(),
-                listen_address,
-                config.producer.stats_allow_non_loopback,
+                StatsListenConfig {
+                    address: listen_address,
+                    allow_non_loopback: config.producer.stats_allow_non_loopback,
+                },
                 cancel.clone(),
                 terminal.clone(),
             )
