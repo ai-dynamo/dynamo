@@ -576,6 +576,8 @@ def resolve_structural_tag_config(
     """Normalize the public setting and hidden legacy flags."""
 
     structural_tag_setting = runtime_config.dyn_structural_tag
+    if structural_tag_setting is True:
+        structural_tag_setting = StructuralTagConfig()
     legacy_enable = runtime_config.dyn_enable_structural_tag
     legacy_scope = runtime_config.dyn_structural_tag_scope
     legacy_schema = runtime_config.dyn_structural_tag_schema
