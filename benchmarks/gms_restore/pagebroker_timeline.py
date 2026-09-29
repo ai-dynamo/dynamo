@@ -672,12 +672,12 @@ def parse_case(case, pagebroker_log=None):
     )
     rows.append(
         row(
-            "Snapshot: CUDA complete → cleanup / restore return",
+            "Snapshot: post-CUDA hooks / cleanup → restore return",
             segment(
                 cuda_end,
                 restore_end,
                 "orchestration",
-                "Measured interval includes nsrestore return, namespace unmounts and process validation; the current log does not split every internal step.",
+                "Measured interval includes post-CUDA work, nsrestore return, namespace unmounts and process validation. The deployed b33a9962 helper calls the cuInterpose restore coordinator after the CUDA timer stops; current logs do not separate coordinator work from cleanup or establish a GMS wait.",
             ),
         )
     )
