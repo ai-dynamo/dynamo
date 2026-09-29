@@ -121,6 +121,8 @@ for process in /proc/[0-9]*; do
     # The sole cross-cgroup exception is the explicit numeric target supplied
     # to this container's still-live helper. Never follow arbitrary CRIU PIDs.
     if [[ "${executable##*/}" == cuda-checkpoint-helper* && "$target" =~ ^[1-9][0-9]{0,9}$ ]] && (( 10#$target <= 2147483647 )); then
+        # Restore helpers use inner PIDs; never treat those as unrelated host PIDs.
+        [[ "$(readlink "/proc/$pid/ns/pid")" == "$(readlink /proc/self/ns/pid)" ]] || continue
         same_cgroup "$pid" || continue
         same_process "$pid" "$identity" || continue
         current_argv=()
