@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: motif3-agg-b200
+spec:
+  components:
+    - name: Frontend
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: acr-token-secret
+    - name: Worker
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: acr-token-secret
