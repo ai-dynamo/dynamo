@@ -853,6 +853,7 @@ class FragmentedMp4Cutter:
     """
 
     def __init__(self) -> None:
+        """Start empty, ahead of the init segment."""
         self._buf = bytearray()
         self._pos = 0  # offset of the next unparsed box header
         self._init_done = False
@@ -881,17 +882,20 @@ class FragmentedMp4Cutter:
         return out
 
     def _reset_fragment(self) -> None:
+        """Drop the buffered bytes and leave fragment state."""
         self._buf.clear()
         self._pos = 0
         self._in_fragment = False
 
     def _take(self, end: int, kind: str) -> Tuple[str, bytes]:
+        """Cut the first ``end`` buffered bytes out as one segment."""
         payload = bytes(self._buf[:end])
         del self._buf[:end]
         self._pos = 0
         return kind, payload
 
     def _cut(self) -> List[Tuple[str, bytes]]:
+        """Walk the complete top-level boxes and return the segments they close."""
         out: List[Tuple[str, bytes]] = []
         while True:
             header = _box_header(self._buf, self._pos, len(self._buf))
@@ -972,6 +976,7 @@ class StreamingCmafEncoder:
         gop_frames: Optional[int] = None,
         read_timeout_s: float = CMAF_READ_TIMEOUT_S,
     ) -> None:
+        """Record the session geometry; ``start()`` launches ffmpeg."""
         self.fps = int(fps)
         self.width = int(width)
         self.height = int(height)
@@ -1044,10 +1049,12 @@ class StreamingCmafEncoder:
         self._stdout_task = self._stderr_task = None
 
     async def __aenter__(self) -> "StreamingCmafEncoder":
+        """Start the session."""
         await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
+        """Tear the session down."""
         await self.aclose()
 
     # -- streaming ---------------------------------------------------------
@@ -1164,11 +1171,13 @@ class StreamingCmafEncoder:
     # -- internals ---------------------------------------------------------
 
     def _require_started(self) -> asyncio.subprocess.Process:
+        """The ffmpeg process, or a RuntimeError if ``start()`` has not run."""
         if self._proc is None:
             raise RuntimeError("StreamingCmafEncoder.start() has not been called")
         return self._proc
 
     def _tag(self, kind: str, payload: bytes) -> Tuple[str, bytes]:
+        """Turn a cutter ``(kind, payload)`` into its wire tag, numbering segments."""
         if kind == "init":
             self._init_segment = payload
             return CMAF_INIT_TAG, payload
@@ -1209,6 +1218,7 @@ class StreamingCmafEncoder:
             self._out_q.put_nowait(None)
 
     async def _pump_stderr(self) -> None:
+        """Keep the tail of ffmpeg's stderr for error reports."""
         proc = self._proc
         assert proc is not None and proc.stderr is not None
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1222,9 +1232,11 @@ class StreamingCmafEncoder:
                     del self._stderr[:-65536]
 
     def _stderr_text(self) -> str:
+        """The captured stderr tail as text."""
         return bytes(self._stderr).decode("utf-8", errors="replace").strip()
 
     async def _close_stdin(self) -> None:
+        """Close ffmpeg's stdin once, signalling end of input."""
         proc = self._require_started()
         if self._stdin_closed or proc.stdin is None:
             return

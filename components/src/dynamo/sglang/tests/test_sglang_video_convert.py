@@ -26,6 +26,7 @@ class TestSglangVideoToCanonical:
     """to_canonical() maps DiffGenerator frames to canonical frames losslessly."""
 
     def test_roundtrip_from_pil_is_bit_exact(self):
+        """PIL frames round-trip through ``to_canonical`` bit-exact."""
         Image = pytest.importorskip("PIL.Image")
         from dynamo.sglang.request_handlers.video_generation.video_convert import (
             to_canonical,
@@ -41,6 +42,7 @@ class TestSglangVideoToCanonical:
         assert np.array_equal(out, truth)
 
     def test_roundtrip_from_numpy_is_bit_exact(self):
+        """NumPy frames round-trip through ``to_canonical`` bit-exact."""
         from dynamo.sglang.request_handlers.video_generation.video_convert import (
             to_canonical,
         )
@@ -58,6 +60,7 @@ class TestSglangVideoHandlerAdapter:
 
     @pytest.mark.asyncio
     async def test_converts_then_encodes(self):
+        """The handler converts to canonical frames before encoding."""
         from dynamo.sglang.request_handlers.video_generation.video_generation_handler import (  # noqa: E501
             VideoGenerationWorkerHandler,
         )

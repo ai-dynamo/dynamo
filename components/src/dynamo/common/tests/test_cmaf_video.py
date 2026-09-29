@@ -32,15 +32,18 @@ class TestIterCmafChunks:
         assert sizes == [8] * 12 + [1]
 
     def test_chunks_cover_every_frame_in_order(self):
+        """Concatenating the chunks reproduces the input."""
         frames = np.arange(30, dtype=np.uint8).reshape(30, 1, 1, 1)
         joined = np.concatenate(list(cmaf_video.iter_cmaf_chunks(frames, 8)))
         assert np.array_equal(joined, frames)
 
     def test_exact_multiple_has_no_tail(self):
+        """A frame count divisible by the GOP yields only full chunks."""
         frames = np.zeros((32, 2, 2, 3), dtype=np.uint8)
         assert [len(c) for c in cmaf_video.iter_cmaf_chunks(frames, 8)] == [8] * 4
 
     def test_rejects_a_non_positive_size(self):
+        """A zero or negative GOP is a ValueError."""
         frames = np.zeros((4, 2, 2, 3), dtype=np.uint8)
         with pytest.raises(ValueError, match="must be positive"):
             list(cmaf_video.iter_cmaf_chunks(frames, 0))
@@ -55,14 +58,17 @@ class TestCmafGopFrames:
     """DYN_CMAF_GOP_FRAMES must be a positive multiple of four."""
 
     def test_default_when_unset(self, monkeypatch):
+        """Unset env falls back to the default GOP."""
         monkeypatch.delenv(cmaf_video.ENV_CMAF_GOP_FRAMES, raising=False)
         assert cmaf_video.cmaf_gop_frames() == cmaf_video.DEFAULT_CMAF_GOP_FRAMES
 
     def test_blank_is_treated_as_unset(self, monkeypatch):
+        """Whitespace-only env is the same as unset."""
         monkeypatch.setenv(cmaf_video.ENV_CMAF_GOP_FRAMES, "  ")
         assert cmaf_video.cmaf_gop_frames() == cmaf_video.DEFAULT_CMAF_GOP_FRAMES
 
     def test_override(self, monkeypatch):
+        """The env override is honoured."""
         monkeypatch.setenv(cmaf_video.ENV_CMAF_GOP_FRAMES, "16")
         assert cmaf_video.cmaf_gop_frames() == 16
 
@@ -74,6 +80,7 @@ class TestCmafGopFrames:
             cmaf_video.cmaf_gop_frames()
 
     def test_segment_seconds_follows_the_frame_rate(self):
+        """Segment seconds is GOP over fps."""
         assert cmaf_video.cmaf_segment_seconds(16, 8) == 0.5
 
 
@@ -84,6 +91,7 @@ class TestCmafGopFrames:
 
 class TestFrameTags:
     def test_segment_tags_are_one_based(self):
+        """Segment tags count from one."""
         assert cmaf_video.segment_tag(1) == "cmaf:segment:1"
         assert cmaf_video.segment_tag(13).startswith(cmaf_video.CMAF_SEGMENT_TAG_PREFIX)
 
@@ -104,6 +112,7 @@ class TestFrameTags:
         assert meta["segment_count"] == 4
 
     def test_metadata_allows_an_unknown_segment_count(self):
+        """``segment_count`` may be ``None`` when the total is not known up front."""
         meta = json.loads(
             cmaf_video.metadata_bytes(
                 video_codec="av01.0.05M.08",

@@ -53,6 +53,7 @@ class DemoProxyServer(http.server.ThreadingHTTPServer):
         frontend_port: int,
         upstream_timeout: float = DEFAULT_UPSTREAM_TIMEOUT,
     ) -> None:
+        """Bind the proxy and remember where the frontend lives."""
         super().__init__(server_address, DemoProxyHandler)
         self.frontend_host = frontend_host
         self.frontend_port = frontend_port
@@ -65,21 +66,26 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
     server_version = "cmaf-binary-demo/0.1"
 
     def do_GET(self) -> None:
+        """Serve a static file or forward to the frontend."""
         self._handle()
 
     def do_HEAD(self) -> None:
+        """Like GET, without the body."""
         self._handle(head_only=True)
 
     def do_POST(self) -> None:
+        """Forward to the frontend."""
         self._handle()
 
     def do_OPTIONS(self) -> None:
+        """Forward to the frontend."""
         self._handle()
 
     def _handle(self, head_only: bool = False) -> None:
         # Route on the path alone; `self.path` keeps the query string because
         # upstream needs it verbatim. Matching the raw target would 404 on
         # `/?debug=1`.
+        """Route one request: static files from disk, everything else upstream."""
         route = self._route_path()
 
         if route in {"/", "/client.html"}:
@@ -107,6 +113,7 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
         return self.path.split("?", 1)[0].split("#", 1)[0]
 
     def _safe_static_path(self, route: str) -> Path | None:
+        """Resolve ``route`` under the static root, or ``None`` if it escapes it."""
         cleaned = route.lstrip("/")
         if not cleaned:
             return None
@@ -118,6 +125,7 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
         return candidate
 
     def _serve_static(self, path: Path, head_only: bool = False) -> None:
+        """Send one file from disk, uncached."""
         body = path.read_bytes()
         mime_type, _ = mimetypes.guess_type(path.name)
         self.send_response(200)
@@ -130,6 +138,7 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _forward(self, head_only: bool = False) -> None:
+        """Relay the request to the frontend and stream its response back."""
         content_length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(content_length) if content_length else None
 
@@ -177,10 +186,12 @@ class DemoProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
 
     def log_message(self, fmt: str, *args) -> None:
+        """Prefix access-log lines so they stand apart from the frontend's."""
         sys.stderr.write(f"[demo-proxy] {self.address_string()} - {fmt % args}\n")
 
 
 def create_parser() -> argparse.ArgumentParser:
+    """Command-line options for the demo proxy."""
     parser = argparse.ArgumentParser(
         description="Serve the CMAF demo page and proxy an already-running "
         "Dynamo frontend under one browser origin."
@@ -224,6 +235,7 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def wait_for_frontend(host: str, port: int, timeout_seconds: float) -> None:
+    """Block until the frontend answers ``/live`` or the timeout passes."""
     deadline = time.time() + timeout_seconds
     last_error: Exception | None = None
     while time.time() < deadline:
@@ -243,6 +255,7 @@ def wait_for_frontend(host: str, port: int, timeout_seconds: float) -> None:
 
 
 def main() -> int:
+    """Wait for the frontend, then serve the page and proxy until interrupted."""
     args = create_parser().parse_args()
 
     wait_for_frontend(

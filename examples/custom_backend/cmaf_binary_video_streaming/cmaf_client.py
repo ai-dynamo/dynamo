@@ -86,6 +86,7 @@ def iter_frames(stream):
 
 
 def run(args: argparse.Namespace) -> int:
+    """POST the request, write each frame under ``--out``, report the outcome."""
     body = {
         "model": args.model,
         "prompt": args.prompt,
@@ -112,7 +113,6 @@ def run(args: argparse.Namespace) -> int:
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
-    concat = (outdir / "stream.mp4").open("wb")
 
     started = time.monotonic()
     segments = 0
@@ -120,35 +120,36 @@ def run(args: argparse.Namespace) -> int:
     done = False
 
     print(f"POST {url}")
-    try:
-        with _opener.open(request, timeout=args.timeout) as response:
-            for kind, payload in iter_frames(response):
-                dt = time.monotonic() - started
-                name = KIND_NAMES.get(kind)
-                if name is None:
-                    print(f"  {dt:7.2f}s  unknown kind 0x{kind:02x}, dropping")
-                    continue
-                if kind == KIND_METADATA:
-                    meta = json.loads(payload)
-                    print(f"  {dt:7.2f}s  metadata {meta}")
-                    (outdir / "metadata.json").write_bytes(payload)
-                elif kind == KIND_INIT:
-                    print(f"  {dt:7.2f}s  init     {len(payload)} bytes")
-                    (outdir / "init.mp4").write_bytes(payload)
-                    concat.write(payload)
-                elif kind == KIND_SEGMENT:
-                    print(f"  {dt:7.2f}s  segment  #{segments} {len(payload)} bytes")
-                    (outdir / f"seg{segments:03d}.m4s").write_bytes(payload)
-                    concat.write(payload)
-                    segments += 1
-                elif kind == KIND_ERROR:
-                    error = payload.decode("utf-8", "replace")
-                    print(f"  {dt:7.2f}s  ERROR    {error}")
-                elif kind == KIND_DONE:
-                    print(f"  {dt:7.2f}s  done")
-                    done = True
-    finally:
-        concat.close()
+    # stream.mp4 is init + every segment in order: a plain fMP4 file that ffprobe
+    # or a player can open, alongside the individual pieces.
+    with (outdir / "stream.mp4").open("wb") as concat, _opener.open(
+        request, timeout=args.timeout
+    ) as response:
+        for kind, payload in iter_frames(response):
+            dt = time.monotonic() - started
+            name = KIND_NAMES.get(kind)
+            if name is None:
+                print(f"  {dt:7.2f}s  unknown kind 0x{kind:02x}, dropping")
+                continue
+            if kind == KIND_METADATA:
+                meta = json.loads(payload)
+                print(f"  {dt:7.2f}s  metadata {meta}")
+                (outdir / "metadata.json").write_bytes(payload)
+            elif kind == KIND_INIT:
+                print(f"  {dt:7.2f}s  init     {len(payload)} bytes")
+                (outdir / "init.mp4").write_bytes(payload)
+                concat.write(payload)
+            elif kind == KIND_SEGMENT:
+                print(f"  {dt:7.2f}s  segment  #{segments} {len(payload)} bytes")
+                (outdir / f"seg{segments:03d}.m4s").write_bytes(payload)
+                concat.write(payload)
+                segments += 1
+            elif kind == KIND_ERROR:
+                error = payload.decode("utf-8", "replace")
+                print(f"  {dt:7.2f}s  ERROR    {error}")
+            elif kind == KIND_DONE:
+                print(f"  {dt:7.2f}s  done")
+                done = True
 
     print(f"\n{segments} segment(s) -> {outdir}")
     if error:
@@ -165,6 +166,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    """Parse arguments and run."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", default="http://localhost:8000", help="frontend base URL")
     p.add_argument("--model", required=True)

@@ -785,39 +785,51 @@ class DiffusionFormatter:
             gop,
         )
         metadata_sent = False
+
+        def frames_for(tag: str, payload: bytes, progress: int) -> list:
+            """The response frames one encoder fragment turns into.
+
+            The codec string comes from the init segment, so metadata can only
+            be built once it exists -- yet it still has to reach the client
+            first. push() only drains output ffmpeg has already written, so
+            the init segment may not surface until finish(); the metadata has
+            to lead it wherever it appears.
+            """
+            nonlocal metadata_sent
+            out = []
+            if tag == CMAF_INIT_TAG and not metadata_sent:
+                out.append(
+                    self.cmaf_frame(
+                        request_id,
+                        CMAF_METADATA_TAG,
+                        metadata_bytes(
+                            video_codec=encoder.codec_string(),
+                            width=width,
+                            height=height,
+                            fps=fps,
+                            target_duration=cmaf_segment_seconds(fps, gop),
+                            segment_count=segment_count,
+                        ),
+                    )
+                )
+                metadata_sent = True
+            out.append(self.cmaf_frame(request_id, tag, payload, progress=progress))
+            return out
+
         pushed = 0
         try:
             for chunk in iter_cmaf_chunks(canonical, gop):
                 pushed += len(chunk)
+                progress = min(99, 99 * pushed // max(total, 1))
                 async for tag, payload in encoder.push(chunk):
-                    if tag == CMAF_INIT_TAG and not metadata_sent:
-                        # The codec string comes from the init segment, so
-                        # metadata can only be built once it exists -- yet it
-                        # still has to reach the client first.
-                        yield self.cmaf_frame(
-                            request_id,
-                            CMAF_METADATA_TAG,
-                            metadata_bytes(
-                                video_codec=encoder.codec_string(),
-                                width=width,
-                                height=height,
-                                fps=fps,
-                                target_duration=cmaf_segment_seconds(fps, gop),
-                                segment_count=segment_count,
-                            ),
-                        )
-                        metadata_sent = True
-                    yield self.cmaf_frame(
-                        request_id,
-                        tag,
-                        payload,
-                        progress=min(99, 99 * pushed // max(total, 1)),
-                    )
+                    for frame in frames_for(tag, payload, progress):
+                        yield frame
 
             # A fragmented muxer cannot close the last fragment until the input
             # ends, so finish() is what produces it.
             async for tag, payload in encoder.finish():
-                yield self.cmaf_frame(request_id, tag, payload, progress=99)
+                for frame in frames_for(tag, payload, 99):
+                    yield frame
         finally:
             await encoder.aclose()
         logger.info(

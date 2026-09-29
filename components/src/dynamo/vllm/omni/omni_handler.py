@@ -357,6 +357,7 @@ class OmniHandler(BaseOmniHandler):
         def error_chunk(message: str) -> Dict[str, Any]:
             # The frontend turns this into a terminal error frame; a bare end of
             # stream would be indistinguishable from success.
+            """Terminal error response in whichever shape this request streams."""
             if cmaf:
                 return self.output_formatter.cmaf_error(request_id, message)
             return self._error_chunk(request_id, message, request_type)
@@ -448,6 +449,7 @@ class OmniHandler(BaseOmniHandler):
         async def create_generator(
             admitted_lora_request: LoRARequest | None,
         ) -> AsyncIterator[Dict[str, Any]]:
+            """Run the engine under the admitted adapter and format what it yields."""
             nonlocal previous_text
 
             per_request_kwargs = dict(generate_kwargs)

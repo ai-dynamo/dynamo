@@ -108,6 +108,7 @@ class OmniStageRouter:
         request: dict,
         context,  # noqa: ARG002 — context unused; router generates its own request_id
     ) -> AsyncGenerator[dict, None]:
+        """Run the request through every stage in order and yield the final output."""
         request_id = str(uuid.uuid4())
         _, request_type = parse_request_type(request, self.config.output_modalities)
 

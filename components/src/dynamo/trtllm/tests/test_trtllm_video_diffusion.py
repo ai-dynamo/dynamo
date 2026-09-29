@@ -709,6 +709,7 @@ class TestVideoHandlerConcurrency:
         """
 
         async def run():
+            """Drive three requests through the handler concurrently."""
             handler, tracker = self._make_handler()
 
             requests = [self._make_request() for _ in range(3)]
@@ -1003,6 +1004,7 @@ class TestTrtllmToCanonical:
     """to_canonical() maps VisualGenOutput.video to canonical frames losslessly."""
 
     def test_roundtrip_is_bit_exact(self):
+        """``to_canonical`` preserves every pixel of a (1, T, H, W, C) tensor."""
         from dynamo.trtllm.request_handlers.diffusion.video_convert import to_canonical
 
         # Distinctive per-pixel values catch axis / channel-order bugs.
