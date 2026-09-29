@@ -97,12 +97,30 @@ func (r *groveStableResourcesReconciler) Reconcile(
 
 		// Give a single-pod elastic-EP leader a stable address for its followers to join.
 		// Sync every component so one that stops qualifying has its Service deleted.
+		//
+		// Shape only, not the gate: this Service shipped ungated in #13178. Deleting it
+		// when an upgrade introduces a default-off gate would remove a live leader's
+		// stable address without the deployment changing at all.
+		//
+		// DELIBERATE BEHAVIOUR CHANGE, and the one case where this DOES remove a Service that
+		// #13178 would have created. The predicate that shipped there checked the launch
+		// flags, node count and replica count, but NOT the component type, so a non-worker
+		// component carrying the elastic-EP flags -- a frontend, say -- qualified for a
+		// headless Ray Service. IsSinglePodElasticEPShape adds the worker check, so such a
+		// component no longer qualifies and this call therefore deletes its Service on the
+		// next reconcile.
+		//
+		// Kept narrow on purpose. The Service exists so followers can find their leader's Ray
+		// head, and a non-worker component never gets a follower (synthesis requires
+		// IsWorkerComponent) and never starts a Ray head, so the Service addressed nothing.
+		// Rendering it was the accident; removing it is the correction. Worth knowing on
+		// upgrade, which is why it is stated here rather than left to be discovered.
 		epService, err := r.reconcileElasticEPLeaderService(
 			ctx,
 			dgd,
 			renderDeployment,
 			component,
-			!isSinglePodElasticEPLeader(component),
+			!dynamo.IsSinglePodElasticEPShape(component),
 		)
 		if err != nil {
 			return nil, err
@@ -230,32 +248,10 @@ func (r *groveStableResourcesReconciler) syncServiceAnnotations(
 	return nil
 }
 
-// isSinglePodElasticEPLeader reports whether the component is the single-pod elastic-EP
-// leader the headless Service is meant to address.
-//
-// The Service selector matches every pod carrying the component labels, so it resolves
-// to the Ray head alone only while the component renders as one pod. Two shapes break
-// that:
-//
-//   - replicas > 1: every replica runs its own Ray head, so one DNS name would
-//     round-robin across unrelated clusters.
-//   - numberOfNodes > 1: worker pods share the component labels, so the Service would
-//     publish them as heads. That topology reaches its leader through the Grove leader
-//     hostname and does not need this Service.
-func isSinglePodElasticEPLeader(component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) bool {
-	container := dynamo.GetMainContainer(component)
-	if container == nil || !dynamo.IsElasticEPRayLaunch(container) {
-		return false
-	}
-	if component.GetNumberOfNodes() > 1 {
-		return false
-	}
-	return component.Replicas == nil || *component.Replicas == 1
-}
-
 // reconcileElasticEPLeaderService creates the headless Service a single-pod elastic-EP
 // leader is reachable at, or deletes it when toDelete says the component no longer
-// qualifies. See dynamo.GenerateElasticEPHeadlessService and isSinglePodElasticEPLeader.
+// qualifies. See dynamo.GenerateElasticEPHeadlessService and
+// dynamo.IsSinglePodElasticEPShape.
 func (r *groveStableResourcesReconciler) reconcileElasticEPLeaderService(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -61,7 +62,7 @@ func newElasticEPComponent(args string) v1beta1.DynamoComponentDeploymentSharedS
 	}
 }
 
-func TestIsSinglePodElasticEPLeader(t *testing.T) {
+func TestIsSinglePodElasticEPShape(t *testing.T) {
 	tests := []struct {
 		name      string
 		component func() v1beta1.DynamoComponentDeploymentSharedSpec
@@ -131,11 +132,11 @@ func TestIsSinglePodElasticEPLeader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Classify the component against the single-pod elastic-EP leader gate")
 			component := tt.component()
-			got := isSinglePodElasticEPLeader(&component)
+			got := dynamo.IsSinglePodElasticEPShape(&component)
 
 			t.Log("Verify only a component that renders as exactly one Ray head qualifies")
 			if got != tt.want {
-				t.Errorf("isSinglePodElasticEPLeader = %v, want %v", got, tt.want)
+				t.Errorf("dynamo.IsSinglePodElasticEPShape = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -218,6 +219,42 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 			}
 			if !apierrors.IsNotFound(err) {
 				t.Fatalf("expected the leader Service to be absent, got service %q with error %v", service.Name, err)
+			}
+		})
+	}
+}
+
+// TestGroveStableResourcesReconcilerLeaderServiceIsNotGated pins the Grove leader
+// Service to the component's shape rather than to the PoC gate.
+//
+// This Service shipped ungated in #13178. The delete argument at the call site is
+// negated -- reconcileElasticEPLeaderService is handed "should I delete this?" so that a
+// component which stops qualifying has its Service cleaned up -- so consulting the gate
+// there means gate-off evaluates to "delete", and an operator upgrade that merely
+// introduces a default-off gate removes a live leader's stable address. That is a
+// separate call site from the leader render, so reverting the render alone does not fix
+// it.
+//
+// Mutation check: passing the gate into the predicate at
+// dgd_grove_stable_resources_reconciler.go fails the gate-off subtest.
+func TestGroveStableResourcesReconcilerLeaderServiceIsNotGated(t *testing.T) {
+	for _, gate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("gate=%t", gate), func(t *testing.T) {
+			ctx := context.Background()
+			dgd := newElasticEPTestDGD(newElasticEPComponent(elasticEPArgs))
+			reconciler, kubeClient := newElasticEPTestStableResourcesReconcilerWithGate(t, gate, dgd)
+			if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
+				t.Fatalf("Reconcile returned an error: %v", err)
+			}
+
+			service := &corev1.Service{}
+			err := kubeClient.Get(ctx, types.NamespacedName{
+				Name:      dynamo.ElasticEPLeaderServiceName(dynamo.GetDCDResourceName(dgd, elasticEPComponentName, "")),
+				Namespace: dgd.Namespace,
+			}, service)
+			if err != nil {
+				t.Fatalf("the Grove leader Service must exist at either gate position; it shipped "+
+					"ungated in #13178 and gating it deletes a running leader's address: %v", err)
 			}
 		})
 	}
@@ -317,7 +354,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true}},
 	)
 	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
@@ -388,6 +425,16 @@ func newElasticEPTestStableResourcesReconciler(
 	existing ...client.Object,
 ) (*groveStableResourcesReconciler, client.Client) {
 	t.Helper()
+	return newElasticEPTestStableResourcesReconcilerWithGate(t, true, dgd, existing...)
+}
+
+func newElasticEPTestStableResourcesReconcilerWithGate(
+	t testing.TB,
+	gateEnabled bool,
+	dgd *v1beta1.DynamoGraphDeployment,
+	existing ...client.Object,
+) (*groveStableResourcesReconciler, client.Client) {
+	t.Helper()
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
 		WithObjects(append([]client.Object{dgd}, existing...)...).
@@ -395,7 +442,7 @@ func newElasticEPTestStableResourcesReconciler(
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: gateEnabled}},
 	)
 	return reconciler, kubeClient
 }

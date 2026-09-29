@@ -365,7 +365,24 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
+		// Shipped in #12943 and not gated, matching the DCD validator. It guards the
+		// Phase 2/3 Ray head, which renders whether or not this PoC gate is on:
+		// injectElasticEPRayLaunchFlags cannot wrap an image ENTRYPOINT it cannot see, so
+		// without an explicit command it declines and only logs. Gating this rule would
+		// make that silent no-op reachable -- elastic EP accepted, and simply absent.
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+		// The single-replica rule is new here, and describes only the topology the PoC
+		// renderer manages: one follower and one <leader>-ray Service are derived per
+		// component, so two leader replicas would share one DNS name.
+		if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
+			// Ratcheted: a cluster-wide gate can be enabled long after this component was
+			// admitted, and admission never re-runs on a flip. Without this, enabling the
+			// gate would freeze every existing component with replicas > 1 against any
+			// edit at all, not just a replica change.
+			allErrs = append(allErrs, validateElasticEPSingleReplicaRatcheted(
+				spec.BackendFramework, component, opts.oldComponents[component.ComponentName], componentPath,
+			)...)
+		}
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,

@@ -62,6 +62,37 @@ const (
 	// when the namespace carries istio-injection=enabled.
 	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
 
+	// KubeAnnotationElasticEPFollower marks a synthesized elastic-EP follower DCD, so the
+	// renderer launches it as a Ray join rather than a serve. Operator-set, never user-set.
+	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
+
+	// KubeAnnotationElasticEPLeaderComponent carries the leader's component name, letting the
+	// follower resolve infrastructure that exists only for declared components: the GMS DRA
+	// claim template. See dynamo.ElasticEPComponentIdentity for what must NOT be resolved this
+	// way. Operator-set, never user-set.
+	KubeAnnotationElasticEPLeaderComponent = "nvidia.com/elastic-ep-leader-component"
+
+	// KubeAnnotationElasticEPFollowerReplicas records how many followers were synthesized for a
+	// leader. It is the only key that may gate multi-pod elastic-EP launch: the leader's wait
+	// for its declared width, and the --data-parallel-size-local pin. Do not gate those on
+	// --data-parallel-size -- it does not imply a multi-pod topology (Grove and replicas > 1 run
+	// ranks intra-pod and derive no follower, grove#676). Such a leader waits forever for pods
+	// nothing creates, and pinning it to one local rank sends the rest of its ranks to nodes
+	// that do not exist. See synthesizeElasticEPFollowerDCD,
+	// which writes this onto the LEADER's pod template only when a follower exists.
+	// Operator-set, never user-set.
+	KubeAnnotationElasticEPFollowerReplicas = "nvidia.com/elastic-ep-follower-replicas"
+
+	// KubeAnnotationElasticEPLeaderService carries the headless Service name the follower
+	// joins, so it never recomputes an address the emitter may have scoped differently.
+	// See dynamo.ElasticEPLeaderServiceNameForDCD. Operator-set, never user-set.
+	KubeAnnotationElasticEPLeaderService = "nvidia.com/elastic-ep-leader-service"
+
+	// NodeLabelGPUClique is the NVLink-partition label the DRA driver stamps on GB200
+	// nodes: equal values mean a shared NVLink fabric, different values mean no NVLink
+	// route. Used as a pod-affinity topology key to place a follower with its leader.
+	NodeLabelGPUClique = "nvidia.com/gpu.clique"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
@@ -249,6 +280,11 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
+	// GroveRoleSuffixFollower names the on-demand elastic-EP follower. It is not a Grove
+	// clique -- the follower renders as its own Deployment on the non-Grove pathway -- but
+	// the suffix matches the other role suffixes and is kept to three characters to
+	// preserve the combined Grove name budget.
+	GroveRoleSuffixFollower = "flw"
 
 	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
 	// resource names (PCS name + PCSG config name + PCLQ template name).

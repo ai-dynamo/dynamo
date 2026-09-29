@@ -279,14 +279,13 @@ func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error
 	)
 }
 
-// validateElasticEPRequiresCommand rejects a vLLM component that requests the
-// elastic-EP Ray topology (--enable-elastic-ep with --data-parallel-backend ray,
-// including the -dpb alias and flag=value spellings) but omits the main
-// container command. The operator starts the single-pod Ray head by rewriting
-// the container to run "ray start ... && <command>", which needs an explicit
-// executable; with only the image ENTRYPOINT (empty command) it cannot build
-// that command, so elastic EP would silently never start. Fail closed here with
-// an actionable error rather than admit a request the operator cannot fulfill.
+// validateElasticEPRequiresCommand requires an explicit main container command on a vLLM
+// component that requests the elastic-EP Ray topology (--enable-elastic-ep with
+// --data-parallel-backend ray, including the -dpb alias and flag=value spellings).
+//
+// The operator starts the single-pod Ray head by rewriting the container to run
+// "ray start ... && <command>". With only the image ENTRYPOINT (empty command) there is
+// nothing to wrap, so elastic EP would silently never start: fail closed instead.
 func validateElasticEPRequiresCommand(
 	backendFramework string,
 	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
@@ -313,6 +312,93 @@ func validateElasticEPRequiresCommand(
 			"start it from the image ENTRYPOINT",
 	))
 	return allErrs
+}
+
+// validateElasticEPSingleReplica rejects a vLLM component that requests the elastic-EP
+// Ray topology with more than one replica.
+//
+// The leader is the Ray head; elastic EP grows by adding followers to it, not leaders. Two
+// replicas mean two independent Ray clusters, but the operator renders one identity for
+// them: one "<component>-ray" headless Service selecting every pod with the component
+// labels, and one follower per component, so a follower would join whichever head DNS
+// resolved with no way to name its leader. Per-replica identity (a Ray Service and
+// follower set each) is not rendered yet, and without this check the operator silently
+// emits neither the Ray Service nor the follower, leaving leaders that can never grow and
+// no indication why.
+//
+// It must therefore fire on EXACTLY the shapes that derive a follower, and no others. The
+// component type and node-count guards below are what keep it from rejecting shapes the
+// feature never touches:
+//
+//   - a non-worker component (a frontend carrying the flags) never reaches synthesis --
+//     IsWorkerComponent excludes it -- so it has no Ray Service or follower to collide over
+//   - a multinode component takes the LWS path, which never renders RoleFollower, so its
+//     replicas are LWS groups rather than competing Ray heads
+//
+// Both were accepted before this rule existed. Rejecting them now would be a regression for
+// configurations that have nothing to do with elastic EP's single-leader constraint, and the
+// error message -- "capacity is added by scaling followers" -- would name a follower those
+// shapes will never get.
+func validateElasticEPSingleReplica(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	if backendFramework != string(dynamo.BackendFrameworkVLLM) || spec.PodTemplate == nil {
+		return allErrs
+	}
+	if spec.Replicas == nil || *spec.Replicas <= 1 {
+		return allErrs
+	}
+	if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
+		return allErrs
+	}
+	if spec.GetNumberOfNodes() > 1 {
+		return allErrs
+	}
+	containers := spec.PodTemplate.Spec.Containers
+	index := containerIndexByName(containers, consts.MainContainerName)
+	if index < 0 || !dynamo.IsElasticEPRayLaunch(&containers[index]) {
+		return allErrs
+	}
+	allErrs = append(allErrs, field.Invalid(
+		fldPath.Child("replicas"),
+		*spec.Replicas,
+		"elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) supports a single "+
+			"leader replica: the leader is the Ray head, and capacity is added by scaling followers rather than "+
+			"leaders. Multiple independent elastic-EP clusters are not rendered yet, because each replica would "+
+			"need its own Ray Service and follower set; use replicas: 1, or declare separate components",
+	))
+	return allErrs
+}
+
+// validateElasticEPSingleReplicaRatcheted applies the single-replica rule but lets an
+// unchanged pre-existing violation through, so existing objects stay editable.
+//
+// The rule is gated and admission never re-runs when a cluster-wide gate flips on, so a
+// component with replicas > 1 can already exist once the gate is enabled. The rule is
+// stateless, so it would then fire on every UPDATE and block any edit to that component,
+// not just its replica count. oldSpec is nil on create: nothing to ratchet against.
+func validateElasticEPSingleReplicaRatcheted(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldSpec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	newErrs := validateElasticEPSingleReplica(backendFramework, spec, fldPath)
+	if len(newErrs) == 0 || oldSpec == nil {
+		return newErrs
+	}
+	// Tolerate only an identical violation: any change to the replica count, in either
+	// direction and including making it worse, re-asserts the rule.
+	if len(validateElasticEPSingleReplica(backendFramework, oldSpec, fldPath)) == 0 {
+		return newErrs
+	}
+	if ptr.Deref(spec.Replicas, 0) != ptr.Deref(oldSpec.Replicas, 0) {
+		return newErrs
+	}
+	return nil
 }
 
 func gpuMemoryServiceFor(

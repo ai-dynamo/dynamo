@@ -50,7 +50,10 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 69,
     "nvidia.com/v1beta1": 69,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 28,
+    # 29 = main's 28 plus ElasticEPRayPoCConfiguration, the operator-managed Ray
+    # elastic-EP gate. Both sides moved this number, so the merge resolution is their
+    # sum, not either value.
+    "operator.config.dynamo.nvidia.com/v1alpha1": 29,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",

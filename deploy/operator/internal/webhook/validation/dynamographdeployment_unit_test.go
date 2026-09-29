@@ -36,7 +36,7 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
@@ -151,8 +151,15 @@ func assertBetaValidationErrors(t *testing.T, err error, wantErrs []string) {
 	}
 }
 
+// elasticEPSharedSpec builds the shape the elastic-EP rules target: a single-node WORKER.
+//
+// ComponentType is set deliberately. The single-replica rule only fires on shapes that
+// actually derive a follower, so a spec without a component type is not a shape the rule
+// applies to -- and a fixture that omits it would exercise the early return rather than the
+// rule.
 func elasticEPSharedSpec(command, args []string) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: consts.ComponentTypeWorker,
 		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:    consts.MainContainerName,
@@ -231,6 +238,116 @@ func TestValidateElasticEPRequiresCommand(t *testing.T) {
 	}
 }
 
+// Elastic EP grows by adding followers to one leader's Ray cluster, not by adding
+// leaders. Two replicas mean two independent Ray heads, but the operator renders one
+// "<component>-ray" Service and one derived follower per component, so a follower cannot
+// say which leader it belongs to. Rejecting here is what keeps the operator from silently
+// dropping both the Service and the follower and leaving leaders that can never grow.
+func TestValidateElasticEPSingleReplica(t *testing.T) {
+	const vllm = "vllm"
+	rayArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
+	command := []string{"python3", "-m", "dynamo.vllm"}
+	fldPath := field.NewPath("spec")
+	const replicasPath = "spec.replicas"
+
+	withReplicas := func(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, n *int32) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		spec.Replicas = n
+		return spec
+	}
+
+	tests := []struct {
+		name    string
+		backend string
+		spec    *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		want    []string
+	}{
+		{
+			name:    "elastic-EP with two replicas is rejected",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    []string{replicasPath},
+		},
+		{
+			name:    "a single replica is accepted",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(1))),
+			want:    nil,
+		},
+		{
+			name:    "unset replicas is accepted: it defaults to one leader",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), nil),
+			want:    nil,
+		},
+		{
+			name:    "zero replicas is accepted: a scaled-to-zero leader has no Ray head to confuse",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(0))),
+			want:    nil,
+		},
+		{
+			name:    "a non-elastic-EP component may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test"}), k8sptr.To(int32(4))),
+			want:    nil,
+		},
+		{
+			name:    "elastic-EP on a non-ray backend may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test", "--data-parallel-backend", "mp", "--enable-elastic-ep"}), k8sptr.To(int32(3))),
+			want:    nil,
+		},
+		{
+			name:    "non-vllm backend is not validated",
+			backend: sglangBackendFramework,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    nil,
+		},
+		{
+			// The rule exists because one follower and one "<component>-ray" Service are
+			// derived per component, so two leaders would share one identity. A MULTINODE
+			// component derives neither: it takes the LWS path, which never renders
+			// RoleFollower. Its replicas are LWS groups, not competing Ray heads.
+			//
+			// Rejecting it would be a regression -- the merge base accepted this shape --
+			// and the error would tell the user to "add followers instead" when multinode
+			// can never have one.
+			name:    "multinode elastic EP may scale: it derives no follower to collide over",
+			backend: vllm,
+			spec: withReplicas(func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+				s := elasticEPSharedSpec(command, rayArgs)
+				s.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				return s
+			}(), k8sptr.To(int32(2))),
+			want: nil,
+		},
+		{
+			// Same reasoning by the other axis: synthesis requires IsWorkerComponent, so a
+			// frontend carrying the flags never reaches it and has no Ray Service or
+			// follower either. Also a regression against the merge base if rejected.
+			name:    "a non-worker component carrying the flags may scale freely",
+			backend: vllm,
+			spec: withReplicas(func() *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+				s := elasticEPSharedSpec(command, rayArgs)
+				s.ComponentType = consts.ComponentTypeFrontend
+				return s
+			}(), k8sptr.To(int32(3))),
+			want: nil,
+		},
+		{
+			name:    "nil pod template is ignored",
+			backend: vllm,
+			spec:    &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Replicas: k8sptr.To(int32(2))},
+			want:    nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertFieldPaths(t, validateElasticEPSingleReplica(tt.backend, tt.spec, fldPath), tt.want)
+		})
+	}
+}
+
 // TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand proves the rule is
 // wired into the DGD admission path end to end, not just callable in isolation.
 func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
@@ -241,7 +358,7 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	}
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !k8serrors.IsInvalid(err) {
 		t.Fatalf("Validate() error = %v, want invalid field error", err)
@@ -249,4 +366,62 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	if !strings.Contains(err.Error(), "requires an explicit container command") {
 		t.Fatalf("Validate() error = %v, want elastic-EP command requirement", err)
 	}
+}
+
+// TestDynamoGraphDeploymentElasticEPRuleGating pins which of the two elastic-EP rules
+// the PoC gate governs, and which it must not.
+//
+// validateElasticEPRequiresCommand shipped in #12943 and guards the Phase 2/3 Ray head,
+// which renders at either gate position. injectElasticEPRayLaunchFlags cannot wrap an
+// image ENTRYPOINT it cannot see, so without an explicit command it declines and only
+// logs -- gating this rule would make that silent no-op reachable, leaving elastic EP
+// accepted and simply absent, with no error, event or condition anywhere.
+//
+// validateElasticEPSingleReplica is new in this PoC and is the only new RESTRICTION it
+// adds -- one follower and one <leader>-ray Service are derived per component -- so it is
+// gated: an operator that has not opted in must not start rejecting manifests the merge
+// base accepted. Generation is ungated, so the follower and the Service are derived at
+// either gate position.
+//
+// Mutation check: moving validateElasticEPRequiresCommand back inside the gate block
+// fails the first subtest.
+func TestDynamoGraphDeploymentElasticEPRuleGating(t *testing.T) {
+	offCtx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	onCtx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
+	elasticArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
+	validator := newDynamoGraphDeploymentTestValidator(t)
+
+	t.Run("missing command is rejected at either gate position", func(t *testing.T) {
+		dgd := newBetaDGDForValidation()
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = nil
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticArgs
+
+		for name, ctx := range map[string]context.Context{"gate off": offCtx, "gate on": onCtx} {
+			_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
+			if err == nil || !k8serrors.IsInvalid(err) {
+				t.Fatalf("%s: error = %v, want invalid field error; this rule shipped ungated in #12943 "+
+					"and without it elastic EP silently no-ops", name, err)
+			}
+		}
+	})
+
+	t.Run("replicas > 1 is rejected only when the gate is on", func(t *testing.T) {
+		dgd := newBetaDGDForValidation()
+		// An explicit command, so the ungated RequiresCommand rule is satisfied and this
+		// subtest isolates the gated single-replica rule.
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
+		dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = elasticArgs
+		dgd.Spec.Components[1].Replicas = k8sptr.To(int32(2))
+
+		t.Log("Gate off: accepted, because the PoC derives nothing for this shape")
+		if _, err := validator.Validate(offCtx, dgd, runtimeVersionSourceV1Beta1); err != nil {
+			t.Fatalf("gate off rejected a shape the PoC does not manage: %v", err)
+		}
+
+		t.Log("Gate on: rejected, so the skip is the gate and not a broken rule")
+		_, err := validator.Validate(onCtx, dgd, runtimeVersionSourceV1Beta1)
+		if err == nil || !k8serrors.IsInvalid(err) {
+			t.Fatalf("gate on error = %v, want invalid field error", err)
+		}
+	})
 }
