@@ -71,12 +71,10 @@ CHECKPOINT_READY_TIMEOUT = 300
 RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
-# Phase caps are deliberately non-additive: successful phases normally finish
-# well below their individual ceilings. TEST_TIMEOUT is the global 28-minute
-# budget and leaves two minutes beneath the workflow limit for final cleanup.
-DEPLOYMENT_READY_TIMEOUT = 900
+# Temporary diagnostic branch: cap the entire comparison at nine minutes.
+DEPLOYMENT_READY_TIMEOUT = 480
 IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 600
-TEST_TIMEOUT = 1680
+TEST_TIMEOUT = 540
 
 
 @dataclass(frozen=True)

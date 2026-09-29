@@ -94,7 +94,7 @@ for process in /proc/[0-9]*; do
     same_cgroup "$pid" || continue
     executable=$(readlink -- "$process/exe" 2>/dev/null) || continue
     case "${executable##*/}" in
-        snapshot-agent|cuda-checkpoint-helper|criu) ;;
+        snapshot-agent|cuda-checkpoint-helper|cuda-checkpoint-helper.real|criu) ;;
         *) continue ;;
     esac
     identity=$(start_time "$pid") || continue
@@ -120,7 +120,7 @@ for process in /proc/[0-9]*; do
     inspect_process "$pid" "$identity" diagnostic
     # The sole cross-cgroup exception is the explicit numeric target supplied
     # to this container's still-live helper. Never follow arbitrary CRIU PIDs.
-    if [[ "${executable##*/}" == cuda-checkpoint-helper && "$target" =~ ^[1-9][0-9]{0,9}$ ]] && (( 10#$target <= 2147483647 )); then
+    if [[ "${executable##*/}" == cuda-checkpoint-helper* && "$target" =~ ^[1-9][0-9]{0,9}$ ]] && (( 10#$target <= 2147483647 )); then
         same_cgroup "$pid" || continue
         same_process "$pid" "$identity" || continue
         current_argv=()

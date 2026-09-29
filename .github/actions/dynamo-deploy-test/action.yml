@@ -143,7 +143,10 @@ runs:
           --durations=10 \
           --junitxml=test-results/pytest_deploy_${TEST_NAME}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml \
           --alluredir=test-results/allure-results \
-          --log-cli-level=INFO
+          --log-cli-level=INFO &
+        diagnostic_pytest_pid=$!
+        echo "$diagnostic_pytest_pid" > checkpoint-diagnostics/pytest.pid
+        wait "$diagnostic_pytest_pid"
 
     - name: Dump cluster state on failure
       if: failure()

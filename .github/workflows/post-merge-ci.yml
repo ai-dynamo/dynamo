@@ -11,7 +11,7 @@ permissions:
 jobs:
   checkpoint:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -50,10 +50,15 @@ jobs:
           set -euo pipefail
           kubectl -n default set env daemonset/snapshot-agent SNAPSHOT_LOG_LEVEL=debug
           kubectl -n default rollout status daemonset/snapshot-agent --timeout=180s
+          for agent in $(kubectl -n default get pods -l app.kubernetes.io/component=snapshot-agent -o jsonpath='{.items[*].metadata.name}'); do
+            kubectl -n default exec "$agent" -c agent -- mv /usr/local/bin/cuda-checkpoint-helper /usr/local/bin/cuda-checkpoint-helper.real
+            kubectl -n default exec -i "$agent" -c agent -- install -m 755 /dev/stdin /usr/local/bin/cuda-checkpoint-helper < .github/scripts/matched-cuda-checkpoint-helper.sh
+          done
           mkdir -p checkpoint-diagnostics
           nohup bash .github/scripts/watch-checkpoint.sh > checkpoint-diagnostics/collector.log 2>&1 < /dev/null &
           echo "$!" > checkpoint-diagnostics/collector.pid
-      - name: Run the unchanged test with the exact failing worker and frontend images
+      - name: Run bounded matched-driver comparison with the same workload images
+        timeout-minutes: 14
         uses: ./.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
@@ -77,6 +82,11 @@ jobs:
           if [ -f checkpoint-diagnostics/collector.pid ]; then
             kill "$(cat checkpoint-diagnostics/collector.pid)" 2>/dev/null || true
           fi
+          mkdir -p checkpoint-diagnostics/final
+          for agent in $(kubectl --request-timeout=10s -n default get pods -l app.kubernetes.io/component=snapshot-agent -o jsonpath='{.items[*].metadata.name}'); do
+            timeout 10s kubectl -n default exec "$agent" -c agent -- tail -100 /tmp/checkpoint-helper-actions.log > "checkpoint-diagnostics/final/$agent-helper.log" 2>&1 || true
+            kubectl --request-timeout=10s -n default logs "$agent" -c agent --tail=300 > "checkpoint-diagnostics/final/$agent.log" 2>&1 || true
+          done
       - name: Upload bounded diagnostic evidence
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f

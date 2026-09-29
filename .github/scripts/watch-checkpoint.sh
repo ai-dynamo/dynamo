@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Read-only, bounded observer inside this run's isolated vCluster.
+# Bounded observer inside this run's isolated vCluster; stop only this test on helper timeout.
 set -uo pipefail
 diag_dir=checkpoint-diagnostics
 deadline=$((SECONDS + 1800))
+agent=
 while ((SECONDS < deadline)); do
     stamp=$(date -u +%Y%m%dT%H%M%SZ)
     sample="$diag_dir/$stamp"
@@ -23,5 +24,17 @@ while ((SECONDS < deadline)); do
         # This PVC belongs exclusively to this diagnostic vCluster; never inspect host stores.
         timeout 15s kubectl -n default exec "$agent" -c agent -- bash -c 'find /checkpoints -maxdepth 5 -type f -name "dump.log" -print -exec tail -c 32768 {} \;' > "$sample/capture-files.log" 2>&1 || true
     done < <(jq -r '.items[] | select(.metadata.name | startswith("checkpoint-")) | [.metadata.name, (.spec.nodeName // "")] | @tsv' "$sample/pods.json" 2>/dev/null)
+    if [[ -n "$agent" ]]; then
+        timeout 10s kubectl -n default exec "$agent" -c agent -- tail -100 /tmp/checkpoint-helper-actions.log > "$sample/helper-actions.log" 2>&1 || true
+        helper_failed=$(timeout 10s kubectl -n default exec "$agent" -c agent -- bash -c 'if [ -f /tmp/checkpoint-diagnostic-helper-failed ]; then printf yes; fi' 2>/dev/null)
+        if [[ "$helper_failed" == yes && -f "$diag_dir/pytest.pid" ]]; then
+            read -r pytest_pid < "$diag_dir/pytest.pid"
+            if [[ "$pytest_pid" =~ ^[1-9][0-9]*$ ]] && tr '\0' ' ' < "/proc/$pytest_pid/cmdline" | grep -q 'python -m pytest tests/deploy/test_dynamocheckpoint.py'; then
+                printf 'Helper failed or exceeded 60 seconds; diagnostics saved; stopping pytest PID %s\n' "$pytest_pid"
+                kill -TERM "$pytest_pid"
+                exit 0
+            fi
+        fi
+    fi
     sleep 30
 done
