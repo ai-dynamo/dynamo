@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from dgd_restore import (
@@ -22,6 +23,15 @@ from dgd_restore import (
     timestamp_epoch,
 )
 from kubernetes import client, config
+from preinstall_cuda import use_preinstalled_cuda, validate_bundle_path
+from resident_restore import (
+    coordinator_request,
+    engine_only_pod,
+    trigger_load,
+    validate_resident_online,
+    validate_resident_pod,
+    validate_resident_restarts,
+)
 from resolve_plan import resolve_destinations
 
 p = argparse.ArgumentParser()
@@ -41,6 +51,17 @@ p.add_argument("--overlap", action="store_true")
 p.add_argument("--early-trigger", action="store_true")
 p.add_argument("--dgd", action="store_true", help="Create the workload through Dynamo")
 p.add_argument("--runtime-discovery", action="store_true")
+p.add_argument(
+    "--runtime-network-discovery",
+    action="store_true",
+    help="Use the validated runtime sandbox IP before cached Pod status arrives",
+)
+p.add_argument("--resident-gms", action="store_true")
+p.add_argument("--resident-gms-pod")
+p.add_argument("--resident-gms-host-path")
+p.add_argument("--resident-gms-url")
+p.add_argument("--resident-gms-generation")
+p.add_argument("--preinstalled-cuda-host-path")
 p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
 if not 0 < a.gms_cpu_request <= a.gms_cpu_limit:
@@ -59,6 +80,36 @@ if a.early_trigger and not (a.overlap and a.fast_gate):
     p.error("--early-trigger requires --overlap --fast-gate")
 if a.dgd and not a.early_trigger:
     p.error("--dgd requires --early-trigger")
+if a.runtime_network_discovery and not a.runtime_discovery:
+    p.error("--runtime-network-discovery requires --runtime-discovery")
+if a.preinstalled_cuda_host_path:
+    try:
+        a.preinstalled_cuda_host_path = validate_bundle_path(
+            a.preinstalled_cuda_host_path
+        )
+    except ValueError as error:
+        p.error(str(error))
+if a.resident_gms:
+    if not (a.dgd and a.early_trigger and a.same_claim):
+        p.error("--resident-gms requires --dgd --early-trigger --same-claim")
+    if a.storage != "pvc" or a.backend != "fused":
+        p.error("--resident-gms requires the PVC fused V1 backend")
+    if not all(
+        [
+            a.resident_gms_pod,
+            a.resident_gms_host_path,
+            a.resident_gms_url,
+            a.resident_gms_generation,
+        ]
+    ):
+        p.error("--resident-gms requires pod, host-path, URL and generation")
+    resident_path = Path(a.resident_gms_host_path)
+    if (
+        not resident_path.is_absolute()
+        or str(resident_path) == "/"
+        or ".." in resident_path.parts
+    ):
+        p.error("--resident-gms-host-path must name an absolute experiment directory")
 root = Path(__file__).parent
 capture_dir = a.capture_dir or root / "results/glm"
 out = capture_dir / a.case
@@ -74,7 +125,7 @@ claimname = "gms-v1-glm-source-0928" if a.same_claim else "gms-v1-glm-target-092
 base = ["kubectl", "-n", ns]
 
 
-def host_name():
+def host_name(virtual_name=None):
     pods = json.loads(subprocess.check_output(base + ["get", "pods", "-o", "json"]))[
         "items"
     ]
@@ -82,13 +133,14 @@ def host_name():
         p["metadata"]["name"]
         for p in pods
         if p["metadata"].get("annotations", {}).get("vcluster.loft.sh/object-name")
-        == name
+        == (virtual_name or name)
     )
 
 
 def remote(cmd, container="gms-0"):
+    target = resident_host if a.resident_gms and container.startswith("gms-") else host
     return subprocess.check_output(
-        base + ["exec", host, "-c", container, "--", *cmd], text=True
+        base + ["exec", target, "-c", container, "--", *cmd], text=True
     )
 
 
@@ -180,6 +232,10 @@ pod["metadata"]["name"] = name
 if a.runtime_discovery:
     pod["metadata"].setdefault("annotations", {})[
         "nvidia.com/gms-prototype-runtime-discovery"
+    ] = "true"
+if a.runtime_network_discovery:
+    pod["metadata"].setdefault("annotations", {})[
+        "nvidia.com/gms-prototype-runtime-network-discovery"
     ] = "true"
 pod["spec"]["nodeSelector"] = {
     "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
@@ -307,6 +363,12 @@ if a.overlap:
     }
     pod["spec"]["containers"].append(gate)
     save(out / "manifest.json", pod)
+if a.resident_gms:
+    pod = engine_only_pod(pod, a.resident_gms_host_path)
+    save(out / "manifest.json", pod)
+if a.preinstalled_cuda_host_path:
+    pod = use_preinstalled_cuda(pod, a.preinstalled_cuda_host_path)
+    save(out / "manifest.json", pod)
 if a.early_trigger:
     # The held claim's allocation is immutable while reserved by the holder.
     # Revalidate before creating the pod; no GPU enumeration or remote exec is needed.
@@ -326,12 +388,52 @@ if a.early_trigger:
 dgd = build_dgd(pod) if a.dgd else None
 if a.dgd:
     save(out / "dgd-manifest.json", dgd)
+resident_load = None
+if a.resident_gms:
+    resident = core.read_namespaced_pod(a.resident_gms_pod, ns)
+    validate_resident_pod(
+        api.sanitize_for_serialization(resident),
+        claimname,
+        a.resident_gms_host_path,
+        pod["spec"]["nodeSelector"]["kubernetes.io/hostname"],
+        a.gms_cpu_request,
+        a.gms_cpu_limit,
+        a.numa,
+    )
+    save(out / "resident-gms-before.json", resident)
+    resident_host = host_name(a.resident_gms_pod)
+    resident_ready = coordinator_request(a.resident_gms_url, "/ready")
+    assert resident_ready["ready"] is True
+    assert resident_ready["capture_id"] == capture["capture_id"]
+    assert resident_ready["generation"] == a.resident_gms_generation
+    assert resident_ready["publications"] == 0, (
+        "resident weights were published before t0"
+    )
+    validate_resident_online(resident_ready, a.workers, a.chunk_mib)
+    save(out / "resident-gms-ready.json", resident_ready)
+    resident_ready_verified_epoch = time.time()
 started = time.time()
 if a.dgd:
-    created_dgd = custom.create_namespaced_custom_object(
-        "nvidia.com", "v1beta1", ns, "dynamographdeployments", dgd
-    )
-    create_returned = time.time()
+    if a.resident_gms:
+        # The resident coordinator and Kubernetes API receive independent requests at t0.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending_load = pool.submit(
+                trigger_load,
+                a.resident_gms_url,
+                capture["capture_id"],
+                a.resident_gms_generation,
+            )
+            created_dgd = custom.create_namespaced_custom_object(
+                "nvidia.com", "v1beta1", ns, "dynamographdeployments", dgd
+            )
+            create_returned = time.time()
+            resident_load = pending_load.result()
+        save(out / "resident-gms-trigger.json", resident_load)
+    else:
+        created_dgd = custom.create_namespaced_custom_object(
+            "nvidia.com", "v1beta1", ns, "dynamographdeployments", dgd
+        )
+        create_returned = time.time()
     save(out / "dgd-created.json", created_dgd)
     end = time.monotonic() + 120
     while time.monotonic() < end:
@@ -493,6 +595,15 @@ if a.fast_gate:
             ]
         )
     )
+    if a.resident_gms:
+        for record in records:
+            assert record["capture_id"] == capture["capture_id"]
+            assert record["generation"] == a.resident_gms_generation
+            assert record["uuid"] == targets[record["rank"]]
+            assert record["workers"] == a.workers
+            assert record["chunk_mib"] == a.chunk_mib
+            assert record["online_epoch"] <= record["trigger_written_epoch"]
+            assert record["started_epoch"] >= record["trigger_written_epoch"]
     save(out / "publications.json", records)
     (out / "gate.txt").write_text(remote(["cat", "/gms/all-ready"]))
 text = remote(["cat", "/snapshot-control/sglang-restore-ready"], "main")
@@ -504,8 +615,22 @@ result = {
     "gms_cpu_limit": a.gms_cpu_limit,
     "early_trigger": a.early_trigger,
     "runtime_discovery": a.runtime_discovery,
+    "runtime_network_discovery": a.runtime_network_discovery,
+    "resident_gms": a.resident_gms,
+    "resident_gms_pod": a.resident_gms_pod,
+    "resident_gms_generation": a.resident_gms_generation,
+    "resident_gms_host_path": a.resident_gms_host_path,
+    "preinstalled_cuda_host_path": a.preinstalled_cuda_host_path,
+    "resident_gms_load_trigger": resident_load,
+    "resident_gms_ready_verified_epoch": resident_ready_verified_epoch
+    if a.resident_gms
+    else None,
     "deployment_mode": "dgd" if a.dgd else "pod",
-    "timer_origin": "dgd_create_request" if a.dgd else "pod_create_request",
+    "timer_origin": "dgd_and_resident_load_requests"
+    if a.resident_gms
+    else "dgd_create_request"
+    if a.dgd
+    else "pod_create_request",
     "pod_name": name,
     "dgd_name": DGD_NAME if a.dgd else None,
     "dgd_shared_memory_size": dgd["spec"]["components"][0].get("sharedMemorySize")
@@ -555,7 +680,10 @@ if a.qualified_pvc_mount:
     assert "nconnect=32" in observed["options"]
 for c in ["gms-" + str(r) for r in range(8)]:
     (out / (c + ".txt")).write_text(
-        subprocess.check_output(base + ["logs", host, "-c", c], text=True)
+        subprocess.check_output(
+            base + ["logs", resident_host if a.resident_gms else host, "-c", c],
+            text=True,
+        )
     )
 # A second response exercises the restored engine beyond the readiness prompt.
 response = remote(
@@ -567,3 +695,8 @@ response = remote(
     "main",
 )
 (out / "inference.json").write_text(response)
+if a.resident_gms:
+    resident_after = core.read_namespaced_pod(a.resident_gms_pod, ns)
+    assert resident_after.metadata.uid == resident.metadata.uid
+    validate_resident_restarts(api.sanitize_for_serialization(resident_after))
+    save(out / "resident-gms-after.json", resident_after)
