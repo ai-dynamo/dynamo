@@ -606,11 +606,18 @@ runs:
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
         end=$((SECONDS + 600))
         while true; do
-          POD_STATE="$(
+          # Keep polling through a failed query. The default shell is
+          # `bash -eo pipefail`, so an unguarded assignment would inherit
+          # kubectl's exit status and abandon the retry loop on one transient
+          # API-server error.
+          if ! POD_STATE="$(
             kubectl get pods -n "${NAMESPACE}" -l "${VCLUSTER_POD_SELECTOR}" \
               -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
-              2>/dev/null
-          )"
+              2>&1
+          )"; then
+            echo "Pod query failed, retrying: ${POD_STATE}"
+            POD_STATE=""
+          fi
           POD_SUMMARY="$(
             printf '%s\n' "${POD_STATE}" \
               | awk '
@@ -904,19 +911,23 @@ runs:
         kubectl describe pods -n ${NAMESPACE} 2>&1 || true
         echo "::endgroup::"
 
-        OPERATOR_POD=$(kubectl get pods -n "${NAMESPACE}" \
+        # Report every operator Pod, not the first match. A terminal Pod is
+        # often the reason this step is running, so its YAML and logs are
+        # evidence rather than noise -- and picking one Pod by name can report
+        # a Failed Pod in place of the live replacement.
+        OPERATOR_PODS=$(kubectl get pods -n "${NAMESPACE}" \
           -l "vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default,control-plane=controller-manager" \
-          -o name 2>/dev/null | head -1)
-        if [ -n "${OPERATOR_POD}" ]; then
-          echo "::group::Operator Pod YAML (host namespace)"
-          kubectl get "${OPERATOR_POD}" -n "${NAMESPACE}" -o yaml 2>&1 || true
+          -o name 2>/dev/null || true)
+        for operator_pod in ${OPERATOR_PODS}; do
+          echo "::group::Operator Pod YAML (host namespace): ${operator_pod}"
+          kubectl get "${operator_pod}" -n "${NAMESPACE}" -o yaml 2>&1 || true
           echo "::endgroup::"
 
-          echo "::group::Operator logs (host namespace)"
-          kubectl logs "${OPERATOR_POD}" -n "${NAMESPACE}" \
+          echo "::group::Operator logs (host namespace): ${operator_pod}"
+          kubectl logs "${operator_pod}" -n "${NAMESPACE}" \
             --all-containers --tail=200 --prefix=true 2>&1 || true
           echo "::endgroup::"
-        fi
+        done
 
         HOST_WEBHOOK_SERVICE=$(kubectl get services -n "${NAMESPACE}" \
           -l app.kubernetes.io/component=webhook \
