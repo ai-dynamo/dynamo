@@ -106,7 +106,6 @@ pub(crate) fn agent_context_header_values(headers: &HeaderMap) -> Option<AgentCo
     None
 }
 
-// Count repeated values individually, including name bytes for each value.
 const MAX_AGENT_HEADER_VALUES: usize = 64;
 const MAX_AGENT_HEADER_VALUE_BYTES: usize = 16 * 1024;
 const MAX_AGENT_HEADER_BYTES: usize = 32 * 1024;
