@@ -180,27 +180,24 @@ impl DiscoverySource {
                 let stream = reflector(writer, watch).default_backoff();
                 let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    loop {
+                    let exit_reason = loop {
                         tokio::select! {
                             _ = token.cancelled() => {
-                                tracing::debug!(
-                                    "EndpointSlice reflector stopping on daemon shutdown"
-                                );
-                                break;
+                                break "cancelled";
                             }
                             res = stream.next() => {
                                 let Some(res) = res else {
                                     tracing::warn!(
                                         "EndpointSlice reflector stream ended before daemon shutdown; store is now stale"
                                     );
-                                    break;
+                                    break "stream_ended";
                                 };
                                 match res {
                                     Ok(event) => {
                                         if let Some(event) = endpoint_slice_event(event)
                                             && events.send(event).await.is_err()
                                         {
-                                            break;
+                                            break "receiver_closed";
                                         }
                                     }
                                     Err(e) => {
@@ -209,7 +206,13 @@ impl DiscoverySource {
                                 }
                             }
                         }
-                    }
+                    };
+                    tracing::info!(
+                        kind = "EndpointSlice",
+                        mode = "pod",
+                        exit_reason,
+                        "Reflector stopped"
+                    );
                 });
 
                 (Self::EndpointSlice(reader), task)
@@ -221,25 +224,24 @@ impl DiscoverySource {
                 let stream = reflector(writer, watch).default_backoff();
                 let task = tokio::spawn(async move {
                     tokio::pin!(stream);
-                    loop {
+                    let exit_reason = loop {
                         tokio::select! {
                             _ = token.cancelled() => {
-                                tracing::debug!("Pod reflector stopping on daemon shutdown");
-                                break;
+                                break "cancelled";
                             }
                             res = stream.next() => {
                                 let Some(res) = res else {
                                     tracing::warn!(
                                         "Pod reflector stream ended before daemon shutdown; store is now stale"
                                     );
-                                    break;
+                                    break "stream_ended";
                                 };
                                 match res {
                                     Ok(event) => {
                                         if let Some(event) = pod_event(event)
                                             && events.send(event).await.is_err()
                                         {
-                                            break;
+                                            break "receiver_closed";
                                         }
                                     }
                                     Err(e) => {
@@ -248,7 +250,13 @@ impl DiscoverySource {
                                 }
                             }
                         }
-                    }
+                    };
+                    tracing::info!(
+                        kind = "Pod",
+                        mode = "container",
+                        exit_reason,
+                        "Reflector stopped"
+                    );
                 });
 
                 (Self::Pod(reader), task)
@@ -322,6 +330,10 @@ impl DiscoveryDaemon {
         outputs: DaemonOutputs,
     ) {
         tracing::info!("Discovery daemon starting");
+        let mode = match &readiness {
+            ReadinessWatch::EndpointSlice(_) => "pod",
+            ReadinessWatch::Pod(_) => "container",
+        };
         let reflector_token = cancel_token.child_token();
         let (readiness_tx, readiness_rx) = mpsc::channel(SOURCE_CHANNEL_CAPACITY);
         let (source, readiness_task) =
@@ -332,27 +344,24 @@ impl DiscoveryDaemon {
         let cr_token = reflector_token.clone();
         let cr_task = tokio::spawn(async move {
             tokio::pin!(cr_reflector_stream);
-            loop {
+            let exit_reason = loop {
                 tokio::select! {
                     _ = cr_token.cancelled() => {
-                        tracing::debug!(
-                            "DynamoWorkerMetadata reflector stopping on daemon shutdown"
-                        );
-                        break;
+                        break "cancelled";
                     }
                     res = cr_reflector_stream.next() => {
                         let Some(res) = res else {
                             tracing::warn!(
                                 "DynamoWorkerMetadata reflector stream ended before daemon shutdown; store is now stale"
                             );
-                            break;
+                            break "stream_ended";
                         };
                         match res {
                             Ok(event) => {
                                 if let Some(event) = cr_event(event)
                                     && cr_tx.send(event).await.is_err()
                                 {
-                                    break;
+                                    break "receiver_closed";
                                 }
                             }
                             Err(e) => {
@@ -361,7 +370,13 @@ impl DiscoveryDaemon {
                         }
                     }
                 }
-            }
+            };
+            tracing::info!(
+                kind = "DynamoWorkerMetadata",
+                mode,
+                exit_reason,
+                "Reflector stopped"
+            );
         });
 
         let result = event_loop(
