@@ -42,6 +42,10 @@ spec:
                   operator: In
                   values: [customer-gpu-o7v, customer-gpu-w0e]
     worker:
+      envs:
+      # Match the upstream perf request timeout for long prefills and cold JIT.
+      - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
+        value: "1200"
       volumeMounts:
       - name: shared-model-cache
         mountPoint: /opt/models
