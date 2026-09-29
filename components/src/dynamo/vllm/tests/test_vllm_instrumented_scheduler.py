@@ -5785,6 +5785,73 @@ def test_kvwarm_live_state_keeps_circular_kpool_geometry():
     assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3) == 2
 
 
+def test_kvwarm_plan_keeps_kimi_long_context_real_kv_coverage(monkeypatch):
+    """Kimi K3 TP8/DCP8 layout (three align-mode recurrent groups, block 1536;
+    one attention group, effective block 12288): a 1M-token batch-8 point must
+    stay on real-KV warm-up. The resident recurrent estimate is the allocator's
+    (align pair + prefill checkpoint), not a token-proportional retention term."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    stub = _kvwarm_planner_stub(usable_blocks=2144)
+    del stub._bench_blocks_per_req  # exercise the real footprint arithmetic
+    stub.max_model_len = 1048576
+    stub.block_size = 12288
+    stub.cache_config = SimpleNamespace(block_size=12288)
+    managers = [
+        SimpleNamespace(
+            block_size=1536,
+            mamba_cache_mode="align",
+            num_speculative_blocks=0,
+            kv_cache_spec=SimpleNamespace(num_prefill_checkpoint_blocks=1),
+        )
+        for _ in range(3)
+    ]
+    managers.append(SimpleNamespace(block_size=12288))
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=managers)
+    )
+    context = 1_000_000
+    point = BenchmarkPoint(
+        point_type="decode",
+        benchmark_id=1,
+        batch_size=8,
+        total_kv_read_tokens=8 * context,
+    )
+    stub._bench_grid = deque([point])
+    stub._kvwarm_prepare("decode")
+    assert stub._bench_blocks_per_req(context + 4, resident_chain=True) == 91
+    assert stub._kvwarm_plan[8] == context + 4
+    assert stub._kvwarm_plan_covers(point)
+
+
+def test_kvwarm_reserve_uses_the_admission_context_at_a_block_boundary(monkeypatch):
+    """The shadow is admitted at ctx-1 with ``repeats`` steady steps. At a block
+    boundary the recurrent read slot moves one position down, so the reserve
+    must be taken at that geometry: ctx 33 -> admission 32 needs 3 private
+    blocks (1 attention + recurrent positions 1..2), not the 2 that
+    ``(33, 1 + repeats)`` suggests. A pool that fits only the smaller reserve
+    must NOT admit the warm stage at the measured depth."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    stub = _kvwarm_planner_stub(usable_blocks=37, groups=2)
+    stub._bench_hybrid_live_state = True
+    stub._bench_random_kda = False
+    stub.kv_cache_manager.coordinator.single_type_managers[
+        1
+    ].kv_cache_spec = _FakeMambaSpec()
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 32, 3) == 3
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks_for(stub, 33, 4) == 2
+    point = BenchmarkPoint(
+        point_type="decode", benchmark_id=1, batch_size=4, total_kv_read_tokens=4 * 33
+    )
+    stub._bench_grid = deque([point])
+    stub._kvwarm_prepare("decode")
+    # depth 37 with the 3-block reserve needs (6 + 3) * 4 = 36 > 35 (0.95 pool):
+    # the rung is trimmed below the point instead of admitting an underfunded stage
+    assert stub._kvwarm_plan[4] < 37
+    assert not stub._kvwarm_plan_covers(point)
+
+
 def _dp_planner_stub(monkeypatch, points, usable_blocks=100):
     monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
     stub = _kvwarm_planner_stub(usable_blocks=usable_blocks)

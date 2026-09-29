@@ -3333,23 +3333,16 @@ class InstrumentedScheduler(AsyncScheduler):
                     0,
                 )
                 blocks = 2 + speculative_blocks + checkpoint_blocks
-                if resident_chain:
-                    # A parked kvwarm chain: below one cache block it holds only its
-                    # live state (no boundary crossed yet -- v1 built 192 chains x 258
-                    # tokens in a 3306-block pool); past the first boundary the
-                    # align-mode pair (current + previous boundary) plus retained
-                    # checkpoints, measured on GLM-5.3-Flash at ~1 per 7680 tokens
-                    # (3.6/group @26k, 7/group @53k at TP4; 3/group @13k and @26k at
-                    # TP1). Under-counting this let a stage admit more chains than the
-                    # pool holds (stage-build deadlock at the pool edge); over-counting
-                    # demotes big rungs to fake KV.
-                    if num_tokens < block_size:
-                        blocks = 1 + speculative_blocks
-                    else:
-                        blocks = max(
-                            blocks,
-                            1 + math.ceil(num_tokens / 7680) + speculative_blocks,
-                        )
+                if resident_chain and num_tokens < block_size:
+                    # A parked kvwarm chain below one cache block holds only its live
+                    # state (no boundary crossed yet -- v1 built 192 chains x 258 tokens
+                    # in a 3306-block pool). Past the first boundary the allocator bound
+                    # above applies: old recurrent states are nulled and freed, so the
+                    # resident count stays at the align pair plus checkpoints whatever
+                    # the depth (v0.29 lifecycle; a token-based retention estimate
+                    # measured on GLM-5.3-Flash over-counted it and demoted long-context
+                    # rungs to fake KV on Kimi K3).
+                    blocks = 1 + speculative_blocks
             elif mamba_cache_mode is not None:
                 blocks += speculative_blocks
 
@@ -5268,7 +5261,13 @@ class InstrumentedScheduler(AsyncScheduler):
                 worst_case_tail,
                 max(
                     (
-                        self._kvwarm_shadow_tail_blocks_for(ctx, margin)
+                        # the shadow is admitted at ctx - 1 with ``repeats`` steady
+                        # steps (``_bench_step_decode`` / ``_kvwarm_inject_borrowed``);
+                        # the recurrent read slot can cross a block boundary between
+                        # ctx and ctx - 1, so reserve at the admission geometry
+                        self._kvwarm_shadow_tail_blocks_for(
+                            max(1, ctx - 1), max(1, repeats)
+                        )
                         for ctx in rung_ctxs.get(batch, ())
                     ),
                     default=worst_case_tail,
