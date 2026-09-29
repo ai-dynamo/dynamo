@@ -31,6 +31,10 @@ then repeated timing and checkpointed-GMS comparison.
 
 ## Recorded prototype
 
+[TUNED-RESTORE.md](TUNED-RESTORE.md) records nine full PVC/O_DIRECT restores
+with the agent and PageBroker resident before timing: buffer tuning, higher GMS
+CPU requests/limits, and container-discovery timing with an updated Gantt chart.
+
 [RESULTS.md](RESULTS.md) records timing boundaries, failed trials and storage /
 communication differences. `results/` holds exact pod/claim/capture plans, logs
 and inference outputs. Large GPU payloads are not stored in Git.

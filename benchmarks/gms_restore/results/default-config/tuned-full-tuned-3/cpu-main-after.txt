@@ -1,0 +1,15 @@
+1790656667.122219616
+/sys/fs/cgroup/
+9600000 100000
+1250
+usage_usec 223315943
+user_usec 99765067
+system_usec 123550875
+core_sched.force_idle_usec 0
+nr_periods 518
+nr_throttled 0
+throttled_usec 0
+nr_bursts 0
+burst_usec 0
+some avg10=0.00 avg60=0.00 avg300=0.00 total=248391
+full avg10=0.00 avg60=0.00 avg300=0.00 total=245938

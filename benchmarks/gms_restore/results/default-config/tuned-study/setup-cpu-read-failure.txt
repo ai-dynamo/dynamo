@@ -1,0 +1,19 @@
+cat: /sys/fs/cgroup/cpu.max: No such file or directory
+cat: /sys/fs/cgroup/cpu.weight: No such file or directory
+command terminated with exit code 1
+Traceback (most recent call last):
+  File "/tmp/gms-tuned-trials.py", line 34, in <module>
+    for container in ['agent','pagebroker']:(path/f'cpu-{container}-before.txt').write_text(cpu(container,host_agent))
+                                                                                            ~~~^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/gms-tuned-trials.py", line 17, in cpu
+    return subprocess.check_output(['kubectl','-n',c.NS,'exec',pod,'-c',container,'--','sh','-c','date -u +%s.%N; cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/cpu.pressure'],text=True)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/schwinns/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/subprocess.py", line 472, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+           ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               **kwargs).stdout
+               ^^^^^^^^^
+  File "/home/schwinns/.local/share/uv/python/cpython-3.13.15-linux-x86_64-gnu/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['kubectl', '-n', 'schwinns-vcluster', 'exec', 'dynamo-snapshot-agent-8s6mb-x-schwinns-vcluster-x-sc-3bb23ee444', '-c', 'agent', '--', 'sh', '-c', 'date -u +%s.%N; cat /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.weight /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/cpu.pressure']' returned non-zero exit status 1.

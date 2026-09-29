@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
+matplotlib.rcParams["svg.fonttype"] = "none"
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 from summarize import json_events, seconds
@@ -59,6 +60,29 @@ def row(label, segments):
 
 
 row("Pod startup", [(zero, min(x["started_epoch"] for x in pub), "agent")])
+watch_path = root / "host-watch.jsonl"
+if watch_path.exists():
+    for line in watch_path.read_text().splitlines():
+        event = json.loads(line)
+        main = next(
+            (
+                c
+                for c in event.get("containers") or []
+                if c["name"] == "main"
+                and c.get("containerID")
+                and "running" in c.get("state", {})
+            ),
+            None,
+        )
+        if main:
+            container_start = datetime.fromisoformat(
+                main["state"]["running"]["startedAt"].replace("Z", "+00:00")
+            ).timestamp()
+            row(
+                "Main start → running status observed",
+                [(container_start, event["observed_epoch"], "gate")],
+            )
+            break
 for r in pub:
     events = list(json_events((root / f"gms-{r['rank']}.txt").read_text()))
     sockets = next((x["elapsed_s"] for x in events if x.get("event") == "sockets"), 0)
@@ -70,8 +94,8 @@ for r in pub:
 last = max(x["published_epoch"] for x in pub)
 gate_end = float((root / "gate.txt").read_text())
 row("Publication validation", [(last, gate_end, "gate")])
-row("Restore dispatch", [(t["trigger_epoch"], start, "gate")])
-row("Engine agent overall", [(start, end, "agent")])
+row("Request → restore handler", [(t["trigger_epoch"], start, "gate")])
+row("Engine restore operation", [(start, end, "agent")])
 # CRIU completion lacks a dedicated return timestamp. Place its measured duration
 # immediately before Native restore order, which follows the call in nsrestore.
 criu_end = next(x[0] for x in entries if "Native restore order" in x[1])
@@ -129,6 +153,13 @@ ax.legend(
 )
 fig.savefig(root / "timeline.svg")
 fig.savefig(root / "timeline.png", dpi=150)
+svg = (
+    "\n".join(
+        line.rstrip() for line in (root / "timeline.svg").read_text().splitlines()
+    )
+    + "\n"
+)
+(root / "timeline.svg").write_text(svg)
 (root / "timeline-data.json").write_text(
     json.dumps(
         {
@@ -139,7 +170,6 @@ fig.savefig(root / "timeline.png", dpi=150)
         indent=2,
     )
 )
-svg = (root / "timeline.svg").read_text()
 svg = svg[svg.index("<svg") :]
 ordering = (
     "GMS loads overlap CRIU and CUDA restoration. The captured engine waits for verified publication immediately before resuming weight use."
@@ -151,5 +181,5 @@ ordering = (
     + svg
     + "<p>"
     + ordering
-    + " PREPARE/TRANSFER/COMPLETE show measured broker request intervals. CRIU placement is approximate; its duration is measured. The final interval includes any publication wait, wake, generation and readiness observation.</p>"
+    + " The Snapshot agent daemon is already running before pod creation; the handler row is per-request dispatch, not daemon startup. Main-container status observation uses a remote API watch and includes observation latency; startedAt has one-second precision. PREPARE/TRANSFER/COMPLETE show measured broker request intervals. CRIU placement is approximate; its duration is measured. The final interval includes any publication wait, wake, generation and readiness observation.</p>"
 )

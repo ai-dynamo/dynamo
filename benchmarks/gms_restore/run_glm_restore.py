@@ -23,6 +23,9 @@ p.add_argument("--storage", choices=["pvc", "tmpfs"], default="pvc")
 p.add_argument("--qualified-pvc-mount", action="store_true")
 p.add_argument("--isolated-pvc-transport", action="store_true")
 p.add_argument("--workers", type=int, default=4)
+p.add_argument("--chunk-mib", type=int, default=16)
+p.add_argument("--gms-cpu-request", type=int, default=1)
+p.add_argument("--gms-cpu-limit", type=int, default=8)
 p.add_argument("--numa", action="store_true")
 p.add_argument("--capture-dir", type=Path)
 p.add_argument("--same-claim", action="store_true")
@@ -31,6 +34,12 @@ p.add_argument("--overlap", action="store_true")
 p.add_argument("--early-trigger", action="store_true")
 p.add_argument("--backend", choices=["fused", "nixl"], default="fused")
 a = p.parse_args()
+if not 0 < a.gms_cpu_request <= a.gms_cpu_limit:
+    p.error("GMS CPU request must be positive and no greater than its limit")
+if a.chunk_mib < 1:
+    p.error("--chunk-mib must be positive")
+if a.backend != "fused" and a.chunk_mib != 16:
+    p.error("--chunk-mib applies to the fused backend")
 if a.overlap and not a.fast_gate:
     p.error("--overlap requires --fast-gate")
 if a.qualified_pvc_mount and a.storage != "pvc":
@@ -236,7 +245,7 @@ for rank, c in enumerate(pod["spec"]["containers"][1:]):
         str(Path(capture["ranks"][0]["artifact"]).parent),
     ]
     if a.backend == "fused":
-        c["command"] += ["--workers", str(a.workers)]
+        c["command"] += ["--workers", str(a.workers), "--chunk-mib", str(a.chunk_mib)]
         if a.numa:
             c["command"].append("--numa")
     if a.backend == "nixl":
@@ -245,7 +254,8 @@ for rank, c in enumerate(pod["spec"]["containers"][1:]):
         "exec": {"command": ["test", "-f", f"/gms/published-{rank}"]},
         "periodSeconds": 1,
     }
-    c["resources"]["limits"] = {"cpu": "8", "memory": "16Gi"}
+    c["resources"]["requests"]["cpu"] = str(a.gms_cpu_request)
+    c["resources"]["limits"] = {"cpu": str(a.gms_cpu_limit), "memory": "16Gi"}
 if a.fast_gate:
     pod["spec"]["containers"][1]["readinessProbe"]["exec"]["command"] = [
         "test",
@@ -426,6 +436,9 @@ text = remote(["cat", "/snapshot-control/sglang-restore-ready"], "main")
 assert "berlin" in text.lower(), text
 result = {
     "backend": a.backend,
+    "chunk_mib": a.chunk_mib if a.backend == "fused" else None,
+    "gms_cpu_request": a.gms_cpu_request,
+    "gms_cpu_limit": a.gms_cpu_limit,
     "early_trigger": a.early_trigger,
     "pod_create_return_epoch": pod_create_returned,
     "workers": a.workers if a.backend == "fused" else 16,

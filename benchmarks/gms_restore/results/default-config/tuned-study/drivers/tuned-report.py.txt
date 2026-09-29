@@ -1,0 +1,40 @@
+import json,sys,statistics,datetime
+from pathlib import Path
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore');out=root/'results/default-config';meta=out/'tuned-study';sys.path.insert(0,str(root));from summarize import summarize,seconds,json_events
+rows=[]
+def epoch(value):return datetime.datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+def counters(path):
+ lines=path.read_text().splitlines();return {x.split()[0]:int(x.split()[1]) for x in lines[4:] if len(x.split())==2 and x.split()[1].isdigit()}
+for p in sorted(out.glob('tuned-full-*')):
+ if not all((p/f).exists() for f in ['timing.json','agent.txt','main.txt','inference.json','cpu-main-after.txt']):continue
+ t=json.loads((p/'timing.json').read_text());summary=summarize(p);pub=json.loads((p/'publications.json').read_text());zero=t['create_epoch'];assert 'berlin' in t['restored_text'].lower() and 'rayleigh' in json.loads((p/'inference.json').read_text())['text'].lower()
+ lines=(p/'agent.txt').read_text().splitlines();op=max(epoch(l.split('\t')[0]) for l in lines if '=== Starting external restore ===' in l)
+ agent=json.loads((p/'resident-agent-before.json').read_text());service_starts={c['name']:epoch(c['state']['running']['startedAt'])-zero for c in agent['status']['containerStatuses']};assert all(v<0 for v in service_starts.values());assert all(c['ready'] for c in agent['status']['containerStatuses'])
+ row={'case':p.name,'group':p.name.split('-')[-2],'chunk_mib':t['chunk_mib'],'gms_cpu_request':t['gms_cpu_request'],'gms_cpu_limit':t['gms_cpu_limit'],'pod_s':t['pod_create_to_ready_s'],'gms_span_s':summary['preload_span_s'],'restore_operation_s':summary['agent_restore_s'],'create_to_restore_operation_s':op-zero,'criu_s':seconds(summary['agent']['phases']['criu_restore']),'cuda_s':seconds(summary['agent']['phases']['cuda_restore']),'resident_container_start_offsets_s':service_starts,'rank_cpu':[]}
+ direct=set();init=[]
+ for rank in range(8):
+  events=list(json_events((p/f'gms-{rank}.txt').read_text()));init.append(next(e['elapsed_s'] for e in events if e.get('event')=='sockets'))
+  for e in events:
+   if e.get('event')=='artifact_open':assert e['o_direct'];direct.add(e['path'])
+ assert len(direct)==112
+ row['init_mean_s']=statistics.mean(init);row['rank_load_mean_s']=statistics.mean(x['elapsed_s']-init[i] for i,x in enumerate(pub));row['create_to_first_gms_s']=min(x['started_epoch'] for x in pub)-zero
+ for r in pub:
+  b,a=r['cpu_before'],r['cpu_after'];delta={k:a['stat'][k]-v for k,v in b['stat'].items()};row['rank_cpu'].append({'rank':r['rank'],'mean_cores':delta['usage_usec']/1e6/(a['epoch']-b['epoch']),'delta':delta,'cpu_max':a['max'],'cpu_weight':a['weight'],'pressure_before':b['pressure'],'pressure_after':a['pressure']})
+ row['gms_cpu_mean_cores']=statistics.mean(x['mean_cores'] for x in row['rank_cpu']);row['gms_throttled_periods']=sum(x['delta']['nr_throttled'] for x in row['rank_cpu'])
+ for kind in ['host','virtual']:
+  for line in (p/f'{kind}-watch.jsonl').read_text().splitlines():
+   e=json.loads(line)
+   main=next((s for s in e.get('containers') or [] if s['name']=='main' and s.get('containerID') and 'running' in s.get('state',{})),None)
+   if main:
+    row[kind+'_main_status_observed_s']=e['observed_epoch']-zero;row[kind+'_main_container_start_s']=epoch(main['state']['running']['startedAt'])-zero;break
+ for comp in ['agent','pagebroker']:
+  before=counters(p/f'cpu-{comp}-before.txt');after=counters(p/f'cpu-{comp}-after.txt');row[comp+'_cpu_delta']={k:after[k]-v for k,v in before.items()}
+ row['main_cpu_lifetime_after_validation']=counters(p/'cpu-main-after.txt')
+ rows.append(row)
+groups={}
+for name in ['base','tuned','cpu']:
+ cases=[r for r in rows if r['group']==name]
+ if not cases:continue
+ groups[name]={'n':len(cases),'cases':[c['case'] for c in cases],'mean':{k:statistics.mean(r[k] for r in cases) for k in cases[0] if k.endswith('_s') and isinstance(cases[0][k],(float,int))},'pod_range_s':[min(r['pod_s'] for r in cases),max(r['pod_s'] for r in cases)],'gms_throttled_periods':sum(r['gms_throttled_periods'] for r in cases),'gms_cpu_mean_cores':statistics.mean(r['gms_cpu_mean_cores'] for r in cases),'main_throttled_periods':sum(r['main_cpu_lifetime_after_validation']['nr_throttled'] for r in cases)}
+(meta/'comparison.json').write_text(json.dumps({'cases':rows,'groups':groups},indent=2))
+for name,g in groups.items():print(name,g,flush=True)

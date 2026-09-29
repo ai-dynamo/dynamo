@@ -189,3 +189,44 @@ whereas PageBroker preinitializes 32 × 128 MiB CUDA host-NUMA slots and NIXL AI
 - Cleanup verified: transfer pod/claim released, private mount removed, original
   agent/operator templates unchanged, NUMA balancing unchanged, retained GLM and
   Qwen snapshots Ready. No model/checkpoint payload was created or removed here.
+
+## Tuned full restore and CPU-share follow-up (2026-09-29)
+
+User corrected the ambiguous agent-start wording: the node agent and PageBroker
+GPU engine must be resident/Ready before the restore timer. Existing +4.875 s
+is the per-request external restore entry. Record resident Pod status and broker
+ready log before trial clocks, and label the Gantt accordingly.
+
+- Testing a three-condition rotating matrix: 16 MiB + CPU request/limit 1/8;
+  128 MiB + 1/8; 128 MiB + 8/16. Three repetitions each, fixed engine resources,
+  16 loader lanes, one GPU per rank, exact PVC/O_DIRECT artifacts, overlap and
+  creation-time restore request. GMS ring initialization stays inside the pod
+  timer. No direct PageBroker/GMS integration is introduced.
+- Resident agent is bc42fb31, with unchanged qualified CUDA shim/broker. GPU
+  engine initialized its eight contexts and 32 × 128 MiB/GPU rings before tests.
+- Lookup already polls at 50 ms; each runtime attempt has a 1 s cap. Containerd
+  filters use virtual Pod names while host CRI has translated names. Dual host
+  and virtual status watches will locate status-propagation delay.
+- First telemetry setup attempted to read privileged agent CPU files at cgroup
+  root. Corrected it to resolve /proc/self/cgroup; no restore ran in that attempt.
+
+- All nine full restores completed with Berlin/Rayleigh correctness. Mean
+  pod-to-ready: original 27.519 s, tuned 27.053 s, tuned+higher CPU 27.479 s.
+  GMS publication span: 21.851 / 20.188 / 19.841 s. No observed GMS or main
+  CPU quota throttling. Engine CPU resources stayed fixed; raising GMS CPU
+  alone showed no end-to-end benefit. See TUNED-RESTORE.md for scope/caveats.
+- Dual watches put host main-start-to-running-status observation at about
+  3.25–4.15 s, including timestamp granularity and remote observation latency.
+  Host/virtual status arrived close together; external restore entry followed
+  status availability promptly. Increasing general reconciliation frequency
+  is not supported by this evidence. Correct translated host runtime identity
+  is the targeted next experiment; no discovery change entered this matrix.
+- Updated Gantt labels distinguish resident daemon from per-request operation,
+  and include main startup/status observation. Recorded all manifests, exact
+  O_DIRECT paths, per-rank CPU counters, dual pod watches and resident-service
+  proof. One pre-restore telemetry setup failure is retained separately.
+- Cleanup independently verified: no experiment pods/claims, original agent and
+  operator templates/config restored and available, private NFS mounts removed,
+  NUMA balancing restored to 1, retained GLM and Qwen snapshots Ready. Ruff check
+  and format pass for all 30 benchmark Python scripts; all nine full restores
+  are the GPU validation for the new buffer/CPU harness controls.

@@ -1,0 +1,48 @@
+"""Return only this experiment's resources and node settings to their saved state."""
+import json,sys,time
+from pathlib import Path
+from kubernetes import client
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+r=Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928');orig=json.loads((r/'manifests/original-vcluster.json').read_text());apps=client.AppsV1Api();ns=c.NS;log=[]
+def note(x):
+ print(x,flush=True);log.append(x);(Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore/results/default-config/tuned-study/cleanup.txt')).write_text('\n'.join(log)+'\n')
+def ignore(fn,*a):
+ try:return fn(*a)
+ except client.ApiException as e:
+  if e.status!=404:raise
+# GPU owners and helper first. Recorded checkpoints/artifacts are separate objects.
+for pod in c.core.list_namespaced_pod(ns).items:
+ if pod.metadata.name.startswith('gms-v1-'):
+  ignore(c.core.delete_namespaced_pod,pod.metadata.name,ns);note('deleted pod '+pod.metadata.name)
+for claim in c.custom.list_namespaced_custom_object('resource.k8s.io','v1',ns,'resourceclaims')['items']:
+ if claim['metadata']['name'].startswith('gms-v1-'):
+  ignore(c.custom.delete_namespaced_custom_object,'resource.k8s.io','v1',ns,'resourceclaims',claim['metadata']['name']);note('deleted claim '+claim['metadata']['name'])
+for cm in c.core.list_namespaced_config_map(ns).items:
+ if cm.metadata.name.startswith('gms-v1-'):
+  ignore(c.core.delete_namespaced_config_map,cm.metadata.name,ns)
+agent=Path('/tmp/gms-restore-agent-virtual').read_text().strip()
+# Do this while the experimental privileged agent can enter host namespaces.
+note(c.host_exec(agent,'nsenter -t 1 -m -- sh /var/lib/schwinns-gms-0928/node-levers.sh restore','agent').strip())
+# Wait for experiment-owned helper mounts to disappear, then retire volatile weights.
+for _ in range(90):
+ if not [p for p in c.core.list_namespaced_pod(ns).items if p.metadata.name.startswith('gms-v1-')]:break
+ time.sleep(1)
+note(c.host_exec(agent,'nsenter -t 1 -m -- umount /var/lib/schwinns-gms-0928/gms-pvc-nfs','agent').strip())
+ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',ns)
+apps.patch_namespaced_daemon_set(ds.metadata.name,ns,[{'op':'test','path':'/metadata/resourceVersion','value':ds.metadata.resource_version},{'op':'replace','path':'/spec/template','value':orig['daemonset']['spec']['template']},{'op':'replace','path':'/spec/updateStrategy','value':orig['daemonset']['spec']['updateStrategy']}])
+cm=c.core.read_namespaced_config_map('dynamo-snapshot-config',ns)
+c.core.replace_namespaced_config_map(cm.metadata.name,ns,{'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':cm.metadata.name,'namespace':ns,'resourceVersion':cm.metadata.resource_version,'labels':orig['configmap']['metadata'].get('labels'),'annotations':orig['configmap']['metadata'].get('annotations')},'data':orig['configmap']['data']})
+op=apps.read_namespaced_deployment('dynamo-snapshot-operator',ns)
+apps.patch_namespaced_deployment(op.metadata.name,ns,[{'op':'test','path':'/metadata/resourceVersion','value':op.metadata.resource_version},{'op':'replace','path':'/spec/template','value':orig['operator']['spec']['template']}])
+ignore(c.core.delete_namespaced_pod,agent,ns)
+for _ in range(120):
+ ps=[p for p in c.core.list_namespaced_pod(ns).items if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name.endswith('s2877') and p.metadata.name!=agent and not p.metadata.deletion_timestamp and any(x.type=='Ready' and x.status=='True' for x in p.status.conditions or [])]
+ if ps:break
+ time.sleep(1)
+else:raise RuntimeError('original agent readiness')
+note('original agent restored: '+ps[0].metadata.name)
+cmd='nsenter -t 1 -m -- sh -c "if mountpoint -q /var/lib/snapshot-restore-perf-nfs; then umount /var/lib/snapshot-restore-perf-nfs; fi"'
+note('destination private NFS: '+c.host_exec(ps[0].metadata.name,cmd,'agent').strip())
+note('No source-node resources or private mounts changed in this trial series.')
+note('Retained default GLM snapshot gms-v1-glm-default-0929 and exact PVC default-capture-2 weights; retained prior Qwen snapshot/artifacts.')
+(Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore/results/default-config/tuned-study/cleanup.txt')).write_text('\n'.join(log)+'\n')

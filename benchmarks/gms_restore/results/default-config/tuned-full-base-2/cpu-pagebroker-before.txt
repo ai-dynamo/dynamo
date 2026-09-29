@@ -1,0 +1,15 @@
+1790656373.571327840
+/sys/fs/cgroup/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podaab0dfbb_db4c_4eb8_a253_90844ccca361.slice/cri-containerd-5d7d32728db9237606fa066c2f0103ee0e6de649084789f0dff722d42f1db850.scope
+1600000 100000
+79
+usage_usec 35978963
+user_usec 5280182
+system_usec 30698781
+core_sched.force_idle_usec 0
+nr_periods 2580
+nr_throttled 0
+throttled_usec 0
+nr_bursts 0
+burst_usec 0
+some avg10=0.00 avg60=0.00 avg300=0.00 total=55258
+full avg10=0.00 avg60=0.00 avg300=0.00 total=55258

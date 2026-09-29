@@ -17,11 +17,34 @@ started = time.time()
 p = argparse.ArgumentParser()
 p.add_argument("--rank", type=int, required=True)
 p.add_argument("--workers", type=int, default=4)
+p.add_argument("--chunk-mib", type=int, default=16)
 p.add_argument("--numa", action="store_true")
 p.add_argument("--artifact-root", required=True)
 p.add_argument("--checkpoint-target", action="store_true")
 p.add_argument("--retain-anchors", action="store_true")
 a = p.parse_args()
+if a.chunk_mib < 1 or a.workers < 1:
+    p.error("chunk size and workers must be positive")
+
+
+def cpu_snapshot():
+    """Read this rank container's counters without sampling another workload."""
+    root = Path("/sys/fs/cgroup")
+    values = {}
+    for line in (root / "cpu.stat").read_text().splitlines():
+        key, value = line.split()
+        values[key] = int(value)
+    return {
+        "epoch": time.time(),
+        "stat": values,
+        "pressure": (root / "cpu.pressure").read_text(),
+        "max": (root / "cpu.max").read_text().strip(),
+        "weight": (root / "cpu.weight").read_text().strip(),
+    }
+
+
+cpu_before = cpu_snapshot()
+import posix_direct
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.v1.checkpoint import GMSCheckpointClient, GMSCheckpointLifecycle
 from gpu_memory_service.v1.cli import run_servers
@@ -29,6 +52,8 @@ from gpu_memory_service.v1.device import get_device_uuid, get_socket_path
 from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
 from gpu_memory_service.v1.snapshot.weight_artifact import load_weights
 from posix_direct import install
+
+posix_direct.CHUNK = a.chunk_mib * 1024**2
 
 if os.environ.get("GMS_PROTOTYPE_INTERPOSE_CUDA_PYTHON") == "1":
     from ctypes_interpose import install as install_interpose
@@ -110,6 +135,10 @@ with ExitStack() as stack:
                 "rank": a.rank,
                 "uuid": uuid,
                 "event": "published",
+                "chunk_mib": a.chunk_mib,
+                "workers": a.workers,
+                "cpu_before": cpu_before,
+                "cpu_after": cpu_snapshot(),
                 "started_epoch": started,
                 "published_epoch": published,
                 "elapsed_s": published - started,

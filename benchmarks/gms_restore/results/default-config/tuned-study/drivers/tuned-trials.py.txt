@@ -1,0 +1,52 @@
+import sys,json,time,subprocess,os,threading
+from pathlib import Path
+from kubernetes import client,config,watch
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928');out=root/'benchmarks/gms_restore/results/default-config';meta=out/'tuned-study';prep=json.loads((meta/'prepared.json').read_text());agent=prep['agent'];host_agent=prep['host_agent'];name='gms-v1-glm-restore-0928';host_name=name+'-x-schwinns-vcluster-x-schwinns-vcluster'
+uid=json.loads((out/'snapshot-content.json').read_text())['metadata']['uid']
+os.environ['GMS_VCLUSTER_KUBECONFIG']=str(c.ROOT/'qualification-private/kubeconfig.json')
+host_api=client.CoreV1Api(config.new_client_from_config(context=c.HOST))
+def observe(api,podname,dest,w):
+ with dest.open('w') as log:
+  try:
+   for e in w.stream(api.list_namespaced_pod,c.NS,field_selector='metadata.name='+podname,timeout_seconds=120):
+    p=e['object'];status=p.status
+    log.write(json.dumps({'observed_epoch':time.time(),'type':e['type'],'uid':p.metadata.uid,'rv':p.metadata.resource_version,'phase':status.phase,'node':p.spec.node_name,'ip':status.pod_ip,'containers':c.api.sanitize_for_serialization(status.container_statuses),'init':c.api.sanitize_for_serialization(status.init_container_statuses)})+'\n');log.flush()
+  except Exception as e:log.write(json.dumps({'watch_error':str(e),'epoch':time.time()})+'\n')
+def cpu(container,pod):
+ return subprocess.check_output(['kubectl','-n',c.NS,'exec',pod,'-c',container,'--','sh','-c','p=/sys/fs/cgroup; rel=$(sed -n "s/^0:://p" /proc/self/cgroup); if [ -f "$p$rel/cpu.max" ]; then p="$p$rel"; fi; date -u +%s.%N; echo "$p"; cat "$p/cpu.max" "$p/cpu.weight" "$p/cpu.stat" "$p/cpu.pressure"'],text=True)
+def wait_deleted():
+ for _ in range(120):
+  try:c.core.read_namespaced_pod(name,c.NS)
+  except client.ApiException as e:
+   if e.status==404:return
+   raise
+  time.sleep(.5)
+ raise TimeoutError('pod deletion')
+counts={'base':0,'tuned':0,'cpu':0}
+for label in ['base','tuned','cpu','tuned','cpu','base','cpu','base','tuned']:
+ counts[label]+=1;case=f'tuned-full-{label}-{counts[label]}';path=out/case;path.mkdir(exist_ok=False)
+ chunk=16 if label=='base' else 128;request=8 if label=='cpu' else 1;limit=16 if label=='cpu' else 8
+ # Both resident service containers must be running before every measured pod create.
+ ap=c.core.read_namespaced_pod(agent,c.NS)
+ assert all(s.ready for s in ap.status.container_statuses)
+ (path/'resident-agent-before.json').write_text(json.dumps(c.api.sanitize_for_serialization(ap),indent=2))
+ for container in ['agent','pagebroker']:(path/f'cpu-{container}-before.txt').write_text(cpu(container,host_agent))
+ code="import os,glob,json; files=glob.glob('/var/lib/snapshot-restore-perf-nfs/artifacts/"+uid+"/containers/main/pages-*.img')+glob.glob('/var/lib/snapshot-restore-perf-nfs/artifacts/"+uid+"/containers/main/ghost-file-*.img'); [(lambda fd:(os.posix_fadvise(fd,0,0,os.POSIX_FADV_DONTNEED),os.close(fd)))(os.open(f,os.O_RDONLY)) for f in files]; print(json.dumps({'advised_cpu_files':len(files),'content_uid':'"+uid+"'})); assert files"
+ (path/'cpu-eviction.json').write_text(subprocess.check_output(['kubectl','-n',c.NS,'exec',host_agent,'-c','agent','--','nsenter','-t','1','-m','-n','-r','-w','--','python3','-c',code],text=True))
+ observers=[]
+ for api,podname,labelwatch in [(c.core,name,'virtual'),(host_api,host_name,'host')]:
+  w=watch.Watch();thread=threading.Thread(target=observe,args=(api,podname,path/f'{labelwatch}-watch.jsonl',w),daemon=True);thread.start();observers.append((w,thread))
+ command=[sys.executable,str(root/'benchmarks/gms_restore/run_glm_restore.py'),'--case',case,'--capture-dir',str(out),'--backend','fused','--workers','16','--chunk-mib',str(chunk),'--gms-cpu-request',str(request),'--gms-cpu-limit',str(limit),'--qualified-pvc-mount','--isolated-pvc-transport','--storage','pvc','--same-claim','--fast-gate','--overlap','--numa','--early-trigger']
+ try:
+  with (path/'harness.log').open('w') as log:subprocess.run(command,check=True,stdout=log,stderr=subprocess.STDOUT)
+  t=json.loads((path/'timing.json').read_text());t['agent_revision']='bc42fb31';t['resident_services_ready_verified_epoch']=prep['ready_verified_epoch'];(path/'timing.json').write_text(json.dumps(t,indent=2))
+  for container in ['agent','pagebroker']:
+   (path/f'{container}.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',host_agent,'-c',container],text=True))
+   (path/f'cpu-{container}-after.txt').write_text(cpu(container,host_agent))
+  (path/'main.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',host_name,'-c','main'],text=True))
+  (path/'cpu-main-after.txt').write_text(cpu('main',host_name))
+  print(case,t['pod_create_to_ready_s'],flush=True)
+ finally:
+  c.core.delete_namespaced_pod(name,c.NS);wait_deleted()
+  for w,thread in observers:w.stop();thread.join(timeout=3)

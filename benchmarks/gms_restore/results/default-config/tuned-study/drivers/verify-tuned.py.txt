@@ -1,0 +1,27 @@
+import sys,json,subprocess
+from pathlib import Path
+from kubernetes import client
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920')
+import cluster as c
+orig=json.loads(Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928/manifests/original-vcluster.json').read_text())
+a=client.AppsV1Api(); ns=c.NS
+op=a.read_namespaced_deployment('dynamo-snapshot-operator',ns)
+pods=c.core.list_namespaced_pod(ns).items
+checks={
+'no_experiment_pods':not any(p.metadata.name.startswith('gms-v1-') for p in pods),
+'no_experiment_claims':not any(x['metadata']['name'].startswith('gms-v1-') for x in c.custom.list_namespaced_custom_object('resource.k8s.io','v1',ns,'resourceclaims')['items']),
+'config_restored':c.core.read_namespaced_config_map('dynamo-snapshot-config',ns).data==orig['configmap']['data'],
+'agent_template_restored':c.api.sanitize_for_serialization(a.read_namespaced_daemon_set('dynamo-snapshot-agent',ns).spec.template)==orig['daemonset']['spec']['template'],
+'operator_template_restored':c.api.sanitize_for_serialization(op.spec.template)==orig['operator']['spec']['template'],
+'original_operator_available':(op.status.available_replicas or 0)>=op.spec.replicas and (op.status.updated_replicas or 0)>=op.spec.replicas,
+}
+for name in ['gms-v1-glm-default-0929','gms-v1-qwen-0928']:
+ s=c.custom.get_namespaced_custom_object('nvidia.com','v1alpha1',ns,'podsnapshots',name)
+ checks[name+'_retained_ready']=any(x['type']=='Ready' and x['status']=='True' for x in s.get('status',{}).get('conditions',[]))
+agent=next(p for p in pods if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name.endswith('s2877') and not p.metadata.deletion_timestamp)
+result=subprocess.run(['kubectl','--context='+c.HOST,'-n',ns,'exec',c.host_name(agent.metadata.name),'-c','agent','--','nsenter','-t','1','-m','--','sh','-c','for p in /var/lib/snapshot-restore-perf-nfs /var/lib/schwinns-gms-0928/gms-pvc-nfs; do if mountpoint -q "$p"; then exit 1; fi; done; cat /proc/sys/kernel/numa_balancing'],capture_output=True,text=True)
+checks['private_nfs_mounts_removed']=result.returncode==0
+checks['numa_balancing_restored']=result.stdout.strip()=='1'
+Path('benchmarks/gms_restore/results/default-config/tuned-study/cleanup-verification.json').write_text(json.dumps(checks,indent=2)+'\n')
+print(json.dumps(checks,indent=2))
+assert all(checks.values())

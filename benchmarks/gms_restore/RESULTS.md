@@ -7,12 +7,30 @@ Snapshot/PageBroker composition. It does not yet exercise Dynamo's distributed
 frontend or a DynamoGraphDeployment. Large-model inference has passed with the constraints described below; the
 RAM-staged measurements are not cold-NFS comparisons.
 
-The best repeated PVC setting reached **27.624 s mean pod-to-coherent-readiness**
+The earlier best repeated PVC setting reached **27.624 s mean pod-to-coherent-readiness**
 (range 27.118–27.895 s, three trials). It uses the fused V1 loader,
 16 workers per rank, NUMA affinity, and a separate qualified NFS transport.
 All 448 GiB of matching allocation data is read from the PVC export with
 `O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
 comparison is 46.083 s serialized versus 29.562 s overlapping.
+
+## Full restore with tuned buffers and CPU (2026-09-29)
+
+Nine new full restores, with Snapshot/PageBroker Ready before every timer,
+averaged **27.519 s original**, **27.053 s with 128 MiB buffers**, and
+**27.479 s with 128 MiB buffers plus higher GMS CPU** (three each).
+GMS publication span improved 21.851 → 20.188 s with larger buffers; the
+end-to-end difference was only 0.466 s. Raising each rank's CPU request/limit
+from 1/8 to 8/16 showed no meaningful benefit; no quota throttling was observed.
+All trials passed restored inference using PVC/O_DIRECT and the default
+communication capture. See [full results and Gantt](TUNED-RESTORE.md).
+
+The historical +4.88 s denotes per-request restore entry, not daemon startup.
+Discovery already retries on a 50 ms ticker. Dual API watches show seconds
+between main-container start and running-status observation; the runtime
+fast path uses virtual names that do not match translated containerd labels.
+Correct host identity is the next targeted dispatch experiment, rather than
+faster general reconciliation. It was not changed during this matrix.
 
 ## Equal-payload transfer and CPU follow-up (2026-09-29)
 

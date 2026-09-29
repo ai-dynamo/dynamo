@@ -102,7 +102,7 @@ rank-sharded loader contract has not yet been benchmarked.
 ## Remaining waits exposed by creation-time dispatch
 
 The first fixed-agent early run started its main container around 2 s after
-creation, but the agent started at 5.102 s. The vcluster's published container
+creation, but the restore operation began at 5.102 s. The vcluster's published container
 status arrived after rank-container startup; direct runtime lookup uses different
 pod identities on the virtual and host sides. A native DGD deployment should be
 measured with its actual CRI identity rather than inheriting this test harness's
@@ -117,8 +117,20 @@ GMS publication gate, and measure first successful inference separately from
 readiness-probe and observer latency. There is no benefit in relabeling the
 measurement origin to hide these waits.
 
-The three-pair follow-up reduced first-GMS-start→agent-start from 4.487 to
+The three-pair follow-up reduced first-GMS-start→restore-operation-start from 4.487 to
 2.629 s. Median pod readiness fell from 28.082 to 26.377 s, but mean readiness was
 28.076 versus 28.619 s because a real pre-application startup outlier remains in
 the sample. Thus dispatch work is measurable, while an end-to-end mean win is
 not established. See RESULTS.md for all phase means and diagnostic limitations.
+
+The Snapshot agent daemon and persistent PageBroker GPU engine are already Ready
+before pod creation in these restore measurements. Historical `create_to_agent_s`
+means pod creation to the per-request external restore operation, not daemon
+startup. Container discovery polls every 50 ms with up to one second per CRI
+lookup. General resync/reconciliation frequency is not an established cause of
+the several-second dispatch interval. The nine-trial
+[follow-up](TUNED-RESTORE.md) records dual API watches: running main status was
+observed about 3.25–4.15 s after container start, with no comparable extra delay
+between host and virtual status. Correcting virtual-to-host runtime identity
+is the next targeted change; faster reconciliation alone would keep repeating
+the mismatched lookup.

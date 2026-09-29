@@ -1,0 +1,9 @@
+{
+  "filesystems": [
+    {
+      "source": "192.168.0.221:/unikorn-identity-03cfadd31877-551/pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21",
+      "fstype": "nfs",
+      "options": "ro,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,hard,rdirplus=force,nosharecache,nosharetransport,forcerdirplus,proto=tcp,nconnect=32,timeo=600,retrans=2,sec=sys,mountaddr=192.168.0.221,mountvers=3,mountport=20048,mountproto=tcp,local_lock=none,localports_failover,remoteports=192.168.0.220-192.168.0.223,spread_reads,addr=192.168.0.221"
+    }
+  ]
+}

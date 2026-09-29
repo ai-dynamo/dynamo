@@ -1,0 +1,22 @@
+import sys,json,time,subprocess,copy
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore');out=root/'results/default-config';meta=out/'tuned-study';meta.mkdir(exist_ok=True)
+agent=Path('/tmp/gms-restore-agent-virtual').read_text().strip();host=c.host_name(agent)
+cmd='mkdir -p /var/lib/schwinns-gms-0928/gms-pvc-nfs && mount -t nfs -o vers=3,proto=tcp,rsize=1048576,wsize=1048576,nosharecache,nosharetransport,nconnect=32,spread_reads,remoteports=192.168.0.220-192.168.0.223 192.168.0.221:/unikorn-identity-03cfadd31877-551/pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21 /var/lib/schwinns-gms-0928/gms-pvc-nfs'
+subprocess.run(['kubectl','-n',c.NS,'exec',host,'-c','agent','--','nsenter','-t','1','-m','--','sh','-c',cmd],check=True)
+source=json.loads((out/'source-manifest-nccl.json').read_text());capture=json.loads((out/'capture.json').read_text());claim=copy.deepcopy(source['items'][0]);claim['metadata']['name']='gms-v1-glm-source-0928'
+for i,request in enumerate(claim['spec']['devices']['requests']):request['exactly']['selectors']=[{'cel':{'expression':'device.attributes["gpu.nvidia.com"].uuid == "'+capture['ranks'][i]['source_uuid']+'"'}}]
+c.custom.create_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims',claim)
+pod=source['items'][2];hold={'apiVersion':'v1','kind':'Pod','metadata':{'name':'gms-v1-claim-hold-0928','namespace':c.NS},'spec':{'nodeSelector':{'kubernetes.io/hostname':'cluster-0967a26d-pool-14bee067-prctr-s2877'},'resourceClaims':[{'name':'gpus','resourceClaimName':'gms-v1-glm-source-0928'}],'tolerations':[{'operator':'Exists'}],'imagePullSecrets':pod['spec']['imagePullSecrets'],'containers':[{'name':'hold','image':pod['spec']['containers'][0]['image'],'imagePullPolicy':'IfNotPresent','command':['sleep','infinity'],'resources':{'claims':[{'name':'gpus'}],'requests':{'cpu':'100m','memory':'100Mi'}}}],'restartPolicy':'Never'}}
+c.core.create_namespaced_pod(c.NS,hold)
+for _ in range(120):
+ p=c.core.read_namespaced_pod(hold['metadata']['name'],c.NS)
+ if p.status.phase=='Running':break
+ time.sleep(1)
+else:raise TimeoutError('claim holder startup')
+(meta/'agent-ready-before-trials.json').write_text(json.dumps(c.api.sanitize_for_serialization(c.core.read_namespaced_pod(agent,c.NS)),indent=2))
+for container in ['agent','pagebroker']:
+ (meta/f'{container}-before-trials.txt').write_text(subprocess.check_output(['kubectl','-n',c.NS,'logs',host,'-c',container],text=True))
+(meta/'prepared.json').write_text(json.dumps({'ready_verified_epoch':time.time(),'agent':agent,'host_agent':host,'claim':claim['metadata']['name']},indent=2))
+print('claim and resident agent/PageBroker ready before trial timers',flush=True)

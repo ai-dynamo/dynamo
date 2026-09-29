@@ -1,0 +1,27 @@
+GMS_WAKE_GATE {"entered_epoch": 1790656091.2742841, "passed_epoch": 1790656091.2742991}
+[2026-09-29 04:28:11 TP6 EP6] GMS V1 wake complete device=6 total_elapsed=0.354s
+[2026-09-29 04:28:11 TP5 EP5] GMS V1 wake complete device=5 total_elapsed=0.384s
+[2026-09-29 04:28:11 TP1 EP1] GMS V1 wake complete device=1 total_elapsed=0.385s
+[2026-09-29 04:28:11 TP4 EP4] GMS V1 wake complete device=4 total_elapsed=0.386s
+[2026-09-29 04:28:11 TP3 EP3] GMS V1 wake complete device=3 total_elapsed=0.387s
+[2026-09-29 04:28:11 TP7 EP7] GMS V1 wake complete device=7 total_elapsed=0.388s
+[2026-09-29 04:28:11 TP0 EP0] GMS V1 wake complete device=0 total_elapsed=0.391s
+[2026-09-29 04:28:11 TP2 EP2] GMS V1 wake complete device=2 total_elapsed=0.391s
+[2026-09-29 04:28:11 TP6 EP6] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP2 EP2] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP1 EP1] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP3 EP3] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP4 EP4] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP5 EP5] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP0 EP0] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP7 EP7] [continue_generation] torch.cuda.empty_cache() called: reserved 125470.0 MB -> 125214.0 MB (freed 256.0 MB)
+[2026-09-29 04:28:11 TP0 EP0] Prefill batch, #new-seq: 1, #new-token: 64, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 0.20
+[2026-09-29 04:28:12 TP0 EP0] Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 0.12, #queue-req: 0
+[2026-09-29 04:28:12 TP0 EP0] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, cuda graph: True, gen throughput (token/s): 161.31, #queue-req: 0
+SGLang restored output="Berlin. It is the country's largest city in terms of area and population and the second most populous city. It is located in northeastern Germany. It is the center of the Berlin-Brandenburg Metropolitan Region. It is surrounded by the state of Brandenburg. It has a population of 3.5 million. The city spans an area of 891.85 square kilometers. The city experiences a temperate seasonal climate. The city is famous for its festivals, diverse architecture, nightlife, contemporary"
+SGLang API listening on port 8000
+[2026-09-29 04:28:33 TP0 EP0] Prefill batch, #new-seq: 1, #new-token: 64, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0, #pending-token: 0, cuda graph: False, input throughput (token/s): 2.89
+[2026-09-29 04:28:34 TP0 EP0] Decode batch, #running-req: 1, #token: 64, token usage: 0.00, cuda graph: True, gen throughput (token/s): 1.84, #queue-req: 0
+[2026-09-29 04:28:34 TP0 EP0] Decode batch, #running-req: 1, #token: 128, token usage: 0.00, cuda graph: True, gen throughput (token/s): 161.46, #queue-req: 0
+127.0.0.1 - - [29/Sep/2026 04:28:34] "POST /generate HTTP/1.1" 200 -
+[2026-09-29 04:28:34 TP0 EP0] Decode batch, #running-req: 1, #token: 0, token usage: 0.00, cuda graph: True, gen throughput (token/s): 161.51, #queue-req: 0
