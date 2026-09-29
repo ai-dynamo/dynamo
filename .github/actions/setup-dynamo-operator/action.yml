@@ -335,7 +335,7 @@ runs:
         kubectl wait --for=condition=ready pod \
           -l app=vcluster,release=${VCLUSTER_NAME} \
           -n ${NAMESPACE} \
-          --timeout=900s
+          --timeout=180s
         echo "::endgroup::"
 
     - name: Install vCluster HostPath Mapper

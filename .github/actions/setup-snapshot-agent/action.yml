@@ -75,7 +75,7 @@ runs:
           --namespace "${NAMESPACE}" \
           --create-namespace \
           --wait \
-          --timeout 15m \
+          --timeout 150s \
           --set storage.pvc.name="${STORAGE_PVC_NAME}" \
           --set storage.pvc.create=true \
           --set storage.pvc.size="${STORAGE_SIZE}" \
@@ -130,10 +130,10 @@ runs:
 
         kubectl rollout status "deployment/${OPERATOR_DEPLOYMENT_NAME}" \
           -n "${NAMESPACE}" \
-          --timeout=900s
+          --timeout=120s
         kubectl rollout status "daemonset/${DAEMONSET_NAME}" \
           -n "${NAMESPACE}" \
-          --timeout=900s
+          --timeout=120s
         kubectl get deployment,daemonset,pods,pvc \
           -n "${NAMESPACE}" \
           -l app.kubernetes.io/name=snapshot \

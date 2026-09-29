@@ -71,10 +71,10 @@ CHECKPOINT_READY_TIMEOUT = 300
 RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
-# Temporary diagnostic branch: cap the entire comparison at nine minutes.
-DEPLOYMENT_READY_TIMEOUT = 480
-IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 600
-TEST_TIMEOUT = 540
+# Temporary diagnostic branch: cap readiness at five minutes, test at seven.
+DEPLOYMENT_READY_TIMEOUT = 300
+IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 300
+TEST_TIMEOUT = 420
 
 
 @dataclass(frozen=True)
@@ -266,6 +266,26 @@ def _new_checkpoint_spec(
         pod_spec.update(copy.deepcopy(backend.pod_spec_updates))
     container = containers[0]
     container["args"] = list(backend.args)
+    if backend.name == "trtllm":
+        # Keep links in the captured rootfs, not an emptyDir lost on restore.
+        # Positional parameters preserve the recipe command and backend args.
+        container["command"] = [
+            "/bin/bash",
+            "-ec",
+            (
+                "checkpoint_driver=/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03\n"
+                'test -r "$checkpoint_driver"\n'
+                "driver_dir=$(mktemp -d /opt/dynamo/checkpoint-host-driver.XXXXXX)\n"
+                'ln -s "$checkpoint_driver" "$driver_dir/libcuda.so.1"\n'
+                'ln -s libcuda.so.1 "$driver_dir/libcuda.so"\n'
+                'export LD_LIBRARY_PATH="$driver_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n'
+                'export LD_PRELOAD="$checkpoint_driver${LD_PRELOAD:+:$LD_PRELOAD}"\n'
+                'printf "checkpoint host driver: %s directory: %s\\n" "$checkpoint_driver" "$driver_dir"\n'
+                'exec "$@"'
+            ),
+            "checkpoint-host-driver",
+            *container["command"],
+        ]
     if backend.container_resources:
         container["resources"] = copy.deepcopy(backend.container_resources)
 
@@ -316,7 +336,7 @@ async def _wait_for(
     fn: Callable[[], Any],
     predicate: Callable[[Any], bool],
     *,
-    timeout_s: int = 600,
+    timeout_s: int = 300,
     interval_s: float = 2.0,
 ) -> Any:
     deadline = time.monotonic() + timeout_s
