@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: PR CI Summary Smoke Test
+on:
+  push:
+    branches: [codex/ci-summary-smoke-15363]
+permissions: {}
+
+jobs:
+  fixture:
+    name: Intentional CPU failure fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    continue-on-error: true
+    steps:
+      - name: Emit an intentional diagnostic
+        run: |
+          echo 'FAILED ci_summary_smoke::intentional_failure - AssertionError: expected smoke-test failure'
+          echo 'FAILED ci_summary_smoke::escaping - AssertionError: <tag> must be escaped; token=smoke-only-placeholder'
+          exit 1
+
+  publish-smoke:
+    name: Verify real bot comment creation and update
+    needs: fixture
+    if: always() && github.repository == 'ai-dynamo/dynamo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    concurrency:
+      group: pr-ci-summary-15363
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          script: |
+            await require('./.github/scripts/ci-summary-smoke.cjs')({ github, context, core });
