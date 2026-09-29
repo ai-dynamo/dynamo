@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Default communication configuration investigation
 
-Date: 2026-09-29. Source: user follow-up. Status: default configuration reproduced successfully; PVC contention trials in progress.
+Date: 2026-09-29. Source: user follow-up. Status: resolved for the tested default configuration; 23 PVC restores validated.
 Environment: nscale DRA, eight B200s, pinned Torch 2.11/SGLang 0.5.16 image
 and Snapshot d9b6bc72 with prototype external-GMS imports.
 
@@ -72,3 +72,23 @@ Use logged timestamps for a Gantt chart; distinguish observed from derived phase
   to 34.723 s. One fused eight-worker shared-mount trial reached 27.878 s; sixteen
   workers reached 31.642 s. Testing independent NFS transport before selecting
   and repeating the best configuration. No shared PV mount options were changed.
+
+- Completed 23 PVC/O_DIRECT restores, all passing both inference checks. Best
+  repeated setting: fused V1, 16 workers/rank, NUMA affinity, separate qualified
+  NFS transport; 27.624 s mean, 27.118–27.895 s range across three trials.
+  Its all-rank span averages 22.008 s; per-rank init 0.280 s and loader interval
+  20.234 s. CRIU 6.603 s and CUDA phase 8.732 s show that contention remains.
+- Ordinary PVC NIXL overlap saves 16.521 s versus its serialized control despite
+  phase inflation. Shared qualified-mount NIXL loads faster but increases CRIU to
+  11.875 s. The separate-transport experiment reduces that penalty; it does not
+  prove that transport queues are the only competing resource.
+- The earlier claim of mandatory multimem/fused-allreduce workarounds is withdrawn.
+  No new cuInterpose modification was necessary for successful default restores.
+  Historical FABRIC/POSIX-FD fallback remains; full distributed Dynamo deployment
+  and a freshly alternating no-GMS control remain outside this prototype series.
+
+- Cleanup completed: released experiment pods/claims, restored saved agent/operator
+  templates and configuration, restored NUMA balancing, and removed both private
+  NFS mounts. Deleted the unused 448 GiB profiled-source weight set. The valid
+  GLM default snapshot and Qwen snapshot still report Ready, with their exact
+  durable artifacts retained. Verification is archived beside the trial evidence.

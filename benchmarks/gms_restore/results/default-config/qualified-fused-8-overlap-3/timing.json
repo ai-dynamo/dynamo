@@ -1,0 +1,20 @@
+{
+  "backend": "fused",
+  "workers": 8,
+  "numa": true,
+  "qualified_pvc_mount": true,
+  "isolated_pvc_transport": false,
+  "fast_gate": true,
+  "overlap": true,
+  "capture_id": "gms-v1-glm-default-0929",
+  "storage": "PVC O_DIRECT weights; PVC engine checkpoint",
+  "create_epoch": 1790649588.098211,
+  "publication_observed_epoch": null,
+  "trigger_epoch": 1790649595.1618109,
+  "ready_epoch": 1790649616.6259623,
+  "pod_create_to_ready_s": 28.527751207351685,
+  "pod_create_to_publication_observed_s": null,
+  "verification_orchestration_gap_s": null,
+  "trigger_to_ready_s": 21.46415138244629,
+  "restored_text": "Berlin. It is the country's largest city in terms of area and population and the second most populous city. It is located in northeastern Germany. It is the center of the Berlin-Brandenburg Metropolitan Region. It is surrounded by the state of Brandenburg. It has a population of 3.5 million. The city spans an area of 891.85 square kilometers. The city experiences a temperate seasonal climate. The city is famous for its festivals, diverse architecture, nightlife, contemporary\n"
+}

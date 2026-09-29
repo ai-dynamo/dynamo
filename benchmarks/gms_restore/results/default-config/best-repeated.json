@@ -1,0 +1,23 @@
+{
+  "cases": [
+    "isolated-fused-16-overlap-3",
+    "isolated-fused-16-overlap-2",
+    "isolated-fused-16-overlap-1"
+  ],
+  "representative": "isolated-fused-16-overlap-2",
+  "mean": {
+    "pod_s": 27.62379781405131,
+    "preload_span_s": 22.008320411046345,
+    "server_init_mean_s": 0.28017765283584595,
+    "load_mean_s": 20.23387770851453,
+    "criu_s": 6.603094108666666,
+    "cuda_phase_s": 8.731746652,
+    "native_prepare_sum_s": 8.408479,
+    "residual_transfer_mean_s": 0.6677855604583334,
+    "agent_s": 17.729029328666666
+  },
+  "pod_range_s": [
+    27.118080854415894,
+    27.895186185836792
+  ]
+}

@@ -1,0 +1,78 @@
+from pathlib import Path
+import json,statistics,subprocess,sys,os,html
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore')
+r=root/'results/default-config'
+subprocess.run([sys.executable,str(root/'compare_trials.py'),str(r)],check=True)
+rows=json.loads((r/'comparison.json').read_text())
+groups={}
+for x in rows:
+ k=(x['backend'],x['workers'],x['numa'],x['qualified_pvc_mount'],x['isolated_pvc_transport'],x['overlap'])
+ groups.setdefault(k,[]).append(x)
+eligible=[v for k,v in groups.items() if k[-1] and len(v)>=3]
+best=min(eligible,key=lambda g:statistics.mean(x['pod_s'] for x in g));best=sorted(best,key=lambda x:x['pod_s']);representative=best[len(best)//2];avg=lambda key:statistics.mean(x[key] for x in best)
+print('BEST REPEATED',best[0]['backend'],best[0]['workers'],'mean',avg('pod_s'),'range',best[0]['pod_s'],best[-1]['pod_s'],'representative',representative['case'])
+intro=f'''The best repeated PVC setting reached **{avg('pod_s'):.3f} s mean pod-to-coherent-readiness**
+(range {best[0]['pod_s']:.3f}–{best[-1]['pod_s']:.3f} s, three trials). It uses the fused V1 loader,
+{best[0]['workers']} workers per rank, NUMA affinity, and {'a separate qualified NFS transport' if best[0]['isolated_pvc_transport'] else 'the qualified NFS mount shared with PageBroker'}.
+All 448 GiB of matching allocation data is read from the PVC export with
+`O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
+comparison is 46.083 s serialized versus 29.562 s overlapping.
+
+'''
+p=root/'RESULTS.md';s=p.read_text();at=s.index('## PVC O_DIRECT');s=s[:at]+intro+s[at:]
+at=s.index('Charts: [serialized]')
+section='''### NFS transport and loader concurrency sweep
+
+The GMS-only mount override binds the same PVC export and exact files read-only
+at `/checkpoints`, using the qualified 32-connection, four-address NFS setup.
+The ordinary Kubernetes PVC volume remains mounted in the engine and validator;
+no shared PV mount options change. The isolated variant mounts that same export
+again with `nosharecache,nosharetransport`, giving GMS and PageBroker separate
+client transports. This is durable PVC data, not a host RAM copy.
+
+| Overlapping configuration | Trials | Weight span | CRIU | CUDA phase | Pod to ready |
+|---|---:|---:|---:|---:|---:|
+'''
+for k,g in sorted(groups.items()):
+ if not k[-1] or not k[3]:continue
+ desc=f"{k[0]}, {k[1]} workers, {'separate transport' if k[4] else 'shared qualified mount'}"
+ section+='| '+desc+' | '+str(len(g))+' | '+' | '.join(f'{statistics.mean(x[f] for x in g):.3f}' for f in ['preload_span_s','criu_s','cuda_phase_s','pod_s'])+' |\n'
+section+=f'''
+These small samples favor the full readiness measurement over loader throughput.
+Shared-mount NIXL loads fastest but inflates CRIU enough to lose overall. Separate
+transports reduce that penalty, but do not remove all contention. The experiment
+does not isolate transport queueing from CPU/memory/storage-server effects.
+
+For the best repeated setting, the all-rank load span averages **{avg('preload_span_s'):.3f} s**,
+server initialization averages **{avg('server_init_mean_s'):.3f} s per rank**, and sockets-to-load-return
+averages **{avg('load_mean_s'):.3f} s per rank**. Initialization starts at the Python script timer,
+after interpreter startup and initial standard-library imports; it includes NUMA
+setup where enabled. The load interval includes allocation, reading, copying,
+cleanup and V1 commit, not just DMA. Agent restore averages {avg('agent_s'):.3f} s,
+and summed native CUDA prepare/restore calls average {avg('native_prepare_sum_s'):.3f} s.
+
+All **{len(rows)} PVC restores** passed Berlin generation before readiness and a second
+Rayleigh-scattering request. Every case recorded 112 unique O_DIRECT payload
+files and the same 481,036,337,152 bytes of captured V1 allocations. GLM trials
+remain same-node; the earlier Qwen run is the cross-node permutation check.
+
+[Interactive comparison of measured Gantt charts](results/default-config/timelines.html)
+includes serialized, ordinary overlap, the shared-mount contention example, and
+the representative best repeated configuration. The earlier 5.99 s RAM result
+must not be presented as a PVC loading measurement.
+
+'''
+s=s[:at]+section+s[at:];p.write_text(s)
+case_list=[(representative['case'],'Optimized representative'),('nixl-serial-1','Serialized PVC'),('nixl-overlap-1','Ordinary PVC overlap'),('qualified-nixl-16-overlap-1','Shared-mount contention')]
+buttons=[];panels=[]
+for i,(case,label) in enumerate(case_list):
+ subprocess.run([sys.executable,str(root/'timeline.py'),str(r/case)],check=True,env={**os.environ,'MPLCONFIGDIR':'/tmp/gms-matplotlib'})
+ svg=(r/case/'timeline.svg').read_text();svg=svg[svg.index('<svg'):]
+ buttons.append(f'<button onclick="select({i})">{html.escape(label)}</button>')
+ panels.append(f'<section id="p{i}" '+('' if i==0 else 'hidden')+'>'+svg+'</section>')
+page='''<!doctype html><meta charset="utf-8"><title>PVC restore timelines</title><style>body{font:15px system-ui;margin:18px;color:#18242e;background:#f4f6f8}h1{font-size:23px}button{padding:10px 16px;margin:4px;border:1px solid #879baa;border-radius:6px;background:white;cursor:pointer}button.active{background:#234b68;color:white}section{background:white;border-radius:8px;margin-top:12px}svg{width:100%;height:auto}p{max-width:1100px;line-height:1.5}</style>'''
+page+=f'<h1>GLM TP8 · GMS V1 · PVC O_DIRECT restore</h1><p>Best repeated setting: <b>{avg("pod_s"):.2f} s</b> mean pod-to-coherent-readiness ({best[0]["pod_s"]:.2f}–{best[-1]["pod_s"]:.2f} s). Same capture and 448 GiB allocation set throughout. No RAM staging; NFS server cache state uncontrolled.</p>'
+page+=''.join(buttons)+''.join(panels)
+page+='<p>Dashed line: restore trigger. Green dotted line: final rank publication. GMS initialization begins at each script timer. CUDA bars are measured PageBroker request intervals; CRIU duration is measured but its placement is approximate. The captured engine gates weight use after publication validation. The historical 25–28 s no-GMS baseline is agent-only and is not an equivalent pod-to-ready measurement.</p><script>function select(n){document.querySelectorAll("section").forEach((p,i)=>p.hidden=i!==n);document.querySelectorAll("button").forEach((b,i)=>b.classList.toggle("active",i===n))}select(0)</script>'
+(r/'timelines.html').write_text(page)
+(r/'best-repeated.json').write_text(json.dumps({'cases':[x['case'] for x in best],'representative':representative['case'],'mean':{k:avg(k) for k in best[0] if k.endswith('_s')},'pod_range_s':[best[0]['pod_s'],best[-1]['pod_s']]},indent=2))

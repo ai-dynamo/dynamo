@@ -7,6 +7,13 @@ Snapshot/PageBroker composition. It does not yet exercise Dynamo's distributed
 frontend or a DynamoGraphDeployment. Large-model inference has passed with the constraints described below; the
 RAM-staged measurements are not cold-NFS comparisons.
 
+The best repeated PVC setting reached **27.624 s mean pod-to-coherent-readiness**
+(range 27.118–27.895 s, three trials). It uses the fused V1 loader,
+16 workers per rank, NUMA affinity, and a separate qualified NFS transport.
+All 448 GiB of matching allocation data is read from the PVC export with
+`O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
+comparison is 46.083 s serialized versus 29.562 s overlapping.
+
 ## PVC O_DIRECT with overlapping restore (2026-09-29)
 
 The earlier **5.99 s** weight result was RAM-staged and is not a PVC result.
@@ -53,7 +60,8 @@ NFSv3, `nconnect=16`, 1 MiB read/write sizes, and one VAST address. The engine's
 qualified PageBroker path retains its separate 32-connection, four-address
 mount. `O_DIRECT` bypasses the client page cache; storage-server caches were not
 flushed. CPU checkpoint files received the baseline's `POSIX_FADV_DONTNEED`
-advice before every case. Images are already cached on the node.
+advice before every case. Images are already cached on the node. Timed runs
+reuse an allocated DRA claim; initial claim-allocation latency is excluded.
 
 The publication gate moved from ahead of Snapshot to immediately before the
 captured engine calls `resume_memory_occupation`. A CPU-only sidecar verifies
@@ -77,6 +85,47 @@ three alternating pairs on the ordinary PVC mount. Serialized means were
 overlapping means were 33.474 s, 28.709 s, 4.844 s and 8.077 s respectively.
 Its load variability (one serialized load took 32.045 s) prevents attributing
 small loader deltas to overlap. It did not beat standard NIXL on that mount.
+
+### NFS transport and loader concurrency sweep
+
+The GMS-only mount override binds the same PVC export and exact files read-only
+at `/checkpoints`, using the qualified 32-connection, four-address NFS setup.
+The ordinary Kubernetes PVC volume remains mounted in the engine and validator;
+no shared PV mount options change. The isolated variant mounts that same export
+again with `nosharecache,nosharetransport`, giving GMS and PageBroker separate
+client transports. This is durable PVC data, not a host RAM copy.
+
+| Overlapping configuration | Trials | Weight span | CRIU | CUDA phase | Pod to ready |
+|---|---:|---:|---:|---:|---:|
+| fused, 8 workers, shared qualified mount | 3 | 21.701 | 6.566 | 8.080 | 28.504 |
+| fused, 8 workers, separate transport | 1 | 22.818 | 6.439 | 7.289 | 30.139 |
+| fused, 16 workers, shared qualified mount | 1 | 20.040 | 8.834 | 8.521 | 31.642 |
+| fused, 16 workers, separate transport | 3 | 22.008 | 6.603 | 8.732 | 27.624 |
+| nixl, 16 workers, shared qualified mount | 2 | 19.343 | 11.875 | 8.094 | 34.723 |
+| nixl, 16 workers, separate transport | 1 | 23.174 | 6.531 | 8.251 | 28.689 |
+
+These small samples favor the full readiness measurement over loader throughput.
+Shared-mount NIXL loads fastest but inflates CRIU enough to lose overall. Separate
+transports reduce that penalty, but do not remove all contention. The experiment
+does not isolate transport queueing from CPU/memory/storage-server effects.
+
+For the best repeated setting, the all-rank load span averages **22.008 s**,
+server initialization averages **0.280 s per rank**, and sockets-to-load-return
+averages **20.234 s per rank**. Initialization starts at the Python script timer,
+after interpreter startup and initial standard-library imports; it includes NUMA
+setup where enabled. The load interval includes allocation, reading, copying,
+cleanup and V1 commit, not just DMA. Agent restore averages 17.729 s,
+and summed native CUDA prepare/restore calls average 8.408 s.
+
+All **23 PVC restores** passed Berlin generation before readiness and a second
+Rayleigh-scattering request. Every case recorded 112 unique O_DIRECT payload
+files and the same 481,036,337,152 bytes of captured V1 allocations. GLM trials
+remain same-node; the earlier Qwen run is the cross-node permutation check.
+
+[Interactive comparison of measured Gantt charts](results/default-config/timelines.html)
+includes serialized, ordinary overlap, the shared-mount contention example, and
+the representative best repeated configuration. The earlier 5.99 s RAM result
+must not be presented as a PVC loading measurement.
 
 Charts: [serialized](results/default-config/nixl-serial-1/timeline.html) and
 [overlapping](results/default-config/nixl-overlap-1/timeline.html), also PNG/SVG.
@@ -278,9 +327,18 @@ is counted as a functional result.
 
 Trial logs, rank plans, manifests, timing summaries, inference outputs, and
 retired snapshot metadata are committed here. Large CUDA/CRIU payloads are not
-Git artifacts. The temporary GLM RAM weight sets and their associated snapshots
-were retired after the completed trials, so replay requires a fresh matching
-capture. The smaller Qwen checkpoint and its durable matching artifacts were
-retained. Experiment pods and GPU claims are released, and the original agent,
-operator, configuration, node levers and private NFS mounts are restored; see
-`results/cleanup.txt` for the recorded cleanup outcome.
+Git artifacts. The historical RAM weights and their associated snapshots were
+retired after those trials (`results/cleanup.txt`). The new default-config PVC
+capture is separate: `gms-v1-glm-default-0929`, content UID
+`859c4057-d1da-45d6-8565-39225861a5be`, with exact durable weight artifacts under
+`/checkpoints/gms-restore-0929/default-capture-2`. The earlier Qwen snapshot and
+its durable matching artifacts are retained too. Replay requires the recorded
+prototype agent/bundle, source configuration and rank plan, not the stock agent.
+
+Five old experimental checkpoints were retired through the controller, freeing
+about 1.9 TiB. The unused profiled-source `default-capture-1` weight set was also removed
+(481,036,369,080 bytes including metadata). Experiment pods and GPU claims are
+released. The original agent/operator templates, configuration and node levers
+are restored, and both experiment-owned private NFS mounts are unmounted.
+See `results/default-config/cleanup.txt` and `cleanup-verification.json`; both
+retained snapshots still report Ready.

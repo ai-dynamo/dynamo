@@ -28,7 +28,7 @@ for _ in range(90):
  if not [p for p in c.core.list_namespaced_pod(ns).items if p.metadata.name.startswith('gms-v1-')]:break
  time.sleep(1)
 # Retire only the unused profiled source's weights; retain the valid capture-2 set.
-code="import pathlib,shutil; p=pathlib.Path('/var/lib/snapshot-restore-perf-nfs/gms-restore-0929/default-capture-1'); assert p.name=='default-capture-1' and not p.is_symlink(); print('retiring unused profiled-source weights',p); shutil.rmtree(p) if p.exists() else None"
+code="import pathlib,shutil; p=pathlib.Path('/var/lib/snapshot-restore-perf-nfs/gms-restore-0929/default-capture-1'); assert p.name=='default-capture-1' and not p.is_symlink(); print('retiring unused profiled-source weights',p,'bytes',sum(f.stat().st_size for f in p.rglob('*') if f.is_file())); shutil.rmtree(p) if p.exists() else None"
 import subprocess
 note(subprocess.check_output(['kubectl','-n',ns,'exec',c.host_name(agent),'-c','agent','--','nsenter','-t','1','-m','-n','-r','-w','--','python3','-c',code],text=True).strip())
 

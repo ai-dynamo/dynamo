@@ -1,0 +1,215 @@
+{
+  "kind": "ResourceClaim",
+  "apiVersion": "resource.k8s.io/v1",
+  "metadata": {
+    "name": "gms-v1-glm-source-0928",
+    "namespace": "schwinns-vcluster",
+    "uid": "7abf9a0d-baa3-43b9-8c8d-28e1470f37f1",
+    "resourceVersion": "11510026",
+    "creationTimestamp": "2026-09-29T01:47:27Z",
+    "managedFields": [
+      {
+        "manager": "OpenAPI-Generator",
+        "operation": "Update",
+        "apiVersion": "resource.k8s.io/v1",
+        "time": "2026-09-29T01:47:27Z",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:spec": {
+            "f:devices": {
+              "f:requests": {}
+            }
+          }
+        }
+      },
+      {
+        "manager": "vcluster",
+        "operation": "Update",
+        "apiVersion": "resource.k8s.io/v1",
+        "time": "2026-09-29T02:40:54Z",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            "f:allocation": {
+              ".": {},
+              "f:devices": {
+                ".": {},
+                "f:results": {}
+              },
+              "f:nodeSelector": {}
+            },
+            "f:reservedFor": {
+              ".": {},
+              "k:{\"uid\":\"91f6f2ba-aa6f-4171-a0a0-5d5d1038dea0\"}": {
+                ".": {},
+                "f:name": {},
+                "f:resource": {},
+                "f:uid": {}
+              },
+              "k:{\"uid\":\"96752b55-3d73-4e0d-82e3-e256f1541406\"}": {
+                ".": {},
+                "f:name": {},
+                "f:resource": {},
+                "f:uid": {}
+              }
+            }
+          }
+        },
+        "subresource": "status"
+      }
+    ]
+  },
+  "spec": {
+    "devices": {
+      "requests": [
+        {
+          "name": "tp-0",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-1",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-2",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-3",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-4",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-5",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-6",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        },
+        {
+          "name": "tp-7",
+          "exactly": {
+            "deviceClassName": "gpu.nvidia.com",
+            "allocationMode": "ExactCount",
+            "count": 1
+          }
+        }
+      ]
+    }
+  },
+  "status": {
+    "allocation": {
+      "devices": {
+        "results": [
+          {
+            "request": "tp-0",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-6"
+          },
+          {
+            "request": "tp-1",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-7"
+          },
+          {
+            "request": "tp-2",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-0"
+          },
+          {
+            "request": "tp-3",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-1"
+          },
+          {
+            "request": "tp-4",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-2"
+          },
+          {
+            "request": "tp-5",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-3"
+          },
+          {
+            "request": "tp-6",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-4"
+          },
+          {
+            "request": "tp-7",
+            "driver": "gpu.nvidia.com",
+            "pool": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+            "device": "gpu-5"
+          }
+        ]
+      },
+      "nodeSelector": {
+        "nodeSelectorTerms": [
+          {
+            "matchFields": [
+              {
+                "key": "metadata.name",
+                "operator": "In",
+                "values": [
+                  "cluster-0967a26d-pool-14bee067-prctr-s2877"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "reservedFor": [
+      {
+        "resource": "pods",
+        "name": "gms-v1-claim-hold-0928",
+        "uid": "96752b55-3d73-4e0d-82e3-e256f1541406"
+      },
+      {
+        "resource": "pods",
+        "name": "gms-v1-glm-restore-0928",
+        "uid": "91f6f2ba-aa6f-4171-a0a0-5d5d1038dea0"
+      }
+    ]
+  }
+}
