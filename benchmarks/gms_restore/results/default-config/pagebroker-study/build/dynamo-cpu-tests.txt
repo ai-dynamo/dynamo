@@ -1,0 +1,8 @@
+Commands run from /home/schwinns/dynamo/worktrees/gms-pagebroker-restore-20260929:
+/tmp/gms-restore-tests/bin/ruff check benchmarks/gms_restore/pagebroker_coordinator.py benchmarks/gms_restore/test_pagebroker_coordinator.py
+/tmp/gms-restore-tests/bin/python -m pytest benchmarks/gms_restore/test_pagebroker_coordinator.py -q --noconftest
+
+Observed output:
+All checks passed!
+.......................................                                  [100%]
+39 passed in 0.38s

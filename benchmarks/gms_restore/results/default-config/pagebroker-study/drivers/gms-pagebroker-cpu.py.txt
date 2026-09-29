@@ -1,0 +1,19 @@
+import sys,json,time
+from pathlib import Path
+from kubernetes import client
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+limit=int(sys.argv[1]);request=int(sys.argv[2]) if len(sys.argv)>2 else 2
+apps=client.AppsV1Api();ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',c.NS);template=c.api.sanitize_for_serialization(ds.spec.template)
+container=next(x for x in template['spec']['containers'] if x['name']=='pagebroker');container['resources']['limits']['cpu']=str(limit);container['resources']['requests']['cpu']=str(request)
+apps.patch_namespaced_daemon_set(ds.metadata.name,c.NS,[{'op':'test','path':'/metadata/resourceVersion','value':ds.metadata.resource_version},{'op':'replace','path':'/spec/template','value':template}])
+old=Path('/tmp/gms-restore-agent-virtual').read_text().strip();c.core.delete_namespaced_pod(old,c.NS)
+for _ in range(120):
+ pods=[p for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name.endswith('s2877') and p.metadata.name!=old and not p.metadata.deletion_timestamp and any(x.type=='Ready' and x.status=='True' for x in p.status.conditions or [])]
+ if pods:break
+ time.sleep(1)
+else:raise TimeoutError('PageBroker CPU variant prewarm')
+pod=pods[0];name=pod.metadata.name;host=c.host_name(name);Path('/tmp/gms-restore-agent-virtual').write_text(name);Path('/tmp/gms-restore-agent-host').write_text(host)
+meta=Path('/home/schwinns/dynamo/worktrees/gms-pagebroker-restore-20260929/benchmarks/gms_restore/results/default-config/pagebroker-study')
+p=meta/'prepared-network.json';record=json.loads(p.read_text());record.update(agent=name,host_agent=host,ready_verified_epoch=time.time(),pagebroker_cpu_limit=limit,pagebroker_cpu_request=request);p.write_text(json.dumps(record,indent=2))
+(meta/f'agent-cpu-{request}-{limit}-ready.json').write_text(json.dumps(c.api.sanitize_for_serialization(pod),indent=2))
+print(name,'CPU request',request,'limit',limit,'ready before timers',flush=True)

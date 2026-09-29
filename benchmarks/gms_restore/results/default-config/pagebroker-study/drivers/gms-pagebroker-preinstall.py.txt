@@ -1,0 +1,28 @@
+import sys,json,time,subprocess
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-pagebroker-restore-20260929/benchmarks/gms_restore');sys.path.insert(0,str(root))
+from preinstall_cuda import render_staging_pod
+out=root/'results/default-config';meta=out/'pagebroker-study'
+pod,provenance=render_staging_pod(json.loads((out/'source-manifest-nccl.json').read_text()),'/var/lib/schwinns-pb-gms-0929/cuda-bundle-e021a725','cluster-0967a26d-pool-14bee067-prctr-s2877','gms-v1-cuda-preinstall-0929')
+(meta/'cuda-staging-manifest.json').write_text(json.dumps(pod,indent=2));(meta/'cuda-staging-provenance.json').write_text(json.dumps(provenance,indent=2))
+c.core.create_namespaced_pod(c.NS,pod)
+for _ in range(120):
+ current=c.core.read_namespaced_pod(pod['metadata']['name'],c.NS)
+ if current.status.phase=='Succeeded':break
+ if current.status.phase=='Failed':raise RuntimeError('CUDA preinstall failed')
+ time.sleep(1)
+else:raise TimeoutError('CUDA preinstall')
+log=subprocess.check_output(['kubectl','-n',c.NS,'logs',c.host_name(pod['metadata']['name']),'-c','snapshot-cuda-install'],text=True)
+(meta/'cuda-bundle-sha256.txt').write_text(log)
+qualified={}
+for row in (out/'daemonset-study/preinstall-SHA256SUMS').read_text().splitlines():
+ parts=row.split();qualified[Path(parts[1]).name]=parts[0]
+assert len(qualified)==3
+print(log,flush=True)
+(meta/'qualified-cuda-hashes.json').write_text(json.dumps(qualified,indent=2))
+if qualified:
+ for row in log.splitlines():
+  parts=row.split()
+  if len(parts)==2 and len(parts[0])==64:assert qualified[Path(parts[1]).name]==parts[0]
+c.core.delete_namespaced_pod(pod['metadata']['name'],c.NS)

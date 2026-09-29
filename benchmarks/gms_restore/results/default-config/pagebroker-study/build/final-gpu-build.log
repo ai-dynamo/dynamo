@@ -1,0 +1,8 @@
+protoc --proto_path=. --cpp_out=. v1/pagebroker.proto gpu_engine.proto
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. -I/opt/cuda/include \
+	gpu_engine_worker.cpp fd_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+	gms_v1_client.cpp gms_load_operation.cpp gms_load_layout.cpp \
+	file_descriptor.cpp cuda_posix_transfer.cpp nixl_transfer.cpp storage_manifest.cpp \
+	../cmd/cuda-checkpoint-helper/custom_storage.cpp \
+	-L/opt/cuda/lib64/stubs -lcuda -lprotobuf -pthread -DPAGEBROKER_NIXL -I/usr/local/include -L/usr/local/lib -lnixl -lnixl_build -o build/pagebroker-gpu-engine

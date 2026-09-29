@@ -1,0 +1,693 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "method": "Replayed the independent assertion suite for all four cases, with CPU quota selected by cohort and native records fenced by the fresh DGD UID.",
+  "reproduce": "python3 benchmarks/gms_restore/results/default-config/pagebroker-study/validate_all_restores.py",
+  "validator_sha256": "0a8fcb661e4b19b1bb2e0ecc93368ec9b4ec8331a491e208168ee43079d43534",
+  "case_count": 4,
+  "same_capture_manifest_and_inherited_communication_settings": true,
+  "cases": [
+    {
+      "schema_version": 1,
+      "case": "pagebroker-native16-1",
+      "status": "passed",
+      "method": "Offline assertions over archived case objects, logs, capture plan and pinned bundle hashes; no cluster mutation or payload reads.",
+      "measurement": {
+        "origin": "DGD create request",
+        "origin_epoch": 1790665841.1109366,
+        "ready_s": 22.650229454040527,
+        "dgd_post_return_s": 0.2504715919494629,
+        "snapshot_selection_complete_s": 0.6785469055175781,
+        "manifest_discovery_start_s": 1.1216766834259033,
+        "manifest_discovery_complete_s": 1.156571865081787,
+        "first_payload_read_s": 1.5952863693237305,
+        "last_commit_s": 19.985424995422363,
+        "all_ready_s": 20.082709789276123,
+        "engine_wake_gate_s": 20.566325187683105,
+        "last_server_online_s": -16.73530125617981
+      },
+      "checks": {
+        "generic_service_has_no_capture_selection": true,
+        "snapshot_selected_after_created_dgd_uid": true,
+        "metadata_discovery_after_dgd_creation": true,
+        "captured_rank_ids_sizes_hashes_unchanged": true,
+        "named_dra_request_uuid_join": true,
+        "engine_cuda_map_matches_gms_plan": true,
+        "gms_single_visible_gpu_and_rank_socket": true,
+        "gms_zero_preload_and_no_loader_ring": true,
+        "gms_no_current_or_primary_cuda_context_at_online_allocation_commit": true,
+        "server_nonces_match_native_commit_reports": true,
+        "native_direct_reads_follow_load_request": true,
+        "native_copies_drained_and_imports_released_before_commit": true,
+        "all_commits_then_verified_publication_gate_then_engine_resume": true,
+        "operator_owner_chain": true,
+        "no_pod_replacement_or_container_restart": true,
+        "default_berlin_and_http_rayleigh_inference": true,
+        "retained_capture_nccl_and_fused_communication_configuration": true,
+        "same_qualified_cuda_shim_bundle": true,
+        "same_rank_numa_affinity_as_daemonset_network_2": true
+      },
+      "payload": {
+        "owner": "PageBroker native GPU engine",
+        "bytes": 481036337152,
+        "gib": 448,
+        "unique_source_paths": 112,
+        "o_direct_read_copy_records": 112,
+        "unique_allocation_ids": 224,
+        "ranks": 8,
+        "payload_bytes_copied_when_publishing_snapshot_metadata": 0,
+        "source_path_evidence": "Native shard names joined to the exact per-rank artifact path in plan.json; PB mount aliases the same PVC as coordinator.",
+        "open_time_evidence": "Native source opens occur in the load RPC after trigger and before validated; logs timestamp read/copy, not each open syscall."
+      },
+      "tuning": {
+        "pagebroker_cpu_request": 2,
+        "pagebroker_cpu_limit": 16,
+        "pagebroker_slots_per_gpu": 32,
+        "chunk_mib": 128,
+        "pagebroker_retained_contexts": 8,
+        "pagebroker_pinned_gib_per_gpu": 4,
+        "gms_cpu_request_per_rank": 1,
+        "gms_cpu_limit_per_rank": 8,
+        "main_cpu_request": 32,
+        "main_cpu_limit": 96,
+        "pagebroker_cpu_seconds_between_samples": 47.908128,
+        "pagebroker_throttled_usec_delta": 0
+      },
+      "inherited_nccl_environment": {
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_RAS_ENABLE": "0",
+        "TORCH_NCCL_ENABLE_MONITORING": "0",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"
+      },
+      "rank_measurements": [
+        {
+          "rank": 0,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6688578128814697,
+          "committed_offset_s": 19.791935920715332
+        },
+        {
+          "rank": 1,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6652944087982178,
+          "committed_offset_s": 17.23546838760376
+        },
+        {
+          "rank": 2,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.5952863693237305,
+          "committed_offset_s": 19.792761087417603
+        },
+        {
+          "rank": 3,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.626291036605835,
+          "committed_offset_s": 19.79339838027954
+        },
+        {
+          "rank": 4,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6531810760498047,
+          "committed_offset_s": 19.985424995422363
+        },
+        {
+          "rank": 5,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6721587181091309,
+          "committed_offset_s": 19.793647527694702
+        },
+        {
+          "rank": 6,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6438243389129639,
+          "committed_offset_s": 19.793261289596558
+        },
+        {
+          "rank": 7,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6679725646972656,
+          "committed_offset_s": 18.646355390548706
+        }
+      ],
+      "watch_records": {
+        "virtual-watch.jsonl": 17,
+        "host-watch.jsonl": 15
+      },
+      "capture_manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+      "plan_sha256": "024be39f1ab70b9a8ab7cc45c7f49402e5777bf2b734a03bc582cc9f97d892db",
+      "cuda_bundle_sha256_lines": [
+        "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db  cuda-checkpoint",
+        "821413343a23aaa0d1b98e00d41ba2ed68b13bb7b558ec3d24e723d80cd703ac  libcuinterpose.so",
+        "8ac6d61952e358d85ce91d840c37312c4b56b98a207e1311e002aeb6e38ce8b6  libcuinterpose_core.so"
+      ],
+      "secret_pattern_scan": {
+        "text_files": 82,
+        "matches": [],
+        "scope": "this case and current top-level study artifacts"
+      },
+      "limits": [
+        "One functional qualification, not a statistically established speedup.",
+        "Operator-created DGD custom podTemplate restores a captured SGLang Engine API; native Dynamo checkpointRef/frontend/GMS integration remains experimental.",
+        "Source and destination UUIDs are identical on the held DRA claim; no cross-node or permuted-GPU qualification.",
+        "448 GiB counts padded captured allocation bytes, not unique model tensor bytes.",
+        "O_DIRECT avoids client page-cache payload reads; NFS server/storage cache state was not flushed or characterized.",
+        "Context checks observe the GMS main-thread current context and device primary context at sampled stages; PageBroker intentionally owns CUDA contexts.",
+        "Exact inventory equality is enforced in native pre-commit and coordinator RO verification; archived reports contain counts/hashes plus success, not a second full inventory dump.",
+        "The generic GMS service is independent of captures, but this coordinator qualification accepts one load and has no reset/reuse API.",
+        "Only capture metadata is colocated with Snapshot content; exact payload artifacts remain on their existing PVC paths.",
+        "API creation timestamps have one-second precision; watch observation times are used for sub-second ordering."
+      ]
+    },
+    {
+      "schema_version": 1,
+      "case": "pagebroker-native16-2",
+      "status": "passed",
+      "method": "Offline assertions over archived case objects, logs, capture plan and pinned bundle hashes; no cluster mutation or payload reads.",
+      "measurement": {
+        "origin": "DGD create request",
+        "origin_epoch": 1790665990.7652657,
+        "ready_s": 22.73175573348999,
+        "dgd_post_return_s": 0.24727201461791992,
+        "snapshot_selection_complete_s": 0.6694092750549316,
+        "manifest_discovery_start_s": 1.1126925945281982,
+        "manifest_discovery_complete_s": 1.1299254894256592,
+        "first_payload_read_s": 1.5923569202423096,
+        "last_commit_s": 19.68053650856018,
+        "all_ready_s": 19.757431507110596,
+        "engine_wake_gate_s": 20.587759971618652,
+        "last_server_online_s": -17.83421301841736
+      },
+      "checks": {
+        "generic_service_has_no_capture_selection": true,
+        "snapshot_selected_after_created_dgd_uid": true,
+        "metadata_discovery_after_dgd_creation": true,
+        "captured_rank_ids_sizes_hashes_unchanged": true,
+        "named_dra_request_uuid_join": true,
+        "engine_cuda_map_matches_gms_plan": true,
+        "gms_single_visible_gpu_and_rank_socket": true,
+        "gms_zero_preload_and_no_loader_ring": true,
+        "gms_no_current_or_primary_cuda_context_at_online_allocation_commit": true,
+        "server_nonces_match_native_commit_reports": true,
+        "native_direct_reads_follow_load_request": true,
+        "native_copies_drained_and_imports_released_before_commit": true,
+        "all_commits_then_verified_publication_gate_then_engine_resume": true,
+        "operator_owner_chain": true,
+        "no_pod_replacement_or_container_restart": true,
+        "default_berlin_and_http_rayleigh_inference": true,
+        "retained_capture_nccl_and_fused_communication_configuration": true,
+        "same_qualified_cuda_shim_bundle": true,
+        "same_rank_numa_affinity_as_daemonset_network_2": true
+      },
+      "payload": {
+        "owner": "PageBroker native GPU engine",
+        "bytes": 481036337152,
+        "gib": 448,
+        "unique_source_paths": 112,
+        "o_direct_read_copy_records": 112,
+        "unique_allocation_ids": 224,
+        "ranks": 8,
+        "payload_bytes_copied_when_publishing_snapshot_metadata": 0,
+        "source_path_evidence": "Native shard names joined to the exact per-rank artifact path in plan.json; PB mount aliases the same PVC as coordinator.",
+        "open_time_evidence": "Native source opens occur in the load RPC after trigger and before validated; logs timestamp read/copy, not each open syscall."
+      },
+      "tuning": {
+        "pagebroker_cpu_request": 2,
+        "pagebroker_cpu_limit": 16,
+        "pagebroker_slots_per_gpu": 32,
+        "chunk_mib": 128,
+        "pagebroker_retained_contexts": 8,
+        "pagebroker_pinned_gib_per_gpu": 4,
+        "gms_cpu_request_per_rank": 1,
+        "gms_cpu_limit_per_rank": 8,
+        "main_cpu_request": 32,
+        "main_cpu_limit": 96,
+        "pagebroker_cpu_seconds_between_samples": 47.0126,
+        "pagebroker_throttled_usec_delta": 0
+      },
+      "inherited_nccl_environment": {
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_RAS_ENABLE": "0",
+        "TORCH_NCCL_ENABLE_MONITORING": "0",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"
+      },
+      "rank_measurements": [
+        {
+          "rank": 0,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6470375061035156,
+          "committed_offset_s": 18.55776596069336
+        },
+        {
+          "rank": 1,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6447432041168213,
+          "committed_offset_s": 19.144274711608887
+        },
+        {
+          "rank": 2,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.642448902130127,
+          "committed_offset_s": 19.14439606666565
+        },
+        {
+          "rank": 3,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6511199474334717,
+          "committed_offset_s": 19.33505129814148
+        },
+        {
+          "rank": 4,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6353683471679688,
+          "committed_offset_s": 19.68053650856018
+        },
+        {
+          "rank": 5,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.5923569202423096,
+          "committed_offset_s": 19.144366979599
+        },
+        {
+          "rank": 6,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6640069484710693,
+          "committed_offset_s": 18.666825771331787
+        },
+        {
+          "rank": 7,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6530041694641113,
+          "committed_offset_s": 18.673974990844727
+        }
+      ],
+      "watch_records": {
+        "virtual-watch.jsonl": 17,
+        "host-watch.jsonl": 15
+      },
+      "capture_manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+      "plan_sha256": "024be39f1ab70b9a8ab7cc45c7f49402e5777bf2b734a03bc582cc9f97d892db",
+      "cuda_bundle_sha256_lines": [
+        "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db  cuda-checkpoint",
+        "821413343a23aaa0d1b98e00d41ba2ed68b13bb7b558ec3d24e723d80cd703ac  libcuinterpose.so",
+        "8ac6d61952e358d85ce91d840c37312c4b56b98a207e1311e002aeb6e38ce8b6  libcuinterpose_core.so"
+      ],
+      "secret_pattern_scan": {
+        "text_files": 82,
+        "matches": [],
+        "scope": "this case and current top-level study artifacts"
+      },
+      "limits": [
+        "One functional qualification, not a statistically established speedup.",
+        "Operator-created DGD custom podTemplate restores a captured SGLang Engine API; native Dynamo checkpointRef/frontend/GMS integration remains experimental.",
+        "Source and destination UUIDs are identical on the held DRA claim; no cross-node or permuted-GPU qualification.",
+        "448 GiB counts padded captured allocation bytes, not unique model tensor bytes.",
+        "O_DIRECT avoids client page-cache payload reads; NFS server/storage cache state was not flushed or characterized.",
+        "Context checks observe the GMS main-thread current context and device primary context at sampled stages; PageBroker intentionally owns CUDA contexts.",
+        "Exact inventory equality is enforced in native pre-commit and coordinator RO verification; archived reports contain counts/hashes plus success, not a second full inventory dump.",
+        "The generic GMS service is independent of captures, but this coordinator qualification accepts one load and has no reset/reuse API.",
+        "Only capture metadata is colocated with Snapshot content; exact payload artifacts remain on their existing PVC paths.",
+        "API creation timestamps have one-second precision; watch observation times are used for sub-second ordering."
+      ]
+    },
+    {
+      "schema_version": 1,
+      "case": "pagebroker-native64-1",
+      "status": "passed",
+      "method": "Offline assertions over archived case objects, logs, capture plan and pinned bundle hashes; no cluster mutation or payload reads.",
+      "measurement": {
+        "origin": "DGD create request",
+        "origin_epoch": 1790666223.2934773,
+        "ready_s": 25.931435108184814,
+        "dgd_post_return_s": 0.2903256416320801,
+        "snapshot_selection_complete_s": 0.7100381851196289,
+        "manifest_discovery_start_s": 1.1451048851013184,
+        "manifest_discovery_complete_s": 1.1633386611938477,
+        "first_payload_read_s": 1.6024503707885742,
+        "last_commit_s": 19.047712564468384,
+        "all_ready_s": 19.13122296333313,
+        "engine_wake_gate_s": 23.762710571289062,
+        "last_server_online_s": -18.050174474716187
+      },
+      "checks": {
+        "generic_service_has_no_capture_selection": true,
+        "snapshot_selected_after_created_dgd_uid": true,
+        "metadata_discovery_after_dgd_creation": true,
+        "captured_rank_ids_sizes_hashes_unchanged": true,
+        "named_dra_request_uuid_join": true,
+        "engine_cuda_map_matches_gms_plan": true,
+        "gms_single_visible_gpu_and_rank_socket": true,
+        "gms_zero_preload_and_no_loader_ring": true,
+        "gms_no_current_or_primary_cuda_context_at_online_allocation_commit": true,
+        "server_nonces_match_native_commit_reports": true,
+        "native_direct_reads_follow_load_request": true,
+        "native_copies_drained_and_imports_released_before_commit": true,
+        "all_commits_then_verified_publication_gate_then_engine_resume": true,
+        "operator_owner_chain": true,
+        "no_pod_replacement_or_container_restart": true,
+        "default_berlin_and_http_rayleigh_inference": true,
+        "retained_capture_nccl_and_fused_communication_configuration": true,
+        "same_qualified_cuda_shim_bundle": true,
+        "same_rank_numa_affinity_as_daemonset_network_2": true
+      },
+      "payload": {
+        "owner": "PageBroker native GPU engine",
+        "bytes": 481036337152,
+        "gib": 448,
+        "unique_source_paths": 112,
+        "o_direct_read_copy_records": 112,
+        "unique_allocation_ids": 224,
+        "ranks": 8,
+        "payload_bytes_copied_when_publishing_snapshot_metadata": 0,
+        "source_path_evidence": "Native shard names joined to the exact per-rank artifact path in plan.json; PB mount aliases the same PVC as coordinator.",
+        "open_time_evidence": "Native source opens occur in the load RPC after trigger and before validated; logs timestamp read/copy, not each open syscall."
+      },
+      "tuning": {
+        "pagebroker_cpu_request": 2,
+        "pagebroker_cpu_limit": 64,
+        "pagebroker_slots_per_gpu": 32,
+        "chunk_mib": 128,
+        "pagebroker_retained_contexts": 8,
+        "pagebroker_pinned_gib_per_gpu": 4,
+        "gms_cpu_request_per_rank": 1,
+        "gms_cpu_limit_per_rank": 8,
+        "main_cpu_request": 32,
+        "main_cpu_limit": 96,
+        "pagebroker_cpu_seconds_between_samples": 46.905375,
+        "pagebroker_throttled_usec_delta": 0
+      },
+      "inherited_nccl_environment": {
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_RAS_ENABLE": "0",
+        "TORCH_NCCL_ENABLE_MONITORING": "0",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"
+      },
+      "rank_measurements": [
+        {
+          "rank": 0,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.672368049621582,
+          "committed_offset_s": 18.0130934715271
+        },
+        {
+          "rank": 1,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6024503707885742,
+          "committed_offset_s": 18.013381958007812
+        },
+        {
+          "rank": 2,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6362886428833008,
+          "committed_offset_s": 18.53079056739807
+        },
+        {
+          "rank": 3,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6678411960601807,
+          "committed_offset_s": 19.047712564468384
+        },
+        {
+          "rank": 4,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6158301830291748,
+          "committed_offset_s": 17.74744439125061
+        },
+        {
+          "rank": 5,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6623563766479492,
+          "committed_offset_s": 18.509767055511475
+        },
+        {
+          "rank": 6,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6606419086456299,
+          "committed_offset_s": 17.871450662612915
+        },
+        {
+          "rank": 7,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.653580904006958,
+          "committed_offset_s": 16.898998260498047
+        }
+      ],
+      "watch_records": {
+        "virtual-watch.jsonl": 16,
+        "host-watch.jsonl": 14
+      },
+      "capture_manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+      "plan_sha256": "024be39f1ab70b9a8ab7cc45c7f49402e5777bf2b734a03bc582cc9f97d892db",
+      "cuda_bundle_sha256_lines": [
+        "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db  cuda-checkpoint",
+        "821413343a23aaa0d1b98e00d41ba2ed68b13bb7b558ec3d24e723d80cd703ac  libcuinterpose.so",
+        "8ac6d61952e358d85ce91d840c37312c4b56b98a207e1311e002aeb6e38ce8b6  libcuinterpose_core.so"
+      ],
+      "secret_pattern_scan": {
+        "text_files": 84,
+        "matches": [],
+        "scope": "this case and current top-level study artifacts"
+      },
+      "limits": [
+        "One functional qualification, not a statistically established speedup.",
+        "Operator-created DGD custom podTemplate restores a captured SGLang Engine API; native Dynamo checkpointRef/frontend/GMS integration remains experimental.",
+        "Source and destination UUIDs are identical on the held DRA claim; no cross-node or permuted-GPU qualification.",
+        "448 GiB counts padded captured allocation bytes, not unique model tensor bytes.",
+        "O_DIRECT avoids client page-cache payload reads; NFS server/storage cache state was not flushed or characterized.",
+        "Context checks observe the GMS main-thread current context and device primary context at sampled stages; PageBroker intentionally owns CUDA contexts.",
+        "Exact inventory equality is enforced in native pre-commit and coordinator RO verification; archived reports contain counts/hashes plus success, not a second full inventory dump.",
+        "The generic GMS service is independent of captures, but this coordinator qualification accepts one load and has no reset/reuse API.",
+        "Only capture metadata is colocated with Snapshot content; exact payload artifacts remain on their existing PVC paths.",
+        "API creation timestamps have one-second precision; watch observation times are used for sub-second ordering."
+      ]
+    },
+    {
+      "schema_version": 1,
+      "case": "pagebroker-native64-2",
+      "status": "passed",
+      "method": "Offline assertions over archived case objects, logs, capture plan and pinned bundle hashes; no cluster mutation or payload reads.",
+      "measurement": {
+        "origin": "DGD create request",
+        "origin_epoch": 1790666548.7085967,
+        "ready_s": 22.602982759475708,
+        "dgd_post_return_s": 0.2839946746826172,
+        "snapshot_selection_complete_s": 0.7040820121765137,
+        "manifest_discovery_start_s": 1.1735942363739014,
+        "manifest_discovery_complete_s": 1.1886365413665771,
+        "first_payload_read_s": 1.6205570697784424,
+        "last_commit_s": 19.245839595794678,
+        "all_ready_s": 19.322677850723267,
+        "engine_wake_gate_s": 20.351677179336548,
+        "last_server_online_s": -17.70347237586975
+      },
+      "checks": {
+        "generic_service_has_no_capture_selection": true,
+        "snapshot_selected_after_created_dgd_uid": true,
+        "metadata_discovery_after_dgd_creation": true,
+        "captured_rank_ids_sizes_hashes_unchanged": true,
+        "named_dra_request_uuid_join": true,
+        "engine_cuda_map_matches_gms_plan": true,
+        "gms_single_visible_gpu_and_rank_socket": true,
+        "gms_zero_preload_and_no_loader_ring": true,
+        "gms_no_current_or_primary_cuda_context_at_online_allocation_commit": true,
+        "server_nonces_match_native_commit_reports": true,
+        "native_direct_reads_follow_load_request": true,
+        "native_copies_drained_and_imports_released_before_commit": true,
+        "all_commits_then_verified_publication_gate_then_engine_resume": true,
+        "operator_owner_chain": true,
+        "no_pod_replacement_or_container_restart": true,
+        "default_berlin_and_http_rayleigh_inference": true,
+        "retained_capture_nccl_and_fused_communication_configuration": true,
+        "same_qualified_cuda_shim_bundle": true,
+        "same_rank_numa_affinity_as_daemonset_network_2": true
+      },
+      "payload": {
+        "owner": "PageBroker native GPU engine",
+        "bytes": 481036337152,
+        "gib": 448,
+        "unique_source_paths": 112,
+        "o_direct_read_copy_records": 112,
+        "unique_allocation_ids": 224,
+        "ranks": 8,
+        "payload_bytes_copied_when_publishing_snapshot_metadata": 0,
+        "source_path_evidence": "Native shard names joined to the exact per-rank artifact path in plan.json; PB mount aliases the same PVC as coordinator.",
+        "open_time_evidence": "Native source opens occur in the load RPC after trigger and before validated; logs timestamp read/copy, not each open syscall."
+      },
+      "tuning": {
+        "pagebroker_cpu_request": 2,
+        "pagebroker_cpu_limit": 64,
+        "pagebroker_slots_per_gpu": 32,
+        "chunk_mib": 128,
+        "pagebroker_retained_contexts": 8,
+        "pagebroker_pinned_gib_per_gpu": 4,
+        "gms_cpu_request_per_rank": 1,
+        "gms_cpu_limit_per_rank": 8,
+        "main_cpu_request": 32,
+        "main_cpu_limit": 96,
+        "pagebroker_cpu_seconds_between_samples": 47.571543,
+        "pagebroker_throttled_usec_delta": 0
+      },
+      "inherited_nccl_environment": {
+        "NCCL_CUMEM_ENABLE": "0",
+        "NCCL_NVLS_ENABLE": "0",
+        "NCCL_IB_DISABLE": "1",
+        "NCCL_RAS_ENABLE": "0",
+        "TORCH_NCCL_ENABLE_MONITORING": "0",
+        "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"
+      },
+      "rank_measurements": [
+        {
+          "rank": 0,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6333589553833008,
+          "committed_offset_s": 18.95694065093994
+        },
+        {
+          "rank": 1,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.636580228805542,
+          "committed_offset_s": 18.22866654396057
+        },
+        {
+          "rank": 2,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6415386199951172,
+          "committed_offset_s": 18.888766050338745
+        },
+        {
+          "rank": 3,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6437926292419434,
+          "committed_offset_s": 19.245839595794678
+        },
+        {
+          "rank": 4,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6266779899597168,
+          "committed_offset_s": 19.122809410095215
+        },
+        {
+          "rank": 5,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6404378414154053,
+          "committed_offset_s": 18.908197164535522
+        },
+        {
+          "rank": 6,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6395537853240967,
+          "committed_offset_s": 18.801401138305664
+        },
+        {
+          "rank": 7,
+          "allocation_count": 28,
+          "bytes": 60129542144,
+          "shards": 14,
+          "first_read_offset_s": 1.6205570697784424,
+          "committed_offset_s": 17.426965713500977
+        }
+      ],
+      "watch_records": {
+        "virtual-watch.jsonl": 17,
+        "host-watch.jsonl": 15
+      },
+      "capture_manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+      "plan_sha256": "024be39f1ab70b9a8ab7cc45c7f49402e5777bf2b734a03bc582cc9f97d892db",
+      "cuda_bundle_sha256_lines": [
+        "707fa7f54136824d6c1d6dd724b9b1717610f831033c00d06da474de363a06db  cuda-checkpoint",
+        "821413343a23aaa0d1b98e00d41ba2ed68b13bb7b558ec3d24e723d80cd703ac  libcuinterpose.so",
+        "8ac6d61952e358d85ce91d840c37312c4b56b98a207e1311e002aeb6e38ce8b6  libcuinterpose_core.so"
+      ],
+      "secret_pattern_scan": {
+        "text_files": 82,
+        "matches": [],
+        "scope": "this case and current top-level study artifacts"
+      },
+      "limits": [
+        "One functional qualification, not a statistically established speedup.",
+        "Operator-created DGD custom podTemplate restores a captured SGLang Engine API; native Dynamo checkpointRef/frontend/GMS integration remains experimental.",
+        "Source and destination UUIDs are identical on the held DRA claim; no cross-node or permuted-GPU qualification.",
+        "448 GiB counts padded captured allocation bytes, not unique model tensor bytes.",
+        "O_DIRECT avoids client page-cache payload reads; NFS server/storage cache state was not flushed or characterized.",
+        "Context checks observe the GMS main-thread current context and device primary context at sampled stages; PageBroker intentionally owns CUDA contexts.",
+        "Exact inventory equality is enforced in native pre-commit and coordinator RO verification; archived reports contain counts/hashes plus success, not a second full inventory dump.",
+        "The generic GMS service is independent of captures, but this coordinator qualification accepts one load and has no reset/reuse API.",
+        "Only capture metadata is colocated with Snapshot content; exact payload artifacts remain on their existing PVC paths.",
+        "API creation timestamps have one-second precision; watch observation times are used for sub-second ordering."
+      ]
+    }
+  ],
+  "limits": [
+    "Two sequential runs per CPU cohort establish functional qualification; they do not isolate a CPU-limit effect or establish a speedup over preselected Python-loader trials.",
+    "All metadata selection/discovery follows creation of each DGD; generic service readiness and PageBroker initialization precede the timer.",
+    "Default configuration refers to retained captured engine communication paths, including mnnvl allreduce fusion; inherited single-node NCCL overrides remain enabled.",
+    "The original single-case validation.json is preserved. Per-case limitations are retained in full below."
+  ]
+}

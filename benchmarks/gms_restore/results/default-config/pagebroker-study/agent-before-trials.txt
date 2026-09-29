@@ -1,0 +1,4 @@
+2026-09-29T07:01:04.240432603Z	INFO	agent	agent/main.go:63	Starting snapshot agent	{"node": "cluster-0967a26d-pool-14bee067-prctr-s2877", "runtime": "containerd"}
+2026-09-29T07:01:04.242009834Z	INFO	controller	controller/controller.go:250	Starting snapshot node controller	{"node": "cluster-0967a26d-pool-14bee067-prctr-s2877", "restore_from_annotation": "nvidia.com/gms-prototype-restore-from"}
+2026-09-29T07:01:04.242024455Z	INFO	controller	controller/controller.go:255	Watching pods cluster-wide (all namespaces)
+2026-09-29T07:01:04.342283154Z	INFO	controller	controller/controller.go:366	PodSnapshot node controller started and caches synced

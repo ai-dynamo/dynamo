@@ -1,0 +1,18 @@
+{
+  "snapshot_revision": "7e347afb62690103d53ea867265167ba9d2b886d",
+  "gpu_qualification": "passed_four_default_config_restores_and_equal_payload_isolated_control",
+  "artifact_selection": "after_DGD_created;generic_GMS_servers_prestarted",
+  "metadata_attachment": "snapshot-gms-metadata.json",
+  "dynamo_implementation_revision": "bf766ad441ec00b778307b25a226c96935e2206e",
+  "timeline_revision": "6bcdb5ac212",
+  "default_config_restore_cases": [
+    "pagebroker-native16-1",
+    "pagebroker-native16-2",
+    "pagebroker-native64-1",
+    "pagebroker-native64-2"
+  ],
+  "isolated_transfer_case": "pagebroker-isolated64-1",
+  "dynamo_cpu_tests_passed": 63,
+  "cleanup_verification": "cleanup-verification.json",
+  "prototype_limit": "one_load_per_coordinator_and_server_incarnation;production_multi_DGD_retirement_not_integrated"
+}

@@ -1,0 +1,1363 @@
+{
+  "metadata": {
+    "annotations": {
+      "checksum/config": "c5c81ac1cdb1dd00358bc32ca5bbdfc22923e42b2eb53a68d153340a0795d4f3",
+      "schwinns/sideload": "06e5522",
+      "snapshot.ai-dynamo.io/stack-top": "06e5522"
+    },
+    "creationTimestamp": "2026-09-29T07:15:15+00:00",
+    "generateName": "dynamo-snapshot-agent-",
+    "generation": 1,
+    "labels": {
+      "app.kubernetes.io/component": "snapshot-agent",
+      "app.kubernetes.io/instance": "dynamo-snapshot",
+      "app.kubernetes.io/name": "snapshot",
+      "controller-revision-hash": "7486ff977f",
+      "pod-template-generation": "412",
+      "topology.kubernetes.io/zone": "nova"
+    },
+    "managedFields": [
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:metadata": {
+            "f:annotations": {
+              ".": {},
+              "f:checksum/config": {},
+              "f:schwinns/sideload": {},
+              "f:snapshot.ai-dynamo.io/stack-top": {}
+            },
+            "f:generateName": {},
+            "f:labels": {
+              ".": {},
+              "f:app.kubernetes.io/component": {},
+              "f:app.kubernetes.io/instance": {},
+              "f:app.kubernetes.io/name": {},
+              "f:controller-revision-hash": {},
+              "f:pod-template-generation": {}
+            },
+            "f:ownerReferences": {
+              ".": {},
+              "k:{\"uid\":\"38f6e566-685d-4fa2-8a98-f45b38c08636\"}": {}
+            }
+          },
+          "f:spec": {
+            "f:affinity": {
+              ".": {},
+              "f:nodeAffinity": {
+                ".": {},
+                "f:requiredDuringSchedulingIgnoredDuringExecution": {}
+              }
+            },
+            "f:containers": {
+              "k:{\"name\":\"agent\"}": {
+                ".": {},
+                "f:args": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"NODE_NAME\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:valueFrom": {
+                      ".": {},
+                      "f:fieldRef": {}
+                    }
+                  },
+                  "k:{\"name\":\"SNAPSHOT_LOG_LEVEL\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:resources": {
+                  ".": {},
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:securityContext": {
+                  ".": {},
+                  "f:privileged": {}
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/etc/snapshot\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/host/proc\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/pagebroker\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/run/containerd\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/run/cuda-checkpoint-helper\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/snapshot-binaries\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/sys/fs/cgroup\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/usr/local/bin/snapshot-agent\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/usr/local/sbin/criu\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/var/lib/containerd\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/var/lib/kubelet/pod-resources\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/var/lib/kubelet/pods\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              },
+              "k:{\"name\":\"pagebroker\"}": {
+                ".": {},
+                "f:args": {},
+                "f:command": {},
+                "f:env": {
+                  ".": {},
+                  "k:{\"name\":\"NODE_NAME\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:valueFrom": {
+                      ".": {},
+                      "f:fieldRef": {}
+                    }
+                  },
+                  "k:{\"name\":\"NVIDIA_DRIVER_CAPABILITIES\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  },
+                  "k:{\"name\":\"NVIDIA_VISIBLE_DEVICES\"}": {
+                    ".": {},
+                    "f:name": {},
+                    "f:value": {}
+                  }
+                },
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:resources": {
+                  ".": {},
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:securityContext": {
+                  ".": {},
+                  "f:privileged": {}
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/checkpoints\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/checkpoints/gms-pvc\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/gms\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/opt/gms-pagebroker\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/opt/schwinns-profile\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  },
+                  "k:{\"mountPath\":\"/pagebroker\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  }
+                }
+              }
+            },
+            "f:dnsPolicy": {},
+            "f:enableServiceLinks": {},
+            "f:hostIPC": {},
+            "f:hostNetwork": {},
+            "f:hostPID": {},
+            "f:imagePullSecrets": {
+              ".": {},
+              "k:{\"name\":\"nvcr-secret\"}": {}
+            },
+            "f:initContainers": {
+              ".": {},
+              "k:{\"name\":\"deploy-seccomp\"}": {
+                ".": {},
+                "f:command": {},
+                "f:image": {},
+                "f:imagePullPolicy": {},
+                "f:name": {},
+                "f:resources": {
+                  ".": {},
+                  "f:limits": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  },
+                  "f:requests": {
+                    ".": {},
+                    "f:cpu": {},
+                    "f:memory": {}
+                  }
+                },
+                "f:terminationMessagePath": {},
+                "f:terminationMessagePolicy": {},
+                "f:volumeMounts": {
+                  ".": {},
+                  "k:{\"mountPath\":\"/host-seccomp\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {}
+                  },
+                  "k:{\"mountPath\":\"/seccomp-profiles\"}": {
+                    ".": {},
+                    "f:mountPath": {},
+                    "f:name": {},
+                    "f:readOnly": {}
+                  }
+                }
+              }
+            },
+            "f:nodeSelector": {},
+            "f:restartPolicy": {},
+            "f:runtimeClassName": {},
+            "f:schedulerName": {},
+            "f:securityContext": {},
+            "f:serviceAccount": {},
+            "f:serviceAccountName": {},
+            "f:terminationGracePeriodSeconds": {},
+            "f:tolerations": {},
+            "f:volumes": {
+              ".": {},
+              "k:{\"name\":\"checkpoints\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"config\"}": {
+                ".": {},
+                "f:configMap": {
+                  ".": {},
+                  "f:defaultMode": {},
+                  "f:name": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"cuda-helper-socket\"}": {
+                ".": {},
+                "f:emptyDir": {},
+                "f:name": {}
+              },
+              "k:{\"name\":\"exp-bundle\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"exp-criu\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"gms-agent\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"host-cgroup\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"host-proc\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"host-seccomp\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"kubelet-pod-resources\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"kubelet-pods\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"pagebroker\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"pb-gms-bin\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"pb-gms-pvc\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"pb-gms-sockets\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"runtime-run\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"runtime-storage\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"schwinns-profile\"}": {
+                ".": {},
+                "f:hostPath": {
+                  ".": {},
+                  "f:path": {},
+                  "f:type": {}
+                },
+                "f:name": {}
+              },
+              "k:{\"name\":\"seccomp-profiles\"}": {
+                ".": {},
+                "f:configMap": {
+                  ".": {},
+                  "f:defaultMode": {},
+                  "f:name": {}
+                },
+                "f:name": {}
+              }
+            }
+          }
+        },
+        "manager": "kube-controller-manager",
+        "operation": "Update",
+        "time": "2026-09-29T07:15:15+00:00"
+      },
+      {
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {
+          "f:status": {
+            "f:conditions": {
+              "k:{\"type\":\"ContainersReady\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"Initialized\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodReadyToStartContainers\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              },
+              "k:{\"type\":\"PodScheduled\"}": {
+                "f:observedGeneration": {}
+              },
+              "k:{\"type\":\"Ready\"}": {
+                ".": {},
+                "f:lastProbeTime": {},
+                "f:lastTransitionTime": {},
+                "f:observedGeneration": {},
+                "f:status": {},
+                "f:type": {}
+              }
+            },
+            "f:containerStatuses": {},
+            "f:hostIP": {},
+            "f:hostIPs": {},
+            "f:initContainerStatuses": {},
+            "f:observedGeneration": {},
+            "f:phase": {},
+            "f:podIP": {},
+            "f:podIPs": {
+              ".": {},
+              "k:{\"ip\":\"192.168.0.161\"}": {
+                ".": {},
+                "f:ip": {}
+              }
+            },
+            "f:startTime": {}
+          }
+        },
+        "manager": "vcluster",
+        "operation": "Update",
+        "subresource": "status",
+        "time": "2026-09-29T07:15:23+00:00"
+      }
+    ],
+    "name": "dynamo-snapshot-agent-xddmk",
+    "namespace": "schwinns-vcluster",
+    "ownerReferences": [
+      {
+        "apiVersion": "apps/v1",
+        "blockOwnerDeletion": true,
+        "controller": true,
+        "kind": "DaemonSet",
+        "name": "dynamo-snapshot-agent",
+        "uid": "38f6e566-685d-4fa2-8a98-f45b38c08636"
+      }
+    ],
+    "resourceVersion": "11547455",
+    "uid": "a8b491c5-63e1-4f4a-adf7-0c08e7173aba"
+  },
+  "spec": {
+    "affinity": {
+      "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+          "nodeSelectorTerms": [
+            {
+              "matchFields": [
+                {
+                  "key": "metadata.name",
+                  "operator": "In",
+                  "values": [
+                    "cluster-0967a26d-pool-14bee067-prctr-s2877"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "containers": [
+      {
+        "args": [
+          "--runtime",
+          "containerd",
+          "--runtime-socket",
+          "/run/containerd/containerd.sock"
+        ],
+        "env": [
+          {
+            "name": "NODE_NAME",
+            "valueFrom": {
+              "fieldRef": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.nodeName"
+              }
+            }
+          },
+          {
+            "name": "SNAPSHOT_LOG_LEVEL",
+            "value": "info"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "imagePullPolicy": "Always",
+        "name": "agent",
+        "resources": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "securityContext": {
+          "privileged": true
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/etc/snapshot",
+            "name": "config",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/run/cuda-checkpoint-helper",
+            "name": "cuda-helper-socket"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "checkpoints"
+          },
+          {
+            "mountPath": "/run/containerd",
+            "name": "runtime-run"
+          },
+          {
+            "mountPath": "/var/lib/kubelet/pods",
+            "name": "kubelet-pods",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/lib/containerd",
+            "name": "runtime-storage",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/host/proc",
+            "name": "host-proc"
+          },
+          {
+            "mountPath": "/sys/fs/cgroup",
+            "name": "host-cgroup"
+          },
+          {
+            "mountPath": "/var/lib/kubelet/pod-resources",
+            "name": "kubelet-pod-resources",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/pagebroker",
+            "name": "pagebroker"
+          },
+          {
+            "mountPath": "/snapshot-binaries",
+            "name": "exp-bundle",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/usr/local/sbin/criu",
+            "name": "exp-criu",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/usr/local/bin/snapshot-agent",
+            "name": "gms-agent",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "args": [
+          "/pagebroker/control/pagebroker.sock",
+          "/checkpoints/.cs-matrix-staging/$(NODE_NAME)",
+          "/checkpoints",
+          "--max-concurrent-requests",
+          "32",
+          "--gpu-engine",
+          "/opt/gms-pagebroker/pagebroker-gpu-engine"
+        ],
+        "command": [
+          "/opt/gms-pagebroker/pagebroker"
+        ],
+        "env": [
+          {
+            "name": "NODE_NAME",
+            "valueFrom": {
+              "fieldRef": {
+                "apiVersion": "v1",
+                "fieldPath": "spec.nodeName"
+              }
+            }
+          },
+          {
+            "name": "NVIDIA_VISIBLE_DEVICES",
+            "value": "all"
+          },
+          {
+            "name": "NVIDIA_DRIVER_CAPABILITIES",
+            "value": "compute,utility"
+          }
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:a9f71596b7186de01c77080213a33dfced0acfc954564c6410e87baa3b03b15d",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "pagebroker",
+        "resources": {
+          "limits": {
+            "cpu": "64",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "securityContext": {
+          "privileged": true
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/pagebroker",
+            "name": "pagebroker"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "checkpoints"
+          },
+          {
+            "mountPath": "/opt/schwinns-profile",
+            "name": "schwinns-profile",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/opt/gms-pagebroker",
+            "name": "pb-gms-bin",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/gms",
+            "name": "pb-gms-sockets"
+          },
+          {
+            "mountPath": "/checkpoints/gms-pvc",
+            "name": "pb-gms-pvc",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "dnsPolicy": "ClusterFirst",
+    "enableServiceLinks": true,
+    "hostIPC": true,
+    "hostNetwork": true,
+    "hostPID": true,
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      }
+    ],
+    "initContainers": [
+      {
+        "command": [
+          "sh",
+          "-c",
+          "mkdir -p /host-seccomp/profiles\ncp /seccomp-profiles/block-iouring.json /host-seccomp/profiles/block-iouring.json\necho \"Deployed seccomp profile to /var/lib/kubelet/seccomp/profiles/block-iouring.json\"\n"
+        ],
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "imagePullPolicy": "IfNotPresent",
+        "name": "deploy-seccomp",
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "10m",
+            "memory": "16Mi"
+          }
+        },
+        "terminationMessagePath": "/dev/termination-log",
+        "terminationMessagePolicy": "File",
+        "volumeMounts": [
+          {
+            "mountPath": "/seccomp-profiles",
+            "name": "seccomp-profiles",
+            "readOnly": true
+          },
+          {
+            "mountPath": "/host-seccomp",
+            "name": "host-seccomp"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "nodeName": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+    "nodeSelector": {
+      "nvidia.com/gpu.present": "true",
+      "schwinns.ai-dynamo.io/snapshot-agent": "true"
+    },
+    "preemptionPolicy": "PreemptLowerPriority",
+    "priority": 0,
+    "restartPolicy": "Always",
+    "runtimeClassName": "nvidia",
+    "schedulerName": "default-scheduler",
+    "securityContext": {},
+    "serviceAccount": "dynamo-snapshot",
+    "serviceAccountName": "dynamo-snapshot",
+    "terminationGracePeriodSeconds": 30,
+    "tolerations": [
+      {
+        "operator": "Exists"
+      },
+      {
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/not-ready",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoExecute",
+        "key": "node.kubernetes.io/unreachable",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/disk-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/memory-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/pid-pressure",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/unschedulable",
+        "operator": "Exists"
+      },
+      {
+        "effect": "NoSchedule",
+        "key": "node.kubernetes.io/network-unavailable",
+        "operator": "Exists"
+      }
+    ],
+    "volumes": [
+      {
+        "configMap": {
+          "defaultMode": 420,
+          "name": "dynamo-snapshot-config"
+        },
+        "name": "config"
+      },
+      {
+        "emptyDir": {},
+        "name": "cuda-helper-socket"
+      },
+      {
+        "configMap": {
+          "defaultMode": 420,
+          "name": "dynamo-snapshot-seccomp"
+        },
+        "name": "seccomp-profiles"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/kubelet/seccomp",
+          "type": "DirectoryOrCreate"
+        },
+        "name": "host-seccomp"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/snapshot-restore-perf-nfs",
+          "type": "Directory"
+        },
+        "name": "checkpoints"
+      },
+      {
+        "hostPath": {
+          "path": "/run/containerd",
+          "type": "Directory"
+        },
+        "name": "runtime-run"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/kubelet/pods",
+          "type": "Directory"
+        },
+        "name": "kubelet-pods"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/containerd",
+          "type": "Directory"
+        },
+        "name": "runtime-storage"
+      },
+      {
+        "hostPath": {
+          "path": "/proc",
+          "type": "Directory"
+        },
+        "name": "host-proc"
+      },
+      {
+        "hostPath": {
+          "path": "/sys/fs/cgroup",
+          "type": "Directory"
+        },
+        "name": "host-cgroup"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/kubelet/pod-resources",
+          "type": "Directory"
+        },
+        "name": "kubelet-pod-resources"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-pb-gms-0929/control",
+          "type": "Directory"
+        },
+        "name": "pagebroker"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-profile",
+          "type": "Directory"
+        },
+        "name": "schwinns-profile"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/bundle",
+          "type": "Directory"
+        },
+        "name": "exp-bundle"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/bundle/criu",
+          "type": "File"
+        },
+        "name": "exp-criu"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/snapshot-agent-network-discovery",
+          "type": "File"
+        },
+        "name": "gms-agent"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-pb-gms-0929/bin",
+          "type": "Directory"
+        },
+        "name": "pb-gms-bin"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-pb-gms-0929/servers",
+          "type": "Directory"
+        },
+        "name": "pb-gms-sockets"
+      },
+      {
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/gms-pvc-nfs",
+          "type": "Directory"
+        },
+        "name": "pb-gms-pvc"
+      },
+      {
+        "name": "kube-api-access-pd42v",
+        "projected": {
+          "defaultMode": 420,
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "expirationSeconds": 3607,
+                "path": "token"
+              }
+            },
+            {
+              "configMap": {
+                "items": [
+                  {
+                    "key": "ca.crt",
+                    "path": "ca.crt"
+                  }
+                ],
+                "name": "kube-root-ca.crt"
+              }
+            },
+            {
+              "downwardAPI": {
+                "items": [
+                  {
+                    "fieldRef": {
+                      "apiVersion": "v1",
+                      "fieldPath": "metadata.namespace"
+                    },
+                    "path": "namespace"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-29T07:15:20+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodReadyToStartContainers"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T07:15:21+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Initialized"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T07:15:23+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T07:15:23+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "ContainersReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-29T07:15:15+00:00",
+        "observedGeneration": 1,
+        "status": "True",
+        "type": "PodScheduled"
+      }
+    ],
+    "containerStatuses": [
+      {
+        "allocatedResources": {
+          "cpu": "2",
+          "memory": "1Gi"
+        },
+        "containerID": "containerd://f872c37388a49fa463d0eebddb2694518c72a2f0087526fbc83b9623b351d9ee",
+        "image": "sha256:a444484af16081419ec4877a7e94235b254c5140332b676ffd9c3325bd028fca",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "lastState": {},
+        "name": "agent",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T07:15:22+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/etc/snapshot",
+            "name": "config",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/run/cuda-checkpoint-helper",
+            "name": "cuda-helper-socket"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "checkpoints"
+          },
+          {
+            "mountPath": "/run/containerd",
+            "name": "runtime-run"
+          },
+          {
+            "mountPath": "/var/lib/kubelet/pods",
+            "name": "kubelet-pods",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/lib/containerd",
+            "name": "runtime-storage",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/host/proc",
+            "name": "host-proc"
+          },
+          {
+            "mountPath": "/sys/fs/cgroup",
+            "name": "host-cgroup"
+          },
+          {
+            "mountPath": "/var/lib/kubelet/pod-resources",
+            "name": "kubelet-pod-resources",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/pagebroker",
+            "name": "pagebroker"
+          },
+          {
+            "mountPath": "/snapshot-binaries",
+            "name": "exp-bundle",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/usr/local/sbin/criu",
+            "name": "exp-criu",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/usr/local/bin/snapshot-agent",
+            "name": "gms-agent",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      },
+      {
+        "allocatedResources": {
+          "cpu": "2",
+          "memory": "1Gi"
+        },
+        "containerID": "containerd://1d11fc5133ea20c0cf9debdab3535d4cf0dd6e8dca3a09f3e04740bb44a8d04d",
+        "image": "sha256:bb7c4528b43188057444377215e2814dfadde35503f014ef6817d9dc1e5f3ca5",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:a9f71596b7186de01c77080213a33dfced0acfc954564c6410e87baa3b03b15d",
+        "lastState": {},
+        "name": "pagebroker",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "64",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "restartCount": 0,
+        "started": true,
+        "state": {
+          "running": {
+            "startedAt": "2026-09-29T07:15:22+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/pagebroker",
+            "name": "pagebroker"
+          },
+          {
+            "mountPath": "/checkpoints",
+            "name": "checkpoints"
+          },
+          {
+            "mountPath": "/opt/schwinns-profile",
+            "name": "schwinns-profile",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/opt/gms-pagebroker",
+            "name": "pb-gms-bin",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/gms",
+            "name": "pb-gms-sockets"
+          },
+          {
+            "mountPath": "/checkpoints/gms-pvc",
+            "name": "pb-gms-pvc",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      }
+    ],
+    "hostIP": "192.168.0.161",
+    "hostIPs": [
+      {
+        "ip": "192.168.0.161"
+      }
+    ],
+    "initContainerStatuses": [
+      {
+        "allocatedResources": {
+          "cpu": "10m",
+          "memory": "16Mi"
+        },
+        "containerID": "containerd://9d67ac5f63d396b1d1893e07d159f3d42d559a71a058c779541fe75e69299ad8",
+        "image": "sha256:a444484af16081419ec4877a7e94235b254c5140332b676ffd9c3325bd028fca",
+        "imageID": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "lastState": {},
+        "name": "deploy-seccomp",
+        "ready": true,
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "64Mi"
+          },
+          "requests": {
+            "cpu": "10m",
+            "memory": "16Mi"
+          }
+        },
+        "restartCount": 0,
+        "started": false,
+        "state": {
+          "terminated": {
+            "containerID": "containerd://9d67ac5f63d396b1d1893e07d159f3d42d559a71a058c779541fe75e69299ad8",
+            "exitCode": 0,
+            "finishedAt": "2026-09-29T07:15:20+00:00",
+            "reason": "Completed",
+            "startedAt": "2026-09-29T07:15:19+00:00"
+          }
+        },
+        "user": {
+          "linux": {
+            "gid": 0,
+            "supplementalGroups": [
+              0
+            ],
+            "uid": 0
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/seccomp-profiles",
+            "name": "seccomp-profiles",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          },
+          {
+            "mountPath": "/host-seccomp",
+            "name": "host-seccomp"
+          },
+          {
+            "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+            "name": "kube-api-access-pd42v",
+            "readOnly": true,
+            "recursiveReadOnly": "Disabled"
+          }
+        ]
+      }
+    ],
+    "observedGeneration": 1,
+    "phase": "Running",
+    "podIP": "192.168.0.161",
+    "podIPs": [
+      {
+        "ip": "192.168.0.161"
+      }
+    ],
+    "qosClass": "Burstable",
+    "startTime": "2026-09-29T07:15:15+00:00"
+  }
+}

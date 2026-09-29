@@ -1,0 +1,86 @@
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	gms_v1_client.cpp gms_v1_client_test.cpp file_descriptor.cpp \
+	-DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-v1-client-test
+./build/gms-v1-client-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 9 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 9 tests from GmsV1Client
+[ RUN      ] GmsV1Client.FragmentedFramesDescriptorsAndExactInventory
+[       OK ] GmsV1Client.FragmentedFramesDescriptorsAndExactInventory (0 ms)
+[ RUN      ] GmsV1Client.RejectsWrongIdentityOrLease
+[       OK ] GmsV1Client.RejectsWrongIdentityOrLease (0 ms)
+[ RUN      ] GmsV1Client.RejectsMissingExtraTruncatedOrUnexpectedDescriptorsWithoutLeaks
+[       OK ] GmsV1Client.RejectsMissingExtraTruncatedOrUnexpectedDescriptorsWithoutLeaks (0 ms)
+[ RUN      ] GmsV1Client.RejectsMalformedUnexpectedAndErrorResponses
+[       OK ] GmsV1Client.RejectsMalformedUnexpectedAndErrorResponses (0 ms)
+[ RUN      ] GmsV1Client.RejectsDuplicateInventoryIdsAndInvalidSizes
+[       OK ] GmsV1Client.RejectsDuplicateInventoryIdsAndInvalidSizes (0 ms)
+[ RUN      ] GmsV1Client.RejectsOversizedTruncatedAndDeepFrames
+[       OK ] GmsV1Client.RejectsOversizedTruncatedAndDeepFrames (0 ms)
+[ RUN      ] GmsV1Client.WholeRpcDeadlineStopsSlowFragmentTrickleAndRetainsLeaseUntilClose
+[       OK ] GmsV1Client.WholeRpcDeadlineStopsSlowFragmentTrickleAndRetainsLeaseUntilClose (105 ms)
+[ RUN      ] GmsV1Client.ExplicitAbortSendsAbortOnceAndThenCloses
+[       OK ] GmsV1Client.ExplicitAbortSendsAbortOnceAndThenCloses (0 ms)
+[ RUN      ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm
+gms_v1_client_test.cpp:342: Skipped
+Set GMS_V1_DYNAMO_ROOT for actual Dynamo V1 interoperability
+
+[  SKIPPED ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm (0 ms)
+[----------] 9 tests from GmsV1Client (108 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 1 test suite ran. (108 ms total)
+[  PASSED  ] 8 tests.
+[  SKIPPED ] 1 test, listed below:
+[  SKIPPED ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm
+protoc --proto_path=. --cpp_out=. v1/pagebroker.proto gpu_engine.proto
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	gms_load_layout.cpp gms_load_layout_test.cpp file_descriptor.cpp v1/pagebroker.pb.cc \
+	-lprotobuf -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-load-layout-test
+./build/gms-load-layout-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 6 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 6 tests from GmsLayoutTest
+[ RUN      ] GmsLayoutTest.ContiguousAllocationsBecomeOneWholeFileWithDirectIO
+[       OK ] GmsLayoutTest.ContiguousAllocationsBecomeOneWholeFileWithDirectIO (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsDuplicateCapturedAllocationID
+[       OK ] GmsLayoutTest.RejectsDuplicateCapturedAllocationID (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsGapsOverlapsAndUnalignedSizes
+[       OK ] GmsLayoutTest.RejectsGapsOverlapsAndUnalignedSizes (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsFilesLongerOrShorterThanCapturedExtents
+[       OK ] GmsLayoutTest.RejectsFilesLongerOrShorterThanCapturedExtents (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsTraversalAndIntermediateSymlinks
+[       OK ] GmsLayoutTest.RejectsTraversalAndIntermediateSymlinks (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsFinalSymlinkAndMissingServerIncarnation
+[       OK ] GmsLayoutTest.RejectsFinalSymlinkAndMissingServerIncarnation (0 ms)
+[----------] 6 tests from GmsLayoutTest (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 1 test suite ran. (1 ms total)
+[  PASSED  ] 6 tests.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	fair_transfer_mutex_test.cpp -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/fair-transfer-mutex-test
+./build/fair-transfer-mutex-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from FairTransferMutexTest
+[ RUN      ] FairTransferMutexTest.NextShardCannotOvertakeQueuedNativeTransfer
+[       OK ] FairTransferMutexTest.NextShardCannotOvertakeQueuedNativeTransfer (0 ms)
+[----------] 1 test from FairTransferMutexTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. -I/opt/cuda/include \
+	gpu_engine_worker.cpp fd_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+	gms_v1_client.cpp gms_load_operation.cpp gms_load_layout.cpp \
+	file_descriptor.cpp cuda_posix_transfer.cpp nixl_transfer.cpp storage_manifest.cpp \
+	../cmd/cuda-checkpoint-helper/custom_storage.cpp \
+	-L/opt/cuda/lib64/stubs -lcuda -lprotobuf -pthread -DPAGEBROKER_NIXL -I/usr/local/include -L/usr/local/lib -lnixl -lnixl_build -o build/pagebroker-gpu-engine

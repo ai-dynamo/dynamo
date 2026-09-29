@@ -1,0 +1,10 @@
+$ /tmp/gms-restore-tests/bin/python -m pytest benchmarks/gms_restore/test_pagebroker_coordinator.py benchmarks/gms_restore/test_pagebroker_server.py benchmarks/gms_restore/test_pagebroker_timeline.py benchmarks/gms_restore/test_resident_coordinator.py -q --noconftest
+...........................................................              [100%]
+59 passed in 1.24s
+
+$ /tmp/gms-restore-tests/bin/ruff check benchmarks/gms_restore/test_pagebroker_coordinator.py benchmarks/gms_restore/test_pagebroker_server.py benchmarks/gms_restore/test_pagebroker_timeline.py benchmarks/gms_restore/test_resident_coordinator.py benchmarks/gms_restore/pagebroker_coordinator.py benchmarks/gms_restore/pagebroker_server.py benchmarks/gms_restore/pagebroker_timeline.py
+All checks passed!
+
+$ /tmp/gms-restore-tests/bin/python -m pytest benchmarks/gms_restore/test_resolve_plan.py -q --noconftest
+....                                                                     [100%]
+4 passed in 0.05s

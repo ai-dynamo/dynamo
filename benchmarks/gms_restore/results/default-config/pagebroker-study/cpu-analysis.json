@@ -1,0 +1,1053 @@
+{
+  "cases": [
+    {
+      "case": "pagebroker-isolated64-1",
+      "isolated_gms_load": true,
+      "dgd_ready_s": null,
+      "publication_ready_s": 15.806835412979126,
+      "resources": {
+        "agent": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "pagebroker": {
+          "limits": {
+            "cpu": "64",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        }
+      },
+      "agent_pod_uid": "a8b491c5-63e1-4f4a-adf7-0c08e7173aba",
+      "capture_manifest_digests_by_rank": {
+        "0": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+        "1": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+        "2": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+        "3": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+        "4": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+        "5": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+        "6": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+        "7": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb"
+      },
+      "destination_uuids_by_rank": {
+        "0": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+        "1": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+        "2": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+        "3": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+        "4": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+        "5": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+        "6": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+        "7": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+      },
+      "cpu": {
+        "pagebroker": {
+          "before_epoch": 1790666404.8069136,
+          "after_epoch": 1790666447.0488417,
+          "sample_window_s": 42.24192810058594,
+          "quota_cores": 64.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 41.665554,
+          "user_cpu_seconds": 9.746854,
+          "system_cpu_seconds": 31.9187,
+          "mean_cores_over_sample_window": 0.9863554026413406,
+          "periods": 250,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.064265,
+            "full": 0.064264
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.1521355745101715,
+            "full": 0.15213320719398837
+          }
+        },
+        "agent": {
+          "before_epoch": 1790666403.1987524,
+          "after_epoch": 1790666444.205074,
+          "sample_window_s": 41.00632166862488,
+          "quota_cores": 4.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 0.099455,
+          "user_cpu_seconds": 0.022303,
+          "system_cpu_seconds": 0.077151,
+          "mean_cores_over_sample_window": 0.0024253577485857723,
+          "periods": 11,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.000394,
+            "full": 0.000395
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.0009608274626140408,
+            "full": 0.00096326611099631
+          }
+        }
+      },
+      "payload": {
+        "bytes": 481036337152,
+        "shards": 112,
+        "first_read_offset_s": 1.7053186893463135,
+        "last_copy_offset_s": 15.573007822036743,
+        "window_s": 13.86768913269043,
+        "effective_GiB_per_s": 32.3053102585005
+      },
+      "ring_contention": {
+        "gms_wait_sum_s": 1.2e-05,
+        "gms_wait_rank_mean_s": 2.84925e-06,
+        "gms_wait_rank_max_s": 5.055e-06,
+        "gms_shard_wait_max_s": 1e-06,
+        "native_wait_sum_s": 0,
+        "native_wait_mean_s": 0,
+        "native_wait_max_s": 0,
+        "native_transfers": 0,
+        "native_residual_bytes": 0
+      },
+      "rank_mean": {
+        "queue_wait_seconds": 2.84925e-06,
+        "transfer_seconds": 13.382200000000001,
+        "storage_request_service_seconds": 249.04975000000002,
+        "cuda_wait_seconds": 1.15548125,
+        "total_seconds": 13.849562500000001
+      },
+      "rank_timings": [
+        {
+          "rank": 0,
+          "queue_wait_seconds": 2.245e-06,
+          "transfer_seconds": 12.662,
+          "storage_request_service_seconds": 238.814,
+          "cuda_wait_seconds": 1.17386,
+          "total_seconds": 13.1454
+        },
+        {
+          "rank": 1,
+          "queue_wait_seconds": 5.055e-06,
+          "transfer_seconds": 13.3366,
+          "storage_request_service_seconds": 256.719,
+          "cuda_wait_seconds": 1.17228,
+          "total_seconds": 13.7972
+        },
+        {
+          "rank": 2,
+          "queue_wait_seconds": 2.742e-06,
+          "transfer_seconds": 13.8196,
+          "storage_request_service_seconds": 269.461,
+          "cuda_wait_seconds": 1.1361,
+          "total_seconds": 14.3106
+        },
+        {
+          "rank": 3,
+          "queue_wait_seconds": 2.917e-06,
+          "transfer_seconds": 13.7068,
+          "storage_request_service_seconds": 258.821,
+          "cuda_wait_seconds": 1.15626,
+          "total_seconds": 14.1695
+        },
+        {
+          "rank": 4,
+          "queue_wait_seconds": 1.993e-06,
+          "transfer_seconds": 13.8463,
+          "storage_request_service_seconds": 270.398,
+          "cuda_wait_seconds": 1.13452,
+          "total_seconds": 14.3094
+        },
+        {
+          "rank": 5,
+          "queue_wait_seconds": 2.817e-06,
+          "transfer_seconds": 13.7359,
+          "storage_request_service_seconds": 241.044,
+          "cuda_wait_seconds": 1.14797,
+          "total_seconds": 14.1788
+        },
+        {
+          "rank": 6,
+          "queue_wait_seconds": 1.98e-06,
+          "transfer_seconds": 12.657,
+          "storage_request_service_seconds": 223.663,
+          "cuda_wait_seconds": 1.15874,
+          "total_seconds": 13.1251
+        },
+        {
+          "rank": 7,
+          "queue_wait_seconds": 3.045e-06,
+          "transfer_seconds": 13.2934,
+          "storage_request_service_seconds": 233.478,
+          "cuda_wait_seconds": 1.16412,
+          "total_seconds": 13.7605
+        }
+      ]
+    },
+    {
+      "case": "pagebroker-native16-1",
+      "isolated_gms_load": false,
+      "dgd_ready_s": 22.650229454040527,
+      "publication_ready_s": null,
+      "resources": {
+        "agent": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "pagebroker": {
+          "limits": {
+            "cpu": "16",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        }
+      },
+      "agent_pod_uid": "dc4cb874-4c72-42cc-a410-c60bb4592256",
+      "capture_manifest_digests_by_rank": {
+        "0": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+        "1": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+        "2": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+        "3": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+        "4": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+        "5": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+        "6": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+        "7": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb"
+      },
+      "destination_uuids_by_rank": {
+        "0": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+        "1": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+        "2": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+        "3": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+        "4": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+        "5": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+        "6": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+        "7": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+      },
+      "cpu": {
+        "pagebroker": {
+          "before_epoch": 1790665833.591559,
+          "after_epoch": 1790665897.3733933,
+          "sample_window_s": 63.78183436393738,
+          "quota_cores": 16.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 47.908128,
+          "user_cpu_seconds": 11.024189,
+          "system_cpu_seconds": 36.883939,
+          "mean_cores_over_sample_window": 0.7511249633655493,
+          "periods": 346,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.060698,
+            "full": 0.060695
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.09516502716691855,
+            "full": 0.09516032363333424
+          }
+        },
+        "agent": {
+          "before_epoch": 1790665831.8576646,
+          "after_epoch": 1790665894.2659836,
+          "sample_window_s": 62.40831899642944,
+          "quota_cores": 4.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 0.665794,
+          "user_cpu_seconds": 0.228257,
+          "system_cpu_seconds": 0.437537,
+          "mean_cores_over_sample_window": 0.010668353365487892,
+          "periods": 83,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.002931,
+            "full": 0.002931
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.004696489261580161,
+            "full": 0.004696489261580161
+          }
+        },
+        "main": {
+          "scope": "lifetime since current container started; no before snapshot",
+          "sample_window_s": 57.23680257797241,
+          "quota_cores": 96.0,
+          "cpu_weight": 1250,
+          "cpu_seconds": 240.084569,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.238952,
+            "full": 0.237243
+          }
+        }
+      },
+      "payload": {
+        "bytes": 481036337152,
+        "shards": 112,
+        "first_read_offset_s": 1.5952863693237305,
+        "last_copy_offset_s": 19.981369018554688,
+        "window_s": 18.386082649230957,
+        "effective_GiB_per_s": 24.36625618120664
+      },
+      "ring_contention": {
+        "gms_wait_sum_s": 6.726127,
+        "gms_wait_rank_mean_s": 0.840767375,
+        "gms_wait_rank_max_s": 1.12349,
+        "gms_shard_wait_max_s": 1.123484,
+        "native_wait_sum_s": 4.3515179999999996,
+        "native_wait_mean_s": 0.5439397499999999,
+        "native_wait_max_s": 0.941144,
+        "native_transfers": 8,
+        "native_residual_bytes": 44275073024
+      },
+      "rank_mean": {
+        "queue_wait_seconds": 0.840767375,
+        "transfer_seconds": 16.52215,
+        "storage_request_service_seconds": 318.153,
+        "cuda_wait_seconds": 1.177935,
+        "total_seconds": 18.166275
+      },
+      "rank_timings": [
+        {
+          "rank": 0,
+          "queue_wait_seconds": 0.599073,
+          "transfer_seconds": 16.8393,
+          "storage_request_service_seconds": 324.941,
+          "cuda_wait_seconds": 1.17619,
+          "total_seconds": 18.6133
+        },
+        {
+          "rank": 1,
+          "queue_wait_seconds": 0.706947,
+          "transfer_seconds": 14.8286,
+          "storage_request_service_seconds": 282.389,
+          "cuda_wait_seconds": 1.20188,
+          "total_seconds": 16.0568
+        },
+        {
+          "rank": 2,
+          "queue_wait_seconds": 0.621796,
+          "transfer_seconds": 16.9372,
+          "storage_request_service_seconds": 316.105,
+          "cuda_wait_seconds": 1.15341,
+          "total_seconds": 18.5995
+        },
+        {
+          "rank": 3,
+          "queue_wait_seconds": 0.685466,
+          "transfer_seconds": 16.8394,
+          "storage_request_service_seconds": 338.324,
+          "cuda_wait_seconds": 1.16126,
+          "total_seconds": 18.6002
+        },
+        {
+          "rank": 4,
+          "queue_wait_seconds": 1.12349,
+          "transfer_seconds": 17.2041,
+          "storage_request_service_seconds": 338.327,
+          "cuda_wait_seconds": 1.16064,
+          "total_seconds": 18.7923
+        },
+        {
+          "rank": 5,
+          "queue_wait_seconds": 1.11137,
+          "transfer_seconds": 16.8667,
+          "storage_request_service_seconds": 343.446,
+          "cuda_wait_seconds": 1.16194,
+          "total_seconds": 18.6004
+        },
+        {
+          "rank": 6,
+          "queue_wait_seconds": 0.908592,
+          "transfer_seconds": 16.6863,
+          "storage_request_service_seconds": 322.056,
+          "cuda_wait_seconds": 1.19462,
+          "total_seconds": 18.6002
+        },
+        {
+          "rank": 7,
+          "queue_wait_seconds": 0.969405,
+          "transfer_seconds": 15.9756,
+          "storage_request_service_seconds": 279.636,
+          "cuda_wait_seconds": 1.21354,
+          "total_seconds": 17.4675
+        }
+      ]
+    },
+    {
+      "case": "pagebroker-native16-2",
+      "isolated_gms_load": false,
+      "dgd_ready_s": 22.73175573348999,
+      "publication_ready_s": null,
+      "resources": {
+        "agent": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "pagebroker": {
+          "limits": {
+            "cpu": "16",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        }
+      },
+      "agent_pod_uid": "dc4cb874-4c72-42cc-a410-c60bb4592256",
+      "capture_manifest_digests_by_rank": {
+        "0": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+        "1": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+        "2": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+        "3": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+        "4": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+        "5": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+        "6": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+        "7": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb"
+      },
+      "destination_uuids_by_rank": {
+        "0": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+        "1": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+        "2": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+        "3": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+        "4": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+        "5": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+        "6": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+        "7": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+      },
+      "cpu": {
+        "pagebroker": {
+          "before_epoch": 1790665983.1911309,
+          "after_epoch": 1790666047.818488,
+          "sample_window_s": 64.627357006073,
+          "quota_cores": 16.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 47.0126,
+          "user_cpu_seconds": 11.101533,
+          "system_cpu_seconds": 35.911068,
+          "mean_cores_over_sample_window": 0.7274411669903544,
+          "periods": 338,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.062961,
+            "full": 0.062958
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.09742159190276586,
+            "full": 0.0974169499057247
+          }
+        },
+        "agent": {
+          "before_epoch": 1790665981.6267831,
+          "after_epoch": 1790666045.0627036,
+          "sample_window_s": 63.43592047691345,
+          "quota_cores": 4.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 0.706336,
+          "user_cpu_seconds": 0.219701,
+          "system_cpu_seconds": 0.486634,
+          "mean_cores_over_sample_window": 0.011134637831212055,
+          "periods": 83,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.004417,
+            "full": 0.004417
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.006962931989940148,
+            "full": 0.006962931989940148
+          }
+        },
+        "main": {
+          "scope": "lifetime since current container started; no before snapshot",
+          "sample_window_s": 58.52178478240967,
+          "quota_cores": 96.0,
+          "cpu_weight": 1250,
+          "cpu_seconds": 243.754018,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.277167,
+            "full": 0.274904
+          }
+        }
+      },
+      "payload": {
+        "bytes": 481036337152,
+        "shards": 112,
+        "first_read_offset_s": 1.5923569202423096,
+        "last_copy_offset_s": 19.676453113555908,
+        "window_s": 18.0840961933136,
+        "effective_GiB_per_s": 24.773148473167446
+      },
+      "ring_contention": {
+        "gms_wait_sum_s": 6.303511,
+        "gms_wait_rank_mean_s": 0.78794025,
+        "gms_wait_rank_max_s": 0.949527,
+        "gms_shard_wait_max_s": 0.949525,
+        "native_wait_sum_s": 6.198218,
+        "native_wait_mean_s": 0.77477725,
+        "native_wait_max_s": 1.318035,
+        "native_transfers": 8,
+        "native_residual_bytes": 44275073024
+      },
+      "rank_mean": {
+        "queue_wait_seconds": 0.78794025,
+        "transfer_seconds": 16.5950375,
+        "storage_request_service_seconds": 353.228375,
+        "cuda_wait_seconds": 1.18269625,
+        "total_seconds": 17.8914375
+      },
+      "rank_timings": [
+        {
+          "rank": 0,
+          "queue_wait_seconds": 0.585141,
+          "transfer_seconds": 16.3009,
+          "storage_request_service_seconds": 328.09,
+          "cuda_wait_seconds": 1.19583,
+          "total_seconds": 17.4062
+        },
+        {
+          "rank": 1,
+          "queue_wait_seconds": 0.692093,
+          "transfer_seconds": 16.7807,
+          "storage_request_service_seconds": 346.525,
+          "cuda_wait_seconds": 1.18947,
+          "total_seconds": 17.9913
+        },
+        {
+          "rank": 2,
+          "queue_wait_seconds": 0.822824,
+          "transfer_seconds": 16.6623,
+          "storage_request_service_seconds": 379.223,
+          "cuda_wait_seconds": 1.16073,
+          "total_seconds": 17.9926
+        },
+        {
+          "rank": 3,
+          "queue_wait_seconds": 0.846837,
+          "transfer_seconds": 16.8323,
+          "storage_request_service_seconds": 349.059,
+          "cuda_wait_seconds": 1.16505,
+          "total_seconds": 18.1833
+        },
+        {
+          "rank": 4,
+          "queue_wait_seconds": 0.79467,
+          "transfer_seconds": 17.2458,
+          "storage_request_service_seconds": 368.121,
+          "cuda_wait_seconds": 1.16804,
+          "total_seconds": 18.5286
+        },
+        {
+          "rank": 5,
+          "queue_wait_seconds": 0.677111,
+          "transfer_seconds": 16.8528,
+          "storage_request_service_seconds": 348.094,
+          "cuda_wait_seconds": 1.17561,
+          "total_seconds": 17.9927
+        },
+        {
+          "rank": 6,
+          "queue_wait_seconds": 0.949527,
+          "transfer_seconds": 16.0255,
+          "storage_request_service_seconds": 346.749,
+          "cuda_wait_seconds": 1.21831,
+          "total_seconds": 17.5148
+        },
+        {
+          "rank": 7,
+          "queue_wait_seconds": 0.935319,
+          "transfer_seconds": 16.06,
+          "storage_request_service_seconds": 359.966,
+          "cuda_wait_seconds": 1.18853,
+          "total_seconds": 17.522
+        }
+      ]
+    },
+    {
+      "case": "pagebroker-native64-1",
+      "isolated_gms_load": false,
+      "dgd_ready_s": 25.931435108184814,
+      "publication_ready_s": null,
+      "resources": {
+        "agent": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "pagebroker": {
+          "limits": {
+            "cpu": "64",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        }
+      },
+      "agent_pod_uid": "a8b491c5-63e1-4f4a-adf7-0c08e7173aba",
+      "capture_manifest_digests_by_rank": {
+        "0": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+        "1": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+        "2": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+        "3": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+        "4": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+        "5": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+        "6": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+        "7": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb"
+      },
+      "destination_uuids_by_rank": {
+        "0": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+        "1": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+        "2": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+        "3": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+        "4": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+        "5": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+        "6": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+        "7": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+      },
+      "cpu": {
+        "pagebroker": {
+          "before_epoch": 1790666215.6675448,
+          "after_epoch": 1790666282.804274,
+          "sample_window_s": 67.13672924041748,
+          "quota_cores": 64.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 46.905375,
+          "user_cpu_seconds": 11.00888,
+          "system_cpu_seconds": 35.896496,
+          "mean_cores_over_sample_window": 0.6986544553284872,
+          "periods": 354,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.068007,
+            "full": 0.067994
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.10129626624565827,
+            "full": 0.10127690277629198
+          }
+        },
+        "agent": {
+          "before_epoch": 1790666214.0929978,
+          "after_epoch": 1790666279.5917459,
+          "sample_window_s": 65.49874806404114,
+          "quota_cores": 4.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 0.814255,
+          "user_cpu_seconds": 0.307202,
+          "system_cpu_seconds": 0.507053,
+          "mean_cores_over_sample_window": 0.01243161165773528,
+          "periods": 118,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.003869,
+            "full": 0.003851
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.005906983132283843,
+            "full": 0.005879501690986063
+          }
+        },
+        "main": {
+          "scope": "lifetime since current container started; no before snapshot",
+          "sample_window_s": 55.383471727371216,
+          "quota_cores": 96.0,
+          "cpu_weight": 1250,
+          "cpu_seconds": 254.211219,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.323372,
+            "full": 0.319628
+          }
+        }
+      },
+      "payload": {
+        "bytes": 481036337152,
+        "shards": 112,
+        "first_read_offset_s": 1.6024503707885742,
+        "last_copy_offset_s": 19.01670527458191,
+        "window_s": 17.414254903793335,
+        "effective_GiB_per_s": 25.726050438277003
+      },
+      "ring_contention": {
+        "gms_wait_sum_s": 3.4851,
+        "gms_wait_rank_mean_s": 0.435637875625,
+        "gms_wait_rank_max_s": 1.01297,
+        "gms_shard_wait_max_s": 1.012971,
+        "native_wait_sum_s": 2.115699,
+        "native_wait_mean_s": 0.264462375,
+        "native_wait_max_s": 1.055193,
+        "native_transfers": 8,
+        "native_residual_bytes": 44275073024
+      },
+      "rank_mean": {
+        "queue_wait_seconds": 0.435637875625,
+        "transfer_seconds": 15.9485125,
+        "storage_request_service_seconds": 317.716,
+        "cuda_wait_seconds": 1.1816787499999999,
+        "total_seconds": 16.884675
+      },
+      "rank_timings": [
+        {
+          "rank": 0,
+          "queue_wait_seconds": 1.01297,
+          "transfer_seconds": 15.2966,
+          "storage_request_service_seconds": 333.452,
+          "cuda_wait_seconds": 1.19905,
+          "total_seconds": 16.8318
+        },
+        {
+          "rank": 1,
+          "queue_wait_seconds": 0.996663,
+          "transfer_seconds": 15.39,
+          "storage_request_service_seconds": 313.844,
+          "cuda_wait_seconds": 1.21867,
+          "total_seconds": 16.8115
+        },
+        {
+          "rank": 2,
+          "queue_wait_seconds": 0.673739,
+          "transfer_seconds": 16.2156,
+          "storage_request_service_seconds": 326.168,
+          "cuda_wait_seconds": 1.16502,
+          "total_seconds": 17.329
+        },
+        {
+          "rank": 3,
+          "queue_wait_seconds": 0.801722,
+          "transfer_seconds": 16.5465,
+          "storage_request_service_seconds": 329.685,
+          "cuda_wait_seconds": 1.1494,
+          "total_seconds": 17.8657
+        },
+        {
+          "rank": 4,
+          "queue_wait_seconds": 1.893e-06,
+          "transfer_seconds": 16.0455,
+          "storage_request_service_seconds": 296.596,
+          "cuda_wait_seconds": 1.15305,
+          "total_seconds": 16.5455
+        },
+        {
+          "rank": 5,
+          "queue_wait_seconds": 2.462e-06,
+          "transfer_seconds": 16.793,
+          "storage_request_service_seconds": 331.976,
+          "cuda_wait_seconds": 1.16877,
+          "total_seconds": 17.3277
+        },
+        {
+          "rank": 6,
+          "queue_wait_seconds": 2.47e-06,
+          "transfer_seconds": 16.1495,
+          "storage_request_service_seconds": 330.172,
+          "cuda_wait_seconds": 1.21855,
+          "total_seconds": 16.6694
+        },
+        {
+          "rank": 7,
+          "queue_wait_seconds": 2.18e-06,
+          "transfer_seconds": 15.1514,
+          "storage_request_service_seconds": 279.835,
+          "cuda_wait_seconds": 1.18092,
+          "total_seconds": 15.6968
+        }
+      ]
+    },
+    {
+      "case": "pagebroker-native64-2",
+      "isolated_gms_load": false,
+      "dgd_ready_s": 22.602982759475708,
+      "publication_ready_s": null,
+      "resources": {
+        "agent": {
+          "limits": {
+            "cpu": "4",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        },
+        "pagebroker": {
+          "limits": {
+            "cpu": "64",
+            "memory": "128Gi"
+          },
+          "requests": {
+            "cpu": "2",
+            "memory": "1Gi"
+          }
+        }
+      },
+      "agent_pod_uid": "a8b491c5-63e1-4f4a-adf7-0c08e7173aba",
+      "capture_manifest_digests_by_rank": {
+        "0": "65735577ad711def753550252b5936f1793079af47237223595decefa04717bb",
+        "1": "61a77b5d12776aaaefabf6476f44bbcbfefc285b03a75d26429426f4e418abe1",
+        "2": "47d29af9cc94f31d6067345cea2312b6e7c4a09731eca53eb9b80a5f6c9e1831",
+        "3": "95fff276b9f34733d67de127f3be2f08f29b36546889a5cc7be2dc875b7d1028",
+        "4": "6616db4244e93727fd1c5aaa6255bd178d49f779a3e608ad21c84e84570d2e0c",
+        "5": "0bebf1caf2ade725a9ab54d561fe867aa8acbbd28d8002e9d6857955bd347168",
+        "6": "71aca0e9b742c5c9cd5f7e5bf148a6c28712de560eba3f86093bab3a996f3308",
+        "7": "8ffd36d2798781996af4372c5314ccb4cc5826be210e7767c7989dfe57b71cdb"
+      },
+      "destination_uuids_by_rank": {
+        "0": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+        "1": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+        "2": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+        "3": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+        "4": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+        "5": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+        "6": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+        "7": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+      },
+      "cpu": {
+        "pagebroker": {
+          "before_epoch": 1790666540.486689,
+          "after_epoch": 1790666604.974053,
+          "sample_window_s": 64.48736381530762,
+          "quota_cores": 64.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 47.571543,
+          "user_cpu_seconds": 10.987336,
+          "system_cpu_seconds": 36.584207,
+          "mean_cores_over_sample_window": 0.7376878226290242,
+          "periods": 348,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.052441,
+            "full": 0.052439
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.08131980731944866,
+            "full": 0.08131670593666344
+          }
+        },
+        "agent": {
+          "before_epoch": 1790666538.8861609,
+          "after_epoch": 1790666601.6402514,
+          "sample_window_s": 62.754090547561646,
+          "quota_cores": 4.0,
+          "cpu_weight": 79,
+          "cpu_seconds": 0.698529,
+          "user_cpu_seconds": 0.258058,
+          "system_cpu_seconds": 0.440471,
+          "mean_cores_over_sample_window": 0.01113121063352167,
+          "periods": 81,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.004595,
+            "full": 0.004593
+          },
+          "pressure_percent_of_sample_window": {
+            "some": 0.007322231841631784,
+            "full": 0.0073190447983927705
+          }
+        },
+        "main": {
+          "scope": "lifetime since current container started; no before snapshot",
+          "sample_window_s": 55.74619269371033,
+          "quota_cores": 96.0,
+          "cpu_weight": 1250,
+          "cpu_seconds": 253.652119,
+          "throttled_periods": 0,
+          "throttled_seconds": 0.0,
+          "pressure_seconds": {
+            "some": 0.35683,
+            "full": 0.355661
+          }
+        }
+      },
+      "payload": {
+        "bytes": 481036337152,
+        "shards": 112,
+        "first_read_offset_s": 1.6205570697784424,
+        "last_copy_offset_s": 19.213054418563843,
+        "window_s": 17.5924973487854,
+        "effective_GiB_per_s": 25.465401023972884
+      },
+      "ring_contention": {
+        "gms_wait_sum_s": 5.634212,
+        "gms_wait_rank_mean_s": 0.70427785675,
+        "gms_wait_rank_max_s": 1.10944,
+        "gms_shard_wait_max_s": 1.109441,
+        "native_wait_sum_s": 4.047218,
+        "native_wait_mean_s": 0.50590225,
+        "native_wait_max_s": 1.014671,
+        "native_transfers": 8,
+        "native_residual_bytes": 44275073024
+      },
+      "rank_mean": {
+        "queue_wait_seconds": 0.70427785675,
+        "transfer_seconds": 16.3324,
+        "storage_request_service_seconds": 343.815,
+        "cuda_wait_seconds": 1.17581625,
+        "total_seconds": 17.4931
+      },
+      "rank_timings": [
+        {
+          "rank": 0,
+          "queue_wait_seconds": 0.65069,
+          "transfer_seconds": 16.6312,
+          "storage_request_service_seconds": 342.64,
+          "cuda_wait_seconds": 1.17869,
+          "total_seconds": 17.7537
+        },
+        {
+          "rank": 1,
+          "queue_wait_seconds": 0.777017,
+          "transfer_seconds": 15.7626,
+          "storage_request_service_seconds": 308.959,
+          "cuda_wait_seconds": 1.20755,
+          "total_seconds": 17.0251
+        },
+        {
+          "rank": 2,
+          "queue_wait_seconds": 0.622075,
+          "transfer_seconds": 16.6078,
+          "storage_request_service_seconds": 362.5,
+          "cuda_wait_seconds": 1.1426,
+          "total_seconds": 17.6854
+        },
+        {
+          "rank": 3,
+          "queue_wait_seconds": 1.04406,
+          "transfer_seconds": 16.5246,
+          "storage_request_service_seconds": 365.014,
+          "cuda_wait_seconds": 1.17684,
+          "total_seconds": 18.041
+        },
+        {
+          "rank": 4,
+          "queue_wait_seconds": 1.10944,
+          "transfer_seconds": 16.3722,
+          "storage_request_service_seconds": 338.637,
+          "cuda_wait_seconds": 1.17941,
+          "total_seconds": 17.9191
+        },
+        {
+          "rank": 5,
+          "queue_wait_seconds": 0.673962,
+          "transfer_seconds": 16.5765,
+          "storage_request_service_seconds": 349.718,
+          "cuda_wait_seconds": 1.14438,
+          "total_seconds": 17.7022
+        },
+        {
+          "rank": 6,
+          "queue_wait_seconds": 0.756977,
+          "transfer_seconds": 16.3832,
+          "storage_request_service_seconds": 363.702,
+          "cuda_wait_seconds": 1.20201,
+          "total_seconds": 17.5962
+        },
+        {
+          "rank": 7,
+          "queue_wait_seconds": 1.854e-06,
+          "transfer_seconds": 15.8011,
+          "storage_request_service_seconds": 319.35,
+          "cuda_wait_seconds": 1.17505,
+          "total_seconds": 16.2221
+        }
+      ]
+    }
+  ],
+  "pending_collection": [],
+  "cpu_limit_cohorts": {
+    "16": {
+      "n": 2,
+      "ready_mean_s": 22.69099259376526,
+      "ready_min_s": 22.650229454040527,
+      "ready_max_s": 22.73175573348999,
+      "payload_window_mean_s": 18.235089421272278,
+      "cpu_seconds_mean": 47.460364,
+      "throttled_seconds_sum": 0.0
+    },
+    "64": {
+      "n": 2,
+      "ready_mean_s": 24.26720893383026,
+      "ready_min_s": 22.602982759475708,
+      "ready_max_s": 25.931435108184814,
+      "payload_window_mean_s": 17.503376126289368,
+      "cpu_seconds_mean": 47.238459,
+      "throttled_seconds_sum": 0.0
+    }
+  },
+  "isolated_comparisons": [
+    {
+      "isolated_case": "pagebroker-isolated64-1",
+      "concurrent_case": "pagebroker-native64-1",
+      "same_agent_pod": true,
+      "same_cpu_resources": true,
+      "same_captured_artifact_digests": true,
+      "same_destination_gpus": true,
+      "payload_bytes": 481036337152,
+      "payload_window_increase_s": 3.5465657711029053,
+      "payload_window_increase_percent": 25.574309729387814,
+      "effective_throughput_decrease_percent": 20.365877212066998,
+      "additional_native_gpu_residual_bytes": 44275073024,
+      "additional_criu_cpu_image_bytes": null,
+      "sample_size_each": 1
+    },
+    {
+      "isolated_case": "pagebroker-isolated64-1",
+      "concurrent_case": "pagebroker-native64-2",
+      "same_agent_pod": true,
+      "same_cpu_resources": true,
+      "same_captured_artifact_digests": true,
+      "same_destination_gpus": true,
+      "payload_bytes": 481036337152,
+      "payload_window_increase_s": 3.7248082160949707,
+      "payload_window_increase_percent": 26.859617204098175,
+      "effective_throughput_decrease_percent": 21.17270869648381,
+      "additional_native_gpu_residual_bytes": 44275073024,
+      "additional_criu_cpu_image_bytes": null,
+      "sample_size_each": 1
+    }
+  ],
+  "limits": [
+    "Before/after CPU sampling includes idle lead-in and evidence collection after Ready; mean cores is not restore-only utilization or peak demand.",
+    "CPU quota throttling and scheduler CPU pressure differ from waiting for the PageBroker per-GPU transfer ring.",
+    "CPU request controls relative scheduling weight under competition, not a hard core cap.",
+    "Parent cgroup counters and node-wide runnable/CPU occupancy were not collected; low leaf CPU pressure supports but does not prove absence of all host competition.",
+    "Storage request service time sums overlapping in-flight I/O latency and is neither CPU time nor a serial wall-time component. CUDA wait sums host event synchronization waits.",
+    "Rank and native ring waits overlap across GPUs; their sums cannot be added directly to end-to-end Ready time.",
+    "Effective payload throughput divides 448GiB by earliest read to final transfer-routine completion, including intervening ring waits; it is not raw storage or PCIe bandwidth."
+  ]
+}

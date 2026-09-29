@@ -1,0 +1,6 @@
+
+
+
+agent dynamo-snapshot-agent-ffqlw
+applied: numa_balancing=0 read_ahead_kb=16384
+

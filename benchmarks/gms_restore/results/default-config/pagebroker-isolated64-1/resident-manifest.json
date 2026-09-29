@@ -1,0 +1,714 @@
+{
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "metadata": {
+        "name": "gms-v1-pagebroker-0929-0f084481"
+      },
+      "immutable": true,
+      "data": {
+        "pagebroker_server.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"One-GPU GMS V1 allocation owner for the native PageBroker restore experiment.\n\nThis process serves weights and KV-cache sockets. It initializes the CUDA driver\nwithout creating a context, importing a loader, opening payload files, or owning\ntransfer streams/buffers. PageBroker acquires the weights RW lease and performs\nall allocation imports and PVC transfers in its native GPU engine.\n\nThe service starts without a capture or model binding. Its service generation\nand server nonces identify this lifetime independently of later restore requests.\n\"\"\"\n\nimport argparse\nimport json\nimport os\nimport signal\nimport subprocess\nimport time\nfrom concurrent.futures import ThreadPoolExecutor\nfrom contextlib import ExitStack\nfrom pathlib import Path\nfrom threading import Event, Lock\n\n\ndef atomic_json(path, value):\n    temporary = path.with_name(f\".{path.name}.{os.getpid()}.tmp\")\n    temporary.write_text(json.dumps(value))\n    temporary.replace(path)\n\n\ndef cpu_snapshot():\n    root = Path(\"/sys/fs/cgroup\")\n    return {\n        \"epoch\": time.time(),\n        \"stat\": {\n            key: int(value)\n            for key, value in (\n                line.split() for line in (root / \"cpu.stat\").read_text().splitlines()\n            )\n        },\n        \"pressure\": (root / \"cpu.pressure\").read_text(),\n        \"max\": (root / \"cpu.max\").read_text().strip(),\n        \"weight\": (root / \"cpu.weight\").read_text().strip(),\n    }\n\n\ndef context_state(driver, device=0):\n    \"\"\"Observe without creating/retaining a context; reject unexpected activation.\"\"\"\n\n    def checked(result, operation):\n        if int(result[0]) != 0:\n            raise RuntimeError(f\"{operation} failed: CUDA result {int(result[0])}\")\n        return result[1:]\n\n    (current,) = checked(driver.cuCtxGetCurrent(), \"cuCtxGetCurrent\")\n    (cuda_device,) = checked(driver.cuDeviceGet(device), \"cuDeviceGet\")\n    flags, active = checked(\n        driver.cuDevicePrimaryCtxGetState(cuda_device), \"cuDevicePrimaryCtxGetState\"\n    )\n    record = {\n        \"epoch\": time.time(),\n        \"current_context\": 0 if current is None else int(current),\n        \"primary_context_active\": bool(active),\n        \"primary_context_flags\": int(flags),\n    }\n    if record[\"current_context\"] != 0 or record[\"primary_context_active\"]:\n        raise RuntimeError(\"server-only GMS unexpectedly acquired a CUDA context\")\n    return record\n\n\ndef bind_numa(uuid, emit):\n    rows = subprocess.check_output(\n        [\"nvidia-smi\", \"--query-gpu=uuid,pci.bus_id\", \"--format=csv,noheader\"],\n        text=True,\n    )\n    pci = next(\n        line.split(\",\")[1].strip()\n        for line in rows.splitlines()\n        if line.split(\",\")[0].strip() == uuid\n    )\n    domain, rest = pci.split(\":\", 1)\n    pci = f\"{int(domain, 16):04x}:{rest}\".lower()\n    node = int(Path(f\"/sys/bus/pci/devices/{pci}/numa_node\").read_text())\n    if node < 0:\n        raise RuntimeError(\"GPU NUMA node unknown\")\n    cpus = set()\n    for part in (\n        Path(f\"/sys/devices/system/node/node{node}/cpulist\")\n        .read_text()\n        .strip()\n        .split(\",\")\n    ):\n        limits = [int(x) for x in part.split(\"-\")]\n        cpus.update(range(limits[0], limits[-1] + 1))\n    os.sched_setaffinity(0, cpus & os.sched_getaffinity(0))\n    emit(\"numa_affinity\", node=node, cpus=sorted(os.sched_getaffinity(0)))\n\n\ndef parse_args(argv=None):\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\"--rank\", type=int, required=True)\n    parser.add_argument(\"--service-generation\", required=True)\n    parser.add_argument(\"--expected-uuid\", required=True)\n    parser.add_argument(\"--numa\", action=\"store_true\")\n    args = parser.parse_args(argv)\n    if args.rank < 0 or not args.service_generation:\n        parser.error(\"rank must be nonnegative; service generation is required\")\n    return args\n\n\ndef main():\n    started = time.time()\n    args = parse_args()\n    output_lock = Lock()\n\n    def emit(event, **values):\n        with output_lock:\n            epoch = time.time()\n            print(\n                json.dumps(\n                    {\n                        \"event\": event,\n                        \"rank\": args.rank,\n                        \"epoch\": epoch,\n                        \"daemon_elapsed_s\": epoch - started,\n                        **values,\n                    }\n                ),\n                flush=True,\n            )\n\n    emit(\n        \"daemon_start\",\n        mode=\"pagebroker\",\n        daemon_started_epoch=started,\n        service_generation=args.service_generation,\n    )\n    before = cpu_snapshot()\n    emit(\"imports_start\")\n    # Keep imports inside this benchmark entrypoint to measure startup cost;\n    # CPU-only tests can import the service identity and context checks.\n    from cuda.bindings import driver\n    from gpu_memory_service.common.locks import RequestedLockType\n    from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm\n    from gpu_memory_service.v1.checkpoint import GMSCheckpointLifecycle\n    from gpu_memory_service.v1.cli import run_servers\n    from gpu_memory_service.v1.client.session import _GMSClientSession\n    from gpu_memory_service.v1.device import get_device_uuid, get_socket_path\n    from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager\n\n    emit(\"imports_complete\")\n    init_vmm(VMMDeviceType.CUDA)\n    vmm = get_vmm()\n    emit(\"cuinit_start\")\n    vmm.ensure_initialized()\n    emit(\"cuinit_complete\")\n    result, count = driver.cuDeviceGetCount()\n    if int(result) != 0 or count != 1:\n        raise RuntimeError(\"server-only rank container must expose exactly one CUDA GPU\")\n    uuid = get_device_uuid(0)\n    if uuid != args.expected_uuid:\n        raise RuntimeError(f\"rank {args.rank}: expected {args.expected_uuid}, got {uuid}\")\n    initial_context = context_state(driver)\n    emit(\"context_state\", stage=\"driver_initialized\", **initial_context)\n    if args.numa:\n        bind_numa(uuid, emit)\n    root = Path(os.environ[\"GMS_SOCKET_DIR\"])\n    root.mkdir(parents=True, exist_ok=True)\n    online_path = root / f\"online-{args.rank}.json\"\n    if online_path.exists():\n        raise RuntimeError(f\"GMS service lifetime already has online state: {online_path}\")\n    stop = Event()\n    signal.signal(signal.SIGTERM, lambda *_: stop.set())\n    signal.signal(signal.SIGINT, lambda *_: stop.set())\n    lifecycle = GMSCheckpointLifecycle()\n    with ExitStack() as stack:\n        emit(\"server_init_start\")\n        managers = {\n            domain: GMSServerMemoryManager(uuid, vmm, 0, checkpoint_lifecycle=lifecycle)\n            for domain in (\"weights\", \"kv_cache\")\n        }\n        lifecycle.bind_domains(managers)\n        servers = [\n            stack.enter_context(\n                GMSRPCServer(get_socket_path(args.rank, domain), manager)\n            )\n            for domain, manager in managers.items()\n        ]\n        emit(\"sockets\", uuid=uuid)\n        with ThreadPoolExecutor(max_workers=1) as executor:\n            serving = executor.submit(run_servers, servers, stop)\n            try:\n                for domain, manager in managers.items():\n                    session = _GMSClientSession(\n                        get_socket_path(args.rank, domain),\n                        RequestedLockType.RW,\n                        expected_identity=manager.identity,\n                        connect_timeout=10,\n                        admission_timeout=10,\n                    )\n                    try:\n                        if session.identity != manager.identity:\n                            raise RuntimeError(\"server-only GMS readiness identity mismatch\")\n                    finally:\n                        session.close()  # Abort the empty lease; publish nothing.\n                if any(manager.allocation_snapshot() for manager in managers.values()):\n                    raise RuntimeError(\"server-only readiness allocated GPU weights\")\n                ready_context = context_state(driver)\n                online = {\n                    \"event\": \"online\",\n                    \"mode\": \"pagebroker\",\n                    \"rank\": args.rank,\n                    \"uuid\": uuid,\n                    \"service_generation\": args.service_generation,\n                    \"daemon_started_epoch\": started,\n                    \"online_epoch\": time.time(),\n                    \"local_device\": 0,\n                    \"visible_device_count\": count,\n                    \"socket_device\": args.rank,\n                    \"socket_dir\": str(root),\n                    \"weights_server_nonce\": managers[\"weights\"].identity[0],\n                    \"kv_cache_server_nonce\": managers[\"kv_cache\"].identity[0],\n                    \"server_domains_responsive\": list(managers),\n                    \"payload_bytes_read\": 0,\n                    \"weight_allocations\": 0,\n                    \"pinned_bytes\": 0,\n                    \"loader_lanes_ready\": 0,\n                    \"cuda_context_current\": False,\n                    \"cuda_primary_context_active\": False,\n                    \"context_state\": ready_context,\n                    \"prewarm_cpu_before\": before,\n                    \"prewarm_cpu_after\": cpu_snapshot(),\n                }\n                atomic_json(online_path, online)\n                emit(\"online\", **{k: v for k, v in online.items() if k != \"event\"})\n                allocated_seen = committed_seen = False\n                while not stop.wait(0.05):\n                    if serving.done():\n                        serving.result()\n                        raise RuntimeError(\"server-only GMS serving thread stopped\")\n                    weights = managers[\"weights\"]\n                    allocations = weights.allocation_snapshot()\n                    if allocations and not allocated_seen:\n                        emit(\n                            \"allocation_context_state\",\n                            allocation_count=len(allocations),\n                            context_state=context_state(driver),\n                        )\n                        allocated_seen = True\n                    if weights.session_snapshot().committed and not committed_seen:\n                        emit(\n                            \"weights_committed\",\n                            allocation_count=len(allocations),\n                            allocated_bytes=sum(size for _, size in allocations),\n                            context_state=context_state(driver),\n                            weights_server_nonce=weights.identity[0],\n                        )\n                        committed_seen = True\n            except BaseException as error:\n                emit(\"server_error\", error=str(error))\n                raise\n            finally:\n                online_path.unlink(missing_ok=True)\n                stop.set()\n                serving.result(timeout=10)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+        "pagebroker_coordinator.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Generic GMS service coordinator; select snapshot metadata after DGD creation.\n\nStartup knows only the resident allocation and service incarnation. One POST\nbinds this qualification coordinator to a DGD and discovers its PVC manifest.\nNo payload is read here. Reset/reuse of the coordinator is intentionally unsupported.\n\"\"\"\n\nimport argparse\nimport array\nimport hashlib\nimport json\nimport math\nimport os\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport uuid\nfrom concurrent.futures import ThreadPoolExecutor\nfrom pathlib import Path\n\nimport pagebroker_pb2 as pb\nfrom google.protobuf.message import DecodeError\nfrom resident_coordinator import LoadConflict, atomic_write, emit, make_server\nfrom resolve_plan import gpu_uuid, resolve\n\n\ndef rpc(path, request, timeout=240):\n    \"\"\"Public PageBroker framing, with no ancillary descriptors permitted.\"\"\"\n    deadline = time.monotonic() + timeout\n\n    def receive(stream, size):\n        result = bytearray()\n        while len(result) < size:\n            remaining = deadline - time.monotonic()\n            if remaining <= 0:\n                raise TimeoutError(\"PageBroker RPC deadline exceeded\")\n            stream.settimeout(remaining)\n            data, controls, flags, _ = stream.recvmsg(\n                size - len(result), socket.CMSG_SPACE(16 * 4)\n            )\n            for level, kind, raw in controls:\n                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:\n                    fds = array.array(\"i\")\n                    fds.frombytes(raw[: len(raw) - len(raw) % fds.itemsize])\n                    for fd in fds:\n                        os.close(fd)\n            if controls or flags & (socket.MSG_CTRUNC | socket.MSG_TRUNC):\n                raise ValueError(\"PageBroker public reply carried ancillary data\")\n            if not data:\n                raise ValueError(\"PageBroker reply truncated\")\n            result.extend(data)\n        return bytes(result)\n\n    data = request.SerializeToString()\n    if len(data) > 65536:\n        raise ValueError(\"PageBroker request exceeds frame limit\")\n    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:\n        stream.settimeout(timeout)\n        stream.connect(str(path))\n        stream.sendall(struct.pack(\"!I\", len(data)) + data)\n        size = struct.unpack(\"!I\", receive(stream, 4))[0]\n        if size > 65536:\n            raise ValueError(\"PageBroker reply exceeds frame limit\")\n        try:\n            response = pb.Response.FromString(receive(stream, size))\n        except DecodeError as error:\n            raise ValueError(\"PageBroker reply is not valid protobuf\") from error\n    if (response.request_id, response.transaction_id) != (\n        request.request_id,\n        request.transaction_id,\n    ):\n        raise ValueError(\"PageBroker reply identity mismatch\")\n    return response\n\n\ndef allocation_destinations(claim, slices):\n    \"\"\"Join resident tp-N allocation names to UUIDs, without a capture document.\"\"\"\n    devices = {}\n    for item in slices[\"items\"]:\n        spec = item[\"spec\"]\n        if spec[\"driver\"] != \"gpu.nvidia.com\":\n            continue\n        for device in spec.get(\"devices\", []):\n            key = (spec[\"driver\"], spec[\"pool\"][\"name\"], device[\"name\"])\n            value = gpu_uuid(device[\"attributes\"][\"uuid\"][\"string\"])\n            if key in devices and devices[key] != value:\n                raise ValueError(\"conflicting resident ResourceSlice UUID\")\n            devices[key] = value\n    requests = {}\n    for entry in claim[\"status\"][\"allocation\"][\"devices\"][\"results\"]:\n        request = entry[\"request\"]\n        if request in requests:\n            raise ValueError(\"resident request must select exactly one GPU\")\n        requests[request] = devices[(entry[\"driver\"], entry[\"pool\"], entry[\"device\"])]\n    if set(requests) != {f\"tp-{rank}\" for rank in range(8)}:\n        raise ValueError(\"resident allocation requires exactly tp-0 through tp-7\")\n    if len(set(requests.values())) != 8:\n        raise ValueError(\"resident destination UUIDs must be unique\")\n    return {rank: requests[f\"tp-{rank}\"] for rank in range(8)}\n\n\ndef canonical_uuid(value, name):\n    if not isinstance(value, str) or str(uuid.UUID(value)) != value:\n        raise ValueError(f\"{name} must be a canonical UUID\")\n    return value\n\n\nclass PageBrokerCoordinator:\n    def __init__(\n        self,\n        claim,\n        slices,\n        service_generation,\n        root,\n        app,\n        broker_socket,\n        *,\n        artifact_root=Path(\"/checkpoints/artifacts\"),\n        broker_pvc_root=Path(\"/checkpoints/gms-pvc\"),\n    ):\n        self.claim = json.loads(json.dumps(claim))\n        self.slices = json.loads(json.dumps(slices))\n        self.destinations = allocation_destinations(self.claim, self.slices)\n        self.service_generation = canonical_uuid(\n            service_generation, \"service generation\"\n        )\n        self.root = Path(root)\n        self.app = Path(app)\n        self.broker_socket = broker_socket\n        # Do not stat, resolve, or open this PVC path during service initialization.\n        self.artifact_root = Path(artifact_root)\n        self.broker_pvc_root = Path(broker_pvc_root)\n        if any(\n            not path.is_absolute() or \"..\" in path.parts\n            for path in (self.artifact_root, self.broker_pvc_root)\n        ):\n            raise ValueError(\"artifact and broker PVC roots must be absolute\")\n        self.pvc_root = self.artifact_root.parent\n        self.lock = threading.Lock()\n        self.stop = threading.Event()\n        self.state = \"waiting\"\n        self.error = None\n        self.plan = None\n        self.capture_id = None\n        self.generation = None\n        self.dgd_uid = None\n        self.snapshot_id = None\n        self.ranks = {}\n        self.bound_servers = {}\n        self.root.mkdir(parents=True, exist_ok=True)\n        self._marker_names = [\n            \"load-trigger.json\",\n            \"load-request.json\",\n            \"restore-plan.json\",\n            \"all-ready\",\n            \"coordinator-error.json\",\n            *(f\"rank-{rank}.json\" for rank in self.destinations),\n            *(f\"published-{rank}\" for rank in self.destinations),\n        ]\n        if any((self.root / name).exists() for name in self._marker_names):\n            raise ValueError(\n                \"qualification coordinator requires fresh load state; reset is unsupported\"\n            )\n\n    def _publications(self):\n        return sum(\n            (self.root / f\"published-{rank}\").exists() for rank in self.destinations\n        )\n\n    def _online(self):\n        records = []\n        for rank, destination_uuid in self.destinations.items():\n            path = self.root / f\"online-{rank}.json\"\n            if not path.exists():\n                continue\n            record = json.loads(path.read_text())\n            for key, value in {\n                \"rank\": rank,\n                \"service_generation\": self.service_generation,\n                \"uuid\": destination_uuid,\n                \"mode\": \"pagebroker\",\n                \"payload_bytes_read\": 0,\n                \"weight_allocations\": 0,\n                \"cuda_context_current\": False,\n                \"cuda_primary_context_active\": False,\n                \"socket_device\": rank,\n                \"socket_dir\": \"/gms\",\n            }.items():\n                if record.get(key) != value:\n                    raise ValueError(f\"rank {rank} online field {key} mismatch\")\n            if (\n                not isinstance(record.get(\"weights_server_nonce\"), str)\n                or not record[\"weights_server_nonce\"]\n            ):\n                raise ValueError(\"missing GMS server incarnation\")\n            if sorted(record.get(\"server_domains_responsive\", [])) != [\n                \"kv_cache\",\n                \"weights\",\n            ]:\n                raise ValueError(\"GMS domains not responsive\")\n            daemon, online = record[\"daemon_started_epoch\"], record[\"online_epoch\"]\n            if not (\n                math.isfinite(daemon) and math.isfinite(online) and 0 < daemon <= online\n            ):\n                raise ValueError(\"invalid GMS startup timestamps\")\n            records.append(record)\n        return records\n\n    def _ready(self):\n        records = self._online() if self.state == \"waiting\" else []\n        ready = (\n            self.state == \"waiting\"\n            and len(records) == 8\n            and not any((self.root / name).exists() for name in self._marker_names)\n        )\n        if ready:\n            request = pb.Request(\n                request_id=str(uuid.uuid4()), transaction_id=\"gms-ready\"\n            )\n            response = rpc(self.broker_socket, request, timeout=5)\n            if (\n                response.WhichOneof(\"result\") != \"failure\"\n                or response.failure.code != pb.Failure.INVALID_REQUEST\n            ):\n                raise ValueError(\n                    \"PageBroker readiness probe returned unexpected response\"\n                )\n        return {\n            \"service_generation\": self.service_generation,\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"ready\": ready,\n            \"publications\": self._publications(),\n            \"state\": self.state,\n            \"online\": records,\n            \"error\": self.error,\n            \"transfer_owner\": \"resident_pagebroker_gpu_engine\",\n            \"transfer_slots_per_gpu\": 32,\n            \"chunk_mib\": 128,\n        }\n\n    def ready(self):\n        with self.lock:\n            try:\n                return self._ready()\n            except (OSError, ValueError, KeyError, TypeError) as error:\n                self._fail(error)\n                return self._ready()\n\n    def health(self):\n        with self.lock:\n            return {\n                \"healthy\": self.state != \"error\",\n                \"state\": self.state,\n                \"error\": self.error,\n            }\n\n    def _fail(self, error):\n        self.error = str(error)\n        self.state = \"error\"\n        record = {\n            \"error\": self.error,\n            \"service_generation\": self.service_generation,\n            \"dgd_uid\": self.dgd_uid,\n            \"snapshot_id\": self.snapshot_id,\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"epoch\": time.time(),\n        }\n        atomic_write(self.root / \"coordinator-error.json\", json.dumps(record))\n        emit(\"coordinator_error\", **record)\n\n    def load(self, request):\n        required = {\"dgd_uid\", \"snapshot_id\", \"generation\", \"capture_manifest_path\"}\n        if not isinstance(request, dict) or set(request) != required:\n            raise ValueError(\n                \"load requires only dgd_uid, snapshot_id, generation, capture_manifest_path\"\n            )\n        dgd_uid = canonical_uuid(request[\"dgd_uid\"], \"DGD UID\")\n        snapshot_id = canonical_uuid(request[\"snapshot_id\"], \"snapshot ID\")\n        generation = canonical_uuid(request[\"generation\"], \"load generation\")\n        if generation != dgd_uid:\n            raise ValueError(\"qualification load generation must equal its DGD UID\")\n        expected_path = self.artifact_root / snapshot_id / \"gms/capture.json\"\n        if (\n            not isinstance(request[\"capture_manifest_path\"], str)\n            or Path(request[\"capture_manifest_path\"]) != expected_path\n        ):\n            raise ValueError(\n                \"capture manifest must be the selected Snapshot artifact's gms/capture.json\"\n            )\n        with self.lock:\n            ready = self._ready()\n            if not ready[\"ready\"]:\n                raise LoadConflict(\n                    \"qualification coordinator is not pristine and ready; reset is unsupported\"\n                )\n            self.dgd_uid, self.snapshot_id, self.generation = (\n                dgd_uid,\n                snapshot_id,\n                generation,\n            )\n            self.bound_servers = {record[\"rank\"]: record for record in ready[\"online\"]}\n            self.state = \"discovering\"\n            request_epoch = time.time()\n            try:\n                atomic_write(\n                    self.root / \"load-request.json\",\n                    json.dumps({**request, \"load_request_epoch\": request_epoch}),\n                    exclusive=True,\n                )\n                discovery_start = time.time()\n                emit(\n                    \"manifest_discovery_start\",\n                    dgd_uid=dgd_uid,\n                    snapshot_id=snapshot_id,\n                    generation=generation,\n                    capture_manifest_path=str(expected_path),\n                    manifest_discovery_start_epoch=discovery_start,\n                )\n                if expected_path.resolve(strict=True) != expected_path:\n                    raise ValueError(\"capture manifest path must not traverse symlinks\")\n                with expected_path.open(\"rb\") as manifest_file:\n                    data = manifest_file.read((1 << 20) + 1)\n                if len(data) > 1 << 20:\n                    raise ValueError(\"capture manifest exceeds metadata size limit\")\n                capture = json.loads(data)\n                if not isinstance(capture, dict):\n                    raise TypeError(\"capture manifest must be an object\")\n                if capture.get(\"snapshot_content_uid\") != snapshot_id:\n                    raise ValueError(\"capture manifest Snapshot content UID mismatch\")\n                if (\n                    not isinstance(capture.get(\"snapshot_name\"), str)\n                    or not capture[\"snapshot_name\"]\n                    or capture[\"snapshot_name\"] != capture.get(\"capture_id\")\n                ):\n                    raise ValueError(\n                        \"capture manifest snapshot name/capture identity mismatch\"\n                    )\n                if capture.get(\"layout\") != {\"tp\": 8, \"pp\": 1, \"dp\": 1}:\n                    raise ValueError(\"PageBroker qualification requires a TP8 capture\")\n                if not isinstance(capture.get(\"ranks\"), list) or not all(\n                    isinstance(rank, dict) for rank in capture[\"ranks\"]\n                ):\n                    raise ValueError(\"capture ranks must be a list of records\")\n                for rank in capture[\"ranks\"]:\n                    artifact = Path(rank[\"artifact\"])\n                    if (\n                        not artifact.is_absolute()\n                        or \"..\" in artifact.parts\n                        or not artifact.is_relative_to(self.pvc_root)\n                    ):\n                        raise ValueError(\"rank artifact must remain on the mounted PVC\")\n                    if (\n                        rank[\"socket_device\"] != rank[\"rank\"]\n                        or rank[\"socket_dir\"] != \"/gms\"\n                    ):\n                        raise ValueError(\"unsupported captured GMS socket layout\")\n                # This opens only per-rank manifest metadata and checks exact IDs,\n                # sizes and hashes. Payload shards are opened by native PB later.\n                plan = resolve(capture, self.claim, self.slices)\n                ranks = {rank[\"rank\"]: rank for rank in plan[\"ranks\"]}\n                if {\n                    rank: record[\"destination_uuid\"] for rank, record in ranks.items()\n                } != self.destinations:\n                    raise ValueError(\n                        \"selected capture differs from resident DRA allocation\"\n                    )\n                self.plan, self.ranks, self.capture_id = plan, ranks, plan[\"capture_id\"]\n                discovery_complete = time.time()\n                selection = {\n                    **request,\n                    \"service_generation\": self.service_generation,\n                    \"capture_id\": self.capture_id,\n                    \"capture_manifest_sha256\": hashlib.sha256(data).hexdigest(),\n                    \"load_request_epoch\": request_epoch,\n                    \"manifest_discovery_start_epoch\": discovery_start,\n                    \"manifest_discovery_complete_epoch\": discovery_complete,\n                }\n                atomic_write(\n                    self.root / \"restore-plan.json\", json.dumps(plan), exclusive=True\n                )\n                emit(\"manifest_discovery_complete\", **selection)\n                trigger = {**selection, \"trigger_written_epoch\": time.time()}\n                atomic_write(\n                    self.root / \"load-trigger.json\", json.dumps(trigger), exclusive=True\n                )\n                self.state = \"loading\"\n                emit(\"load_trigger_written\", **trigger)\n                return trigger\n            except (OSError, ValueError, KeyError, TypeError) as error:\n                self._fail(error)\n                raise\n\n    def _load_rank(self, rank, trigger):\n        expected = self.ranks[rank]\n        online = self.bound_servers[rank]\n        operation = pb.LoadGmsWeightsRequest(\n            capture_id=self.capture_id,\n            generation=self.generation,\n            rank=rank,\n            destination_uuid=expected[\"destination_uuid\"],\n            expected_server_nonce=online[\"weights_server_nonce\"],\n            socket_path=f\"/gms/{self.service_generation}/gms_{rank}_weights.sock\",\n            artifact_directory=str(\n                self.broker_pvc_root\n                / Path(expected[\"artifact\"]).relative_to(self.pvc_root)\n            ),\n            manifest_sha256=expected[\"manifest_sha256\"],\n            allocations=[\n                pb.GmsAllocation(**allocation) for allocation in expected[\"allocations\"]\n            ],\n            timeout_seconds=180,\n        )\n        request = pb.Request(\n            request_id=str(uuid.uuid4()),\n            transaction_id=f\"gms-{self.generation}-{rank}\",\n            load_gms_weights=operation,\n        )\n        started = time.time()\n        emit(\n            \"pagebroker_request_start\",\n            rank=rank,\n            generation=self.generation,\n            dgd_uid=self.dgd_uid,\n        )\n        response = rpc(self.broker_socket, request)\n        if response.WhichOneof(\"result\") != \"gms_weights_loaded\":\n            raise RuntimeError(f\"rank {rank} PageBroker failed: {response}\")\n        report = json.loads(response.gms_weights_loaded.report)\n        for key, value in {\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"rank\": rank,\n            \"destination_uuid\": expected[\"destination_uuid\"],\n            \"server_nonce\": online[\"weights_server_nonce\"],\n            \"manifest_sha256\": expected[\"manifest_sha256\"],\n            \"allocations\": len(expected[\"allocations\"]),\n            \"bytes\": sum(a[\"aligned_size\"] for a in expected[\"allocations\"]),\n        }.items():\n            if report.get(key) != value:\n                raise ValueError(f\"PageBroker report field {key} mismatch\")\n        published = time.time()\n        if not started <= report[\"committed_epoch_ns\"] / 1e9 <= published:\n            raise ValueError(\"PageBroker commit timestamp is outside its request\")\n        record = {\n            \"rank\": rank,\n            \"uuid\": expected[\"destination_uuid\"],\n            \"dgd_uid\": self.dgd_uid,\n            \"snapshot_id\": self.snapshot_id,\n            \"service_generation\": self.service_generation,\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"workers\": 32,\n            \"chunk_mib\": 128,\n            \"mode\": \"pagebroker\",\n            \"daemon_started_epoch\": online[\"daemon_started_epoch\"],\n            \"online_epoch\": online[\"online_epoch\"],\n            \"trigger_written_epoch\": trigger[\"trigger_written_epoch\"],\n            \"started_epoch\": started,\n            \"published_epoch\": published,\n            \"elapsed_s\": published - started,\n            \"pagebroker_report\": report,\n        }\n        atomic_write(\n            self.root / f\"rank-{rank}.json\", json.dumps(record), exclusive=True\n        )\n        atomic_write(\n            self.root / f\"published-{rank}\",\n            expected[\"destination_uuid\"],\n            exclusive=True,\n        )\n        emit(\"pagebroker_published\", **record)\n\n    def watch_publication(self):\n        while not self.stop.wait(0.002):\n            with self.lock:\n                if self.state != \"loading\":\n                    continue\n                self.state = \"transferring\"\n            try:\n                trigger = json.loads((self.root / \"load-trigger.json\").read_text())\n                with ThreadPoolExecutor(max_workers=8) as pool:\n                    futures = [\n                        pool.submit(self._load_rank, rank, trigger)\n                        for rank in self.ranks\n                    ]\n                    for future in futures:\n                        future.result()\n                online = {record[\"rank\"]: record for record in self._online()}\n                if set(online) != set(self.bound_servers) or any(\n                    online[rank][\"weights_server_nonce\"]\n                    != record[\"weights_server_nonce\"]\n                    for rank, record in self.bound_servers.items()\n                ):\n                    raise ValueError(\"GMS server incarnation changed during load\")\n                emit(\"publication_verification_started\", dgd_uid=self.dgd_uid)\n                verified = subprocess.run(\n                    [\n                        sys.executable,\n                        str(self.app / \"verify_publication.py\"),\n                        str(self.root / \"restore-plan.json\"),\n                    ],\n                    check=True,\n                    capture_output=True,\n                    text=True,\n                    timeout=60,\n                )\n                (self.root / \"publication-verification.txt\").write_text(verified.stdout)\n                published = time.time()\n                atomic_write(self.root / \"all-ready\", str(published), exclusive=True)\n                with self.lock:\n                    self.state = \"published\"\n                emit(\n                    \"all_ranks_verified\",\n                    published_epoch=published,\n                    dgd_uid=self.dgd_uid,\n                    snapshot_id=self.snapshot_id,\n                    capture_id=self.capture_id,\n                    generation=self.generation,\n                )\n            except (\n                OSError,\n                ValueError,\n                KeyError,\n                TypeError,\n                RuntimeError,\n                subprocess.SubprocessError,\n            ) as error:\n                if isinstance(error, subprocess.CalledProcessError):\n                    error = RuntimeError(f\"publication verifier failed: {error.stderr}\")\n                with self.lock:\n                    self._fail(error)\n            return\n\n\ndef main():\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\"--service-generation\", required=True)\n    parser.add_argument(\"--root\", type=Path, default=Path(\"/gms\"))\n    parser.add_argument(\"--app\", type=Path, default=Path(\"/snapshot-app\"))\n    parser.add_argument(\n        \"--broker-socket\", default=\"/pagebroker/control/pagebroker.sock\"\n    )\n    args = parser.parse_args()\n    coordinator = PageBrokerCoordinator(\n        json.loads((args.app / \"claim.json\").read_text()),\n        json.loads((args.app / \"slices.json\").read_text()),\n        args.service_generation,\n        args.root,\n        args.app,\n        args.broker_socket,\n    )\n    server = make_server(coordinator, (\"0.0.0.0\", 18081))\n    watcher = threading.Thread(target=coordinator.watch_publication, daemon=True)\n    watcher.start()\n\n    def shutdown(*_):\n        threading.Thread(target=server.shutdown, daemon=True).start()\n\n    signal.signal(signal.SIGTERM, shutdown)\n    signal.signal(signal.SIGINT, shutdown)\n    emit(\"pagebroker_coordinator_listening\", service_generation=args.service_generation)\n    try:\n        server.serve_forever(poll_interval=0.1)\n    finally:\n        coordinator.stop.set()\n        server.server_close()\n        watcher.join(timeout=245)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+        "pagebroker_pb2.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.\n# SPDX-License-Identifier: Apache-2.0\n# Generated by generate_pagebroker_bindings.py; do not edit.\n# Source proto SHA256: 9a8866baa41a7a1ccdde3e349ac8791e302f3c2d8d103e269ea339158fd57c83\n# -*- coding: utf-8 -*-\n# Generated by the protocol buffer compiler.  DO NOT EDIT!\n# source: pagebroker.proto\n\"\"\"Generated protocol buffer code.\"\"\"\nfrom google.protobuf.internal import builder as _builder\nfrom google.protobuf import descriptor as _descriptor\nfrom google.protobuf import descriptor_pool as _descriptor_pool\nfrom google.protobuf import symbol_database as _symbol_database\n# @@protoc_insertion_point(imports)\n\n_sym_db = _symbol_database.Default()\n\n\n\n\nDESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\\n\\x10pagebroker.proto\\x12\\x16snapshot.pagebroker.v1\\\"9\\n\\x11\\x46ilesystemStorage\\x12\\x16\\n\\tdirectory\\x18\\x01 \\x01(\\tH\\x00\\x88\\x01\\x01\\x42\\x0c\\n\\n_directory\\\"\\xe8\\x01\\n\\x11\\x42indNativeSession\\x12\\x46\\n\\tdirection\\x18\\x01 \\x01(\\x0e\\x32\\x33.snapshot.pagebroker.v1.BindNativeSession.Direction\\x12\\x15\\n\\rcontainer_pid\\x18\\x02 \\x01(\\r\\x12\\x15\\n\\rnamespace_pid\\x18\\x03 \\x01(\\r\\x12\\x17\\n\\x0fvisible_devices\\x18\\x04 \\x03(\\t\\x12\\x12\\n\\ndevice_map\\x18\\x05 \\x01(\\t\\\"0\\n\\tDirection\\x12\\x0f\\n\\x0bUNSPECIFIED\\x10\\x00\\x12\\x08\\n\\x04SAVE\\x10\\x01\\x12\\x08\\n\\x04LOAD\\x10\\x02\\\"\\xc6\\x01\\n\\x14NativeSessionRequest\\x12I\\n\\toperation\\x18\\x01 \\x01(\\x0e\\x32\\x36.snapshot.pagebroker.v1.NativeSessionRequest.Operation\\x12\\x12\\n\\ntarget_pid\\x18\\x02 \\x01(\\r\\\"O\\n\\tOperation\\x12\\x0f\\n\\x0bUNSPECIFIED\\x10\\x00\\x12\\x08\\n\\x04LOCK\\x10\\x01\\x12\\x0b\\n\\x07PREPARE\\x10\\x02\\x12\\x0c\\n\\x08TRANSFER\\x10\\x03\\x12\\x0c\\n\\x08\\x43OMPLETE\\x10\\x04\\\"V\\n\\x12NativeSessionReply\\x12\\x0e\\n\\x06report\\x18\\x01 \\x01(\\t\\x12\\x30\\n\\x07\\x66\\x61ilure\\x18\\x02 \\x01(\\x0b\\x32\\x1f.snapshot.pagebroker.v1.Failure\\\"[\\n\\rGmsAllocation\\x12\\x15\\n\\rallocation_id\\x18\\x01 \\x01(\\t\\x12\\x14\\n\\x0c\\x61ligned_size\\x18\\x02 \\x01(\\x04\\x12\\r\\n\\x05shard\\x18\\x03 \\x01(\\t\\x12\\x0e\\n\\x06offset\\x18\\x04 \\x01(\\x04\\\"\\xa5\\x02\\n\\x15LoadGmsWeightsRequest\\x12\\x12\\n\\ncapture_id\\x18\\x01 \\x01(\\t\\x12\\x12\\n\\ngeneration\\x18\\x02 \\x01(\\t\\x12\\x0c\\n\\x04rank\\x18\\x03 \\x01(\\r\\x12\\x18\\n\\x10\\x64\\x65stination_uuid\\x18\\x04 \\x01(\\t\\x12\\x1d\\n\\x15\\x65xpected_server_nonce\\x18\\x05 \\x01(\\t\\x12\\x13\\n\\x0bsocket_path\\x18\\x06 \\x01(\\t\\x12\\x1a\\n\\x12\\x61rtifact_directory\\x18\\x07 \\x01(\\t\\x12\\x17\\n\\x0fmanifest_sha256\\x18\\x08 \\x01(\\t\\x12:\\n\\x0b\\x61llocations\\x18\\t \\x03(\\x0b\\x32%.snapshot.pagebroker.v1.GmsAllocation\\x12\\x17\\n\\x0ftimeout_seconds\\x18\\n \\x01(\\r\\\"\\\"\\n\\x10GmsWeightsLoaded\\x12\\x0e\\n\\x06report\\x18\\x01 \\x01(\\t\\\"Y\\n\\x0eStorageBackend\\x12?\\n\\nfilesystem\\x18\\x01 \\x01(\\x0b\\x32).snapshot.pagebroker.v1.FilesystemStorageH\\x00\\x42\\x06\\n\\x04kind\\\"\\x13\\n\\x11PosixCopyIOEngine\\\"S\\n\\x08IOEngine\\x12?\\n\\nposix_copy\\x18\\x01 \\x01(\\x0b\\x32).snapshot.pagebroker.v1.PosixCopyIOEngineH\\x00\\x42\\x06\\n\\x04kind\\\"\\x83\\x01\\n\\x14StagedRestoreRequest\\x12\\x36\\n\\x06source\\x18\\x01 \\x01(\\x0b\\x32&.snapshot.pagebroker.v1.StorageBackend\\x12\\x33\\n\\tio_engine\\x18\\x02 \\x01(\\x0b\\x32 .snapshot.pagebroker.v1.IOEngine\\\"\\x83\\x01\\n\\x14\\x44irectRestoreRequest\\x12\\x36\\n\\x06source\\x18\\x01 \\x01(\\x0b\\x32&.snapshot.pagebroker.v1.StorageBackend\\x12\\x33\\n\\tio_engine\\x18\\x02 \\x01(\\x0b\\x32 .snapshot.pagebroker.v1.IOEngine\\\"\\x92\\x01\\n\\x1ePrepareStagedCheckpointRequest\\x12;\\n\\x0b\\x64\\x65stination\\x18\\x01 \\x01(\\x0b\\x32&.snapshot.pagebroker.v1.StorageBackend\\x12\\x33\\n\\tio_engine\\x18\\x02 \\x01(\\x0b\\x32 .snapshot.pagebroker.v1.IOEngine\\\"\\x0f\\n\\rCommitRequest\\\"\\x0e\\n\\x0c\\x41\\x62ortRequest\\\"\\xd6\\x04\\n\\x07Request\\x12\\x17\\n\\nrequest_id\\x18\\x01 \\x01(\\tH\\x01\\x88\\x01\\x01\\x12\\x1b\\n\\x0etransaction_id\\x18\\x02 \\x01(\\tH\\x02\\x88\\x01\\x01\\x12\\x46\\n\\x0estaged_restore\\x18\\x03 \\x01(\\x0b\\x32,.snapshot.pagebroker.v1.StagedRestoreRequestH\\x00\\x12[\\n\\x19prepare_staged_checkpoint\\x18\\x04 \\x01(\\x0b\\x32\\x36.snapshot.pagebroker.v1.PrepareStagedCheckpointRequestH\\x00\\x12\\x37\\n\\x06\\x63ommit\\x18\\x05 \\x01(\\x0b\\x32%.snapshot.pagebroker.v1.CommitRequestH\\x00\\x12\\x35\\n\\x05\\x61\\x62ort\\x18\\x06 \\x01(\\x0b\\x32$.snapshot.pagebroker.v1.AbortRequestH\\x00\\x12\\x46\\n\\x0e\\x64irect_restore\\x18\\x07 \\x01(\\x0b\\x32,.snapshot.pagebroker.v1.DirectRestoreRequestH\\x00\\x12@\\n\\x0b\\x62ind_native\\x18\\t \\x01(\\x0b\\x32).snapshot.pagebroker.v1.BindNativeSessionH\\x00\\x12I\\n\\x10load_gms_weights\\x18\\n \\x01(\\x0b\\x32-.snapshot.pagebroker.v1.LoadGmsWeightsRequestH\\x00\\x42\\t\\n\\x07\\x63ommandB\\r\\n\\x0b_request_idB\\x11\\n\\x0f_transaction_id\\\"J\\n\\x16StagedRestoreDirectory\\x12\\x1c\\n\\x0fimage_directory\\x18\\x01 \\x01(\\tH\\x00\\x88\\x01\\x01\\x42\\x12\\n\\x10_image_directory\\\"\\x14\\n\\x12\\x44irectRestoreReady\\\"M\\n\\x19StagedCheckpointDirectory\\x12\\x1c\\n\\x0fimage_directory\\x18\\x01 \\x01(\\tH\\x00\\x88\\x01\\x01\\x42\\x12\\n\\x10_image_directory\\\"\\x10\\n\\x0e\\x43ommitComplete\\\"\\x0f\\n\\rAbortComplete\\\"\\x92\\x02\\n\\x07\\x46\\x61ilure\\x12\\x37\\n\\x04\\x63ode\\x18\\x01 \\x01(\\x0e\\x32$.snapshot.pagebroker.v1.Failure.CodeH\\x00\\x88\\x01\\x01\\x12\\x14\\n\\x07message\\x18\\x02 \\x01(\\tH\\x01\\x88\\x01\\x01\\\"\\xa2\\x01\\n\\x04\\x43ode\\x12\\x0f\\n\\x0bUNSPECIFIED\\x10\\x00\\x12\\x13\\n\\x0fINVALID_REQUEST\\x10\\x01\\x12\\x19\\n\\x15TRANSACTION_NOT_FOUND\\x10\\x02\\x12\\x18\\n\\x14TRANSACTION_CONFLICT\\x10\\x03\\x12\\x18\\n\\x14INSUFFICIENT_STORAGE\\x10\\x04\\x12\\x11\\n\\rSTORAGE_ERROR\\x10\\x05\\x12\\x12\\n\\x0eINTERNAL_ERROR\\x10\\x06\\x42\\x07\\n\\x05_codeB\\n\\n\\x08_message\\\"\\xac\\x05\\n\\x08Response\\x12\\x17\\n\\nrequest_id\\x18\\x01 \\x01(\\tH\\x01\\x88\\x01\\x01\\x12\\x1b\\n\\x0etransaction_id\\x18\\x02 \\x01(\\tH\\x02\\x88\\x01\\x01\\x12R\\n\\x18staged_restore_directory\\x18\\x03 \\x01(\\x0b\\x32..snapshot.pagebroker.v1.StagedRestoreDirectoryH\\x00\\x12X\\n\\x1bstaged_checkpoint_directory\\x18\\x04 \\x01(\\x0b\\x32\\x31.snapshot.pagebroker.v1.StagedCheckpointDirectoryH\\x00\\x12\\x41\\n\\x0f\\x63ommit_complete\\x18\\x05 \\x01(\\x0b\\x32&.snapshot.pagebroker.v1.CommitCompleteH\\x00\\x12?\\n\\x0e\\x61\\x62ort_complete\\x18\\x06 \\x01(\\x0b\\x32%.snapshot.pagebroker.v1.AbortCompleteH\\x00\\x12\\x32\\n\\x07\\x66\\x61ilure\\x18\\x07 \\x01(\\x0b\\x32\\x1f.snapshot.pagebroker.v1.FailureH\\x00\\x12J\\n\\x14\\x64irect_restore_ready\\x18\\x08 \\x01(\\x0b\\x32*.snapshot.pagebroker.v1.DirectRestoreReadyH\\x00\\x12\\x44\\n\\x0enative_session\\x18\\n \\x01(\\x0b\\x32*.snapshot.pagebroker.v1.NativeSessionReplyH\\x00\\x12\\x46\\n\\x12gms_weights_loaded\\x18\\x0b \\x01(\\x0b\\x32(.snapshot.pagebroker.v1.GmsWeightsLoadedH\\x00\\x42\\x08\\n\\x06resultB\\r\\n\\x0b_request_idB\\x11\\n\\x0f_transaction_idB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\\x06proto3')\n\n_builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, globals())\n_builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'pagebroker_pb2', globals())\nif _descriptor._USE_C_DESCRIPTORS == False:\n\n  DESCRIPTOR._options = None\n  DESCRIPTOR._serialized_options = b'Z7github.com/ai-dynamo/snapshot/agent/internal/pagebroker'\n  _FILESYSTEMSTORAGE._serialized_start=44\n  _FILESYSTEMSTORAGE._serialized_end=101\n  _BINDNATIVESESSION._serialized_start=104\n  _BINDNATIVESESSION._serialized_end=336\n  _BINDNATIVESESSION_DIRECTION._serialized_start=288\n  _BINDNATIVESESSION_DIRECTION._serialized_end=336\n  _NATIVESESSIONREQUEST._serialized_start=339\n  _NATIVESESSIONREQUEST._serialized_end=537\n  _NATIVESESSIONREQUEST_OPERATION._serialized_start=458\n  _NATIVESESSIONREQUEST_OPERATION._serialized_end=537\n  _NATIVESESSIONREPLY._serialized_start=539\n  _NATIVESESSIONREPLY._serialized_end=625\n  _GMSALLOCATION._serialized_start=627\n  _GMSALLOCATION._serialized_end=718\n  _LOADGMSWEIGHTSREQUEST._serialized_start=721\n  _LOADGMSWEIGHTSREQUEST._serialized_end=1014\n  _GMSWEIGHTSLOADED._serialized_start=1016\n  _GMSWEIGHTSLOADED._serialized_end=1050\n  _STORAGEBACKEND._serialized_start=1052\n  _STORAGEBACKEND._serialized_end=1141\n  _POSIXCOPYIOENGINE._serialized_start=1143\n  _POSIXCOPYIOENGINE._serialized_end=1162\n  _IOENGINE._serialized_start=1164\n  _IOENGINE._serialized_end=1247\n  _STAGEDRESTOREREQUEST._serialized_start=1250\n  _STAGEDRESTOREREQUEST._serialized_end=1381\n  _DIRECTRESTOREREQUEST._serialized_start=1384\n  _DIRECTRESTOREREQUEST._serialized_end=1515\n  _PREPARESTAGEDCHECKPOINTREQUEST._serialized_start=1518\n  _PREPARESTAGEDCHECKPOINTREQUEST._serialized_end=1664\n  _COMMITREQUEST._serialized_start=1666\n  _COMMITREQUEST._serialized_end=1681\n  _ABORTREQUEST._serialized_start=1683\n  _ABORTREQUEST._serialized_end=1697\n  _REQUEST._serialized_start=1700\n  _REQUEST._serialized_end=2298\n  _STAGEDRESTOREDIRECTORY._serialized_start=2300\n  _STAGEDRESTOREDIRECTORY._serialized_end=2374\n  _DIRECTRESTOREREADY._serialized_start=2376\n  _DIRECTRESTOREREADY._serialized_end=2396\n  _STAGEDCHECKPOINTDIRECTORY._serialized_start=2398\n  _STAGEDCHECKPOINTDIRECTORY._serialized_end=2475\n  _COMMITCOMPLETE._serialized_start=2477\n  _COMMITCOMPLETE._serialized_end=2493\n  _ABORTCOMPLETE._serialized_start=2495\n  _ABORTCOMPLETE._serialized_end=2510\n  _FAILURE._serialized_start=2513\n  _FAILURE._serialized_end=2787\n  _FAILURE_CODE._serialized_start=2604\n  _FAILURE_CODE._serialized_end=2766\n  _RESPONSE._serialized_start=2790\n  _RESPONSE._serialized_end=3474\n# @@protoc_insertion_point(module_scope)\n",
+        "resident_coordinator.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"CPU-only, single-use trigger and publication gate for resident GMS V1 ranks.\n\nEach generation uses a fresh shared directory. Readiness requires all server\nsockets and transfer lanes to be initialized without allocating or reading any\nweight payload. POST /load begins transfers; only exact allocation verification\nallows the restored engine to pass /gms/all-ready.\n\"\"\"\n\nimport argparse\nimport json\nimport math\nimport os\nimport signal\nimport subprocess\nimport sys\nimport threading\nimport time\nimport uuid\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\nfrom pathlib import Path\n\nfrom resolve_plan import resolve\n\n\ndef emit(event, **fields):\n    print(json.dumps({\"event\": event, \"epoch\": time.time(), **fields}), flush=True)\n\n\ndef atomic_write(path, text, exclusive=False):\n    temporary = path.with_name(path.name + \".\" + uuid.uuid4().hex + \".tmp\")\n    try:\n        temporary.write_text(text)\n        if exclusive:\n            os.link(temporary, path)\n        else:\n            os.replace(temporary, path)\n    finally:\n        temporary.unlink(missing_ok=True)\n\n\nclass LoadConflict(ValueError):\n    pass\n\n\nclass Coordinator:\n    def __init__(self, plan, generation, workers, chunk_mib, root, app):\n        self.plan = plan\n        self.capture_id = plan[\"capture_id\"]\n        self.generation = generation\n        self.workers = workers\n        self.chunk_mib = chunk_mib\n        self.root = Path(root)\n        self.app = Path(app)\n        self.lock = threading.Lock()\n        self.stop = threading.Event()\n        self.state = \"waiting\"\n        self.error = None\n        self.ranks = {rank[\"rank\"]: rank for rank in plan[\"ranks\"]}\n        if set(self.ranks) != set(range(8)):\n            raise ValueError(\"resident experiment requires exactly ranks 0 through 7\")\n        self.root.mkdir(parents=True, exist_ok=True)\n        stale = [\n            name\n            for name in [\n                \"load-trigger.json\",\n                \"all-ready\",\n                \"coordinator-error.json\",\n                *(f\"rank-{rank}.json\" for rank in self.ranks),\n                *(f\"published-{rank}\" for rank in self.ranks),\n            ]\n            if (self.root / name).exists()\n        ]\n        if stale:\n            raise ValueError(f\"resident generation directory has stale state: {stale}\")\n        atomic_write(self.root / \"restore-plan.json\", json.dumps(plan))\n\n    def _publications(self):\n        return sum((self.root / f\"published-{rank}\").exists() for rank in self.ranks)\n\n    def _online(self):\n        records = []\n        for rank, expected in self.ranks.items():\n            path = self.root / f\"online-{rank}.json\"\n            if not path.exists():\n                continue\n            record = json.loads(path.read_text())\n            required = {\n                \"rank\": rank,\n                \"capture_id\": self.capture_id,\n                \"generation\": self.generation,\n                \"uuid\": expected[\"destination_uuid\"],\n                \"workers\": self.workers,\n                \"chunk_mib\": self.chunk_mib,\n                \"loader_lanes_ready\": self.workers,\n                \"pinned_bytes\": self.workers * 2 * self.chunk_mib * 1024**2,\n                \"payload_bytes_read\": 0,\n                \"weight_allocations\": 0,\n            }\n            for key, value in required.items():\n                if record.get(key) != value:\n                    raise ValueError(f\"rank {rank} online field {key} mismatch\")\n            if sorted(record.get(\"server_domains_responsive\", [])) != [\n                \"kv_cache\",\n                \"weights\",\n            ]:\n                raise ValueError(f\"rank {rank} server domains are not responsive\")\n            online = record.get(\"online_epoch\", 0)\n            daemon = record.get(\"daemon_started_epoch\", 0)\n            if not (\n                math.isfinite(online) and math.isfinite(daemon) and 0 < daemon <= online\n            ):\n                raise ValueError(f\"rank {rank} has invalid initialization timestamps\")\n            records.append(record)\n        return records\n\n    def _ready(self):\n        publications = self._publications()\n        records = self._online() if self.state == \"waiting\" else []\n        stale = any(\n            (self.root / name).exists()\n            for name in [\n                \"load-trigger.json\",\n                \"all-ready\",\n                *(f\"rank-{rank}.json\" for rank in self.ranks),\n            ]\n        )\n        return {\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"ready\": self.state == \"waiting\"\n            and len(records) == 8\n            and publications == 0\n            and not stale,\n            \"publications\": publications,\n            \"state\": self.state,\n            \"online\": records,\n            \"error\": self.error,\n        }\n\n    def ready(self):\n        with self.lock:\n            try:\n                return self._ready()\n            except (OSError, ValueError, KeyError, TypeError) as error:\n                self._fail(error)\n                return self._ready()\n\n    def health(self):\n        with self.lock:\n            return {\n                \"healthy\": self.state != \"error\",\n                \"state\": self.state,\n                \"error\": self.error,\n            }\n\n    def load(self, request):\n        if not isinstance(request, dict) or set(request) != {\n            \"capture_id\",\n            \"generation\",\n        }:\n            raise ValueError(\"load request must contain only capture_id and generation\")\n        with self.lock:\n            if request != {\n                \"capture_id\": self.capture_id,\n                \"generation\": self.generation,\n            }:\n                raise LoadConflict(\"load request capture or generation mismatch\")\n            if not self._ready()[\"ready\"]:\n                raise LoadConflict(\"generation is not pristine and ready for a load\")\n            trigger = {**request, \"trigger_written_epoch\": time.time()}\n            try:\n                atomic_write(\n                    self.root / \"load-trigger.json\", json.dumps(trigger), exclusive=True\n                )\n            except FileExistsError as error:\n                raise LoadConflict(\"load trigger already exists\") from error\n            self.state = \"loading\"\n            emit(\"load_trigger_written\", **trigger)\n            return trigger\n\n    def _fail(self, error):\n        self.error = str(error)\n        self.state = \"error\"\n        record = {\n            \"error\": self.error,\n            \"capture_id\": self.capture_id,\n            \"generation\": self.generation,\n            \"epoch\": time.time(),\n        }\n        atomic_write(self.root / \"coordinator-error.json\", json.dumps(record))\n        emit(\"coordinator_error\", **record)\n\n    def watch_publication(self):\n        while not self.stop.wait(0.005):\n            with self.lock:\n                if self.state != \"loading\":\n                    continue\n            try:\n                if self._publications() != 8:\n                    continue\n                for rank, expected in self.ranks.items():\n                    record = json.loads((self.root / f\"rank-{rank}.json\").read_text())\n                    if any(\n                        record.get(key) != value\n                        for key, value in {\n                            \"rank\": rank,\n                            \"capture_id\": self.capture_id,\n                            \"generation\": self.generation,\n                            \"uuid\": expected[\"destination_uuid\"],\n                            \"workers\": self.workers,\n                            \"chunk_mib\": self.chunk_mib,\n                        }.items()\n                    ):\n                        raise ValueError(f\"rank {rank} published identity mismatch\")\n                    if (\n                        self.root / f\"published-{rank}\"\n                    ).read_text().strip() != expected[\"destination_uuid\"]:\n                        raise ValueError(f\"rank {rank} published marker UUID mismatch\")\n                emit(\"publication_verification_started\")\n                verified = subprocess.run(\n                    [\n                        sys.executable,\n                        str(self.app / \"verify_publication.py\"),\n                        str(self.root / \"restore-plan.json\"),\n                    ],\n                    check=True,\n                    capture_output=True,\n                    text=True,\n                    timeout=60,\n                )\n                (self.root / \"publication-verification.txt\").write_text(verified.stdout)\n                published = time.time()\n                atomic_write(self.root / \"all-ready\", str(published), exclusive=True)\n                with self.lock:\n                    self.state = \"published\"\n                emit(\n                    \"all_ranks_verified\",\n                    published_epoch=published,\n                    capture_id=self.capture_id,\n                    generation=self.generation,\n                )\n            except (\n                OSError,\n                ValueError,\n                KeyError,\n                TypeError,\n                subprocess.SubprocessError,\n            ) as error:\n                if isinstance(error, subprocess.CalledProcessError):\n                    error = RuntimeError(f\"publication verifier failed: {error.stderr}\")\n                with self.lock:\n                    self._fail(error)\n\n\ndef make_server(coordinator, address):\n    class Handler(BaseHTTPRequestHandler):\n        def respond(self, status, payload):\n            encoded = json.dumps(payload).encode()\n            self.send_response(status)\n            self.send_header(\"Content-Type\", \"application/json\")\n            self.send_header(\"Content-Length\", str(len(encoded)))\n            self.end_headers()\n            self.wfile.write(encoded)\n\n        def do_GET(self):\n            if self.path == \"/ready\":\n                status = coordinator.ready()\n                self.respond(200 if status[\"ready\"] else 503, status)\n            elif self.path == \"/healthz\":\n                status = coordinator.health()\n                self.respond(200 if status[\"healthy\"] else 503, status)\n            else:\n                self.respond(404, {\"error\": \"unknown endpoint\"})\n\n        def do_POST(self):\n            if self.path != \"/load\":\n                self.respond(404, {\"error\": \"unknown endpoint\"})\n                return\n            try:\n                length = int(self.headers.get(\"Content-Length\", \"0\"))\n                if not 0 < length <= 4096:\n                    raise ValueError(\"invalid load body length\")\n                payload = json.loads(self.rfile.read(length))\n                result = coordinator.load(payload)\n            except LoadConflict as error:\n                self.respond(409, {\"error\": str(error)})\n            except (ValueError, TypeError) as error:\n                self.respond(400, {\"error\": str(error)})\n            except (OSError, RuntimeError) as error:\n                with coordinator.lock:\n                    coordinator._fail(error)\n                self.respond(500, {\"error\": str(error)})\n            else:\n                self.respond(200, result)\n\n        def log_message(self, message, *args):\n            emit(\"http\", message=message % args)\n\n    return ThreadingHTTPServer(address, Handler)\n\n\ndef main():\n    parser = argparse.ArgumentParser(description=__doc__)\n    parser.add_argument(\"--capture-id\", required=True)\n    parser.add_argument(\"--generation\", required=True)\n    parser.add_argument(\"--workers\", type=int, default=16)\n    parser.add_argument(\"--chunk-mib\", type=int, default=128)\n    parser.add_argument(\"--root\", type=Path, default=Path(\"/gms\"))\n    parser.add_argument(\"--app\", type=Path, default=Path(\"/snapshot-app\"))\n    parser.add_argument(\"--port\", type=int, default=18081)\n    args = parser.parse_args()\n    if args.workers < 1 or args.chunk_mib < 1:\n        parser.error(\"workers and chunk-mib must be positive\")\n    plan = resolve(\n        *(\n            json.loads((args.app / name).read_text())\n            for name in [\"capture.json\", \"claim.json\", \"slices.json\"]\n        )\n    )\n    if plan[\"capture_id\"] != args.capture_id:\n        raise ValueError(\"coordinator capture ID differs from the resolved artifact\")\n    if plan[\"cuda_device_map\"] != os.environ.get(\"SNAPSHOT_CUDA_DEVICE_MAP\"):\n        raise ValueError(\"coordinator CUDA map differs from the resolved rank mapping\")\n    coordinator = Coordinator(\n        plan, args.generation, args.workers, args.chunk_mib, args.root, args.app\n    )\n    server = make_server(coordinator, (\"0.0.0.0\", args.port))\n    watcher = threading.Thread(target=coordinator.watch_publication, daemon=True)\n    watcher.start()\n\n    def shutdown(*_):\n        threading.Thread(target=server.shutdown, daemon=True).start()\n\n    signal.signal(signal.SIGTERM, shutdown)\n    signal.signal(signal.SIGINT, shutdown)\n    emit(\n        \"coordinator_listening\",\n        port=args.port,\n        capture_id=args.capture_id,\n        generation=args.generation,\n    )\n    try:\n        server.serve_forever(poll_interval=0.1)\n    finally:\n        coordinator.stop.set()\n        server.server_close()\n        watcher.join(timeout=65)\n\n\nif __name__ == \"__main__\":\n    main()\n",
+        "resolve_plan.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Join immutable capture rank records with named DRA results, never GPU order.\n\nThe capture document must carry artifact manifest SHA256 and exact allocation\nIDs/sizes, plus layout and per-rank source UUID, captured ordinal and socket device.\nThe output's cuda_device_map is passed to the experimental Snapshot agent through\nSNAPSHOT_CUDA_DEVICE_MAP. The very same rank records configure the GMS processes.\n\"\"\"\n\nimport argparse\nimport hashlib\nimport json\nfrom pathlib import Path\nfrom uuid import UUID\n\n\ndef gpu_uuid(value):\n    if not isinstance(value, str) or not value.startswith(\"GPU-\"):\n        raise ValueError(\"expected GPU UUID\")\n    if str(UUID(value[4:])) != value[4:]:\n        raise ValueError(\"expected canonical GPU UUID\")\n    return value\n\n\ndef resolve_destinations(capture, claim, slices):\n    \"\"\"Resolve named DRA GPUs without opening remote artifact files.\"\"\"\n    ranks = capture[\"ranks\"]\n    if not ranks or sorted(r[\"rank\"] for r in ranks) != list(range(len(ranks))):\n        raise ValueError(\"capture must contain each logical rank exactly once\")\n    if not capture[\"capture_id\"] or not capture[\"layout\"]:\n        raise ValueError(\"missing capture identity or parallelism layout\")\n    devices = {}\n    for item in slices[\"items\"]:\n        spec = item[\"spec\"]\n        if spec[\"driver\"] != \"gpu.nvidia.com\":\n            continue\n        for device in spec.get(\"devices\", []):\n            key = (spec[\"driver\"], spec[\"pool\"][\"name\"], device[\"name\"])\n            value = device[\"attributes\"][\"uuid\"][\"string\"]\n            if key in devices and devices[key] != value:\n                raise ValueError(\"conflicting ResourceSlice UUID\")\n            devices[key] = gpu_uuid(value)\n    allocated = {}\n    for result in claim[\"status\"][\"allocation\"][\"devices\"][\"results\"]:\n        request = result[\"request\"]\n        if request in allocated:\n            raise ValueError(\"rank request must select exactly one GPU\")\n        allocated[request] = devices[\n            (result[\"driver\"], result[\"pool\"], result[\"device\"])\n        ]\n    if set(allocated) != {f\"tp-{r['rank']}\" for r in ranks}:\n        raise ValueError(\"named DRA requests do not match captured ranks\")\n    if len(set(allocated.values())) != len(allocated):\n        raise ValueError(\"duplicate destination_uuid\")\n    return allocated\n\n\ndef resolve(capture, claim, slices):\n    ranks = capture[\"ranks\"]\n    allocated = resolve_destinations(capture, claim, slices)\n    resolved = []\n    for rank in sorted(ranks, key=lambda r: r[\"rank\"]):\n        gpu_uuid(rank[\"source_uuid\"])\n        manifest = Path(rank[\"artifact\"]) / \"manifest.json\"\n        data = manifest.read_bytes()\n        if hashlib.sha256(data).hexdigest() != rank[\"manifest_sha256\"]:\n            raise ValueError(\"artifact is not from this capture\")\n        allocations = json.loads(data)[\"allocations\"]\n        expected = sorted((x[\"allocation_id\"], x[\"aligned_size\"]) for x in allocations)\n        if expected != sorted(\n            (x[\"allocation_id\"], x[\"aligned_size\"]) for x in rank[\"allocations\"]\n        ):\n            raise ValueError(\"allocation IDs/sizes differ from captured engine\")\n        resolved.append(\n            {\n                **rank,\n                \"request\": f\"tp-{rank['rank']}\",\n                \"destination_uuid\": allocated[f\"tp-{rank['rank']}\"],\n                \"local_device\": 0,\n            }\n        )\n    for key in (\"source_uuid\", \"destination_uuid\", \"captured_ordinal\", \"socket_device\"):\n        if len({r[key] for r in resolved}) != len(ranks):\n            raise ValueError(f\"duplicate {key}\")\n    return {\n        \"capture_id\": capture[\"capture_id\"],\n        \"layout\": capture[\"layout\"],\n        \"claim_uid\": claim[\"metadata\"][\"uid\"],\n        \"ranks\": resolved,\n        \"cuda_device_map\": \",\".join(\n            r[\"source_uuid\"] + \"=\" + r[\"destination_uuid\"] for r in resolved\n        ),\n    }\n\n\nif __name__ == \"__main__\":\n    p = argparse.ArgumentParser()\n    for name in (\"capture\", \"claim\", \"slices\"):\n        p.add_argument(\"--\" + name, required=True, type=Path)\n    args = p.parse_args()\n    print(\n        json.dumps(\n            resolve(\n                *(\n                    json.loads(getattr(args, n).read_text())\n                    for n in (\"capture\", \"claim\", \"slices\")\n                )\n            ),\n            indent=2,\n        )\n    )\n",
+        "verify_publication.py": "# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n# SPDX-License-Identifier: Apache-2.0\n\"\"\"Validate all rank publications against one plan, without initializing CUDA.\"\"\"\n\nimport argparse\nimport json\nfrom pathlib import Path\n\nfrom gpu_memory_service.common.locks import RequestedLockType\nfrom gpu_memory_service.v1.client.session import _GMSClientSession\nfrom gpu_memory_service.v1.protocol import (\n    ListAllocationsRequest,\n    ListAllocationsResponse,\n)\n\np = argparse.ArgumentParser()\np.add_argument(\"plan\", type=Path)\na = p.parse_args()\nplan = json.loads(a.plan.read_text())\nfor r in plan[\"ranks\"]:\n    socket = f\"{r['socket_dir']}/gms_{r['socket_device']}_weights.sock\"\n    session = _GMSClientSession(\n        socket, RequestedLockType.RO, connect_timeout=10, admission_timeout=10\n    )\n    try:\n        if session.identity[1] != r[\"destination_uuid\"]:\n            raise RuntimeError(\"wrong rank GPU\")\n        records = session._call(\n            ListAllocationsRequest(), ListAllocationsResponse\n        ).allocations\n        expected = sorted(\n            (x[\"allocation_id\"], x[\"aligned_size\"]) for x in r[\"allocations\"]\n        )\n        if sorted((x.allocation_id, x.aligned_size) for x in records) != expected:\n            raise RuntimeError(\"wrong capture allocations\")\n    finally:\n        session.close()\nprint(\n    json.dumps(\n        {\n            \"capture_id\": plan[\"capture_id\"],\n            \"published\": True,\n            \"ranks\": len(plan[\"ranks\"]),\n        }\n    )\n)\n",
+        "claim.json": "{\"kind\": \"ResourceClaim\", \"apiVersion\": \"resource.k8s.io/v1\", \"metadata\": {\"name\": \"gms-v1-glm-source-0928\", \"namespace\": \"schwinns-vcluster\", \"uid\": \"5cdbff9e-f2d4-4116-ad72-ed8147b6ef2f\", \"resourceVersion\": \"11548155\", \"creationTimestamp\": \"2026-09-29T07:04:02Z\", \"managedFields\": [{\"manager\": \"OpenAPI-Generator\", \"operation\": \"Update\", \"apiVersion\": \"resource.k8s.io/v1\", \"time\": \"2026-09-29T07:04:02Z\", \"fieldsType\": \"FieldsV1\", \"fieldsV1\": {\"f:spec\": {\"f:devices\": {\"f:requests\": {}}}}}, {\"manager\": \"vcluster\", \"operation\": \"Update\", \"apiVersion\": \"resource.k8s.io/v1\", \"time\": \"2026-09-29T07:17:03Z\", \"fieldsType\": \"FieldsV1\", \"fieldsV1\": {\"f:status\": {\"f:allocation\": {\".\": {}, \"f:devices\": {\".\": {}, \"f:results\": {}}, \"f:nodeSelector\": {}}, \"f:reservedFor\": {\".\": {}, \"k:{\\\"uid\\\":\\\"b5602569-5ea4-4e51-801b-e8b5d997d4b4\\\"}\": {\".\": {}, \"f:name\": {}, \"f:resource\": {}, \"f:uid\": {}}}}}, \"subresource\": \"status\"}]}, \"spec\": {\"devices\": {\"requests\": [{\"name\": \"tp-0\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-1\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-2\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-02ff0cc1-647f-dee7-8365-921738e945a6\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-3\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-0d5ad102-eb8f-922a-173e-e91033320e0f\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-4\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-5\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-4fba7684-5a96-6280-91ff-b41f7484564c\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-6\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}, {\"name\": \"tp-7\", \"exactly\": {\"deviceClassName\": \"gpu.nvidia.com\", \"selectors\": [{\"cel\": {\"expression\": \"device.attributes[\\\"gpu.nvidia.com\\\"].uuid == \\\"GPU-32a6c51c-d07d-7513-86b5-813b64e452d2\\\"\"}}], \"allocationMode\": \"ExactCount\", \"count\": 1}}]}}, \"status\": {\"allocation\": {\"devices\": {\"results\": [{\"request\": \"tp-0\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-6\"}, {\"request\": \"tp-1\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-7\"}, {\"request\": \"tp-2\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-0\"}, {\"request\": \"tp-3\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-1\"}, {\"request\": \"tp-4\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-2\"}, {\"request\": \"tp-5\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-3\"}, {\"request\": \"tp-6\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-4\"}, {\"request\": \"tp-7\", \"driver\": \"gpu.nvidia.com\", \"pool\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"device\": \"gpu-5\"}]}, \"nodeSelector\": {\"nodeSelectorTerms\": [{\"matchFields\": [{\"key\": \"metadata.name\", \"operator\": \"In\", \"values\": [\"cluster-0967a26d-pool-14bee067-prctr-s2877\"]}]}]}}, \"reservedFor\": [{\"resource\": \"pods\", \"name\": \"gms-v1-claim-hold-0928\", \"uid\": \"b5602569-5ea4-4e51-801b-e8b5d997d4b4\"}]}}",
+        "slices.json": "{\"apiVersion\": \"v1\", \"items\": [{\"apiVersion\": \"resource.k8s.io/v1\", \"kind\": \"ResourceSlice\", \"metadata\": {\"creationTimestamp\": \"2026-09-09T19:21:15Z\", \"generateName\": \"cluster-0967a26d-pool-14bee067-prctr-l9nsv-gpu.nvidia.com-\", \"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-l9nsv-gpu.nvidia.com-f8n4r\", \"ownerReferences\": [{\"apiVersion\": \"v1\", \"controller\": true, \"kind\": \"Node\", \"name\": \"cluster-0967a26d-pool-14bee067-prctr-l9nsv\", \"uid\": \"12f3acd8-ef2c-4a7f-ae9d-0d28a3d093ee\"}], \"resourceVersion\": \"1376191661\", \"uid\": \"bb2e8409-a7b8-42cf-93fe-dd4e75b9af4b\"}, \"spec\": {\"devices\": [{\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ba:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:b7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-fd77376f-599d-a407-48c4-e89927e80d3f\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-6\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ca:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:c7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-f9f66bb6-1527-586f-d438-aca8e5fecba0\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-7\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:18:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:15\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-c7473cee-8224-6a02-a763-4c4972e8a527\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-0\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:29:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:26\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-686152f7-c27c-ae8c-4354-8ef9abf75c99\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-1\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:3a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:37\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-df2d9af8-3862-8ca8-f201-1f1ddf134fbe\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-2\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:4b:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:48\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-0a6caa6b-560e-a317-6db1-1ebadd98b5e7\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-3\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:9a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:97\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-81cfc409-cc14-fde3-7d70-92e62fbb86e2\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-4\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:aa:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:a7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-390fa310-92a8-c15c-0b19-53e7cd287573\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-5\"}], \"driver\": \"gpu.nvidia.com\", \"nodeName\": \"cluster-0967a26d-pool-14bee067-prctr-l9nsv\", \"pool\": {\"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-l9nsv\", \"resourceSliceCount\": 1}}}, {\"apiVersion\": \"resource.k8s.io/v1\", \"kind\": \"ResourceSlice\", \"metadata\": {\"creationTimestamp\": \"2026-09-02T08:17:22Z\", \"generateName\": \"cluster-0967a26d-pool-14bee067-prctr-s2877-gpu.nvidia.com-\", \"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-s2877-gpu.nvidia.com-wrfnv\", \"ownerReferences\": [{\"apiVersion\": \"v1\", \"controller\": true, \"kind\": \"Node\", \"name\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"uid\": \"b7550b43-10b9-4568-b55b-bb0b166820c8\"}], \"resourceVersion\": \"1335168479\", \"uid\": \"b50d52c9-eb20-4920-92eb-b35fc4de0499\"}, \"spec\": {\"devices\": [{\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ba:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:b7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-6\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ca:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:c7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-7\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:18:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:15\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-02ff0cc1-647f-dee7-8365-921738e945a6\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-0\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:29:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:26\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-0d5ad102-eb8f-922a-173e-e91033320e0f\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-1\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:3a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:37\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-2\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:4b:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:48\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-4fba7684-5a96-6280-91ff-b41f7484564c\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-3\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:9a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:97\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-4\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:aa:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:a7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-32a6c51c-d07d-7513-86b5-813b64e452d2\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-5\"}], \"driver\": \"gpu.nvidia.com\", \"nodeName\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"pool\": {\"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-s2877\", \"resourceSliceCount\": 1}}}, {\"apiVersion\": \"resource.k8s.io/v1\", \"kind\": \"ResourceSlice\", \"metadata\": {\"creationTimestamp\": \"2026-06-09T18:31:19Z\", \"generateName\": \"cluster-0967a26d-pool-14bee067-prctr-tx5tk-gpu.nvidia.com-\", \"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-tx5tk-gpu.nvidia.com-9g94p\", \"ownerReferences\": [{\"apiVersion\": \"v1\", \"controller\": true, \"kind\": \"Node\", \"name\": \"cluster-0967a26d-pool-14bee067-prctr-tx5tk\", \"uid\": \"26ee1a54-3422-437f-926f-a3a405489d9e\"}], \"resourceVersion\": \"885436486\", \"uid\": \"bf319ecb-2488-4bfc-94ef-c80cfae30571\"}, \"spec\": {\"devices\": [{\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ca:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:c7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-9702d531-4c6f-99a0-eab6-1f7438365df4\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-7\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:18:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:15\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-390c745d-b113-45b5-8d1a-7873a74d8a29\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-0\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:29:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:26\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-e1508831-bc6f-f0ac-40be-370b1396d649\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-1\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:3a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:37\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-658e1235-c4ea-469b-2349-efdc39bc3612\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-2\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:4b:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:48\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-f939e931-9a8e-e3c8-2dc0-289b3f797bb1\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-3\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:9a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:97\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-7b11828a-3c4d-bb1b-3ca2-96fd26e8c54c\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-4\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:aa:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:a7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-59c40c7e-c1bc-ded1-8490-82439ed78c6d\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-5\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ba:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:b7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-3be0579d-41d8-2f3f-40c0-f7a77546b7aa\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-6\"}], \"driver\": \"gpu.nvidia.com\", \"nodeName\": \"cluster-0967a26d-pool-14bee067-prctr-tx5tk\", \"pool\": {\"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-tx5tk\", \"resourceSliceCount\": 1}}}, {\"apiVersion\": \"resource.k8s.io/v1\", \"kind\": \"ResourceSlice\", \"metadata\": {\"creationTimestamp\": \"2026-09-15T10:46:47Z\", \"generateName\": \"cluster-0967a26d-pool-14bee067-prctr-w4xnn-gpu.nvidia.com-\", \"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-w4xnn-gpu.nvidia.com-gzfmw\", \"ownerReferences\": [{\"apiVersion\": \"v1\", \"controller\": true, \"kind\": \"Node\", \"name\": \"cluster-0967a26d-pool-14bee067-prctr-w4xnn\", \"uid\": \"48002fa3-a714-4b98-8cd0-9f77515b21da\"}], \"resourceVersion\": \"1402662337\", \"uid\": \"245b0031-6588-4dff-80c6-d57b89d03165\"}, \"spec\": {\"devices\": [{\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ca:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:c7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-60834423-c37e-a45c-5702-ff92426b0824\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-7\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:18:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:15\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-c1beaf71-dce9-8dba-8283-170da78dbeff\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-0\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:29:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:26\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-a4aa51a7-9c0f-e4bc-489f-90add7eff6a2\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-1\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:3a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:37\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-39f1ee05-79bc-0d5b-2b59-327f8b5df89d\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-2\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:4b:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:48\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-88214075-636a-e528-da9b-f484b0bea432\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-3\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:9a:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:97\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-581632f8-93e2-3eae-9d96-ed7ae3321d6d\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-4\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:aa:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:a7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-914cf2e0-35fb-42c3-f7c3-427e9a143d25\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-5\"}, {\"attributes\": {\"addressingMode\": {\"string\": \"HMM\"}, \"architecture\": {\"string\": \"Blackwell\"}, \"brand\": {\"string\": \"Nvidia\"}, \"cudaComputeCapability\": {\"version\": \"10.0.0\"}, \"cudaDriverVersion\": {\"version\": \"13.2.0\"}, \"driverVersion\": {\"version\": \"595.58.3\"}, \"productName\": {\"string\": \"NVIDIA B200\"}, \"resource.kubernetes.io/pciBusID\": {\"string\": \"0000:ba:00.0\"}, \"resource.kubernetes.io/pcieRoot\": {\"string\": \"pci0000:b7\"}, \"type\": {\"string\": \"gpu\"}, \"uuid\": {\"string\": \"GPU-10fcaf5c-ba01-ff75-29c5-6e036143a28f\"}}, \"capacity\": {\"memory\": {\"value\": \"183359Mi\"}}, \"name\": \"gpu-6\"}], \"driver\": \"gpu.nvidia.com\", \"nodeName\": \"cluster-0967a26d-pool-14bee067-prctr-w4xnn\", \"pool\": {\"generation\": 1, \"name\": \"cluster-0967a26d-pool-14bee067-prctr-w4xnn\", \"resourceSliceCount\": 1}}}], \"kind\": \"List\", \"metadata\": {\"resourceVersion\": \"\"}}"
+      }
+    },
+    {
+      "apiVersion": "apps/v1",
+      "kind": "DaemonSet",
+      "metadata": {
+        "name": "gms-v1-pagebroker-0929"
+      },
+      "spec": {
+        "selector": {
+          "matchLabels": {
+            "app": "gms-v1-pagebroker-0929"
+          }
+        },
+        "template": {
+          "metadata": {
+            "labels": {
+              "app": "gms-v1-pagebroker-0929"
+            }
+          },
+          "spec": {
+            "nodeSelector": {
+              "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+            },
+            "securityContext": {
+              "seccompProfile": {
+                "type": "Localhost",
+                "localhostProfile": "profiles/block-iouring.json"
+              }
+            },
+            "imagePullSecrets": [
+              {
+                "name": "nvcr-secret"
+              },
+              {
+                "name": "acr-token-secret"
+              }
+            ],
+            "tolerations": [
+              {
+                "operator": "Exists"
+              }
+            ],
+            "runtimeClassName": "nvidia",
+            "resourceClaims": [
+              {
+                "name": "gpus",
+                "resourceClaimName": "gms-v1-glm-source-0928"
+              }
+            ],
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 5,
+            "containers": [
+              {
+                "name": "gms-0",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "0",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-0"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-0.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-1",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "1",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-1"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-1.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-2",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "2",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-02ff0cc1-647f-dee7-8365-921738e945a6"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-2"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-2.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-3",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "3",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-3"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-3.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-4",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "4",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-4"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-4.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-5",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "5",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-4fba7684-5a96-6280-91ff-b41f7484564c"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-5"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-5.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-6",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "6",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-6"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-6.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "gms-7",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_server.py",
+                  "--rank",
+                  "7",
+                  "--numa",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "--expected-uuid",
+                  "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "1",
+                    "memory": "2Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus",
+                      "request": "tp-7"
+                    }
+                  ],
+                  "limits": {
+                    "cpu": "8",
+                    "memory": "16Gi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/gms/online-7.json"
+                    ]
+                  },
+                  "periodSeconds": 1
+                }
+              },
+              {
+                "name": "coordinator",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "python3",
+                  "-u",
+                  "/snapshot-app/pagebroker_coordinator.py",
+                  "--service-generation",
+                  "0f084481-f264-4fc8-bed9-31096e95c4fb"
+                ],
+                "env": [
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/checkpoints/gms-restore-0928/code/lib"
+                  }
+                ],
+                "resources": {
+                  "requests": {
+                    "cpu": "100m",
+                    "memory": "128Mi"
+                  },
+                  "limits": {
+                    "cpu": "1",
+                    "memory": "512Mi"
+                  }
+                },
+                "volumeMounts": [
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  },
+                  {
+                    "name": "pagebroker",
+                    "mountPath": "/pagebroker"
+                  },
+                  {
+                    "name": "artifacts",
+                    "mountPath": "/checkpoints",
+                    "readOnly": true
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "httpGet": {
+                    "path": "/healthz",
+                    "port": 18081
+                  },
+                  "periodSeconds": 1
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "app",
+                "configMap": {
+                  "name": "gms-v1-pagebroker-0929-0f084481"
+                }
+              },
+              {
+                "name": "gms",
+                "hostPath": {
+                  "path": "/var/lib/schwinns-pb-gms-0929/servers/0f084481-f264-4fc8-bed9-31096e95c4fb",
+                  "type": "DirectoryOrCreate"
+                }
+              },
+              {
+                "name": "artifacts",
+                "hostPath": {
+                  "path": "/var/lib/schwinns-gms-0928/gms-pvc-nfs",
+                  "type": "Directory"
+                }
+              },
+              {
+                "name": "pagebroker",
+                "hostPath": {
+                  "path": "/var/lib/schwinns-pb-gms-0929/control",
+                  "type": "Directory"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

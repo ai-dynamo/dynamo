@@ -1,0 +1,1 @@
+GPU engine pid=801917 {"event":"ready","initialization_seconds":8.070647,"retained_contexts":8,"pinned_bytes_per_device":4294967296,"buffer_count":32,"chunk_bytes":134217728}

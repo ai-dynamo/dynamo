@@ -1,0 +1,22 @@
+{
+  "epoch": 1790665200.1877773,
+  "node": "cluster-0967a26d-pool-14bee067-prctr-s2877",
+  "via_pod": "dynamo-snapshot-agent-j2dpp-x-schwinns-vcluster-x-sc-c01900f2da",
+  "api": "host",
+  "binaries": {
+    "pagebroker": {
+      "local_path": "/tmp/pagebroker-gms-build/bin/pagebroker",
+      "host_path": "/var/lib/schwinns-pb-gms-0929/bin/pagebroker",
+      "sha256": "edb4f4910d0d8f911d48b94989be86e5acf58bfc2e0dca0d97a6f2b435e0d839",
+      "remote_sha256": "edb4f4910d0d8f911d48b94989be86e5acf58bfc2e0dca0d97a6f2b435e0d839",
+      "bytes": 1599808
+    },
+    "pagebroker-gpu-engine": {
+      "local_path": "/tmp/pagebroker-gms-build/bin/pagebroker-gpu-engine",
+      "host_path": "/var/lib/schwinns-pb-gms-0929/bin/pagebroker-gpu-engine",
+      "sha256": "902f763ea9f02f6aa01277a0f6aaa3467117ec8476751124671bda5752c4d6ad",
+      "remote_sha256": "902f763ea9f02f6aa01277a0f6aaa3467117ec8476751124671bda5752c4d6ad",
+      "bytes": 645992
+    }
+  }
+}

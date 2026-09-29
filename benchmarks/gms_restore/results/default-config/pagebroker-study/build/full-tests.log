@@ -1,0 +1,235 @@
+protoc --proto_path=. --cpp_out=. v1/pagebroker.proto gpu_engine.proto
+c++ -I. -std=c++20 -Wall -Werror broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp gms_admission.cpp integrity/content_digest.cpp daemon.cpp main.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -lcrypto -o pagebroker
+mkdir -p build
+g++ -std=c++20 -Wall -Wextra -Werror -I. fake_gpu_engine.cpp fd_transport.cpp \
+	file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf -pthread -o build/fake-gpu-engine
+g++ -std=c++20 -Wall -Wextra -Werror -I. gpu_engine_test.cpp gpu_engine.cpp fd_transport.cpp \
+	file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gpu-engine-test
+./build/gpu-engine-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from GpuEngine
+[ RUN      ] GpuEngine.ReusesReadyProcessAndAcknowledgesDrain
+GPU engine pid=76 ready
+[       OK ] GpuEngine.ReusesReadyProcessAndAcknowledgesDrain (4 ms)
+[ RUN      ] GpuEngine.GmsAdmissionPassesConnectedLeaseAndDirectoryWithTerminalReply
+GPU engine pid=79 ready
+[       OK ] GpuEngine.GmsAdmissionPassesConnectedLeaseAndDirectoryWithTerminalReply (2 ms)
+[----------] 2 tests from GpuEngine (7 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (7 ms total)
+[  PASSED  ] 2 tests.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	gms_v1_client.cpp gms_v1_client_test.cpp file_descriptor.cpp \
+	-DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-v1-client-test
+./build/gms-v1-client-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 9 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 9 tests from GmsV1Client
+[ RUN      ] GmsV1Client.FragmentedFramesDescriptorsAndExactInventory
+[       OK ] GmsV1Client.FragmentedFramesDescriptorsAndExactInventory (0 ms)
+[ RUN      ] GmsV1Client.RejectsWrongIdentityOrLease
+[       OK ] GmsV1Client.RejectsWrongIdentityOrLease (0 ms)
+[ RUN      ] GmsV1Client.RejectsMissingExtraTruncatedOrUnexpectedDescriptorsWithoutLeaks
+[       OK ] GmsV1Client.RejectsMissingExtraTruncatedOrUnexpectedDescriptorsWithoutLeaks (0 ms)
+[ RUN      ] GmsV1Client.RejectsMalformedUnexpectedAndErrorResponses
+[       OK ] GmsV1Client.RejectsMalformedUnexpectedAndErrorResponses (0 ms)
+[ RUN      ] GmsV1Client.RejectsDuplicateInventoryIdsAndInvalidSizes
+[       OK ] GmsV1Client.RejectsDuplicateInventoryIdsAndInvalidSizes (0 ms)
+[ RUN      ] GmsV1Client.RejectsOversizedTruncatedAndDeepFrames
+[       OK ] GmsV1Client.RejectsOversizedTruncatedAndDeepFrames (0 ms)
+[ RUN      ] GmsV1Client.WholeRpcDeadlineStopsSlowFragmentTrickleAndRetainsLeaseUntilClose
+[       OK ] GmsV1Client.WholeRpcDeadlineStopsSlowFragmentTrickleAndRetainsLeaseUntilClose (105 ms)
+[ RUN      ] GmsV1Client.ExplicitAbortSendsAbortOnceAndThenCloses
+[       OK ] GmsV1Client.ExplicitAbortSendsAbortOnceAndThenCloses (0 ms)
+[ RUN      ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm
+gms_v1_client_test.cpp:343: Skipped
+Set GMS_V1_DYNAMO_ROOT for actual Dynamo V1 interoperability
+
+[  SKIPPED ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm (0 ms)
+[----------] 9 tests from GmsV1Client (109 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 1 test suite ran. (109 ms total)
+[  PASSED  ] 8 tests.
+[  SKIPPED ] 1 test, listed below:
+[  SKIPPED ] GmsV1Client.ActualPythonV1ProtocolAndServerFakeVmm
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	gms_load_layout.cpp gms_load_layout_test.cpp file_descriptor.cpp v1/pagebroker.pb.cc \
+	-lprotobuf -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-load-layout-test
+./build/gms-load-layout-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 6 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 6 tests from GmsLayoutTest
+[ RUN      ] GmsLayoutTest.ContiguousAllocationsBecomeOneWholeFileWithDirectIO
+[       OK ] GmsLayoutTest.ContiguousAllocationsBecomeOneWholeFileWithDirectIO (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsDuplicateCapturedAllocationID
+[       OK ] GmsLayoutTest.RejectsDuplicateCapturedAllocationID (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsGapsOverlapsAndUnalignedSizes
+[       OK ] GmsLayoutTest.RejectsGapsOverlapsAndUnalignedSizes (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsFilesLongerOrShorterThanCapturedExtents
+[       OK ] GmsLayoutTest.RejectsFilesLongerOrShorterThanCapturedExtents (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsTraversalAndIntermediateSymlinks
+[       OK ] GmsLayoutTest.RejectsTraversalAndIntermediateSymlinks (0 ms)
+[ RUN      ] GmsLayoutTest.RejectsFinalSymlinkAndMissingServerIncarnation
+[       OK ] GmsLayoutTest.RejectsFinalSymlinkAndMissingServerIncarnation (0 ms)
+[----------] 6 tests from GmsLayoutTest (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 6 tests from 1 test suite ran. (1 ms total)
+[  PASSED  ] 6 tests.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	fair_transfer_mutex_test.cpp -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/fair-transfer-mutex-test
+./build/fair-transfer-mutex-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from FairTransferMutexTest
+[ RUN      ] FairTransferMutexTest.NextShardCannotOvertakeQueuedNativeTransfer
+[       OK ] FairTransferMutexTest.NextShardCannotOvertakeQueuedNativeTransfer (0 ms)
+[----------] 1 test from FairTransferMutexTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	fake_gms_gpu_engine.cpp fd_transport.cpp file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc \
+	-lprotobuf -pthread -o build/fake-gms-gpu-engine
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp gms_admission.cpp integrity/content_digest.cpp gms_admission_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+	-lprotobuf -lcrypto -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-admission-test
+./build/gms-admission-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 16 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 16 tests from GmsAdmissionTest
+[ RUN      ] GmsAdmissionTest.AcceptsExactCapturedAllocationsRegardlessOfRequestOrder
+[       OK ] GmsAdmissionTest.AcceptsExactCapturedAllocationsRegardlessOfRequestOrder (1 ms)
+[ RUN      ] GmsAdmissionTest.RejectsCorruptManifestDigestBeforeOpeningPayloads
+[       OK ] GmsAdmissionTest.RejectsCorruptManifestDigestBeforeOpeningPayloads (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsEquivalentSizesWithWrongAllocationIdentity
+[       OK ] GmsAdmissionTest.RejectsEquivalentSizesWithWrongAllocationIdentity (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsWrongAllocationSizesOrOffsets
+[       OK ] GmsAdmissionTest.RejectsWrongAllocationSizesOrOffsets (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsTruncatedAndOversizedShards
+[       OK ] GmsAdmissionTest.RejectsTruncatedAndOversizedShards (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsDuplicateIdsHolesAndOverlapsEvenWithMatchingManifest
+[       OK ] GmsAdmissionTest.RejectsDuplicateIdsHolesAndOverlapsEvenWithMatchingManifest (1 ms)
+[ RUN      ] GmsAdmissionTest.RejectsTraversalAndAbsoluteShardPaths
+[       OK ] GmsAdmissionTest.RejectsTraversalAndAbsoluteShardPaths (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsSymlinkedManifestShardAndShardDirectory
+[       OK ] GmsAdmissionTest.RejectsSymlinkedManifestShardAndShardDirectory (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsInvalidIdentityDeadlineAndSocketBeforeManifestAccess
+[       OK ] GmsAdmissionTest.RejectsInvalidIdentityDeadlineAndSocketBeforeManifestAccess (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsInvalidManifestSchemaAndUnrepresentableIntegers
+[       OK ] GmsAdmissionTest.RejectsInvalidManifestSchemaAndUnrepresentableIntegers (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerWithoutGpuRejectsBeforeConnectingToGms
+[       OK ] GmsAdmissionTest.BrokerWithoutGpuRejectsBeforeConnectingToGms (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerRejectsArtifactOutsideConfiguredRoot
+[       OK ] GmsAdmissionTest.BrokerRejectsArtifactOutsideConfiguredRoot (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerReplaysPublishedResultWithoutSecondGpuAdmission
+GPU engine pid=189 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerReplaysPublishedResultWithoutSecondGpuAdmission (4 ms)
+[ RUN      ] GmsAdmissionTest.BrokerConcurrentDuplicatesWaitForSingleAdmission
+GPU engine pid=191 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerConcurrentDuplicatesWaitForSingleAdmission (54 ms)
+[ RUN      ] GmsAdmissionTest.BrokerRetainsFailedAdmissionWithoutDestructiveRetry
+GPU engine pid=195 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerRetainsFailedAdmissionWithoutDestructiveRetry (4 ms)
+[ RUN      ] GmsAdmissionTest.BrokerConnectionFailureIsStickyEvenIfEndpointAppears
+GPU engine pid=197 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerConnectionFailureIsStickyEvenIfEndpointAppears (3 ms)
+[----------] 16 tests from GmsAdmissionTest (76 ms total)
+
+[----------] Global test environment tear-down
+[==========] 16 tests from 1 test suite ran. (76 ms total)
+[  PASSED  ] 16 tests.
+mkdir -p build
+c++ -I. -std=c++20 -Wall -Werror broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp gms_admission.cpp integrity/content_digest.cpp daemon_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -lcrypto -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -o build/pagebroker-test
+./build/pagebroker-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 28 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 28 tests from BrokerTest
+[ RUN      ] BrokerTest.NativeSessionsBindTransactionAndRejectPrematureComplete
+[       OK ] BrokerTest.NativeSessionsBindTransactionAndRejectPrematureComplete (102 ms)
+[ RUN      ] BrokerTest.NativeEngineReusesProcessAndHoldsAdmissionUntilDrain
+GPU engine pid=237 ready
+Native session target=235 ready
+Native session target=235 ready
+[       OK ] BrokerTest.NativeEngineReusesProcessAndHoldsAdmissionUntilDrain (449 ms)
+[ RUN      ] BrokerTest.NativeLoadChecksManifestAtBind
+[       OK ] BrokerTest.NativeLoadChecksManifestAtBind (19 ms)
+[ RUN      ] BrokerTest.NativeTargetsReuseResolvedPidsAndRejectStaleOnes
+GPU engine pid=244 ready
+Native session target=245 ready
+Native session target=235 ready
+[       OK ] BrokerTest.NativeTargetsReuseResolvedPidsAndRejectStaleOnes (33 ms)
+[ RUN      ] BrokerTest.RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem
+[       OK ] BrokerTest.RestoreFilesRemainPrivateAndPublicationMovesSameFilesystem (1 ms)
+[ RUN      ] BrokerTest.StagesRestoreAndCleansUpOnCommit
+[       OK ] BrokerTest.StagesRestoreAndCleansUpOnCommit (0 ms)
+[ RUN      ] BrokerTest.StagesIndependentRestoresConcurrently
+[       OK ] BrokerTest.StagesIndependentRestoresConcurrently (1 ms)
+[ RUN      ] BrokerTest.RejectsConcurrentRestoreForSameTransaction
+[       OK ] BrokerTest.RejectsConcurrentRestoreForSameTransaction (1 ms)
+[ RUN      ] BrokerTest.ReapsExpiredStagedTransactions
+[       OK ] BrokerTest.ReapsExpiredStagedTransactions (1 ms)
+[ RUN      ] BrokerTest.CleansStaleStagingOnStart
+[       OK ] BrokerTest.CleansStaleStagingOnStart (0 ms)
+[ RUN      ] BrokerTest.RejectsUnsafeTransactionIDs
+[       OK ] BrokerTest.RejectsUnsafeTransactionIDs (0 ms)
+[ RUN      ] BrokerTest.RejectsSymlinkInRestoreSource
+[       OK ] BrokerTest.RejectsSymlinkInRestoreSource (0 ms)
+[ RUN      ] BrokerTest.InvalidRestoreDoesNotReserveTransaction
+[       OK ] BrokerTest.InvalidRestoreDoesNotReserveTransaction (0 ms)
+[ RUN      ] BrokerTest.RejectsPathsOutsideStorageRoot
+[       OK ] BrokerTest.RejectsPathsOutsideStorageRoot (0 ms)
+[ RUN      ] BrokerTest.InsufficientStagingDoesNotReserveTransaction
+[       OK ] BrokerTest.InsufficientStagingDoesNotReserveTransaction (1 ms)
+[ RUN      ] BrokerTest.RejectsInvalidStagedRestore
+[       OK ] BrokerTest.RejectsInvalidStagedRestore (0 ms)
+[ RUN      ] BrokerTest.UnknownCommitAndAbortDoNotReserveTransactions
+[       OK ] BrokerTest.UnknownCommitAndAbortDoNotReserveTransactions (0 ms)
+[ RUN      ] BrokerTest.EvictsOldTerminalTransactionsButRetainsRecentCompletions
+[       OK ] BrokerTest.EvictsOldTerminalTransactionsButRetainsRecentCompletions (237 ms)
+[ RUN      ] BrokerTest.AbortsFailedCheckpointStaging
+[       OK ] BrokerTest.AbortsFailedCheckpointStaging (9 ms)
+[ RUN      ] BrokerTest.PublishesCheckpoint
+[       OK ] BrokerTest.PublishesCheckpoint (0 ms)
+[ RUN      ] BrokerTest.ReplacesExistingCheckpoint
+[       OK ] BrokerTest.ReplacesExistingCheckpoint (0 ms)
+[ RUN      ] BrokerTest.PreservesExistingCheckpointWhenReplacementFails
+[       OK ] BrokerTest.PreservesExistingCheckpointWhenReplacementFails (1 ms)
+[ RUN      ] BrokerTest.CrossFilesystemPublicationKeepsCopySemantics
+[       OK ] BrokerTest.CrossFilesystemPublicationKeepsCopySemantics (0 ms)
+[ RUN      ] BrokerTest.PreservesExistingPartialCheckpointDestination
+[       OK ] BrokerTest.PreservesExistingPartialCheckpointDestination (0 ms)
+[ RUN      ] BrokerTest.AbortsRestore
+[       OK ] BrokerTest.AbortsRestore (0 ms)
+[ RUN      ] BrokerTest.DirectRestoreNeverStagesOrDeletesSource
+[       OK ] BrokerTest.DirectRestoreNeverStagesOrDeletesSource (0 ms)
+[ RUN      ] BrokerTest.DirectRestoreValidatesBeforeReservingTransaction
+[       OK ] BrokerTest.DirectRestoreValidatesBeforeReservingTransaction (0 ms)
+[ RUN      ] BrokerTest.DirectConsumerReadsRetainedDirectoryAfterRename
+[       OK ] BrokerTest.DirectConsumerReadsRetainedDirectoryAfterRename (0 ms)
+[----------] 28 tests from BrokerTest (870 ms total)
+
+[----------] Global test environment tear-down
+[==========] 28 tests from 1 test suite ran. (870 ms total)
+[  PASSED  ] 28 tests.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. -I/opt/cuda/include \
+	gpu_engine_worker.cpp fd_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+	gms_v1_client.cpp gms_load_operation.cpp gms_load_layout.cpp \
+	file_descriptor.cpp cuda_posix_transfer.cpp nixl_transfer.cpp storage_manifest.cpp \
+	../cmd/cuda-checkpoint-helper/custom_storage.cpp \
+	-L/opt/cuda/lib64/stubs -lcuda -lprotobuf -pthread -DPAGEBROKER_NIXL -I/usr/local/include -L/usr/local/lib -lnixl -lnixl_build -o build/pagebroker-gpu-engine

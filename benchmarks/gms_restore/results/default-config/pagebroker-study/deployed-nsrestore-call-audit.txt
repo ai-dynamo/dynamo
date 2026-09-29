@@ -1,0 +1,15 @@
+Deployed nsrestore SHA256: b33a9962366758bdee570437cd4797b203668da8fa2e611c577e709dc2a78779
+Build revision d9b6bc722efb9ee14f774c53837fb0782297f95b; modified=true.
+Recovered function names and source locations from ELF .gopclntab using debug/gosym.
+Instructions decoded with Go toolchain x86asm (no binary modification).
+
+0x15b8280 /tmp/snap-exp/agent/internal/executor/nsrestore.go:145 CALL time.Since(SB)
+0x15b9dd9 /tmp/snap-exp/agent/internal/executor/nsrestore.go:296 CALL github.com/ai-dynamo/snapshot/agent/internal/cuda.RunNativeSessions(SB)
+0x15b9df6 /tmp/snap-exp/agent/internal/executor/nsrestore.go:297 CALL github.com/ai-dynamo/snapshot/agent/internal/cuda.NativeSessions.Close(SB)
+0x15b9ead /tmp/snap-exp/agent/internal/executor/nsrestore.go:301 CALL time.Since(SB)
+0x15ba021 /tmp/snap-exp/agent/internal/executor/nsrestore.go:307 CALL github.com/ai-dynamo/snapshot/agent/internal/cuda.RestoreCuInterpose(SB)
+0x1544248 /tmp/snap-exp/agent/internal/cuda/cuinterpose.go:59 CALL os/exec.CommandContext(SB)
+0x154424d /tmp/snap-exp/agent/internal/cuda/cuinterpose.go:59 CALL github.com/ai-dynamo/snapshot/agent/internal/cuda.executeCoordinator(SB)
+0x15442d2 /tmp/snap-exp/agent/internal/cuda/cuinterpose.go:63 CALL os/exec.(*Cmd).CombinedOutput(SB)
+
+Conclusion: successful CUDA restore calls cuInterpose coordinator after CUDA elapsed-time measurement; CombinedOutput waits for completion and discards successful output. The exact hook/cleanup duration is not observable in current logs.

@@ -1,0 +1,8 @@
+{
+  "dgd_uid": "b92ada63-47cc-456e-80d3-82250ba0e43d",
+  "snapshot_name": "gms-v1-glm-default-0929",
+  "snapshot_id": "859c4057-d1da-45d6-8565-39225861a5be",
+  "capture_manifest_path": "/checkpoints/artifacts/859c4057-d1da-45d6-8565-39225861a5be/gms/capture.json",
+  "discovery_started_epoch": 1790666548.9925919,
+  "discovery_completed_epoch": 1790666549.4126787
+}

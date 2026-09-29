@@ -1,0 +1,78 @@
+mkdir -p build
+g++ -std=c++20 -O2 -Wall -Wextra -Werror integrity/content_digest.cpp integrity/content_digest_test.cpp -lcrypto -o build/content-digest-test
+./build/content-digest-test
+CUDA transfer content digest tests passed
+g++ -std=c++20 -O2 -Wall -Wextra -Werror integrity/content_digest.cpp integrity/extent_digests.cpp integrity/extent_digests_test.cpp -lcrypto -o build/extent-digests-test
+./build/extent-digests-test
+mkdir -p build
+g++ -std=c++20 -O2 -Wall -Wextra -Werror transfer_contracts/transfer_config.cpp transfer_contracts/transfer_config_test.cpp -o build/transfer-config-test
+./build/transfer-config-test
+CUDA transfer configuration tests passed
+g++ -std=c++20 -O2 -Wall -Wextra -Werror transfer_contracts/transfer_engine_test.cpp -o build/transfer-cancellation-test
+./build/transfer-cancellation-test
+mkdir -p build
+g++ -std=c++20 -O2 -Wall -Wextra -Werror storage_manifest.cpp storage_manifest_test.cpp -o build/storage-manifest-test
+./build/storage-manifest-test
+cuda checkpoint storage manifest tests passed
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. -I/opt/cuda/include \
+	cuda_posix_transfer_test.cpp cuda_posix_transfer.cpp file_descriptor.cpp nixl_transfer.cpp \
+	-DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -DPAGEBROKER_NIXL -I/usr/local/include -L/usr/local/lib -lnixl -lnixl_build -o build/cuda-transfer-test
+./build/cuda-transfer-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 9 tests from 2 test suites.
+[----------] Global test environment set-up.
+[----------] 4 tests from CudaTransfer
+[ RUN      ] CudaTransfer.ReusesRingAcrossFilesAndPartialFinalChunks
+[       OK ] CudaTransfer.ReusesRingAcrossFilesAndPartialFinalChunks (45 ms)
+[ RUN      ] CudaTransfer.DrainsFailedCopyBeforeReusingRing
+[       OK ] CudaTransfer.DrainsFailedCopyBeforeReusingRing (31 ms)
+[ RUN      ] CudaTransfer.FailedReadDoesNotPoisonNextFile
+E0929 06:31:54.074086      64 linux_aio_io_queue.cpp:168] AIO operation incomplete: result 0, expected 65536
+E0929 06:31:54.074341      64 linux_aio_io_queue.cpp:168] AIO operation incomplete: result 0, expected 65536
+E0929 06:31:54.074449      64 nixl_agent.cpp:1211] getXferStatus: backend 'POSIX' returned error status NIXL_ERR_BACKEND
+E0929 06:31:54.074455      64 nixl_agent.cpp:1211] getXferStatus: backend 'POSIX' returned error status NIXL_ERR_BACKEND
+[       OK ] CudaTransfer.FailedReadDoesNotPoisonNextFile (26 ms)
+[ RUN      ] CudaTransfer.HostNodeZeroWithoutNuma
+[       OK ] CudaTransfer.HostNodeZeroWithoutNuma (34 ms)
+[----------] 4 tests from CudaTransfer (138 ms total)
+
+[----------] 5 tests from HostNuma/AllocationFailureCleanup
+[ RUN      ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/0
+[       OK ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/0 (0 ms)
+[ RUN      ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/1
+[       OK ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/1 (0 ms)
+[ RUN      ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/2
+[       OK ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/2 (0 ms)
+[ RUN      ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/3
+[       OK ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/3 (0 ms)
+[ RUN      ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/4
+[       OK ] HostNuma/AllocationFailureCleanup.ReleasesPartialAllocation/4 (0 ms)
+[----------] 5 tests from HostNuma/AllocationFailureCleanup (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 9 tests from 2 test suites ran. (138 ms total)
+[  PASSED  ] 9 tests.
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I/opt/cuda/include \
+	../cmd/cuda-checkpoint-helper/custom_storage.cpp ../cmd/cuda-checkpoint-helper/custom_storage_test.cpp \
+	-DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/cuda-helper-test
+./build/cuda-helper-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 3 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 3 tests from NativeOperationTest
+[ RUN      ] NativeOperationTest.ReusesInitializedApiAcrossCaptureAndRestore
+[       OK ] NativeOperationTest.ReusesInitializedApiAcrossCaptureAndRestore (0 ms)
+[ RUN      ] NativeOperationTest.FailedPreparationStillDrainsReturnedDriverHandle
+[       OK ] NativeOperationTest.FailedPreparationStillDrainsReturnedDriverHandle (0 ms)
+[ RUN      ] NativeOperationTest.UnstartedOperationDoesNotTerminateTarget
+Cancelled native target=76 COMPLETE result=0; mappings drained
+[       OK ] NativeOperationTest.UnstartedOperationDoesNotTerminateTarget (0 ms)
+[----------] 3 tests from NativeOperationTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 3 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 3 tests.
+mkdir -p build
+g++ -std=c++20 -O2 -Wall -Wextra -Werror -I/opt/cuda/include -c transfer_contracts/transfer_backend_unavailable.cpp -o build/transfer-backend-unavailable.o

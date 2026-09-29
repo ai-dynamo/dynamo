@@ -1,0 +1,375 @@
+{
+  "apiVersion": "nvidia.com/v1beta1",
+  "kind": "DynamoGraphDeployment",
+  "metadata": {
+    "name": "gms-v1-glm-dgd-0929",
+    "namespace": "schwinns-vcluster"
+  },
+  "spec": {
+    "backendFramework": "sglang",
+    "components": [
+      {
+        "name": "Engine",
+        "type": "worker",
+        "replicas": 1,
+        "sharedMemorySize": "32Gi",
+        "runtimeVersionOverride": "1.5.0",
+        "podTemplate": {
+          "kind": "Pod",
+          "apiVersion": "v1",
+          "metadata": {
+            "annotations": {
+              "nvidia.com/snapshot-pagebroker": "true",
+              "nvidia.com/cuinterpose-enabled": "true",
+              "nvidia.com/gms-prototype-runtime-discovery": "true",
+              "nvidia.com/gms-prototype-runtime-network-discovery": "true",
+              "nvidia.com/gms-prototype-restore-from": "gms-v1-glm-default-0929"
+            },
+            "labels": {
+              "experiment": "gms-v1-0928",
+              "nvidia.com/gms-restore-trial": "gms-v1-glm-dgd-0929"
+            }
+          },
+          "spec": {
+            "volumes": [
+              {
+                "name": "snapshot-control",
+                "emptyDir": {}
+              },
+              {
+                "name": "tun",
+                "hostPath": {
+                  "path": "/dev/net/tun",
+                  "type": "CharDevice"
+                }
+              },
+              {
+                "name": "app",
+                "configMap": {
+                  "name": "gms-v1-glm-restore-app-0928"
+                }
+              },
+              {
+                "name": "model-cache",
+                "nfs": {
+                  "server": "192.168.0.223",
+                  "path": "/unikorn-identity-03cfadd31877-551/pvc-92b73e65-4eb9-486c-a773-8f58c2f32abd"
+                }
+              },
+              {
+                "name": "dshm",
+                "emptyDir": {
+                  "medium": "Memory",
+                  "sizeLimit": "32Gi"
+                }
+              },
+              {
+                "name": "snapshot-cuda",
+                "hostPath": {
+                  "path": "/var/lib/schwinns-pb-gms-0929/cuda-bundle-e021a725",
+                  "type": "Directory"
+                }
+              },
+              {
+                "name": "gms",
+                "hostPath": {
+                  "path": "/var/lib/schwinns-pb-gms-0929/servers/b37342ec-0358-4678-9e63-cce8f3752457",
+                  "type": "Directory"
+                }
+              },
+              {
+                "name": "artifacts",
+                "persistentVolumeClaim": {
+                  "claimName": "snapshot-pvc"
+                }
+              }
+            ],
+            "initContainers": [],
+            "containers": [
+              {
+                "name": "main",
+                "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+                "command": [
+                  "sleep",
+                  "infinity"
+                ],
+                "ports": [
+                  {
+                    "name": "api",
+                    "containerPort": 8000
+                  }
+                ],
+                "env": [
+                  {
+                    "name": "SGLANG_PAGE_SIZE",
+                    "value": "16"
+                  },
+                  {
+                    "name": "SNAPSHOT_CONTROL_DIR",
+                    "value": "/snapshot-control"
+                  },
+                  {
+                    "name": "HF_HUB_DISABLE_XET",
+                    "value": "1"
+                  },
+                  {
+                    "name": "NCCL_CUMEM_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NCCL_NVLS_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "NCCL_IB_DISABLE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "NCCL_RAS_ENABLE",
+                    "value": "0"
+                  },
+                  {
+                    "name": "TORCH_NCCL_ENABLE_MONITORING",
+                    "value": "0"
+                  },
+                  {
+                    "name": "TORCH_NCCL_DUMP_ON_TIMEOUT",
+                    "value": "0"
+                  },
+                  {
+                    "name": "SGLANG_CONTEXT_LENGTH",
+                    "value": "4096"
+                  },
+                  {
+                    "name": "VLLM_WORKER_MULTIPROC_METHOD",
+                    "value": "spawn"
+                  },
+                  {
+                    "name": "VLLM_ALLOW_INSECURE_SERIALIZATION",
+                    "value": "1"
+                  },
+                  {
+                    "name": "HF_HOME",
+                    "value": "/model-cache"
+                  },
+                  {
+                    "name": "HF_HUB_OFFLINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "TRANSFORMERS_OFFLINE",
+                    "value": "1"
+                  },
+                  {
+                    "name": "SNAPSHOT_MODEL",
+                    "value": "nvidia/GLM-5.2-NVFP4"
+                  },
+                  {
+                    "name": "VLLM_GPU_MEMORY_UTILIZATION",
+                    "value": "0.70"
+                  },
+                  {
+                    "name": "VLLM_MAX_MODEL_LEN",
+                    "value": "4096"
+                  },
+                  {
+                    "name": "VLLM_CACHE_ROOT",
+                    "value": "/model-cache/glm52-cache/vllm"
+                  },
+                  {
+                    "name": "TORCHINDUCTOR_CACHE_DIR",
+                    "value": "/model-cache/glm52-cache/torchinductor"
+                  },
+                  {
+                    "name": "TRITON_CACHE_DIR",
+                    "value": "/model-cache/glm52-cache/triton"
+                  },
+                  {
+                    "name": "DG_JIT_CACHE_DIR",
+                    "value": "/model-cache/glm52-cache/deepgemm"
+                  },
+                  {
+                    "name": "CUDA_CACHE_PATH",
+                    "value": "/model-cache/glm52-cache/nv"
+                  },
+                  {
+                    "name": "XDG_CACHE_HOME",
+                    "value": "/model-cache/glm52-cache/xdg"
+                  },
+                  {
+                    "name": "FLASHINFER_WORKSPACE_BASE",
+                    "value": "/model-cache/glm52-cache/flashinfer"
+                  },
+                  {
+                    "name": "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
+                    "value": "/model-cache/glm52-cache/vllm/flashinfer_autotune"
+                  },
+                  {
+                    "name": "LD_PRELOAD",
+                    "value": "/tmp/snapshot-cuda/libcuinterpose.so"
+                  },
+                  {
+                    "name": "DYN_GMS_USE_V1",
+                    "value": "true"
+                  },
+                  {
+                    "name": "GMS_SOCKET_DIR",
+                    "value": "/gms"
+                  },
+                  {
+                    "name": "PYTHONPATH",
+                    "value": "/snapshot-app:/checkpoints/gms-restore-0928/code/lib"
+                  },
+                  {
+                    "name": "CUDA_DEVICE_MAX_COPY_CONNECTIONS",
+                    "value": "2"
+                  },
+                  {
+                    "name": "CUINTERPOSE_QUIESCENT_EXTERNAL_IMPORTS",
+                    "value": "1"
+                  },
+                  {
+                    "name": "CUDA_DEVICE_ORDER",
+                    "value": "PCI_BUS_ID"
+                  },
+                  {
+                    "name": "SGLANG_CACHE_DIR",
+                    "value": "/checkpoints/gms-restore-0928/sglang-cache"
+                  },
+                  {
+                    "name": "SNAPSHOT_CUDA_DEVICE_MAP",
+                    "value": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f=GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f,GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51=GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51,GPU-02ff0cc1-647f-dee7-8365-921738e945a6=GPU-02ff0cc1-647f-dee7-8365-921738e945a6,GPU-0d5ad102-eb8f-922a-173e-e91033320e0f=GPU-0d5ad102-eb8f-922a-173e-e91033320e0f,GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa=GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa,GPU-4fba7684-5a96-6280-91ff-b41f7484564c=GPU-4fba7684-5a96-6280-91ff-b41f7484564c,GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683=GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683,GPU-32a6c51c-d07d-7513-86b5-813b64e452d2=GPU-32a6c51c-d07d-7513-86b5-813b64e452d2"
+                  }
+                ],
+                "resources": {
+                  "limits": {
+                    "cpu": "96",
+                    "memory": "1536Gi"
+                  },
+                  "requests": {
+                    "cpu": "32",
+                    "memory": "128Gi"
+                  },
+                  "claims": [
+                    {
+                      "name": "gpus"
+                    }
+                  ]
+                },
+                "volumeMounts": [
+                  {
+                    "name": "snapshot-control",
+                    "mountPath": "/snapshot-control",
+                    "subPath": "main"
+                  },
+                  {
+                    "name": "tun",
+                    "mountPath": "/dev/net/tun"
+                  },
+                  {
+                    "name": "app",
+                    "readOnly": true,
+                    "mountPath": "/snapshot-app"
+                  },
+                  {
+                    "name": "model-cache",
+                    "mountPath": "/model-cache"
+                  },
+                  {
+                    "name": "model-cache",
+                    "mountPath": "/root/.cache/flashinfer",
+                    "subPath": "glm52-cache/flashinfer/.cache/flashinfer"
+                  },
+                  {
+                    "name": "dshm",
+                    "mountPath": "/dev/shm"
+                  },
+                  {
+                    "name": "snapshot-cuda",
+                    "readOnly": true,
+                    "mountPath": "/tmp/snapshot-cuda"
+                  },
+                  {
+                    "name": "gms",
+                    "mountPath": "/gms"
+                  },
+                  {
+                    "name": "artifacts",
+                    "mountPath": "/checkpoints"
+                  }
+                ],
+                "imagePullPolicy": "IfNotPresent",
+                "readinessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/snapshot-control/sglang-restore-ready"
+                    ]
+                  },
+                  "periodSeconds": 1
+                },
+                "startupProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/snapshot-control/sglang-restore-ready"
+                    ]
+                  },
+                  "periodSeconds": 1,
+                  "timeoutSeconds": 1,
+                  "failureThreshold": 300
+                },
+                "livenessProbe": {
+                  "exec": {
+                    "command": [
+                      "test",
+                      "-f",
+                      "/snapshot-control/sglang-restore-ready"
+                    ]
+                  },
+                  "periodSeconds": 5,
+                  "timeoutSeconds": 1,
+                  "failureThreshold": 3
+                }
+              }
+            ],
+            "restartPolicy": "Always",
+            "terminationGracePeriodSeconds": 1,
+            "nodeSelector": {
+              "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+            },
+            "securityContext": {
+              "seccompProfile": {
+                "type": "Localhost",
+                "localhostProfile": "profiles/block-iouring.json"
+              }
+            },
+            "imagePullSecrets": [
+              {
+                "name": "nvcr-secret"
+              },
+              {
+                "name": "acr-token-secret"
+              }
+            ],
+            "tolerations": [
+              {
+                "operator": "Exists"
+              }
+            ],
+            "runtimeClassName": "nvidia",
+            "resourceClaims": [
+              {
+                "name": "gpus",
+                "resourceClaimName": "gms-v1-glm-source-0928"
+              }
+            ]
+          },
+          "status": {}
+        }
+      }
+    ]
+  }
+}

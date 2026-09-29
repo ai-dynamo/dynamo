@@ -1,0 +1,5 @@
+g++	4:13.2.0-7ubuntu1
+libgtest-dev:amd64	1.14.0-1
+libmsgpack-cxx-dev:amd64	6.1.0-1build1
+libprotobuf-dev:amd64	3.21.12-8.2ubuntu0.3
+protobuf-compiler	3.21.12-8.2ubuntu0.3

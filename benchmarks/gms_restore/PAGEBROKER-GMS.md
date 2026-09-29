@@ -3,7 +3,8 @@
 # PageBroker as the GMS V1 weight-loading client
 
 The native prototype is now implemented on
-`schwinns/gms-pagebroker-restore-20260929`; GPU qualification is in progress.
+`schwinns/gms-pagebroker-restore-20260929`; four default-config GPU restores passed.
+See [PAGEBROKER-RESTORE.md](PAGEBROKER-RESTORE.md) for the measured results.
 Snapshot commit `7e347afb62690103d53ea867265167ba9d2b886d` adds the trusted-node
 `LoadGmsWeights` operation, a native V1 client, and fair per-GPU buffer scheduling.
 [pagebroker-gms-native.patch](pagebroker-gms-native.patch) records that exact
@@ -41,7 +42,13 @@ reopen a destructive RW epoch, and recreates the control generation between
 trials. General multi-DGD lease retirement and operator lifecycle integration
 remain prototype limitations; this is not a production DGD API.
 
-## Resource ownership and container count
+## Original design requirements
+
+The sections below record the design that guided the prototype. The measured
+implementation, scheduling behavior, resource savings, and remaining lifecycle
+limits are documented in [PAGEBROKER-RESTORE.md](PAGEBROKER-RESTORE.md).
+
+### Resource ownership and container count
 
 Keep one GMS server per logical rank with one DRA GPU and local `cuda:0`. Keep
 allocation identity and publication in those servers. Let the existing persistent
@@ -61,7 +68,7 @@ reuses it across restores. A fresh per-DGD multi-GPU process pays that cost on t
 critical path. Report both cold initialization and warm service latency; a single
 large process by itself does not guarantee faster startup.
 
-## Proposed operation
+### Proposed operation
 
 `LoadGmsWeights(restore_generation, immutable_rank_plan, artifact_directory)`
 would be a new PageBroker control operation. Each rank entry contains the source
@@ -98,7 +105,7 @@ This reuses the semantics of `v1/snapshot/weight_artifact.py::load_weights` whil
 moving its transfer client into the persistent broker. It does not require
 checkpointing GMS servers or recovering their broken experimental export path.
 
-## Scheduling and DGD lifecycle
+### Scheduling and DGD lifecycle
 
 The current PageBroker engine leases one ring per GPU for an entire native extent.
 Sharing that ring with GMS therefore needs explicit arbitration. Bound transfer
@@ -115,7 +122,7 @@ container at that point is the restore placeholder; Snapshot agent dispatch was
 for all containers Running. A shared transfer-start barrier is useful for the
 microbenchmark only; introducing it into deployment would add a dependency.
 
-## CPU resources
+### CPU resources
 
 The restore benchmark requested 1 CPU and limited 8 CPUs for each GMS container;
 main requested 32 and limited 96. A CPU request affects scheduling and relative

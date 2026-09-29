@@ -1,0 +1,94 @@
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "gms-v1-cuda-preinstall-0929",
+    "namespace": "schwinns-vcluster",
+    "labels": {
+      "experiment": "gms-v1-cuda-preinstall-0929"
+    },
+    "annotations": {
+      "nvidia.com/gms-prototype-cuda-installer-sha256": "8380292c7b9e4139b401f130c572f8c343235d41cb3ac65eabd0459da6eb36ba"
+    }
+  },
+  "spec": {
+    "runtimeClassName": "nvidia",
+    "securityContext": {
+      "seccompProfile": {
+        "type": "Localhost",
+        "localhostProfile": "profiles/block-iouring.json"
+      }
+    },
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      },
+      {
+        "name": "acr-token-secret"
+      }
+    ],
+    "tolerations": [
+      {
+        "operator": "Exists"
+      }
+    ],
+    "terminationGracePeriodSeconds": 1,
+    "nodeSelector": {
+      "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "restartPolicy": "Never",
+    "containers": [
+      {
+        "name": "snapshot-cuda-install",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns:pagebroker-336-d9b6bc72-agent@sha256:927183f220d4870e1204e1459c6f66166de1aa1a21bbd18e60aad37f5fd80a44",
+        "command": [
+          "/bin/sh",
+          "-c"
+        ],
+        "args": [
+          "cp /usr/local/sbin/cuda-checkpoint /usr/local/lib/snapshot/libcuinterpose.so /snapshot-cuda/ && cp /checkpoints/gms-restore-0928/libcuinterpose_core.so /snapshot-cuda/ && cd /snapshot-cuda && sha256sum cuda-checkpoint libcuinterpose.so libcuinterpose_core.so > SHA256SUMS && cat SHA256SUMS"
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "snapshot-cuda",
+            "mountPath": "/snapshot-cuda"
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        }
+      }
+    ],
+    "volumes": [
+      {
+        "name": "snapshot-cuda",
+        "hostPath": {
+          "path": "/var/lib/schwinns-pb-gms-0929/cuda-bundle-e021a725",
+          "type": "DirectoryOrCreate"
+        }
+      },
+      {
+        "name": "artifacts",
+        "persistentVolumeClaim": {
+          "claimName": "snapshot-pvc"
+        }
+      }
+    ]
+  }
+}

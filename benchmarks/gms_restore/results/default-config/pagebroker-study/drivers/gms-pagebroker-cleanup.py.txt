@@ -1,0 +1,42 @@
+"""Restore original stack after this PageBroker/GMS experiment only."""
+import sys,json,time,shlex
+from pathlib import Path
+from kubernetes import client
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+meta=Path('/home/schwinns/dynamo/worktrees/gms-pagebroker-restore-20260929/benchmarks/gms_restore/results/default-config/pagebroker-study')
+orig=json.loads(Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928/manifests/original-vcluster.json').read_text());apps=client.AppsV1Api();notes=[]
+def note(s):
+ notes.append(s);print(s,flush=True);(meta/'cleanup.txt').write_text('\n'.join(notes)+'\n')
+def delete(fn,*args,**kwargs):
+ try:return fn(*args,**kwargs)
+ except client.ApiException as e:
+  if e.status!=404:raise
+name='gms-v1-glm-dgd-0929';delete(c.custom.delete_namespaced_custom_object,'nvidia.com','v1beta1',c.NS,'dynamographdeployments',name)
+for ds in ['gms-v1-pagebroker-0929','gms-v1-resident-0929']:delete(apps.delete_namespaced_daemon_set,ds,c.NS,propagation_policy='Foreground')
+for pod in ['gms-v1-claim-hold-0928','gms-v1-cuda-preinstall-0929']:delete(c.core.delete_namespaced_pod,pod,c.NS)
+delete(c.custom.delete_namespaced_custom_object,'resource.k8s.io','v1',c.NS,'resourceclaims','gms-v1-glm-source-0928')
+for cm in c.core.list_namespaced_config_map(c.NS).items:
+ if cm.metadata.name=='gms-v1-glm-restore-app-0928' or cm.metadata.name.startswith(('gms-v1-pagebroker-0929-','gms-v1-resident-0929-')):delete(c.core.delete_namespaced_config_map,cm.metadata.name,c.NS)
+for _ in range(120):
+ ps=[p for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith(('gms-v1-glm-dgd-0929','gms-v1-pagebroker-0929','gms-v1-resident-0929','gms-v1-claim-hold-0928','gms-v1-cuda-preinstall-0929'))]
+ if not ps:break
+ time.sleep(1)
+else:raise TimeoutError('experiment workload deletion')
+note('Deleted experiment DGD, GMS DaemonSets, claim holder, staging Pod, claim, and generated ConfigMaps.')
+agent=Path('/tmp/gms-restore-agent-virtual').read_text().strip()
+note(c.host_exec(agent,'nsenter -t 1 -m -- sh /var/lib/schwinns-gms-0928/node-levers.sh restore','agent').strip())
+ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',c.NS);apps.patch_namespaced_daemon_set(ds.metadata.name,c.NS,[{'op':'test','path':'/metadata/resourceVersion','value':ds.metadata.resource_version},{'op':'replace','path':'/spec/template','value':orig['daemonset']['spec']['template']},{'op':'replace','path':'/spec/updateStrategy','value':orig['daemonset']['spec']['updateStrategy']}])
+cm=c.core.read_namespaced_config_map('dynamo-snapshot-config',c.NS);c.core.replace_namespaced_config_map(cm.metadata.name,c.NS,{'apiVersion':'v1','kind':'ConfigMap','metadata':{'name':cm.metadata.name,'namespace':c.NS,'resourceVersion':cm.metadata.resource_version,'labels':orig['configmap']['metadata'].get('labels'),'annotations':orig['configmap']['metadata'].get('annotations')},'data':orig['configmap']['data']})
+op=apps.read_namespaced_deployment('dynamo-snapshot-operator',c.NS);apps.patch_namespaced_deployment(op.metadata.name,c.NS,[{'op':'test','path':'/metadata/resourceVersion','value':op.metadata.resource_version},{'op':'replace','path':'/spec/template','value':orig['operator']['spec']['template']}]);delete(c.core.delete_namespaced_pod,agent,c.NS)
+for _ in range(120):
+ ps=[p for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name.endswith('s2877') and p.metadata.name!=agent and not p.metadata.deletion_timestamp and any(x.type=='Ready' and x.status=='True' for x in p.status.conditions or [])]
+ if ps:break
+ time.sleep(1)
+else:raise TimeoutError('original agent readiness')
+restored=ps[0].metadata.name;note('Original agent restored and Ready: '+restored)
+for mount in ['/var/lib/schwinns-gms-0928/gms-pvc-nfs','/var/lib/snapshot-restore-perf-nfs']:
+ cmd='if mountpoint -q '+shlex.quote(mount)+'; then umount '+shlex.quote(mount)+'; fi'
+ note(c.host_exec(restored,'nsenter -t 1 -m -- sh -c '+shlex.quote(cmd),'agent').strip() or 'Unmounted '+mount)
+note(c.host_exec(restored,'nsenter -t 1 -m -- rm -rf /var/lib/schwinns-pb-gms-0929','agent').strip() or 'Removed experiment node binaries, sockets, and preinstalled bundle directory.')
+note('Retained exact GLM/Qwen snapshots and GMS PVC payloads; retained new matching Snapshot GMS capture descriptor.')
+(meta/'cleanup-state.json').write_text(json.dumps({'original_agent':restored,'experiment_resources_removed':True,'metadata_retained':'/checkpoints/artifacts/859c4057-d1da-45d6-8565-39225861a5be/gms/capture.json'},indent=2))

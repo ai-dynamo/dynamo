@@ -1,0 +1,92 @@
+[
+  {
+    "reason": "Scheduled",
+    "message": "Successfully assigned schwinns-vcluster/gms-v1-glm-dgd-0929-engine-4f9d98c3-5dfbd6cf68-8tzdp-405dea7387 to cluster-0967a26d-pool-14bee067-prctr-s2877",
+    "type": "Normal",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:17:03+00:00",
+    "last_timestamp": "2026-09-29T07:17:03+00:00",
+    "event_time": null,
+    "reporting_component": "default-scheduler"
+  },
+  {
+    "reason": "Pulled",
+    "message": "Container image \"nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01\" already present on machine",
+    "type": "Normal",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:17:10+00:00",
+    "last_timestamp": "2026-09-29T07:17:10+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Created",
+    "message": "Created container: main",
+    "type": "Normal",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:17:10+00:00",
+    "last_timestamp": "2026-09-29T07:17:10+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Started",
+    "message": "Started container main",
+    "type": "Normal",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:17:10+00:00",
+    "last_timestamp": "2026-09-29T07:17:10+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Unhealthy",
+    "message": "Startup probe failed: ",
+    "type": "Warning",
+    "count": 18,
+    "first_timestamp": "2026-09-29T07:17:10+00:00",
+    "last_timestamp": "2026-09-29T07:17:27+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Killing",
+    "message": "Stopping container main",
+    "type": "Normal",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:18:23+00:00",
+    "last_timestamp": "2026-09-29T07:18:23+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Unhealthy",
+    "message": "Readiness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec \"504681de3ebfc7f6f75780346c9b6bd3630e4a943854943c04c2f6165b91bcd0\": OCI runtime exec failed: exec failed: unable to start container process: error executing setns process: exit status 1",
+    "type": "Warning",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:18:25+00:00",
+    "last_timestamp": "2026-09-29T07:18:25+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Unhealthy",
+    "message": "Readiness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: failed to start exec \"6db93726730adb9777005d3986510d40c4d222ec12107dcd8bd8c05e84bf9b75\": OCI runtime exec failed: exec failed: unable to start container process: error executing setns process: exit status 1",
+    "type": "Warning",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:18:26+00:00",
+    "last_timestamp": "2026-09-29T07:18:26+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  },
+  {
+    "reason": "Unhealthy",
+    "message": "Readiness probe errored and resulted in unknown state: rpc error: code = Unknown desc = failed to exec in container: container is in CONTAINER_EXITED state",
+    "type": "Warning",
+    "count": 1,
+    "first_timestamp": "2026-09-29T07:18:27+00:00",
+    "last_timestamp": "2026-09-29T07:18:27+00:00",
+    "event_time": null,
+    "reporting_component": "kubelet"
+  }
+]

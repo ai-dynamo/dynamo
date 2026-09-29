@@ -1,0 +1,34 @@
+{
+  "mode": "isolated_gms_load",
+  "pagebroker_gms": true,
+  "weight_transfer_owner": "pagebroker",
+  "artifact_selection_timing": "after_dgd_creation",
+  "capture_id": "gms-v1-glm-default-0929",
+  "resident_gms_generation": "8ed6694f-30a1-4333-93da-eaa62cb16c6c",
+  "resident_gms_service_generation": "0f084481-f264-4fc8-bed9-31096e95c4fb",
+  "create_epoch": 1790666404.9146857,
+  "dgd_create_return_epoch": 1790666405.2441356,
+  "publication_ready_epoch": 1790666420.7215211,
+  "publication_ready_s": 15.806835412979126,
+  "resident_gms_load_trigger": {
+    "request_epoch": 1790666405.6682553,
+    "trigger_written_epoch": 1790666406.1578782,
+    "return_epoch": 1790666406.252864,
+    "response": {
+      "dgd_uid": "8ed6694f-30a1-4333-93da-eaa62cb16c6c",
+      "snapshot_id": "859c4057-d1da-45d6-8565-39225861a5be",
+      "generation": "8ed6694f-30a1-4333-93da-eaa62cb16c6c",
+      "capture_manifest_path": "/checkpoints/artifacts/859c4057-d1da-45d6-8565-39225861a5be/gms/capture.json",
+      "service_generation": "0f084481-f264-4fc8-bed9-31096e95c4fb",
+      "capture_id": "gms-v1-glm-default-0929",
+      "capture_manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+      "load_request_epoch": 1790666406.1380365,
+      "manifest_discovery_start_epoch": 1790666406.1383233,
+      "manifest_discovery_complete_epoch": 1790666406.1574857,
+      "trigger_written_epoch": 1790666406.1578782
+    }
+  },
+  "pagebroker_cpu_limit": 64,
+  "engine_replicas": 0,
+  "engine_pods_created": 0
+}

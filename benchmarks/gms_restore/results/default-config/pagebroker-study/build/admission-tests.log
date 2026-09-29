@@ -1,0 +1,58 @@
+protoc --proto_path=. --cpp_out=. v1/pagebroker.proto gpu_engine.proto
+mkdir -p build
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	fake_gms_gpu_engine.cpp fd_transport.cpp file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc \
+	-lprotobuf -pthread -o build/fake-gms-gpu-engine
+g++ -O2 -std=c++20 -Wall -Wextra -Werror -I. \
+	broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp gms_admission.cpp integrity/content_digest.cpp gms_admission_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
+	-lprotobuf -lcrypto -DGTEST_HAS_PTHREAD=1 -lgtest_main -lgtest  -pthread -o build/gms-admission-test
+./build/gms-admission-test
+Running main() from ./googletest/src/gtest_main.cc
+[==========] Running 18 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 18 tests from GmsAdmissionTest
+[ RUN      ] GmsAdmissionTest.AcceptsExactCapturedAllocationsRegardlessOfRequestOrder
+[       OK ] GmsAdmissionTest.AcceptsExactCapturedAllocationsRegardlessOfRequestOrder (2 ms)
+[ RUN      ] GmsAdmissionTest.RejectsCorruptManifestDigestBeforeOpeningPayloads
+[       OK ] GmsAdmissionTest.RejectsCorruptManifestDigestBeforeOpeningPayloads (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsEquivalentSizesWithWrongAllocationIdentity
+[       OK ] GmsAdmissionTest.RejectsEquivalentSizesWithWrongAllocationIdentity (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsWrongAllocationSizesOrOffsets
+[       OK ] GmsAdmissionTest.RejectsWrongAllocationSizesOrOffsets (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsEmptyOrUnalignedAllocationExtents
+[       OK ] GmsAdmissionTest.RejectsEmptyOrUnalignedAllocationExtents (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsTruncatedAndOversizedShards
+[       OK ] GmsAdmissionTest.RejectsTruncatedAndOversizedShards (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsDuplicateIdsHolesAndOverlapsEvenWithMatchingManifest
+[       OK ] GmsAdmissionTest.RejectsDuplicateIdsHolesAndOverlapsEvenWithMatchingManifest (1 ms)
+[ RUN      ] GmsAdmissionTest.RejectsTraversalAndAbsoluteShardPaths
+[       OK ] GmsAdmissionTest.RejectsTraversalAndAbsoluteShardPaths (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsSymlinkedManifestShardAndShardDirectory
+[       OK ] GmsAdmissionTest.RejectsSymlinkedManifestShardAndShardDirectory (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsInvalidIdentityDeadlineAndSocketBeforeManifestAccess
+[       OK ] GmsAdmissionTest.RejectsInvalidIdentityDeadlineAndSocketBeforeManifestAccess (0 ms)
+[ RUN      ] GmsAdmissionTest.RejectsInvalidManifestSchemaAndUnrepresentableIntegers
+[       OK ] GmsAdmissionTest.RejectsInvalidManifestSchemaAndUnrepresentableIntegers (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerWithoutGpuRejectsBeforeConnectingToGms
+[       OK ] GmsAdmissionTest.BrokerWithoutGpuRejectsBeforeConnectingToGms (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerRejectsArtifactOutsideConfiguredRoot
+[       OK ] GmsAdmissionTest.BrokerRejectsArtifactOutsideConfiguredRoot (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerRejectsSymlinkedArtifactDirectory
+[       OK ] GmsAdmissionTest.BrokerRejectsSymlinkedArtifactDirectory (0 ms)
+[ RUN      ] GmsAdmissionTest.BrokerReplaysPublishedResultWithoutSecondGpuAdmission
+GPU engine pid=59 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerReplaysPublishedResultWithoutSecondGpuAdmission (3 ms)
+[ RUN      ] GmsAdmissionTest.BrokerConcurrentDuplicatesWaitForSingleAdmission
+GPU engine pid=61 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerConcurrentDuplicatesWaitForSingleAdmission (55 ms)
+[ RUN      ] GmsAdmissionTest.BrokerRetainsFailedAdmissionWithoutDestructiveRetry
+GPU engine pid=65 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerRetainsFailedAdmissionWithoutDestructiveRetry (4 ms)
+[ RUN      ] GmsAdmissionTest.BrokerConnectionFailureIsStickyEvenIfEndpointAppears
+GPU engine pid=67 fake-gms-ready
+[       OK ] GmsAdmissionTest.BrokerConnectionFailureIsStickyEvenIfEndpointAppears (3 ms)
+[----------] 18 tests from GmsAdmissionTest (77 ms total)
+
+[----------] Global test environment tear-down
+[==========] 18 tests from 1 test suite ran. (78 ms total)
+[  PASSED  ] 18 tests.

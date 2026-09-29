@@ -1,0 +1,10 @@
+{
+  "ready_verified_epoch": 1790666124.8657303,
+  "agent": "dynamo-snapshot-agent-xddmk",
+  "host_agent": "dynamo-snapshot-agent-xddmk-x-schwinns-vcluster-x-sc-02369150f7",
+  "claim": "gms-v1-glm-source-0928",
+  "agent_revision": "b209afc332631c5a4c8f747d59dccecd32b4d03e",
+  "agent_binary_sha256": "ef0a146c96c9f8c8bf4705f358c0bb3d132b7fd170d7235f8bb4faaece2b1115",
+  "pagebroker_cpu_limit": 64,
+  "pagebroker_cpu_request": 2
+}

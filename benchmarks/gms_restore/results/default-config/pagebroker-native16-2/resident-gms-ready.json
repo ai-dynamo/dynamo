@@ -1,0 +1,534 @@
+{
+  "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+  "capture_id": null,
+  "generation": null,
+  "ready": true,
+  "publications": 0,
+  "state": "waiting",
+  "online": [
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 0,
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665971.025121,
+      "online_epoch": 1790665971.1728783,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 0,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "d6d8f8be-b6fe-4c95-8247-c9904d83b9e6",
+      "kv_cache_server_nonce": "3e078fec-a837-444a-8ff4-126eee15add3",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665971.172875,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665971.0274773,
+        "stat": {
+          "usage_usec": 157857,
+          "user_usec": 43147,
+          "system_usec": 114709,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=432\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=432\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665971.172885,
+        "stat": {
+          "usage_usec": 297846,
+          "user_usec": 95846,
+          "system_usec": 201999,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=726\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=726\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 1,
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665971.2532415,
+      "online_epoch": 1790665971.3964665,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 1,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "a88d31dd-ea9d-4445-b80e-6f06385dc782",
+      "kv_cache_server_nonce": "9bcdeb27-cf13-48e4-b548-14b1b4a14169",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665971.3964615,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665971.255653,
+        "stat": {
+          "usage_usec": 161573,
+          "user_usec": 46607,
+          "system_usec": 114965,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=539\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=539\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665971.396478,
+        "stat": {
+          "usage_usec": 297621,
+          "user_usec": 96470,
+          "system_usec": 201151,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=631\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=631\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 2,
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665971.4961474,
+      "online_epoch": 1790665971.635866,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 2,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "704411b5-1c8e-4b62-8c4d-348bd79452e2",
+      "kv_cache_server_nonce": "c8e396b7-81fc-4f20-8f2b-98c84f1301f7",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665971.6358566,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665971.4986987,
+        "stat": {
+          "usage_usec": 162683,
+          "user_usec": 39883,
+          "system_usec": 122800,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 2,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=334\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=334\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665971.635873,
+        "stat": {
+          "usage_usec": 294749,
+          "user_usec": 87600,
+          "system_usec": 207148,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=512\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=512\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 3,
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665971.744647,
+      "online_epoch": 1790665971.8817663,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 3,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "29ee31a4-51fa-4523-9fa9-6161834a15de",
+      "kv_cache_server_nonce": "f135a646-3c6f-42c7-8c2f-3bdc114b91cb",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665971.8817627,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665971.7471306,
+        "stat": {
+          "usage_usec": 160401,
+          "user_usec": 43463,
+          "system_usec": 116938,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=277\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=277\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665971.8817732,
+        "stat": {
+          "usage_usec": 288699,
+          "user_usec": 92832,
+          "system_usec": 195866,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=409\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=409\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 4,
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665971.9741223,
+      "online_epoch": 1790665972.1153486,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 4,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "384ce810-1af5-41f0-83b3-d9ea431d248c",
+      "kv_cache_server_nonce": "da12dc85-4cdf-4251-9638-e60116dc6135",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665972.115343,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665971.976426,
+        "stat": {
+          "usage_usec": 155294,
+          "user_usec": 39605,
+          "system_usec": 115689,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=364\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=359\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665972.115361,
+        "stat": {
+          "usage_usec": 288499,
+          "user_usec": 78870,
+          "system_usec": 209629,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=566\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=561\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 5,
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665972.1972852,
+      "online_epoch": 1790665972.332355,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 5,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "235c525b-7c28-4de8-9086-76c8b2b179dc",
+      "kv_cache_server_nonce": "0f74560c-20e7-481b-a54d-6463c1347e53",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665972.3323514,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665972.1997576,
+        "stat": {
+          "usage_usec": 150375,
+          "user_usec": 44477,
+          "system_usec": 105897,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=514\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=514\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665972.3323622,
+        "stat": {
+          "usage_usec": 277790,
+          "user_usec": 93287,
+          "system_usec": 184502,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=553\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=553\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 6,
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665972.4398308,
+      "online_epoch": 1790665972.618322,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 6,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "e2b24991-1f6f-419a-81f4-3bee297c4123",
+      "kv_cache_server_nonce": "334d74f1-c6ec-4d1a-a7ee-dfa5c5dc406c",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665972.6183183,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665972.4422095,
+        "stat": {
+          "usage_usec": 157046,
+          "user_usec": 40294,
+          "system_usec": 116751,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=407\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=407\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665972.6183288,
+        "stat": {
+          "usage_usec": 285073,
+          "user_usec": 100493,
+          "system_usec": 184579,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 3,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=616\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=616\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    },
+    {
+      "event": "online",
+      "mode": "pagebroker",
+      "rank": 7,
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "service_generation": "99b471b7-baed-4cac-be9a-17addf6a5dce",
+      "daemon_started_epoch": 1790665972.6674829,
+      "online_epoch": 1790665972.9310527,
+      "local_device": 0,
+      "visible_device_count": 1,
+      "socket_device": 7,
+      "socket_dir": "/gms",
+      "weights_server_nonce": "a91bd367-2fd9-469a-ab26-9d87ac29e1ff",
+      "kv_cache_server_nonce": "983f25c9-eedf-4637-adae-c8b8a300f83a",
+      "server_domains_responsive": [
+        "weights",
+        "kv_cache"
+      ],
+      "payload_bytes_read": 0,
+      "weight_allocations": 0,
+      "pinned_bytes": 0,
+      "loader_lanes_ready": 0,
+      "cuda_context_current": false,
+      "cuda_primary_context_active": false,
+      "context_state": {
+        "epoch": 1790665972.9310477,
+        "current_context": 0,
+        "primary_context_active": false,
+        "primary_context_flags": 0
+      },
+      "prewarm_cpu_before": {
+        "epoch": 1790665972.669825,
+        "stat": {
+          "usage_usec": 153551,
+          "user_usec": 40880,
+          "system_usec": 112671,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 1,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=341\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=341\n",
+        "max": "800000 100000",
+        "weight": "39"
+      },
+      "prewarm_cpu_after": {
+        "epoch": 1790665972.9310617,
+        "stat": {
+          "usage_usec": 287482,
+          "user_usec": 92115,
+          "system_usec": 195366,
+          "core_sched.force_idle_usec": 0,
+          "nr_periods": 4,
+          "nr_throttled": 0,
+          "throttled_usec": 0,
+          "nr_bursts": 0,
+          "burst_usec": 0
+        },
+        "pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=604\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=604\n",
+        "max": "800000 100000",
+        "weight": "39"
+      }
+    }
+  ],
+  "error": null,
+  "transfer_owner": "resident_pagebroker_gpu_engine",
+  "transfer_slots_per_gpu": 32,
+  "chunk_mib": 128
+}

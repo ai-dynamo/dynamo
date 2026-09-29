@@ -1,0 +1,41 @@
+"""Same exact 448 GiB PageBroker->GMS load after a zero-replica DGD selects it."""
+import sys,json,time,subprocess,copy
+from pathlib import Path
+scope={};driver=Path('/tmp/gms-pagebroker-trials.py').read_text().split('for token in sys.argv[1:]:',1)[0];exec(driver,scope)
+c=scope['c'];root=scope['root'];out=scope['out'];meta=scope['meta'];prep=scope['prep'];agent=scope['agent'];host_agent=scope['host_agent']
+label=sys.argv[1];scope['label']='native'+label
+case='pagebroker-isolated'+label+'-1';path=out/case;path.mkdir(exist_ok=False)
+resident=scope['make_resident'](path)
+sys.path.insert(0,str(root/'benchmarks/gms_restore'));from resident_restore import coordinator_request
+try:
+ ready=coordinator_request('http://127.0.0.1:28445','/ready');assert ready['ready'];assert ready.get('capture_id') is None
+ (path/'resident-gms-ready.json').write_text(json.dumps(ready,indent=2))
+ (path/'resident-gms-before.json').write_text(json.dumps(c.api.sanitize_for_serialization(c.core.read_namespaced_pod(resident['pod'],c.NS)),indent=2))
+ for container in ['agent','pagebroker']:(path/f'cpu-{container}-before.txt').write_text(scope['cpu'](container,host_agent))
+ dgd=json.loads((out/'pagebroker-native16-1/dgd-manifest.json').read_text());dgd['spec']['components'][0]['replicas']=0
+ (path/'dgd-manifest.json').write_text(json.dumps(dgd,indent=2))
+ started=time.time();created=c.custom.create_namespaced_custom_object('nvidia.com','v1beta1',c.NS,'dynamographdeployments',dgd);returned=time.time()
+ (path/'dgd-created.json').write_text(json.dumps(created,indent=2))
+ discovery=time.time();selected_name=created['spec']['components'][0]['podTemplate']['metadata']['annotations']['nvidia.com/gms-prototype-restore-from']
+ selected=c.custom.get_namespaced_custom_object('nvidia.com','v1alpha1',c.NS,'podsnapshots',selected_name);content=c.custom.get_cluster_custom_object('nvidia.com','v1alpha1','podsnapshotcontents',selected['status']['boundSnapshotContentName']);uid=content['metadata']['uid'];generation=created['metadata']['uid']
+ selection={'dgd_uid':generation,'snapshot_name':selected_name,'snapshot_id':uid,'capture_manifest_path':f'/checkpoints/artifacts/{uid}/gms/capture.json','discovery_started_epoch':discovery,'discovery_completed_epoch':time.time()};(path/'snapshot-selection.json').write_text(json.dumps(selection,indent=2))
+ requested=time.time();response=coordinator_request('http://127.0.0.1:28445','/load',{'dgd_uid':generation,'snapshot_id':uid,'generation':generation,'capture_manifest_path':selection['capture_manifest_path']});trigger={'request_epoch':requested,'trigger_written_epoch':response['trigger_written_epoch'],'return_epoch':time.time(),'response':response};(path/'resident-gms-trigger.json').write_text(json.dumps(trigger,indent=2))
+ end=time.monotonic()+200
+ while time.monotonic()<end:
+  health=coordinator_request('http://127.0.0.1:28445','/healthz')
+  if health['state']=='published':break
+  if health['state']=='error':raise RuntimeError(health)
+  time.sleep(.1)
+ else:raise TimeoutError('isolated GMS publication')
+ completed=time.time();assert not any(p.metadata.name.startswith(scope['dgdname']) for p in c.core.list_namespaced_pod(c.NS).items)
+ def remote(command):return subprocess.check_output(['kubectl','--context='+c.HOST,'-n',c.NS,'exec',resident['host'],'-c','coordinator','--',*command],text=True)
+ for name in ['restore-plan.json','publication-verification.txt','all-ready']:(path/('plan.json' if name=='restore-plan.json' else name)).write_text(remote(['cat','/gms/'+name]))
+ pubs=[json.loads(remote(['cat',f'/gms/rank-{rank}.json'])) for rank in range(8)];(path/'publications.json').write_text(json.dumps(pubs,indent=2))
+ (path/'timing.json').write_text(json.dumps({'mode':'isolated_gms_load','pagebroker_gms':True,'weight_transfer_owner':'pagebroker','artifact_selection_timing':'after_dgd_creation','capture_id':selected_name,'resident_gms_generation':generation,'resident_gms_service_generation':resident['generation'],'create_epoch':started,'dgd_create_return_epoch':returned,'publication_ready_epoch':completed,'publication_ready_s':completed-started,'resident_gms_load_trigger':trigger,'pagebroker_cpu_limit':int(label),'engine_replicas':0,'engine_pods_created':0},indent=2))
+ print(case,'published',completed-started,flush=True)
+finally:
+ for container in ['agent','pagebroker']:
+  (path/f'{container}.txt').write_text(subprocess.check_output(['kubectl','--context='+c.HOST,'-n',c.NS,'logs',host_agent,'-c',container],text=True));(path/f'cpu-{container}-after.txt').write_text(scope['cpu'](container,host_agent))
+ for container in ['coordinator']+[f'gms-{r}' for r in range(8)]:(path/f'{container}.txt').write_text(subprocess.check_output(['kubectl','--context='+c.HOST,'-n',c.NS,'logs',resident['host'],'-c',container],text=True))
+ (path/'resident-gms-after.json').write_text(json.dumps(c.api.sanitize_for_serialization(c.core.read_namespaced_pod(resident['pod'],c.NS)),indent=2))
+ scope['cleanup_trial']();scope['delete_resident'](resident)

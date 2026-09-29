@@ -1,0 +1,41 @@
+import sys,json,shlex,time
+from pathlib import Path
+from kubernetes import client
+script=Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928/scripts/setup.py');scope={'__file__':str(script)};exec(script.read_text().rsplit('\nmain()',1)[0],scope)
+c=scope['cluster'];apps=scope['apps'];ns=c.NS;node=scope['NODES']['restore'];orig=json.loads((scope['R']/'manifests/original-vcluster.json').read_text());agent=scope['agent_on'](node)
+mount_cmd=f"mountpoint -q {scope['MOUNT']} || (mkdir -p {scope['MOUNT']} && mount -t nfs -o {scope['NFS_OPTIONS']} {scope['NFS_SOURCE']} {scope['MOUNT']})"
+print(scope['host'](agent,'agent',mount_cmd),flush=True)
+t=scope['bundle_patch'](scope['qualified_template']('stock',orig['daemonset']['spec']['template']['spec'].get('affinity')),True,True)
+for v in t['spec']['volumes']:
+ if v['name']=='exp-bundle':v['hostPath']['path']='/var/lib/schwinns-gms-0928/bundle'
+ if v['name']=='exp-criu':v['hostPath']['path']='/var/lib/schwinns-gms-0928/bundle/criu'
+t['spec']['volumes'].append({'name':'gms-agent','hostPath':{'path':'/var/lib/schwinns-gms-0928/snapshot-agent-network-discovery','type':'File'}})
+for container in t['spec']['containers']:
+ if container['name']=='agent':
+  container['volumeMounts'].append({'name':'gms-agent','mountPath':'/usr/local/bin/snapshot-agent','readOnly':True})
+
+base='/var/lib/schwinns-pb-gms-0929'
+print(scope['host'](agent,'agent','mkdir -p '+base+'/control '+base+'/servers'),flush=True)
+gmsmount='/var/lib/schwinns-gms-0928/gms-pvc-nfs'
+print(scope['host'](agent,'agent',f"mountpoint -q {gmsmount} || (mkdir -p {gmsmount} && mount -t nfs -o {scope['NFS_OPTIONS']} {scope['NFS_SOURCE']} {gmsmount})"),flush=True)
+for volume in t['spec']['volumes']:
+ if volume['name']=='pagebroker':
+  volume.clear();volume.update(name='pagebroker',hostPath={'path':base+'/control','type':'Directory'})
+extra=[('pb-gms-bin',base+'/bin','/opt/gms-pagebroker'),('pb-gms-sockets',base+'/servers','/gms'),('pb-gms-pvc',gmsmount,'/checkpoints/gms-pvc')]
+for name,path,mount in extra:t['spec']['volumes'].append({'name':name,'hostPath':{'path':path,'type':'Directory'}})
+for container in t['spec']['containers']:
+ if container['name']=='pagebroker':
+  container['command']=['/opt/gms-pagebroker/pagebroker']
+  container['args']=[x.replace('/usr/local/bin/pagebroker-gpu-engine','/opt/gms-pagebroker/pagebroker-gpu-engine') for x in container['args']]
+  container['volumeMounts'] += [{'name':name,'mountPath':mount,'readOnly':name!='pb-gms-sockets'} for name,path,mount in extra]
+
+ds=apps.read_namespaced_daemon_set('dynamo-snapshot-agent',ns);apps.patch_namespaced_daemon_set(ds.metadata.name,ns,[{'op':'replace','path':'/spec/template','value':t},{'op':'replace','path':'/spec/updateStrategy','value':{'type':'OnDelete'}}])
+c.core.patch_namespaced_config_map('dynamo-snapshot-config',ns,{'data':scope['config_data']()})
+op=json.loads((scope['OLD']/'customstorage-glm-matrix/candidate-operator-template.json').read_text());co=op['spec']['containers'][0];co['image']=scope['images']['operator'];co['args']=[a for a in co['args'] if not a.startswith(('--agent-image=','--agent-image-pull-secrets='))]+['--agent-image='+scope['images']['agent']];apps.patch_namespaced_deployment('dynamo-snapshot-operator',ns,{'spec':{'template':op}})
+c.core.delete_namespaced_pod(agent,ns);time.sleep(5);new=scope['wait_agent_ready'](node);Path('/tmp/gms-restore-agent-virtual').write_text(new);Path('/tmp/gms-restore-agent-host').write_text(c.host_name(new));print('agent',new,flush=True)
+print(c.host_exec(new,'nsenter -t 1 -m -- sh /var/lib/schwinns-gms-0928/node-levers.sh apply','agent'),flush=True)
+
+r=Path('/home/schwinns/dynamo/worktrees/gms-pagebroker-restore-20260929/benchmarks/gms_restore/results/default-config/pagebroker-study')
+pod=c.core.read_namespaced_pod(new,ns)
+(r/'agent-ready-before-trials.json').write_text(json.dumps(c.api.sanitize_for_serialization(pod),indent=2))
+(r/'prepared-network.json').write_text(json.dumps({'ready_verified_epoch':time.time(),'agent':new,'host_agent':c.host_name(new),'claim':'gms-v1-glm-source-0928','agent_revision':'b209afc332631c5a4c8f747d59dccecd32b4d03e','agent_binary_sha256':'ef0a146c96c9f8c8bf4705f358c0bb3d132b7fd170d7235f8bb4faaece2b1115'},indent=2))

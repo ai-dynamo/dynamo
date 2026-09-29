@@ -1,0 +1,7 @@
+Deleted experiment DGD, GMS DaemonSets, claim holder, staging Pod, claim, and generated ConfigMaps.
+restored: numa_balancing=1
+Original agent restored and Ready: dynamo-snapshot-agent-z97f4
+Unmounted /var/lib/schwinns-gms-0928/gms-pvc-nfs
+Unmounted /var/lib/snapshot-restore-perf-nfs
+Removed experiment node binaries, sockets, and preinstalled bundle directory.
+Retained exact GLM/Qwen snapshots and GMS PVC payloads; retained new matching Snapshot GMS capture descriptor.

@@ -1,0 +1,28 @@
+{
+  "qualified_source_revision": "ca369464c41157bb30da063748b1bea025c34d57",
+  "qualified_runtime_image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:a9f71596b7186de01c77080213a33dfced0acfc954564c6410e87baa3b03b15d",
+  "qualified_cached_builder": "sha256:a594896040ab46d586fbcc75550f0929519290f7d4ae8e98b1e27cbab91d96d8",
+  "extended_test_builder": "sha256:7470b1d5844f573e9edd010d9e4dcaf6957aedce5846d8bf194875b8a336e456",
+  "toolchain_packages": "g++\t4:13.2.0-7ubuntu1\nlibgtest-dev:amd64\t1.14.0-1\nlibmsgpack-cxx-dev:amd64\t6.1.0-1build1\nlibprotobuf-dev:amd64\t3.21.12-8.2ubuntu0.3\nprotobuf-compiler\t3.21.12-8.2ubuntu0.3",
+  "cuda_header_version": 13040,
+  "nixl_revision": "71ca3cb249a481ae892fcc042a456e1a9b87463d",
+  "qualified_binary_and_library_hashes": "c2a1b0cd6c3949a7cd29760d24ad9e8ee5ae071e7ac096c8a9c94abd8a0c07b4  /usr/local/bin/pagebroker\n5e1664105e7795ba083186581144b8d56bad2b1555382e94980545d87ca6a228  /usr/local/bin/pagebroker-gpu-engine\nfd33854f968db784c65bd2dd30a931dd4b4c0ad243908c8355f4f1efb4e5bab5  /usr/local/lib/libnixl.so\n13a644db01e705cabeed18375abc757898942fa9b07018c37e6a161af2aa7215  /usr/local/lib/libnixl_build.so\nbc4eb0993f97678fb569d43b0d29a9d3c56cd9c0e796c961b5bcb0db54950c93  /usr/local/lib/plugins/libplugin_POSIX.so",
+  "preserved_source_sha256": {
+    "agent/pagebroker/cuda_posix_transfer.cpp": "8930cc2d1df25305c1ea37f609458e9c719d2bc8ce54a98d7f95af0d4f345374",
+    "agent/pagebroker/cuda_posix_transfer.hpp": "04d9216ae9810ced98c14556245792db4110bdbef6e6f07e4e9db18e7c53b8a6",
+    "agent/pagebroker/nixl_transfer.cpp": "63a7b428ca39e728b0bca32ec0aa7fa157bdbfc462c8e6d33b90e62b40301ed8",
+    "agent/pagebroker/nixl_transfer.hpp": "2d2da2decb552e0128ca0bad04e361227d556e6060bbd2aec143fac06d0e62cf",
+    "agent/cmd/cuda-checkpoint-helper/custom_storage.cpp": "31f936c0b1f93a86535dbb9d8569abc7686b5ef2c2be3a30c48dc3eeb0027b87"
+  },
+  "qualified_ring": {
+    "buffer_count": 32,
+    "chunk_bytes": 134217728,
+    "host_numa": true,
+    "pinned_bytes_per_device": 4294967296
+  },
+  "notes": [
+    "The original ca369464 docker invocation was not archived in the searched evidence; cached image history matches Dockerfile.gpu build target.",
+    "Use BUILDX_CONFIG=/tmp/pb-gms-buildx locally to avoid a permissions failure in the default buildx activity directory.",
+    "The added msgpack client is header-only; no new runtime library is required."
+  ]
+}

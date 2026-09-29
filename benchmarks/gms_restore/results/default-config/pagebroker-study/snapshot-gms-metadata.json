@@ -1,0 +1,7 @@
+{
+  "snapshot_content_uid": "859c4057-d1da-45d6-8565-39225861a5be",
+  "capture_manifest_path": "/checkpoints/artifacts/859c4057-d1da-45d6-8565-39225861a5be/gms/capture.json",
+  "manifest_sha256": "76420e8f06a07019c892e3d4814cbfc6ffff959cb972daa584200a192c8390c1",
+  "payload_bytes_copied": 0,
+  "payloads": "retained exact GMS V1 PVC artifacts referenced by capture manifest"
+}
