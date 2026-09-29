@@ -1,0 +1,107 @@
+{
+  "publications": [
+    {
+      "rank": 0,
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "event": "published",
+      "started_epoch": 1790655169.1002119,
+      "published_epoch": 1790655188.617765,
+      "elapsed_s": 19.517553091049194
+    },
+    {
+      "rank": 1,
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "event": "published",
+      "started_epoch": 1790655169.1026385,
+      "published_epoch": 1790655188.7922063,
+      "elapsed_s": 19.689567804336548
+    },
+    {
+      "rank": 2,
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "event": "published",
+      "started_epoch": 1790655169.102589,
+      "published_epoch": 1790655188.6087768,
+      "elapsed_s": 19.506187915802002
+    },
+    {
+      "rank": 3,
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "event": "published",
+      "started_epoch": 1790655169.1010041,
+      "published_epoch": 1790655188.613748,
+      "elapsed_s": 19.512743949890137
+    },
+    {
+      "rank": 4,
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "event": "published",
+      "started_epoch": 1790655169.10039,
+      "published_epoch": 1790655188.6140077,
+      "elapsed_s": 19.513617753982544
+    },
+    {
+      "rank": 5,
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "event": "published",
+      "started_epoch": 1790655169.1024773,
+      "published_epoch": 1790655188.7919772,
+      "elapsed_s": 19.689499855041504
+    },
+    {
+      "rank": 6,
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "event": "published",
+      "started_epoch": 1790655169.1020372,
+      "published_epoch": 1790655188.6029923,
+      "elapsed_s": 19.50095510482788
+    },
+    {
+      "rank": 7,
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "event": "published",
+      "started_epoch": 1790655169.1005328,
+      "published_epoch": 1790655188.611242,
+      "elapsed_s": 19.510709285736084
+    }
+  ],
+  "transfers": [
+    {
+      "start_epoch": 1790655175.035472,
+      "end_epoch": 1790655188.6115935
+    },
+    {
+      "start_epoch": 1790655175.0368168,
+      "end_epoch": 1790655188.7007754
+    },
+    {
+      "start_epoch": 1790655175.02253,
+      "end_epoch": 1790655188.4501762
+    },
+    {
+      "start_epoch": 1790655175.1457572,
+      "end_epoch": 1790655188.569738
+    },
+    {
+      "start_epoch": 1790655175.0252247,
+      "end_epoch": 1790655188.5455205
+    },
+    {
+      "start_epoch": 1790655175.1253605,
+      "end_epoch": 1790655188.7068968
+    },
+    {
+      "start_epoch": 1790655174.8881207,
+      "end_epoch": 1790655188.463361
+    },
+    {
+      "start_epoch": 1790655174.9686959,
+      "end_epoch": 1790655188.567719
+    }
+  ],
+  "case": "isolated-v1-128-1",
+  "bytes": 481036337152,
+  "chunk_mib": 128,
+  "span_s": 19.691994428634644,
+  "transfer_span_s": 13.81877613067627
+}

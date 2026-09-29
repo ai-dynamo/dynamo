@@ -1,0 +1,26 @@
+import json,sys,subprocess,time
+from pathlib import Path
+from kubernetes import client
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+out=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928/benchmarks/gms_restore/results/transfer-comparison')
+name='gms-transfer-0929';c.core.delete_namespaced_pod(name,c.NS)
+for _ in range(120):
+ try:c.core.read_namespaced_pod(name,c.NS)
+ except client.ApiException as e:
+  if e.status==404:break
+  raise
+ time.sleep(.5)
+else:raise TimeoutError('delete pod')
+c.custom.delete_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims',name)
+agent=json.loads((out/'agent.json').read_text())['host']
+subprocess.run(['kubectl','-n',c.NS,'exec',agent,'-c','agent','--','nsenter','-t','1','-m','--','umount','/var/lib/schwinns-gms-0928/gms-pvc-nfs'],check=True)
+checks={'no_experiment_pods':not any(p.metadata.name.startswith('gms-transfer-') for p in c.core.list_namespaced_pod(c.NS).items),'no_experiment_claims':not any(x['metadata']['name']==name for x in c.custom.list_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims')['items'])}
+r=subprocess.run(['kubectl','-n',c.NS,'exec',agent,'-c','agent','--','nsenter','-t','1','-m','--','sh','-c','if mountpoint -q /var/lib/schwinns-gms-0928/gms-pvc-nfs; then exit 1; fi; cat /proc/sys/kernel/numa_balancing'],capture_output=True,text=True)
+checks['private_mount_removed']=r.returncode==0;checks['numa_balancing_unchanged']=r.stdout.strip()=='1'
+orig=json.loads(Path('/home/schwinns/checkpoint-e2e-evidence/gms-restore-20260928/manifests/original-vcluster.json').read_text());apps=client.AppsV1Api()
+checks['agent_template_unchanged']=c.api.sanitize_for_serialization(apps.read_namespaced_daemon_set('dynamo-snapshot-agent',c.NS).spec.template)==orig['daemonset']['spec']['template']
+checks['operator_template_unchanged']=c.api.sanitize_for_serialization(apps.read_namespaced_deployment('dynamo-snapshot-operator',c.NS).spec.template)==orig['operator']['spec']['template']
+for snapshot in ['gms-v1-glm-default-0929','gms-v1-qwen-0928']:
+ obj=c.custom.get_namespaced_custom_object('nvidia.com','v1alpha1',c.NS,'podsnapshots',snapshot)
+ checks[snapshot+'_ready']=any(x['type']=='Ready' and x['status']=='True' for x in obj['status']['conditions'])
+(out/'cleanup-verification.json').write_text(json.dumps(checks,indent=2));print(json.dumps(checks,indent=2));assert all(checks.values())

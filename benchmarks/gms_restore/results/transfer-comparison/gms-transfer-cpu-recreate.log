@@ -1,0 +1,5 @@
+resources applied 8 16
+cpu-8req-16lim-gms16-a 16.191 29.71
+cpu-8req-16lim-gms16-b 16.076 29.922
+resources applied 1 8
+cpu-1req-8lim-gms16-b 16.976 28.336

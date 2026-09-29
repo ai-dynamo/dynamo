@@ -1,0 +1,31 @@
+import sys,json,subprocess,time,io,tarfile
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928'); out=root/'benchmarks/gms_restore/results/transfer-comparison';host=(out/'host-name.txt').read_text()
+name='gms-transfer-libs-0929'
+p={'apiVersion':'v1','kind':'Pod','metadata':{'name':name,'namespace':c.NS},'spec':{'nodeSelector':{'kubernetes.io/hostname':'cluster-0967a26d-pool-14bee067-prctr-s2877'},'imagePullSecrets':[{'name':'nvcr-secret'}],'tolerations':[{'operator':'Exists'}],'restartPolicy':'Never','containers':[{'name':'libs','image':'nvcr.io/nvidian/dynamo-dev/schwinns@sha256:a9f71596b7186de01c77080213a33dfced0acfc954564c6410e87baa3b03b15d','command':['sleep','infinity'],'imagePullPolicy':'IfNotPresent'}]}}
+c.core.create_namespaced_pod(c.NS,p)
+for _ in range(90):
+ pod=c.core.read_namespaced_pod(name,c.NS)
+ if pod.status.phase=='Running':break
+ time.sleep(1)
+h=c.host_name(name)
+# Copy the qualified broker's exact NIXL runtime, without importing the image's CUDA stack.
+libs=subprocess.check_output(['kubectl','-n',c.NS,'exec',h,'-c','libs','--','tar','-C','/usr/local','-cf','-','lib'])
+subprocess.run(['kubectl','-n',c.NS,'exec','-i',host,'-c','gms-0','--','tar','-C','/gms','-xf','-'],input=libs,check=True)
+aio=subprocess.check_output(['kubectl','-n',c.NS,'exec',h,'-c','libs','--','cat','/usr/lib/x86_64-linux-gnu/libaio.so.1t64'])
+subprocess.run(['kubectl','-n',c.NS,'exec','-i',host,'-c','gms-0','--','sh','-c','cat > /gms/lib/libaio.so.1t64'],input=aio,check=True)
+c.core.delete_namespaced_pod(name,c.NS)
+# Exact qualified NIXL API headers and unchanged Snapshot transfer implementation.
+headers=subprocess.check_output(['git','-C','/home/schwinns/dynamo/nixl','archive','71ca3cb249a481ae892fcc042a456e1a9b87463d','src/api/cpp'])
+subprocess.run(['kubectl','-n',c.NS,'exec','-i',host,'-c','gms-0','--','tar','-C','/gms','-xf','-'],input=headers,check=True)
+ss=Path('/home/schwinns/dynamo/worktrees/snapshot-gms-rank-restore-20260928/agent/pagebroker')
+buf=io.BytesIO()
+with tarfile.open(fileobj=buf,mode='w') as tar:
+ for f in ['cuda_posix_transfer.cpp','cuda_posix_transfer.hpp','nixl_transfer.cpp','nixl_transfer.hpp']:tar.add(ss/f,arcname=f)
+ for f in ['pagebroker_transfer_probe.cpp','transfer_probe.py','posix_direct.py']:tar.add(root/'benchmarks/gms_restore'/f,arcname=f)
+subprocess.run(['kubectl','-n',c.NS,'exec','-i',host,'-c','gms-0','--','tar','-C','/gms','-xf','-'],input=buf.getvalue(),check=True)
+cmd=['g++','-O2','-std=c++20','-shared','-fPIC','-DPAGEBROKER_NIXL','-I/gms','-I/gms/src/api/cpp','-I/usr/local/cuda/include','/gms/pagebroker_transfer_probe.cpp','/gms/cuda_posix_transfer.cpp','/gms/nixl_transfer.cpp','-L/usr/local/cuda/lib64/stubs','-lcuda','-L/gms/lib','-lnixl','-lnixl_build','-pthread','-Wl,-rpath,/gms/lib','-o','/gms/libpbprobe.so']
+r=subprocess.run(['kubectl','-n',c.NS,'exec',host,'-c','gms-0','--',*cmd],capture_output=True,text=True)
+(out/'build.txt').write_text(r.stdout+r.stderr);print(r.stdout+r.stderr);r.check_returncode()
+print('built',flush=True)

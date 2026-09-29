@@ -1,0 +1,13 @@
+{
+  "snapshot_revision": "bc42fb31b175a1dc138a3e68b8f84a37d38efb8f",
+  "qualified_base": "d9b6bc722efb9ee14f774c53837fb0782297f95b",
+  "nixl_revision": "71ca3cb249a481ae892fcc042a456e1a9b87463d",
+  "broker_image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:a9f71596b7186de01c77080213a33dfced0acfc954564c6410e87baa3b03b15d",
+  "source_sha256": {
+    "cuda_posix_transfer.cpp": "8930cc2d1df25305c1ea37f609458e9c719d2bc8ce54a98d7f95af0d4f345374",
+    "cuda_posix_transfer.hpp": "04d9216ae9810ced98c14556245792db4110bdbef6e6f07e4e9db18e7c53b8a6",
+    "nixl_transfer.cpp": "63a7b428ca39e728b0bca32ec0aa7fa157bdbfc462c8e6d33b90e62b40301ed8",
+    "nixl_transfer.hpp": "2d2da2decb552e0128ca0bad04e361227d556e6060bbd2aec143fac06d0e62cf"
+  },
+  "note": "No source changes to production transfer code. Adapter reads each 4GiB shard into two adjacent 2GiB destination regions; GMS reads the matching manifest extents. Both restore exactly 448GiB, O_DIRECT. Timed transfers exclude GPU destination allocation, and PB/warm-GMS ring setup. Verification samples 3 pages per 2GiB allocation after timing. Storage server cache/load uncontrolled. No CRIU/CUDA checkpoint restore runs concurrently."
+}

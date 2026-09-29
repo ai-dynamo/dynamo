@@ -1,0 +1,18 @@
+cpu-1req-8lim-gms16-a 16.16 29.767
+Traceback (most recent call last):
+  File "/tmp/gms-transfer-cpu.py", line 19, in <module>
+    resize('8','16')
+    ~~~~~~^^^^^^^^^^
+  File "/tmp/gms-transfer-cpu.py", line 8, in resize
+    result=c.api.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize','PATCH',path_params={'namespace':c.NS,'name':'gms-transfer-0929'},header_params={'Content-Type':'application/strategic-merge-patch+json'},body=body,response_type='object',auth_settings=['BearerToken'],_return_http_data_only=True)
+TypeError: ApiClient.call_api() got an unexpected keyword argument 'response_type'. Did you mean 'response_types_map'?
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/gms-transfer-cpu.py", line 23, in <module>
+    resize('1','8')
+    ~~~~~~^^^^^^^^^
+  File "/tmp/gms-transfer-cpu.py", line 8, in resize
+    result=c.api.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize','PATCH',path_params={'namespace':c.NS,'name':'gms-transfer-0929'},header_params={'Content-Type':'application/strategic-merge-patch+json'},body=body,response_type='object',auth_settings=['BearerToken'],_return_http_data_only=True)
+TypeError: ApiClient.call_api() got an unexpected keyword argument 'response_type'. Did you mean 'response_types_map'?

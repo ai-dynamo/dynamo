@@ -1,0 +1,107 @@
+Traceback (most recent call last):
+  File "/tmp/gms-transfer-cpu.py", line 25, in <module>
+    resize('8','16')
+    ~~~~~~^^^^^^^^^^
+  File "/tmp/gms-transfer-cpu.py", line 13, in resize
+    result=c.api.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize','PATCH',path_params={'namespace':c.NS,'name':'gms-transfer-0929'},header_params={'Content-Type':'application/strategic-merge-patch+json'},body=body,response_types_map={'200':'object'},auth_settings=['BearerToken'],_return_http_data_only=True)
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 374, in call_api
+    return self.__call_api(resource_path, method,
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+                           path_params, query_params, header_params,
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                           _preload_content, _request_timeout, _host,
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                           _request_auth)
+                           ^^^^^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 191, in __call_api
+    raise e
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 184, in __call_api
+    response_data = self.request(
+        method, url, query_params=query_params, headers=header_params,
+        post_params=post_params, body=body,
+        _preload_content=_preload_content,
+        _request_timeout=_request_timeout)
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 434, in request
+    return self.rest_client.PATCH(url,
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^
+                                  query_params=query_params,
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                                  _request_timeout=_request_timeout,
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                  body=body)
+                                  ^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/rest.py", line 301, in PATCH
+    return self.request("PATCH", url,
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^
+                        headers=headers,
+                        ^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                        _request_timeout=_request_timeout,
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        body=body)
+                        ^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/rest.py", line 240, in request
+    raise ApiException(http_resp=r)
+kubernetes.client.exceptions.ApiException: (422)
+Reason: Unprocessable Entity
+HTTP response headers: HTTPHeaderDict({'Audit-Id': 'a8e6938e-17e2-431a-b24b-ca471d171ea3, 0e7538e0-ee6e-457e-bcea-127114f6ed29', 'Cache-Control': 'no-cache, private, no-cache, private', 'Content-Length': '1175', 'Content-Type': 'application/json', 'Date': 'Tue, 29 Sep 2026 04:08:31 GMT', 'X-Kubernetes-Pf-Flowschema-Uid': '640f5f47-eda2-4850-ad2d-054bfdb73b85', 'X-Kubernetes-Pf-Prioritylevel-Uid': '64527331-6871-41da-a130-3b819ece94fe'})
+HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"Pod \"gms-transfer-0929\" is invalid: spec: Forbidden: only cpu and memory resources are mutable","reason":"Invalid","details":{"name":"gms-transfer-0929","kind":"Pod","causes":[{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"}]},"code":422}
+
+
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/gms-transfer-cpu.py", line 29, in <module>
+    resize('1','8')
+    ~~~~~~^^^^^^^^^
+  File "/tmp/gms-transfer-cpu.py", line 13, in resize
+    result=c.api.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize','PATCH',path_params={'namespace':c.NS,'name':'gms-transfer-0929'},header_params={'Content-Type':'application/strategic-merge-patch+json'},body=body,response_types_map={'200':'object'},auth_settings=['BearerToken'],_return_http_data_only=True)
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 374, in call_api
+    return self.__call_api(resource_path, method,
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+                           path_params, query_params, header_params,
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                           _preload_content, _request_timeout, _host,
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                           _request_auth)
+                           ^^^^^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 191, in __call_api
+    raise e
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 184, in __call_api
+    response_data = self.request(
+        method, url, query_params=query_params, headers=header_params,
+        post_params=post_params, body=body,
+        _preload_content=_preload_content,
+        _request_timeout=_request_timeout)
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/api_client.py", line 434, in request
+    return self.rest_client.PATCH(url,
+           ~~~~~~~~~~~~~~~~~~~~~~^^^^^
+                                  query_params=query_params,
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                                  _request_timeout=_request_timeout,
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                                  body=body)
+                                  ^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/rest.py", line 301, in PATCH
+    return self.request("PATCH", url,
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^
+                        headers=headers,
+                        ^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+                        _request_timeout=_request_timeout,
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        body=body)
+                        ^^^^^^^^^^
+  File "/tmp/gms-restore-tests/lib/python3.13/site-packages/kubernetes/client/rest.py", line 240, in request
+    raise ApiException(http_resp=r)
+kubernetes.client.exceptions.ApiException: (422)
+Reason: Unprocessable Entity
+HTTP response headers: HTTPHeaderDict({'Audit-Id': 'fee3aa3c-a35b-4e65-81f7-140173890013, b4ab607d-2278-4101-856b-b4ad212b258c', 'Cache-Control': 'no-cache, private, no-cache, private', 'Content-Length': '1175', 'Content-Type': 'application/json', 'Date': 'Tue, 29 Sep 2026 04:08:31 GMT', 'X-Kubernetes-Pf-Flowschema-Uid': '640f5f47-eda2-4850-ad2d-054bfdb73b85', 'X-Kubernetes-Pf-Prioritylevel-Uid': '64527331-6871-41da-a130-3b819ece94fe'})
+HTTP response body: {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Failure","message":"Pod \"gms-transfer-0929\" is invalid: spec: Forbidden: only cpu and memory resources are mutable","reason":"Invalid","details":{"name":"gms-transfer-0929","kind":"Pod","causes":[{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"},{"reason":"FieldValueForbidden","message":"Forbidden: only cpu and memory resources are mutable","field":"spec"}]},"code":422}
+
+

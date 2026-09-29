@@ -1,0 +1,35 @@
+import sys,json,time,runpy,subprocess
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+n=runpy.run_path('/tmp/gms-transfer-run.py');out=n['out'];base=n['base'];run=n['run']
+# /gms contains only probe code/libraries and tiny timing records, not weight payloads.
+archive=subprocess.check_output(base+['-c','gms-0','--','tar','-C','/gms','-cf','-','.'])
+Path('/tmp/gms-transfer-workspace.tar').write_bytes(archive)
+def recreate(request,limit):
+ c.core.delete_namespaced_pod('gms-transfer-0929',c.NS)
+ for _ in range(120):
+  try:c.core.read_namespaced_pod('gms-transfer-0929',c.NS)
+  except c.client.ApiException as e:
+   if e.status==404:break
+   raise
+  time.sleep(.5)
+ else:raise TimeoutError('pod deletion')
+ p=json.loads((out/'manifest.json').read_text())
+ for container in p['spec']['containers']:
+  container['resources']['requests']['cpu']=request;container['resources']['limits']['cpu']=limit
+ c.core.create_namespaced_pod(c.NS,p)
+ (out/f'manifest-cpu-{request}-{limit}.json').write_text(json.dumps(p,indent=2))
+ for _ in range(120):
+  pod=c.core.read_namespaced_pod('gms-transfer-0929',c.NS)
+  if len(pod.status.container_statuses or [])==8 and all(x.ready for x in pod.status.container_statuses):break
+  time.sleep(1)
+ else:raise TimeoutError('pod startup')
+ subprocess.run(base+['-i','-c','gms-0','--','tar','-C','/gms','-xf','-'],input=archive,check=True)
+ actual=subprocess.check_output(base+['-c','gms-0','--','cat','/sys/fs/cgroup/cpu.max'],text=True).strip()
+ assert actual==f'{int(limit)*100000} 100000',actual
+ print('resources applied',request,limit,flush=True)
+recreate('8','16')
+run('cpu-8req-16lim-gms16-a','gms',16,16,32)
+run('cpu-8req-16lim-gms16-b','gms',16,16,32)
+recreate('1','8')
+run('cpu-1req-8lim-gms16-b','gms',16,16,32)

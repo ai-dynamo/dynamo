@@ -128,3 +128,7 @@ still protects weight use. Snapshot patch bc42fb31 is required to avoid holding
 stale pod status through the runtime lookup timeout in this vcluster.
 See `DGD-RESTORE.md` for current operator behavior and the production integration
 plan; these tests are still the Engine API prototype, not a complete DGD run.
+
+Equal-payload transfer and CPU comparison: [TRANSFER-COMPARISON.md](TRANSFER-COMPARISON.md).
+Proposed direct PageBroker → GMS V1 client integration: [PAGEBROKER-GMS.md](PAGEBROKER-GMS.md).
+The probe calls the qualified transfer code, but does not implement that control API.

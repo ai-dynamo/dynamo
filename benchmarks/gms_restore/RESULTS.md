@@ -14,6 +14,30 @@ All 448 GiB of matching allocation data is read from the PVC export with
 `O_DIRECT`, overlapping CRIU/CUDA restore. The repeated ordinary-PVC NIXL
 comparison is 46.083 s serialized versus 29.562 s overlapping.
 
+## Equal-payload transfer and CPU follow-up (2026-09-29)
+
+A separate isolated study reads the same 448 GiB of GMS PVC artifacts through
+both transfer implementations. Current small-buffer GMS averages 16.600 s;
+qualified PageBroker averages 13.183 s across three unambiguous isolated runs.
+Preinitialized GMS with 128 MiB chunks reaches 12.917–13.035 s, and 32 lanes ×
+two 64 MiB buffers reaches 12.843–12.955 s. These use 4 GiB pinned memory/GPU,
+matching PageBroker; the original GMS setting uses 512 MiB/GPU. All transfer
+runs verified sampled GPU bytes and O_DIRECT payload descriptors.
+
+Raising GMS CPU request/limit from 1/8 to 8/16 gave 16.568 versus 16.134 s mean
+in an A–B–B–A comparison, with zero transfer-time quota throttling in either
+configuration. This does not exclude CPU-share contention during full restore.
+Standalone V1 original server/load/publication took 22.485–22.791 s; one 128 MiB
+trial took 19.692 s, including a 13.819 s transfer span. That standalone startup
+is not equivalent to the earlier warm PageBroker/engine deployment.
+
+See [comparison and timing boundaries](TRANSFER-COMPARISON.md) and
+[direct PageBroker/GMS design](PAGEBROKER-GMS.md). These microbenchmarks do not
+establish a new pod-to-ready result or implement the broker control API. The
+current fused prototype already combines server and loader in each rank
+container, so centralization removes loader machinery, not eight separate loader
+containers. Original deployment script starts were staggered by about 1.8 s.
+
 ## Creation-time restore dispatch follow-up (2026-09-29)
 
 Production DGD admission already places restore intent on pod creation. The

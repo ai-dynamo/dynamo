@@ -1,0 +1,35 @@
+import sys,json,subprocess,time,concurrent.futures,statistics
+from pathlib import Path
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928');out=root/'benchmarks/gms_restore/results/transfer-comparison';host=(out/'host-name.txt').read_text()
+base=['kubectl','-n','schwinns-vcluster','exec',host]
+def run(case,backend,workers=16,chunk=16,slots=32):
+ d=out/case;d.mkdir(exist_ok=True)
+ ps=[];logs=[]
+ for rank in range(8):
+  log=(d/f'rank-{rank}.txt').open('w');logs.append(log)
+  cmd=base+['-c',f'gms-{rank}','--','env','LD_LIBRARY_PATH=/gms/lib:/usr/local/cuda/lib64','NIXL_PLUGIN_DIR=/gms/lib/plugins','python3','-u','/gms/transfer_probe.py','--case',case,'--backend',backend,'--rank',str(rank),'--workers',str(workers),'--chunk-mib',str(chunk),'--slots',str(slots)]
+  ps.append(subprocess.Popen(cmd,stdout=log,stderr=subprocess.STDOUT))
+ try:
+  for _ in range(120):
+   bad=[p.returncode for p in ps if p.poll() is not None and p.returncode!=0]
+   if bad:raise RuntimeError('worker failed '+case)
+   n=subprocess.check_output(base+['-c','gms-0','--','python3','-c',f'from pathlib import Path;print(len(list(Path("/gms/{case}").glob("ready-*"))))'],text=True)
+   if int(n)==8:break
+   time.sleep(.5)
+  else:raise TimeoutError('ready '+case)
+  subprocess.run(base+['-c','gms-0','--','touch',f'/gms/{case}/go'],check=True)
+  for proc in ps:
+   if proc.wait(timeout=180):raise RuntimeError('worker failed '+case)
+  data=json.loads(subprocess.check_output(base+['-c','gms-0','--','python3','-c',f'import json;from pathlib import Path;p=Path("/gms/{case}");print(json.dumps({{"results":[json.loads(x.read_text()) for x in sorted(p.glob("result-*"))],"ready":[json.loads(x.read_text()) for x in sorted(p.glob("ready-*"))]}}))'],text=True))
+  data['span_s']=max(x['end_epoch'] for x in data['results'])-min(x['start_epoch'] for x in data['results'])
+  data['bytes']=sum(x['bytes'] for x in data['results']);data['GBps']=data['bytes']/1e9/data['span_s']
+  data['case']=case
+  (d/'results.json').write_text(json.dumps(data,indent=2))
+  print(case,round(data['span_s'],3),round(data['GBps'],3),flush=True)
+ finally:
+  for proc in ps:
+   if proc.poll() is None:proc.terminate()
+  for log in logs:log.close()
+if __name__=='__main__':
+ cases=[('pb32-ok1','pagebroker',16,128,32),('pb32-2','pagebroker',16,128,32),('gms16-2','gms',16,16,32),('gms128-1','gms',16,128,32),('pb32-3','pagebroker',16,128,32)]
+ for args in cases:run(*args)

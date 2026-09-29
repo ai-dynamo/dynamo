@@ -1,0 +1,10 @@
+{
+  "no_experiment_pods": true,
+  "no_experiment_claims": true,
+  "private_mount_removed": true,
+  "numa_balancing_unchanged": true,
+  "agent_template_unchanged": true,
+  "operator_template_unchanged": true,
+  "gms-v1-glm-default-0929_ready": true,
+  "gms-v1-qwen-0928_ready": true
+}

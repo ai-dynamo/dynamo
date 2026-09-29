@@ -1,0 +1,330 @@
+{
+  "results": [
+    {
+      "rank": 0,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5630426,
+      "end_epoch": 1790654685.3309712,
+      "transfer_s": 12.76792860031128,
+      "setup": {
+        "ring_init_s": 1.267980933189392
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "numa_node": 1,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3496315,
+        "user_usec": 115902,
+        "system_usec": 3380412,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 128,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 1,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.561849,
+      "end_epoch": 1790654685.571699,
+      "transfer_s": 13.009849786758423,
+      "setup": {
+        "ring_init_s": 1.2732535563409328
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "numa_node": 1,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3318573,
+        "user_usec": 108164,
+        "system_usec": 3210410,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 129,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 2,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5629363,
+      "end_epoch": 1790654685.5804546,
+      "transfer_s": 13.017518281936646,
+      "setup": {
+        "ring_init_s": 1.289520489051938
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "numa_node": 0,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3253321,
+        "user_usec": 65982,
+        "system_usec": 3187340,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 131,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 3,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5623374,
+      "end_epoch": 1790654685.3678422,
+      "transfer_s": 12.80550479888916,
+      "setup": {
+        "ring_init_s": 1.3336477279663086
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "numa_node": 0,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3279885,
+        "user_usec": 74334,
+        "system_usec": 3205551,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 128,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 4,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5614989,
+      "end_epoch": 1790654685.582911,
+      "transfer_s": 13.021412134170532,
+      "setup": {
+        "ring_init_s": 1.3056480400264263
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "numa_node": 0,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3253080,
+        "user_usec": 88978,
+        "system_usec": 3164102,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 130,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 5,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5610912,
+      "end_epoch": 1790654685.5962703,
+      "transfer_s": 13.035179138183594,
+      "setup": {
+        "ring_init_s": 1.2505841106176376
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "numa_node": 0,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3242732,
+        "user_usec": 80907,
+        "system_usec": 3161825,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 129,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 6,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5619516,
+      "end_epoch": 1790654685.2234151,
+      "transfer_s": 12.661463499069214,
+      "setup": {
+        "ring_init_s": 1.2523957882076502
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "numa_node": 1,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3410057,
+        "user_usec": 100493,
+        "system_usec": 3309564,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 126,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 7,
+      "backend": "gms",
+      "bytes": 60129542144,
+      "start_epoch": 1790654672.5613117,
+      "end_epoch": 1790654685.394088,
+      "transfer_s": 12.832776308059692,
+      "setup": {
+        "ring_init_s": 1.2597615327686071
+      },
+      "profile": [],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "numa_node": 1,
+      "prewarm": true,
+      "cpu_delta": {
+        "usage_usec": 3421037,
+        "user_usec": 113147,
+        "system_usec": 3307889,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 127,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    }
+  ],
+  "ready": [
+    {
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.267980933189392
+      },
+      "startup_s": 6.894908428192139
+    },
+    {
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.2732535563409328
+      },
+      "startup_s": 6.949302673339844
+    },
+    {
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.289520489051938
+      },
+      "startup_s": 6.891144752502441
+    },
+    {
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.3336477279663086
+      },
+      "startup_s": 6.900700569152832
+    },
+    {
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.3056480400264263
+      },
+      "startup_s": 7.0213141441345215
+    },
+    {
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.2505841106176376
+      },
+      "startup_s": 7.055610418319702
+    },
+    {
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.2523957882076502
+      },
+      "startup_s": 6.915258169174194
+    },
+    {
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.2597615327686071
+      },
+      "startup_s": 6.871478319168091
+    }
+  ],
+  "span_s": 13.035179138183594,
+  "bytes": 481036337152,
+  "GBps": 36.902932598978516,
+  "case": "warm-gms128-1"
+}

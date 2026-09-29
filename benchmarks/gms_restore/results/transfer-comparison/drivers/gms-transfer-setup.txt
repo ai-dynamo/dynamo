@@ -1,0 +1,34 @@
+import sys,json,time,subprocess,copy
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920')
+import cluster as c
+root=Path('/home/schwinns/dynamo/worktrees/gms-snapshot-restore-20260928'); out=root/'benchmarks/gms_restore/results/transfer-comparison'
+name='gms-transfer-0929'; node='cluster-0967a26d-pool-14bee067-prctr-s2877'
+agent=next(p.metadata.name for p in c.core.list_namespaced_pod(c.NS).items if p.metadata.name.startswith('dynamo-snapshot-agent-') and p.spec.node_name==node and not p.metadata.deletion_timestamp)
+host=c.host_name(agent)
+cmd='mkdir -p /var/lib/schwinns-gms-0928/gms-pvc-nfs && mount -t nfs -o vers=3,proto=tcp,rsize=1048576,wsize=1048576,nosharecache,nosharetransport,nconnect=32,spread_reads,remoteports=192.168.0.220-192.168.0.223 192.168.0.221:/unikorn-identity-03cfadd31877-551/pvc-1df82048-23b9-47dc-91cd-2b2b7dff7e21 /var/lib/schwinns-gms-0928/gms-pvc-nfs'
+subprocess.run(['kubectl','-n',c.NS,'exec',host,'-c','agent','--','nsenter','-t','1','-m','--','sh','-c',cmd],check=True)
+(out/'agent.json').write_text(json.dumps({'virtual':agent,'host':host}))
+old=root/'benchmarks/gms_restore/results/default-config/dispatch-fixed-early-2'
+claim={'apiVersion':'resource.k8s.io/v1','kind':'ResourceClaim','metadata':{'name':name,'namespace':c.NS},'spec':json.loads((old/'claim.json').read_text())['spec']}
+c.custom.create_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims',claim)
+pod=json.loads((old/'manifest.json').read_text());pod['metadata']={'name':name,'namespace':c.NS,'labels':{'experiment':name}}
+spec=pod['spec'];spec.pop('initContainers');spec['resourceClaims'][0]['resourceClaimName']=name
+spec['volumes']=[v for v in spec['volumes'] if v['name'] in ['gms','qualified-pvc']]
+spec['volumes'].append({'name':'artifacts','persistentVolumeClaim':{'claimName':'snapshot-pvc'}})
+spec['containers']=[x for x in spec['containers'] if x['name'].startswith('gms-')]
+for x in spec['containers']:
+ x['command']=['sleep','infinity'];x.pop('readinessProbe',None)
+ x['volumeMounts']=[v for v in x['volumeMounts'] if v['name']!='app']+[{'name':'artifacts','mountPath':'/ordinary-pvc','readOnly':True}]
+ x['resources']['limits']['memory']='24Gi'
+ x['env'].append({'name':'PYTHONUNBUFFERED','value':'1'})
+c.core.create_namespaced_pod(c.NS,pod)
+(out/'manifest.json').write_text(json.dumps(pod,indent=2))
+for _ in range(120):
+ p=c.core.read_namespaced_pod(name,c.NS)
+ if len(p.status.container_statuses or [])==8 and all(x.ready for x in p.status.container_statuses):break
+ time.sleep(1)
+else:raise RuntimeError('pod not ready')
+(out/'claim.json').write_text(json.dumps(c.custom.get_namespaced_custom_object('resource.k8s.io','v1',c.NS,'resourceclaims',name),indent=2))
+(out/'host-name.txt').write_text(c.host_name(name))
+print('ready',c.host_name(name),flush=True)

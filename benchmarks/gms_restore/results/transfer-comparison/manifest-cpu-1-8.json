@@ -1,0 +1,538 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "gms-transfer-0929",
+    "namespace": "schwinns-vcluster",
+    "labels": {
+      "experiment": "gms-transfer-0929"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "gms",
+        "emptyDir": {}
+      },
+      {
+        "name": "qualified-pvc",
+        "hostPath": {
+          "path": "/var/lib/schwinns-gms-0928/gms-pvc-nfs",
+          "type": "Directory"
+        }
+      },
+      {
+        "name": "artifacts",
+        "persistentVolumeClaim": {
+          "claimName": "snapshot-pvc"
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "gms-0",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-0"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-1",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-1"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-2",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-2"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-3",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-3"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-4",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-4"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-5",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-5"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-6",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-6"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      },
+      {
+        "name": "gms-7",
+        "image": "nvcr.io/nvidian/dynamo-dev/schwinns@sha256:177f356064ee3f0a0a5b1cfd412521d3c9487375bc5e85f81ad639e2caf2aa01",
+        "command": [
+          "sleep",
+          "infinity"
+        ],
+        "env": [
+          {
+            "name": "DYN_GMS_USE_V1",
+            "value": "true"
+          },
+          {
+            "name": "GMS_SOCKET_DIR",
+            "value": "/gms"
+          },
+          {
+            "name": "PYTHONPATH",
+            "value": "/checkpoints/gms-restore-0928/code/lib"
+          },
+          {
+            "name": "PYTHONUNBUFFERED",
+            "value": "1"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "1",
+            "memory": "2Gi"
+          },
+          "claims": [
+            {
+              "name": "gpus",
+              "request": "tp-7"
+            }
+          ],
+          "limits": {
+            "cpu": "8",
+            "memory": "24Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "gms",
+            "mountPath": "/gms"
+          },
+          {
+            "name": "qualified-pvc",
+            "mountPath": "/checkpoints",
+            "readOnly": true
+          },
+          {
+            "name": "artifacts",
+            "mountPath": "/ordinary-pvc",
+            "readOnly": true
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent"
+      }
+    ],
+    "restartPolicy": "Never",
+    "terminationGracePeriodSeconds": 1,
+    "nodeSelector": {
+      "kubernetes.io/hostname": "cluster-0967a26d-pool-14bee067-prctr-s2877"
+    },
+    "securityContext": {
+      "seccompProfile": {
+        "type": "Localhost",
+        "localhostProfile": "profiles/block-iouring.json"
+      }
+    },
+    "imagePullSecrets": [
+      {
+        "name": "nvcr-secret"
+      },
+      {
+        "name": "acr-token-secret"
+      }
+    ],
+    "tolerations": [
+      {
+        "operator": "Exists"
+      }
+    ],
+    "runtimeClassName": "nvidia",
+    "resourceClaims": [
+      {
+        "name": "gpus",
+        "resourceClaimName": "gms-transfer-0929"
+      }
+    ]
+  },
+  "status": {}
+}

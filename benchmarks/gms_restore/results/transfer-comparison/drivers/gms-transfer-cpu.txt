@@ -1,0 +1,30 @@
+import sys,json,subprocess,time,runpy
+from pathlib import Path
+sys.path.insert(0,'/home/schwinns/checkpoint-e2e-evidence/restore-performance-20260920');import cluster as c
+ns=runpy.run_path('/tmp/gms-transfer-run.py');out=ns['out'];base=ns['base']
+assert (out/'warm-gms32x64-2/results.json').exists()
+def resize(request,limit):
+ current=c.api.sanitize_for_serialization(c.core.read_namespaced_pod('gms-transfer-0929',c.NS))
+ containers=[]
+ for item in current['spec']['containers']:
+  resources=item['resources'];resources['requests']['cpu']=request;resources['limits']['cpu']=limit
+  containers.append({'name':item['name'],'resources':resources})
+ body={'spec':{'containers':containers}}
+ result=c.api.call_api('/api/v1/namespaces/{namespace}/pods/{name}/resize','PATCH',path_params={'namespace':c.NS,'name':'gms-transfer-0929'},header_params={'Content-Type':'application/strategic-merge-patch+json'},body=body,response_types_map={'200':'object'},auth_settings=['BearerToken'],_return_http_data_only=True)
+ (out/f'cpu-resize-{request}-{limit}.json').write_text(json.dumps(result,indent=2))
+ for _ in range(60):
+  actual=subprocess.check_output(base+['-c','gms-0','--','cat','/sys/fs/cgroup/cpu.max'],text=True).strip()
+  if actual==f'{int(limit)*100000} 100000':break
+  time.sleep(1)
+ else:raise RuntimeError('quota not applied '+actual)
+ print('resize',request,limit,'applied',flush=True)
+# Original (cold buffers) GMS transfer, with CPU telemetry enabled.
+run=ns['run']
+if not (out/'cpu-1req-8lim-gms16-a/results.json').exists():run('cpu-1req-8lim-gms16-a','gms',16,16,32)
+try:
+ resize('8','16')
+ run('cpu-8req-16lim-gms16-a','gms',16,16,32)
+ run('cpu-8req-16lim-gms16-b','gms',16,16,32)
+finally:
+ resize('1','8')
+run('cpu-1req-8lim-gms16-b','gms',16,16,32)

@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "/gms/transfer_probe.py", line 76, in <module>
+    targets[x["allocation_id"]] = TransferTarget(
+                              ^^^^^^^^^^^^^^^^^^^^
+TimeoutError: barrier
+command terminated with exit code 1

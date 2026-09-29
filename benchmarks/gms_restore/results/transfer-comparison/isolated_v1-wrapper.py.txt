@@ -1,0 +1,15 @@
+import sys,os,time,runpy,json
+from pathlib import Path
+rank=int(sys.argv[1]);case=sys.argv[2];chunk=int(sys.argv[3]);root=Path('/gms')/case;root.mkdir(exist_ok=True)
+os.environ['GMS_SOCKET_DIR']=str(root)
+import posix_direct
+posix_direct.CHUNK=chunk*1024**2
+old=posix_direct.PosixDirect.restore
+def measured(self,targets):
+ start=time.time();old(self,targets);end=time.time()
+ (root/f'transfer-{rank}.json').write_text(json.dumps({'start_epoch':start,'end_epoch':end}))
+posix_direct.PosixDirect.restore=measured
+(root/f'ready-{rank}').touch()
+while not (root/'go').exists():time.sleep(.002)
+sys.argv=['fast_server.py','--rank',str(rank),'--artifact-root','/checkpoints/gms-restore-0929/default-capture-2','--workers','16','--numa']
+runpy.run_path('/gms/fast_server.py',run_name='__main__')

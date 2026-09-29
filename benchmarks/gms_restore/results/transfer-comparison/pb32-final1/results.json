@@ -1,0 +1,1682 @@
+{
+  "results": [
+    {
+      "rank": 0,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.3285592,
+      "end_epoch": 1790654745.8215277,
+      "transfer_s": 12.492968559265137,
+      "setup": {
+        "ring_init_s": 0.9999696929007769
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.055786389,
+            1.2029e-05,
+            1.055774109,
+            18.402089373000003,
+            0.08056517000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.964605207,
+            1.2876e-05,
+            0.964592166,
+            15.848708753999999,
+            0.081822943
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.871189657,
+            1.1908e-05,
+            0.871177463,
+            13.569039314000001,
+            0.08212799999999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.6394542,
+            1.5285e-05,
+            0.639438589,
+            8.045778276,
+            0.08475833000000003
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.629698955,
+            2.2636e-05,
+            0.629675899,
+            8.598153103,
+            0.08744510900000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.761714484,
+            1.9602e-05,
+            0.761694292,
+            15.179785606000001,
+            0.09484175600000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.868668938,
+            2.5126e-05,
+            0.868643517,
+            13.19398363,
+            0.085606633
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.621587883,
+            1.9646e-05,
+            0.621567604,
+            8.527972593999998,
+            0.08479067800000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.87302525,
+            2.4484e-05,
+            0.872999966,
+            17.909898135,
+            0.08536977500000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.137562648,
+            1.9034e-05,
+            1.137542822,
+            25.288948213999994,
+            0.07972962199999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.795098045,
+            1.9347e-05,
+            0.79507834,
+            9.404876072999999,
+            0.084784257
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.868461083,
+            1.737e-05,
+            0.868443264,
+            13.194456764999998,
+            0.08527341000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.832129537,
+            1.956e-05,
+            0.832109465,
+            10.500107939000001,
+            0.084508258
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.765817554,
+            1.6835e-05,
+            0.765800134,
+            12.207816338,
+            0.08686155499999998
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "numa_node": 1,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5448798,
+        "user_usec": 1257166,
+        "system_usec": 4191632,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 125,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 1,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.328574,
+      "end_epoch": 1790654746.250145,
+      "transfer_s": 12.921571016311646,
+      "setup": {
+        "ring_init_s": 1.019494453445077
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.079298857,
+            1.194e-05,
+            1.079286585,
+            19.334235045,
+            0.080998103
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.950643854,
+            2.226e-05,
+            0.950620999,
+            20.156140184,
+            0.08187176
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.685634349,
+            2.5375e-05,
+            0.685608672,
+            16.109258924,
+            0.082887008
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.857725264,
+            2.1438e-05,
+            0.857703299,
+            13.109321038999997,
+            0.087449076
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.601647498,
+            1.7936e-05,
+            0.601628845,
+            12.368495433999998,
+            0.094427124
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.654185556,
+            2.2026e-05,
+            0.654163225,
+            11.712590045,
+            0.08686852800000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.903046962,
+            1.9149e-05,
+            0.903027323,
+            11.142491267,
+            0.08518266600000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.704676573,
+            1.9609e-05,
+            0.704656676,
+            11.042675179000002,
+            0.08131533499999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.624008782,
+            2.2217e-05,
+            0.6239831,
+            10.988576100999998,
+            0.08639940099999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.855111796,
+            2.4664e-05,
+            0.855086658,
+            21.734797212000004,
+            0.08173313299999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.940966349,
+            2.1841e-05,
+            0.940944123,
+            20.254320022,
+            0.08533076100000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.799058844,
+            2.2032e-05,
+            0.799036466,
+            12.322097159000002,
+            0.086252174
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.918137859,
+            4.8816e-05,
+            0.918088568,
+            18.354924642,
+            0.08437523100000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.67661029,
+            1.5016e-05,
+            0.676594947,
+            12.662922559,
+            0.079562504
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "numa_node": 1,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5076601,
+        "user_usec": 1221777,
+        "system_usec": 3854825,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 128,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 2,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.3289282,
+      "end_epoch": 1790654746.70558,
+      "transfer_s": 13.376651763916016,
+      "setup": {
+        "ring_init_s": 1.081720283254981
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.072416589,
+            1.2856e-05,
+            1.072403551,
+            19.175098166999998,
+            0.08001560200000003
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.960751212,
+            8.441e-06,
+            0.960742607,
+            20.795218714000004,
+            0.07933409000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.988681557,
+            7.294e-06,
+            0.988674094,
+            20.394835667000006,
+            0.08121092399999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.840642322,
+            6.926e-06,
+            0.840635231,
+            13.990656785,
+            0.08037087500000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.883021416,
+            7.385e-06,
+            0.883013874,
+            12.309601029,
+            0.07849849899999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.961147214,
+            7.712e-06,
+            0.961139333,
+            11.941159111999996,
+            0.080960427
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.659623362,
+            7.256e-06,
+            0.659615943,
+            9.054359658000001,
+            0.083162974
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.700414911,
+            7.157e-06,
+            0.70040759,
+            14.487191661,
+            0.081124438
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.08753188,
+            6.69e-06,
+            1.087525023,
+            27.612215262,
+            0.079074423
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.944272067,
+            6.747e-06,
+            0.944265162,
+            19.311200300000003,
+            0.08169981299999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.688437413,
+            6.656e-06,
+            0.688430621,
+            10.572600506999999,
+            0.084096008
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.995259108,
+            7.247e-06,
+            0.995251694,
+            17.310297551,
+            0.081642867
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.686448194,
+            6.644e-06,
+            0.686441361,
+            13.141874139,
+            0.087490561
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.443731964,
+            3.631e-06,
+            0.443728225,
+            7.107258376999999,
+            0.077694167
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "numa_node": 0,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5808283,
+        "user_usec": 1149679,
+        "system_usec": 4658604,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 132,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 3,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.3280215,
+      "end_epoch": 1790654746.4615357,
+      "transfer_s": 13.133514165878296,
+      "setup": {
+        "ring_init_s": 1.1081334426999092
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.059509258,
+            1.3599e-05,
+            1.059495261,
+            19.109742023,
+            0.08129484399999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.982197723,
+            6.05e-06,
+            0.982191568,
+            16.218871738,
+            0.07981235400000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.008691403,
+            1.0941e-05,
+            1.008680324,
+            14.794031315000002,
+            0.08044677100000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.827478684,
+            6.501e-06,
+            0.82747208,
+            11.256223124999998,
+            0.086877712
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.840932538,
+            6.645e-06,
+            0.840925771,
+            10.403349609,
+            0.07953722000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.703751032,
+            6.796e-06,
+            0.703744099,
+            11.873349764999999,
+            0.082085221
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.801037695,
+            8.635e-06,
+            0.801028925,
+            15.23302067,
+            0.08141453199999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.983667521,
+            6.746e-06,
+            0.983660615,
+            13.357460552,
+            0.08076739700000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.130349598,
+            7.786e-06,
+            1.13034167,
+            24.306919581,
+            0.07862546100000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.870505607,
+            4.576e-06,
+            0.870500905,
+            9.968208798,
+            0.08111159900000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.859760963,
+            4.937e-06,
+            0.859755922,
+            15.07311487,
+            0.09237709699999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.877002559,
+            7.383e-06,
+            0.876995043,
+            11.624562213999997,
+            0.083159662
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.748436432,
+            6.65e-06,
+            0.748429646,
+            13.057459257999998,
+            0.084262639
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.491307243,
+            6.799e-06,
+            0.49130031,
+            8.047905033000003,
+            0.08023421
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "numa_node": 0,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 6028254,
+        "user_usec": 1190650,
+        "system_usec": 4837604,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 130,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 4,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.328249,
+      "end_epoch": 1790654746.4632053,
+      "transfer_s": 13.134956359863281,
+      "setup": {
+        "ring_init_s": 1.0422464404255152
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.071038855,
+            1.5502e-05,
+            1.071023096,
+            19.180331578,
+            0.08052976200000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.981270455,
+            8.671e-06,
+            0.981261622,
+            16.123871116,
+            0.08027077799999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.071105021,
+            7.06e-06,
+            1.0710978,
+            19.223860110000004,
+            0.08134317800000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.83494499,
+            6.69e-06,
+            0.834938128,
+            14.211809881999999,
+            0.080911012
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.737976813,
+            7.647e-06,
+            0.73796899,
+            13.831810373,
+            0.07902713600000003
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.882623231,
+            8.308e-06,
+            0.882614765,
+            13.883034126999998,
+            0.082734618
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.658341053,
+            7.406e-06,
+            0.658333463,
+            9.298064364000002,
+            0.08335901700000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.879428612,
+            7.06e-06,
+            0.879421412,
+            18.602119366,
+            0.07830027899999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.097522927,
+            7.34e-06,
+            1.097515436,
+            25.827373187,
+            0.078439488
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.87073508,
+            4.915e-06,
+            0.870730053,
+            9.907308933000001,
+            0.08124706300000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.842929307,
+            6.687e-06,
+            0.842922491,
+            15.177468784,
+            0.09224520700000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.857786854,
+            6.443e-06,
+            0.857780259,
+            11.300026583999998,
+            0.08285943100000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.754150752,
+            4.339e-06,
+            0.754146298,
+            13.040927990999998,
+            0.08306676100000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.503277916,
+            7.121e-06,
+            0.503270648,
+            8.16494292,
+            0.08051587899999998
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "numa_node": 0,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 6003216,
+        "user_usec": 1173194,
+        "system_usec": 4830022,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 129,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 5,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.327497,
+      "end_epoch": 1790654746.2464054,
+      "transfer_s": 12.91890835762024,
+      "setup": {
+        "ring_init_s": 0.9933420494198799
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.065390926,
+            1.2679e-05,
+            1.065378086,
+            19.152691672000003,
+            0.080437845
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.949072911,
+            5.041e-06,
+            0.949067741,
+            16.308924911000002,
+            0.07970535000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.05218744,
+            5.893e-06,
+            1.052181425,
+            13.809985124,
+            0.08064025200000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.767393229,
+            3.981e-06,
+            0.767389074,
+            10.876639469999997,
+            0.08681613900000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.82661589,
+            6.602e-06,
+            0.826609126,
+            11.012671367999998,
+            0.07959430700000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.687378022,
+            8.182e-06,
+            0.687369679,
+            11.713470592999998,
+            0.08180690599999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.966151983,
+            9.006e-06,
+            0.966142821,
+            12.474792044000003,
+            0.08247060899999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.717906354,
+            6.641e-06,
+            0.717899547,
+            11.110721947,
+            0.08062365999999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.620283674,
+            7.254e-06,
+            0.620276247,
+            11.002709524,
+            0.080301543
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.854629065,
+            8.02e-06,
+            0.854620873,
+            19.544167926999997,
+            0.07919473999999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.004478907,
+            3.1981e-05,
+            1.004446762,
+            19.949236918999997,
+            0.08076603999999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.650299142,
+            8.915e-06,
+            0.650290055,
+            10.976257375,
+            0.088156674
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.898476799,
+            8.327e-06,
+            0.8984683,
+            16.551698896,
+            0.083542282
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.737996014,
+            6.981e-06,
+            0.737988837,
+            12.537527255999999,
+            0.08645214000000001
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "numa_node": 0,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5868748,
+        "user_usec": 1189317,
+        "system_usec": 4679431,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 129,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 6,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.3269522,
+      "end_epoch": 1790654745.8363402,
+      "transfer_s": 12.509387969970703,
+      "setup": {
+        "ring_init_s": 1.0659472681581974
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.051181486,
+            1.3206e-05,
+            1.051167928,
+            18.54616452,
+            0.079670596
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.965026739,
+            9.04e-06,
+            0.965017365,
+            14.784915276,
+            0.08127622100000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.846197163,
+            1.0006e-05,
+            0.8461868,
+            12.430394218000002,
+            0.08225891100000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.610699951,
+            1.1862e-05,
+            0.610687656,
+            7.662265408,
+            0.08409597600000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.614377456,
+            1.955e-05,
+            0.614357562,
+            8.793428020999997,
+            0.08643645
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.745496626,
+            2.6811e-05,
+            0.745469457,
+            16.340898364999997,
+            0.08999137399999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.868230446,
+            1.9863e-05,
+            0.868210131,
+            12.674445080999998,
+            0.08545934999999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.624466289,
+            2.0409e-05,
+            0.624445468,
+            8.760300222,
+            0.08441013099999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.687407884,
+            1.952e-05,
+            0.687387894,
+            15.080760210999998,
+            0.084437538
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.071091726,
+            1.1586e-05,
+            1.071079782,
+            24.548522843999994,
+            0.07890768400000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.680893235,
+            1.554e-05,
+            0.68087713,
+            8.195230924999999,
+            0.08449026699999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.871612297,
+            2.1538e-05,
+            0.871590253,
+            11.555620263000002,
+            0.08610817799999998
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.851334508,
+            1.9476e-05,
+            0.851314604,
+            10.492678353999997,
+            0.083530147
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.786992809,
+            2.0613e-05,
+            0.786971608,
+            13.137740077000002,
+            0.08629448099999999
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "numa_node": 1,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5459876,
+        "user_usec": 1216453,
+        "system_usec": 4243424,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 124,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    },
+    {
+      "rank": 7,
+      "backend": "pagebroker",
+      "bytes": 60129542144,
+      "start_epoch": 1790654733.3287876,
+      "end_epoch": 1790654746.2294412,
+      "transfer_s": 12.900653600692749,
+      "setup": {
+        "ring_init_s": 1.0323746632784605
+      },
+      "profile": [
+        {
+          "shard": "shards/shard_0000.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.066597261,
+            1.044e-05,
+            1.06658655,
+            18.257566111,
+            0.080845147
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0001.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.982026289,
+            1.0973e-05,
+            0.982015024,
+            17.5233252,
+            0.08235984000000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0002.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            1.045497674,
+            2.9338e-05,
+            1.045467609,
+            16.765553694999998,
+            0.08367978500000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0003.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.824923671,
+            2.5755e-05,
+            0.824897339,
+            12.874901106000001,
+            0.08631905400000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0004.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.604878534,
+            2.3216e-05,
+            0.604854901,
+            12.286265432999999,
+            0.09486361600000003
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0005.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.671528417,
+            2.5284e-05,
+            0.671502739,
+            11.813966412000001,
+            0.089291359
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0006.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.928915531,
+            2.5021e-05,
+            0.928890103,
+            12.005115636000003,
+            0.085267406
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0007.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.725859525,
+            2.0332e-05,
+            0.725838751,
+            10.860570773999996,
+            0.081692339
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0008.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.619543707,
+            2.0449e-05,
+            0.61952278,
+            10.799187087,
+            0.08652501300000001
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0009.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.854821341,
+            2.2243e-05,
+            0.854798643,
+            20.042660674,
+            0.08219428400000002
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0010.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.980179255,
+            2.1395e-05,
+            0.980157364,
+            20.052469151,
+            0.086121169
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0011.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.680677797,
+            1.9563e-05,
+            0.68065776,
+            10.137859008,
+            0.08373606399999997
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0012.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.878680927,
+            2.0591e-05,
+            0.878659933,
+            15.702605285999999,
+            0.08319782999999999
+          ],
+          "o_direct": true
+        },
+        {
+          "shard": "shards/shard_0013.bin",
+          "bytes": 4294967296,
+          "metrics": [
+            0.726064482,
+            1.9867e-05,
+            0.726044233,
+            10.874986156999999,
+            0.084715612
+          ],
+          "o_direct": true
+        }
+      ],
+      "verified_samples": 84,
+      "workers": 16,
+      "slots": 32,
+      "chunk_mib": 128,
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "numa_node": 1,
+      "prewarm": false,
+      "cpu_delta": {
+        "usage_usec": 5144556,
+        "user_usec": 1239548,
+        "system_usec": 3905009,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 129,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu_max": "800000 100000",
+      "cpu_weight": "39"
+    }
+  ],
+  "ready": [
+    {
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 0.9999696929007769
+      },
+      "startup_s": 7.089686632156372
+    },
+    {
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.019494453445077
+      },
+      "startup_s": 7.09654974937439
+    },
+    {
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.081720283254981
+      },
+      "startup_s": 7.090489387512207
+    },
+    {
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.1081334426999092
+      },
+      "startup_s": 7.198613882064819
+    },
+    {
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.0422464404255152
+      },
+      "startup_s": 7.248971462249756
+    },
+    {
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 0.9933420494198799
+      },
+      "startup_s": 7.074777364730835
+    },
+    {
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.0659472681581974
+      },
+      "startup_s": 7.220227241516113
+    },
+    {
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "size": 60129542144,
+      "setup": {
+        "ring_init_s": 1.0323746632784605
+      },
+      "startup_s": 7.159291982650757
+    }
+  ],
+  "span_s": 13.37862777709961,
+  "bytes": 481036337152,
+  "GBps": 35.95558118265289,
+  "case": "pb32-final1"
+}

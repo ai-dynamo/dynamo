@@ -1,0 +1,18 @@
+{
+  "case": "dispatch-fixed-early-2",
+  "create_epoch": 1790651888.479889,
+  "rank_script_start_offsets_s": [
+    2.2184245586395264,
+    2.4516286849975586,
+    2.7004947662353516,
+    2.9401960372924805,
+    3.215447187423706,
+    3.4830594062805176,
+    3.7432663440704346,
+    4.012807130813599
+  ],
+  "script_skew_s": 1.7943825721740723,
+  "main_container_start_offset_s": 1.520111,
+  "agent_start_offset_s": 4.875002,
+  "note": "Main is the placeholder. Kubernetes container timestamps have one-second resolution; rank script timestamps are higher resolution."
+}

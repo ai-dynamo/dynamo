@@ -1,0 +1,9 @@
+gms16-1 16.492 29.168
+Traceback (most recent call last):
+  File "/tmp/gms-transfer-run.py", line 35, in <module>
+    for args in cases:run(*args)
+                      ~~~^^^^^^^
+  File "/tmp/gms-transfer-run.py", line 15, in run
+    if bad:raise RuntimeError('worker failed '+case)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: worker failed pb32-1

@@ -136,3 +136,56 @@ revalidated the claim before sending an already-planned restore request.
   original templates/config/operator restored, NUMA balancing 1, private NFS
   mounts absent, retained GLM and Qwen snapshots Ready. DGD integration remains
   a documented proposal; full DGD startup and allocation are not benchmarked.
+
+## Equal-payload transfer comparison (2026-09-29)
+
+User questioned why GMS PVC transfer looked slower than the qualified PageBroker
+GPU engine. Existing standard-NIXL serial/overlap pairs measured 1.634 s of
+all-rank load inflation; they did not isolate the tuned GMS/PB transfer engines.
+The implementations also differ: GMS prototype uses 16 lanes × two 16 MiB slots,
+whereas PageBroker preinitializes 32 × 128 MiB CUDA host-NUMA slots and NIXL AIO.
+
+- Allocated an isolated DRA pod on s2877, eight one-GPU containers, same qualified
+  PVC transport for both backends. No agent/operator configuration changed.
+- The probe runs the unchanged PageBroker TransferBuffers/NixlTransfer source
+  through a small C ABI adapter, using the qualified broker's exact NIXL runtime
+  and pinned API headers. GMS calls the existing PosixDirect implementation.
+- Both consume the exact 448 GiB current captured artifact set into fresh GPU
+  allocations. A shared start barrier excludes process/context/destination setup;
+  PB ring setup is measured separately, while GMS initializes slots in restore.
+  This is a transfer-layer comparison, not a full GMS publication or checkpoint
+  restore. GPU bytes are sampled at first/middle/last page of every allocation.
+- First PB setup failed because its copied POSIX plugin depended on libaio1t64,
+  absent in the workload image. Copied that exact dependency from the broker
+  image too; failed setup logs are retained and excluded from timing results.
+- Shared-barrier transfers with no CRIU/restore: original GMS 16 MiB chunks
+  measured 16.190–17.118 s; qualified PageBroker 128 MiB rings 12.827–13.379 s.
+  GMS warm 16 MiB remained 16.486 s; warm 128 MiB reached 12.917–13.035 s,
+  and warm 32-lane × 64 MiB reached 12.843–12.955 s. All samples verified.
+- CPU telemetry in these warm transfers showed zero quota throttling and roughly
+  0.23–0.28 cores/rank for GMS (8-core quota); PB about 0.43 cores/rank.
+- User asked about CPU requests and a direct PB→GMS API. Recorded original
+  GMS request/limit 1/8 CPUs, main 32/96; script starts staggered by ~1.8 s.
+  PageBroker can use V1 RW/allocate/export/commit, but needs scatter/offset-aware
+  targets and arbitration with native residual transfers. Design in PAGEBROKER-GMS.md.
+- Live resize attempts were rejected by the DRA/vcluster path with HTTP 422
+  (only CPU/memory mutable), including a request preserving claim fields. No
+  resource change took effect. Recreating only the experiment pod to compare
+  request/limit 1/8 against 8/16, retaining the same claim and transfer inputs.
+
+- CPU A–B–B–A complete: 1/8 request/limit mean 16.568 s, 8/16 mean 16.134 s;
+  zero transfer-time quota throttling, about 0.25 cores/rank. Small sample and
+  variation prevent treating the 0.434 s difference as an established gain.
+- Standalone V1 publication 16 MiB: 22.485 and 22.791 s; 128 MiB: 19.692 s.
+  The latter actual transfer span is 13.819 s. Startup/allocation work remains;
+  this cold standalone setup differs from the previous resident-broker stack.
+- Transfer parity is demonstrated for warm larger-buffer configurations, not
+  full restore readiness. Direct PB→GMS is a documented integration proposal.
+- Retained setup failures and first successful PB sample separately: a code
+  refresh raced the second PB launch, and its failed barrier waiters might still
+  have been exiting during the first successful sample. Main PB comparison uses
+  only the subsequent three unambiguous isolated runs.
+
+- Cleanup verified: transfer pod/claim released, private mount removed, original
+  agent/operator templates unchanged, NUMA balancing unchanged, retained GLM and
+  Qwen snapshots Ready. No model/checkpoint payload was created or removed here.

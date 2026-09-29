@@ -1,0 +1,10 @@
+import runpy,subprocess,time,json
+from pathlib import Path
+ns=runpy.run_path('/tmp/gms-transfer-run.py');run=ns['run'];root=ns['root'];out=ns['out'];base=ns['base']
+# Driver 3 must finish before replacing the script in the shared experiment volume.
+assert (out/'gms16-3/results.json').exists()
+subprocess.run(base+['-i','-c','gms-0','--','sh','-c','cat > /gms/transfer_probe.py.new && mv /gms/transfer_probe.py.new /gms/transfer_probe.py'],input=(root/'benchmarks/gms_restore/transfer_probe.py').read_bytes(),check=True)
+# A separate warm driver adds --prewarm for every GMS case; PB already prewarms.
+s=Path('/tmp/gms-transfer-run.py').read_text().replace("'--slots',str(slots)]","'--slots',str(slots)]+(['--prewarm'] if backend=='gms' else [])")
+d={'__name__':'not_main'};exec(compile(s,'warm-driver','exec'),d);run=d['run']
+for args in [('warm-gms16-1','gms',16,16,32),('warm-gms128-1','gms',16,128,32),('warm-gms32x64-1','gms',32,64,32),('pb32-final1','pagebroker',16,128,32),('warm-gms128-2','gms',16,128,32),('warm-gms32x64-2','gms',32,64,32)]:run(*args)

@@ -1,0 +1,8 @@
+E0929 03:57:34.088329      68 nixl_agent.cpp:356] createBackend: unsupported backend 'POSIX'
+probe setup: NIXL create POSIX backend: -4
+Traceback (most recent call last):
+  File "/gms/transfer_probe.py", line 64, in <module>
+    s=time.perf_counter();handle=lib.probe_create(a.slots,a.chunk_mib*1024**2);assert handle
+                                                                                      ^^^^^^
+AssertionError
+command terminated with exit code 1

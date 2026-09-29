@@ -1,0 +1,107 @@
+{
+  "publications": [
+    {
+      "rank": 0,
+      "uuid": "GPU-56c0be30-f1d3-a00d-8a2a-7fa70da8037f",
+      "event": "published",
+      "started_epoch": 1790655134.0637105,
+      "published_epoch": 1790655156.5062253,
+      "elapsed_s": 22.442514896392822
+    },
+    {
+      "rank": 1,
+      "uuid": "GPU-ce231b92-c54f-3f0c-af1c-1a696db97f51",
+      "event": "published",
+      "started_epoch": 1790655134.0644732,
+      "published_epoch": 1790655156.5427775,
+      "elapsed_s": 22.478304386138916
+    },
+    {
+      "rank": 2,
+      "uuid": "GPU-02ff0cc1-647f-dee7-8365-921738e945a6",
+      "event": "published",
+      "started_epoch": 1790655134.0639162,
+      "published_epoch": 1790655156.37869,
+      "elapsed_s": 22.31477379798889
+    },
+    {
+      "rank": 3,
+      "uuid": "GPU-0d5ad102-eb8f-922a-173e-e91033320e0f",
+      "event": "published",
+      "started_epoch": 1790655134.0643623,
+      "published_epoch": 1790655156.5406525,
+      "elapsed_s": 22.476290225982666
+    },
+    {
+      "rank": 4,
+      "uuid": "GPU-9c595f65-4651-0b25-f95c-09a0abd5f5fa",
+      "event": "published",
+      "started_epoch": 1790655134.0642648,
+      "published_epoch": 1790655156.5483215,
+      "elapsed_s": 22.4840567111969
+    },
+    {
+      "rank": 5,
+      "uuid": "GPU-4fba7684-5a96-6280-91ff-b41f7484564c",
+      "event": "published",
+      "started_epoch": 1790655134.0637364,
+      "published_epoch": 1790655156.4771783,
+      "elapsed_s": 22.4134418964386
+    },
+    {
+      "rank": 6,
+      "uuid": "GPU-3ef7c092-d55c-ca6c-0018-9fc89ed28683",
+      "event": "published",
+      "started_epoch": 1790655134.0639756,
+      "published_epoch": 1790655156.5080583,
+      "elapsed_s": 22.444082736968994
+    },
+    {
+      "rank": 7,
+      "uuid": "GPU-32a6c51c-d07d-7513-86b5-813b64e452d2",
+      "event": "published",
+      "started_epoch": 1790655134.066173,
+      "published_epoch": 1790655156.3655324,
+      "elapsed_s": 22.29935932159424
+    }
+  ],
+  "transfers": [
+    {
+      "start_epoch": 1790655139.2356572,
+      "end_epoch": 1790655156.500382
+    },
+    {
+      "start_epoch": 1790655139.2377937,
+      "end_epoch": 1790655156.537331
+    },
+    {
+      "start_epoch": 1790655139.190266,
+      "end_epoch": 1790655156.374186
+    },
+    {
+      "start_epoch": 1790655139.1902547,
+      "end_epoch": 1790655156.5347478
+    },
+    {
+      "start_epoch": 1790655139.1917698,
+      "end_epoch": 1790655156.5443103
+    },
+    {
+      "start_epoch": 1790655139.1929636,
+      "end_epoch": 1790655156.4730148
+    },
+    {
+      "start_epoch": 1790655139.2415905,
+      "end_epoch": 1790655156.5023708
+    },
+    {
+      "start_epoch": 1790655139.2327805,
+      "end_epoch": 1790655156.36056
+    }
+  ],
+  "case": "isolated-v1-16-1",
+  "bytes": 481036337152,
+  "chunk_mib": 16,
+  "span_s": 22.48461103439331,
+  "transfer_span_s": 17.354055643081665
+}

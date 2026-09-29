@@ -1,0 +1,54 @@
+import runpy,subprocess,json,time,concurrent.futures
+from pathlib import Path
+ns=runpy.run_path('/tmp/gms-transfer-run.py');root=ns['root'];out=ns['out'];base=ns['base']
+# Call only after all transfer probes have finished.
+subprocess.run(base+['-i','-c','gms-0','--','sh','-c','cat > /gms/fast_server.py'],input=(root/'benchmarks/gms_restore/fast_server.py').read_bytes(),check=True)
+wrapper='''import sys,os,time,runpy,json
+from pathlib import Path
+rank=int(sys.argv[1]);case=sys.argv[2];chunk=int(sys.argv[3]);root=Path('/gms')/case;root.mkdir(exist_ok=True)
+os.environ['GMS_SOCKET_DIR']=str(root)
+import posix_direct
+posix_direct.CHUNK=chunk*1024**2
+old=posix_direct.PosixDirect.restore
+def measured(self,targets):
+ start=time.time();old(self,targets);end=time.time()
+ (root/f'transfer-{rank}.json').write_text(json.dumps({'start_epoch':start,'end_epoch':end}))
+posix_direct.PosixDirect.restore=measured
+(root/f'ready-{rank}').touch()
+while not (root/'go').exists():time.sleep(.002)
+sys.argv=['fast_server.py','--rank',str(rank),'--artifact-root','/checkpoints/gms-restore-0929/default-capture-2','--workers','16','--numa']
+runpy.run_path('/gms/fast_server.py',run_name='__main__')
+'''
+subprocess.run(base+['-i','-c','gms-0','--','sh','-c','cat > /gms/isolated_v1.py'],input=wrapper.encode(),check=True)
+(out/'isolated_v1-wrapper.py.txt').write_text(wrapper)
+for case,chunk in [('isolated-v1-16-1',16),('isolated-v1-128-1',128),('isolated-v1-16-2',16)]:
+ d=out/case;d.mkdir(exist_ok=True);ps=[];logs=[]
+ for rank in range(8):
+  log=(d/f'rank-{rank}.txt').open('w');logs.append(log)
+  ps.append(subprocess.Popen(base+['-c',f'gms-{rank}','--','python3','-u','/gms/isolated_v1.py',str(rank),case,str(chunk)],stdout=log,stderr=subprocess.STDOUT))
+ try:
+  for _ in range(120):
+   if any(p.poll() is not None for p in ps):raise RuntimeError('v1 exited')
+   n=int(subprocess.check_output(base+['-c','gms-0','--','python3','-c',f'from pathlib import Path;print(len(list(Path("/gms/{case}").glob("ready-*"))))'],text=True))
+   if n==8:break
+   time.sleep(.2)
+  else:raise TimeoutError('v1 start')
+  subprocess.run(base+['-c','gms-0','--','touch',f'/gms/{case}/go'],check=True)
+  for _ in range(120):
+   if any(p.poll() is not None for p in ps):raise RuntimeError('v1 exited')
+   n=int(subprocess.check_output(base+['-c','gms-0','--','python3','-c',f'from pathlib import Path;print(len(list(Path("/gms/{case}").glob("rank-*.json"))))'],text=True))
+   if n==8:break
+   time.sleep(.2)
+  else:raise TimeoutError('v1 publication')
+  data=json.loads(subprocess.check_output(base+['-c','gms-0','--','python3','-c',f'import json;from pathlib import Path;p=Path("/gms/{case}");print(json.dumps({{"publications":[json.loads(x.read_text()) for x in sorted(p.glob("rank-*.json"))],"transfers":[json.loads(x.read_text()) for x in sorted(p.glob("transfer-*.json"))]}}))'],text=True))
+  data['case']=case;data['bytes']=481036337152;data['chunk_mib']=chunk
+  data['span_s']=max(x['published_epoch'] for x in data['publications'])-min(x['started_epoch'] for x in data['publications'])
+  data['transfer_span_s']=max(x['end_epoch'] for x in data['transfers'])-min(x['start_epoch'] for x in data['transfers'])
+  (d/'results.json').write_text(json.dumps(data,indent=2));print(case,data['span_s'],data['transfer_span_s'],flush=True)
+ finally:
+  def stop(rank):
+   code="import os,signal;from pathlib import Path;[(os.kill(int(p.name),signal.SIGTERM)) for p in Path('/proc').iterdir() if p.name.isdigit() and (p/'cmdline').exists() and b'/gms/isolated_v1.py' in (p/'cmdline').read_bytes().split(bytes([0]))]"
+   subprocess.run(base+['-c',f'gms-{rank}','--','python3','-c',code],check=True)
+  with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:list(ex.map(stop,range(8)))
+  for proc in ps:proc.wait(timeout=30)
+  for log in logs:log.close()

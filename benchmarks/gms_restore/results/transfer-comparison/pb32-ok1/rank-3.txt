@@ -1,0 +1,5 @@
+Traceback (most recent call last):
+  File "/gms/transfer_probe.py", line 128, in <module>
+    raise TimeoutError("barrier")
+TimeoutError: barrier
+command terminated with exit code 1
