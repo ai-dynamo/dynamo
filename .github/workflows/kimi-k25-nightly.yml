@@ -4,8 +4,6 @@
 name: Kimi K2.5 Aggregated Perf
 
 on:
-  push:
-    branches: [saperiyasamy/ops-8639-onboard-kimi-k25-aggregated-nightly-with-kustomize]
   workflow_call:
     inputs:
       source_ref:
@@ -34,7 +32,6 @@ concurrency:
 
 jobs:
   perf:
-    if: github.event_name != 'push'
     runs-on: prod-deploy-tester-v1
     timeout-minutes: 360
     defaults:
