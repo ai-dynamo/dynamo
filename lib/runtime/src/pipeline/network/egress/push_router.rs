@@ -620,9 +620,9 @@ where
     /// Create a new PushRouter with an optional worker load monitor.
     ///
     /// The rejection path is gated by `fault_detection_enabled` (true here);
-    /// overload detection itself is driven by the monitor via `client.set_overloaded_instances(...)`.
-    /// If no thresholds are configured on the monitor (or no monitor is provided),
-    /// the routing snapshot reports at least one free instance and the gate never rejects.
+    /// durable overload detection is driven by the monitor through
+    /// `client.set_overloaded_instances(...)`. Worker responses can also create
+    /// bounded request-path overload leases.
     pub async fn from_client_with_monitor(
         client: Client,
         router_mode: RouterMode,
@@ -1941,11 +1941,11 @@ where
                         );
                         self.client.report_instance_down(instance_id);
                     } else if match_error_chain(err.as_ref(), &[ErrorType::WorkerOverloaded], &[]) {
-                        // Backpressure: worker said "my queue is full,
-                        // retry later". Mark overloaded so this FE skips it on
-                        // the next selection; the next ActiveLoad event from the
-                        // worker monitor overwrites the overloaded set from fresh
-                        // metrics. This is NOT report_instance_down (fault path).
+                        // Backpressure: the worker said "my queue is full,
+                        // retry later". A bounded lease prevents an immediate
+                        // retry loop. Fresh monitor data clears the lease early.
+                        // Lease expiry permits a recovery probe when load events
+                        // remain unchanged. This is not a fault quarantine.
                         tracing::debug!(
                             "Marking instance {instance_id} overloaded due to backpressure: {err}"
                         );
