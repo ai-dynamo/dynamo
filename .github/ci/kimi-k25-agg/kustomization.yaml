@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: dynamo-nightly-dsv4
+commonLabels:
+  ci-run: local
+resources:
+- base.yaml
+- perf.yaml
+- ../../../recipes/kimi-k2.5/model-cache/model-download.yaml
+patches:
+- path: patch-deploy.yaml
+- path: patch-perf.yaml
+- path: patch-download.yaml
+- target:
+    kind: Job
+    name: model-download
+  patch: |-
+    - op: replace
+      path: /metadata/name
+      value: kimi-k25-model-download
+- target:
+    kind: DynamoGraphDeployment
+    name: kimi-k25-trtllm-aggregate
+  patch: |-
+    - op: add
+      path: /spec/services/Worker/extraPodSpec/mainContainer/env/-
+      value: {name: NCCL_SOCKET_IFNAME, value: eth0}
+    - op: add
+      path: /spec/services/Worker/extraPodSpec/mainContainer/env/-
+      value: {name: GLOO_SOCKET_IFNAME, value: eth0}
+    - op: add
+      path: /spec/services/Worker/extraPodSpec/mainContainer/volumeMounts/-
+      value: {name: sshd-run, mountPath: /run/sshd}
+    - op: add
+      path: /spec/services/Worker/extraPodSpec/volumes/-
+      value: {name: sshd-run, emptyDir: {}}

@@ -156,6 +156,7 @@ ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
+  - '.github/ci/**'
   - '.github/scripts/parse_buildkit_output.py'
   - '.github/scripts/route_buildkit.sh'
   - 'container/Dockerfile.test'
