@@ -1,109 +1,70 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-name: Bounded TRTLLM host-driver checkpoint test
+name: CUDA runtime permission probe
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  checkpoint:
+  probe:
     runs-on: prod-deploy-tester-v1
-    timeout-minutes: 30
+    timeout-minutes: 9
+    env:
+      PROBE_NAMESPACE: cuda-permission-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          persist-credentials: false
-      - name: Create isolated diagnostic vCluster
-        timeout-minutes: 4
-        uses: ./.github/actions/setup-dynamo-operator
-        with:
-          vcluster_name: checkpoint-rca-${{ github.run_id }}
-          vcluster_namespace: checkpoint-rca-${{ github.run_id }}
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          repository: ${{ vars.ACR_REPOSITORY }}
-          operator_tag: 51b83df91f3fca2f52ed644f744c4465c3d163b3-operator
-          hf_token: ${{ secrets.HF_TOKEN }}
-          dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
-          dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
-          checkpoint_enabled: 'true'
-          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
-          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
-      - name: Connect
-        timeout-minutes: 1
-        id: connect
-        uses: ./.github/actions/connect-vcluster
-        with:
-          vcluster_name: checkpoint-rca-${{ github.run_id }}
-          vcluster_namespace: checkpoint-rca-${{ github.run_id }}
-      - name: Install the original Snapshot binaries
-        timeout-minutes: 3
-        uses: ./.github/actions/setup-snapshot-agent
-        with:
-          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
-          namespace: default
-          chart_version: 0.1.0-rc.1
-          storage_class: azurefile-csi
-          storage_size: 64Gi
-      - name: Select host driver for Snapshot and enable fail-fast collection
-        timeout-minutes: 2
+      - name: Run isolated permission comparison
+        shell: bash
         run: |
           set -euo pipefail
-          kubectl --request-timeout=10s -n default set env daemonset/snapshot-agent \
-            SNAPSHOT_LOG_LEVEL=debug LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03
-          kubectl -n default rollout status daemonset/snapshot-agent --timeout=90s
-          for agent in $(kubectl --request-timeout=10s -n default get pods -l app.kubernetes.io/component=snapshot-agent -o jsonpath='{.items[*].metadata.name}'); do
-            kubectl --request-timeout=10s -n default exec "$agent" -c agent -- test -f /usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03
+          kubectl --request-timeout=10s create namespace "$PROBE_NAMESPACE"
+          kubectl --request-timeout=10s label namespace "$PROBE_NAMESPACE" \
+            nscleanup/enabled=true nscleanup/ttl=600 dynamo.github/run-id="${GITHUB_RUN_ID}"
+          kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create serviceaccount cuda-runtime-permission-probe
+          kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-permission-probe \
+            --from-file=.github/scripts/cuda-runtime-permission-probe.py
+          control_passed=false
+          probe_node=""
+          for mode in no-ptrace sys-ptrace; do
+            kubectl create --dry-run=client -f .github/scripts/cuda-runtime-permission-probe-pod.yaml -o json \
+              | jq --arg mode "$mode" --arg node "$probe_node" '.metadata.name=$mode | .spec.containers[0].env[0].value=$mode |
+                  if $node != "" then .spec.nodeName=$node else . end |
+                  if $mode == "sys-ptrace" then .spec.containers[0].securityContext.capabilities.add=["SYS_PTRACE"] else . end' \
+              | kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create -f -
+            startup_deadline=$((SECONDS + 120))
+            running_deadline=0
+            phase=Pending
+            while true; do
+              pod=$(kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" get pod "$mode" -o json)
+              phase=$(jq -r '.status.phase' <<< "$pod")
+              [[ "$phase" == Succeeded || "$phase" == Failed ]] && break
+              if jq -e '[.status.initContainerStatuses[]?, .status.containerStatuses[]?] |
+                  any(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull" or
+                      .state.waiting.reason == "CreateContainerConfigError" or .state.waiting.reason == "RunContainerError")' \
+                  <<< "$pod" >/dev/null; then
+                echo "::error::$mode has a container startup error"
+                break
+              fi
+              if [[ "$phase" == Running && "$running_deadline" == 0 ]]; then
+                running_deadline=$((SECONDS + 90))
+                echo "$mode started; maximum remaining runtime 90s"
+              fi
+              if { [[ "$running_deadline" == 0 ]] && ((SECONDS >= startup_deadline)); } ||
+                 { [[ "$running_deadline" != 0 ]] && ((SECONDS >= running_deadline)); }; then
+                echo "::error::$mode reached its bounded startup/runtime deadline"
+                break
+              fi
+              sleep 2
+            done
+            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" logs "$mode" -c probe --tail=100 || true
+            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" get events --field-selector "involvedObject.name=$mode" || true
+            echo "### $mode: $phase" >> "$GITHUB_STEP_SUMMARY"
+            probe_node=$(jq -r '.spec.nodeName // ""' <<< "$pod")
+            if [[ "$mode" == sys-ptrace && "$phase" == Succeeded ]]; then control_passed=true; fi
+            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" delete pod "$mode" --wait=true --timeout=10s
           done
-          mkdir -p checkpoint-diagnostics
-      - name: Test original checkpoint, restore, and inference on host driver
-        timeout-minutes: 18
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ steps.connect.outputs.kubeconfig_base64 }}
-          namespace: default
-          registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          operator_tag: 51b83df91f3fca2f52ed644f744c4465c3d163b3-operator
-          framework: checkpoint
-          profile: dgd_restore
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
-          test_name: checkpoint_host_driver_trtllm
-          test_file: tests/deploy/test_dynamocheckpoint.py
-          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
-          extra_pytest_args: >-
-            -m snapshot_restore
-            --checkpoint-backend=trtllm
-            --frontend-image=dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-dynamo-frontend@sha256:9b40f5e9d14f795143f950e1e6b126983ed816d0bf27165ab7716816f2b324cb
-      - name: Stop collector and capture final evidence
+          "$control_passed"
+      - name: Always remove isolated namespace
         if: always()
-        timeout-minutes: 1
-        run: |
-          if [ -f checkpoint-diagnostics/collector.pid ]; then
-            kill "$(cat checkpoint-diagnostics/collector.pid)" 2>/dev/null || true
-          fi
-          mkdir -p checkpoint-diagnostics/final
-          kubectl --request-timeout=5s -n default get pods -o yaml > checkpoint-diagnostics/final/pods.yaml || true
-          kubectl --request-timeout=5s -n default get podsnapshotcontents,snapshotjobs,podsnapshots -o yaml > checkpoint-diagnostics/final/status.yaml || true
-          for agent in $(kubectl --request-timeout=5s -n default get pods -l app.kubernetes.io/component=snapshot-agent -o jsonpath='{.items[*].metadata.name}'); do
-            kubectl --request-timeout=5s -n default logs "$agent" -c agent --tail=300 > "checkpoint-diagnostics/final/$agent.log" 2>&1 || true
-          done
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
-        if: always()
-        with:
-          name: checkpoint-host-driver-${{ github.run_id }}
-          path: checkpoint-diagnostics/
-          retention-days: 7
-          if-no-files-found: warn
-  cleanup:
-    needs: checkpoint
-    if: always()
-    runs-on: prod-deploy-tester-v1
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          persist-credentials: false
-      - name: Remove only this run's vCluster and namespace
-        uses: ./.github/actions/teardown-dynamo-operator
-        with:
-          vcluster_name: checkpoint-rca-${{ github.run_id }}
-          vcluster_namespace: checkpoint-rca-${{ github.run_id }}
+        shell: bash
+        run: kubectl --request-timeout=10s delete namespace "$PROBE_NAMESPACE" --ignore-not-found --wait=false

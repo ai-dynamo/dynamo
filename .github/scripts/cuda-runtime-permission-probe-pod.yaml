@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Pod
+metadata:
+  name: no-ptrace
+spec:
+  serviceAccountName: cuda-runtime-permission-probe
+  automountServiceAccountToken: false
+  restartPolicy: Never
+  runtimeClassName: nvidia
+  activeDeadlineSeconds: 210
+  terminationGracePeriodSeconds: 1
+  nodeSelector:
+    nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  tolerations:
+    - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+    - {key: dedicated, operator: Exists, effect: NoSchedule}
+  initContainers:
+    - name: helper
+      image: dynamoci.azurecr.io/ghcr.io/ai-dynamo/snapshot/agent@sha256:42b340a7a58feadae76f209c066c08a3f3cb9262cee12487425808e39303e301
+      command: ["/bin/cp", "/usr/local/bin/cuda-checkpoint-helper", "/helpers/cuda-checkpoint-helper"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL]}
+      volumeMounts:
+        - {name: helpers, mountPath: /helpers}
+  containers:
+    - name: probe
+      image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
+      command: ["python3", "-S", "/probe/cuda-runtime-permission-probe.py"]
+      env:
+        - {name: PROBE_MODE, value: no-ptrace}
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        capabilities: {drop: [ALL], add: []}
+        # Hold seccomp constant to isolate the capability requirement.
+        seccompProfile: {type: Unconfined}
+      resources:
+        requests: {cpu: "1", memory: 2Gi}
+        limits: {nvidia.com/gpu: "1", memory: 2Gi}
+      volumeMounts:
+        - {name: helpers, mountPath: /helpers, readOnly: true}
+        - {name: probe, mountPath: /probe, readOnly: true}
+  volumes:
+    - {name: helpers, emptyDir: {}}
+    - name: probe
+      configMap: {name: cuda-runtime-permission-probe}
