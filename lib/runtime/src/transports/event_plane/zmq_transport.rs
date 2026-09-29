@@ -14,7 +14,7 @@
 //! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
 //! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -56,6 +56,7 @@ where
     T: tmq::FromZmqSocket<T>,
 {
     builder
+        .set_ipv6(true)
         .set_sndhwm(ZMQ_SNDHWM)
         .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
 }
@@ -74,7 +75,10 @@ fn configure_subscribe_builder_with_hwm<T>(
 where
     T: tmq::FromZmqSocket<T>,
 {
-    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+    builder
+        .set_ipv6(true)
+        .set_rcvhwm(rcvhwm)
+        .set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -98,24 +102,23 @@ pub struct ZmqPubTransport {
 impl ZmqPubTransport {
     /// Create a new ZMQ publisher by binding to an endpoint.
     ///
-    /// If port is 0, finds an available port using TcpListener first,
-    /// then binds ZMQ to that port.
+    /// If port is 0, ZMQ chooses an available port on the publisher socket.
     ///
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
-        let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
-            let actual_addr = listener.local_addr()?;
-            let port = actual_addr.port();
-            drop(listener);
-
-            format!("tcp://0.0.0.0:{port}")
+        let bind_endpoint = if endpoint.starts_with("tcp://") && endpoint.ends_with(":0") {
+            format!("{}*", &endpoint[..endpoint.len() - 1])
         } else {
             endpoint.to_string()
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let socket = configure_publish_builder(publish(&ctx)).bind(&bind_endpoint)?;
+        let actual_endpoint = socket
+            .get_socket()
+            .get_last_endpoint()
+            .context("Failed to read bound ZMQ publisher endpoint")?
+            .map_err(|_| anyhow!("Bound ZMQ publisher endpoint is not valid UTF-8"))?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
