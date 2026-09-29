@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use dashmap::{DashMap, mapref::entry::Entry as DashEntry};
+use dashmap::{DashMap, DashSet, mapref::entry::Entry as DashEntry};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -25,6 +25,8 @@ type RegistrationSlot = Arc<Mutex<Option<RegistrationEntry>>>;
 pub(crate) struct EndpointRegistrationManager {
     discovery: Arc<dyn Discovery>,
     slots: DashMap<EndpointInstanceId, RegistrationSlot>,
+    // Discovery list caches may still contain registrations this manager has released.
+    retired: DashSet<EndpointInstanceId>,
     runtime: tokio::runtime::Handle,
     cancellation: CancellationToken,
 }
@@ -38,6 +40,7 @@ impl EndpointRegistrationManager {
         Arc::new(Self {
             discovery,
             slots: DashMap::new(),
+            retired: DashSet::new(),
             runtime,
             cancellation,
         })
@@ -79,6 +82,9 @@ impl EndpointRegistrationManager {
         }
 
         let registration = async {
+            if self.retired.contains(&id) {
+                return Ok((self.discovery.register(spec).await?, true));
+            }
             let existing = self
                 .discovery
                 .list(DiscoveryQuery::Endpoint {
@@ -109,6 +115,7 @@ impl EndpointRegistrationManager {
                 return Err(error);
             }
         };
+        self.retired.remove(&id);
         *entry = Some(RegistrationEntry {
             instance,
             leases: 1,
@@ -161,6 +168,7 @@ impl EndpointRegistrationManager {
                 }
                 retry_delay = (retry_delay * 2).min(Duration::from_secs(5));
             }
+            self.retired.insert(id.clone());
         }
         *entry = None;
         drop(entry);
@@ -268,6 +276,123 @@ mod tests {
             cancel_token: Option<CancellationToken>,
         ) -> Result<DiscoveryStream> {
             self.inner.list_and_watch(query, cancel_token).await
+        }
+    }
+
+    struct StaleListDiscovery {
+        inner: MockDiscovery,
+        stale: parking_lot::Mutex<Option<DiscoveryInstance>>,
+    }
+
+    #[async_trait]
+    impl Discovery for StaleListDiscovery {
+        fn instance_id(&self) -> u64 {
+            self.inner.instance_id()
+        }
+
+        async fn register_internal(&self, spec: DiscoverySpec) -> Result<DiscoveryInstance> {
+            self.inner.register_internal(spec).await
+        }
+
+        async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
+            self.inner.unregister(instance.clone()).await?;
+            *self.stale.lock() = Some(instance);
+            Ok(())
+        }
+
+        async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
+            if let Some(stale) = self.stale.lock().clone() {
+                return Ok(vec![stale]);
+            }
+            self.inner.list(query).await
+        }
+
+        async fn list_and_watch(
+            &self,
+            query: DiscoveryQuery,
+            cancel_token: Option<CancellationToken>,
+        ) -> Result<DiscoveryStream> {
+            self.inner.list_and_watch(query, cancel_token).await
+        }
+    }
+
+    #[tokio::test]
+    async fn replacement_registers_despite_stale_retired_record() {
+        let discovery = Arc::new(StaleListDiscovery {
+            inner: MockDiscovery::new(Some(7), SharedMockRegistry::new()),
+            stale: parking_lot::Mutex::new(None),
+        });
+        let manager = EndpointRegistrationManager::new(
+            discovery.clone(),
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        );
+        let original = manager.register(endpoint_spec()).await.unwrap();
+        original.release().await.unwrap();
+        assert!(
+            discovery
+                .inner
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            discovery
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let replacement = manager.register(endpoint_spec()).await.unwrap();
+        // Deliver the delayed removal to the cache. The replacement must actually exist.
+        *discovery.stale.lock() = None;
+        assert_eq!(
+            discovery
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        replacement.release().await.unwrap();
+        assert!(
+            discovery
+                .inner
+                .list(DiscoveryQuery::AllEndpoints)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn releasing_borrowed_registration_preserves_external_owner() {
+        let discovery: Arc<dyn Discovery> =
+            Arc::new(MockDiscovery::new(Some(7), SharedMockRegistry::new()));
+        discovery.register(endpoint_spec()).await.unwrap();
+        let manager = EndpointRegistrationManager::new(
+            discovery.clone(),
+            tokio::runtime::Handle::current(),
+            CancellationToken::new(),
+        );
+        for _ in 0..2 {
+            manager
+                .register(endpoint_spec())
+                .await
+                .unwrap()
+                .release()
+                .await
+                .unwrap();
+            assert_eq!(
+                discovery
+                    .list(DiscoveryQuery::AllEndpoints)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
         }
     }
 

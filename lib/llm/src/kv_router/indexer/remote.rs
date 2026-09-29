@@ -491,7 +491,31 @@ async fn get_or_start_service(
     }
 
     let creation_lock = service_creation_lock(&key);
-    let _guard = creation_lock.lock().await;
+    let guard = creation_lock.lock_owned().await;
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    // Keep acquisition and cleanup serialized even when the caller abandons startup.
+    tokio::spawn(async move {
+        let _guard = guard;
+        let result = start_service_locked(component, mode, key.clone()).await;
+        if let Err(Ok(service)) = result_tx.send(result)
+            && service.retire_if_unused()
+        {
+            service.stop_endpoints().await;
+            let removed =
+                SERVED_INDEXER_SERVICES.remove_if(&key, |_, entry| Arc::ptr_eq(entry, &service));
+            drop(removed);
+        }
+    });
+    result_rx
+        .await
+        .map_err(|error| anyhow::anyhow!("served indexer startup task failed: {error}"))?
+}
+
+async fn start_service_locked(
+    component: Component,
+    mode: ServedIndexerMode,
+    key: ServiceKey,
+) -> Result<Arc<ServedIndexerService>> {
     let mut ignored_instance_ids = HashSet::new();
     if let Some(existing) = cached_service(&key) {
         if existing.mode == mode && !existing.is_retired() {
@@ -837,58 +861,137 @@ mod tests {
         .expect("replacement query endpoint should remain callable");
     }
 
-    #[tokio::test]
-    async fn cancelled_startup_cleans_query_and_allows_retry() {
-        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            let (drt, component) = registry_test_component("cancelled-startup").await;
-            let key = service_key(&component);
-            let (reached, release) = install_pause(&STARTUP_PAUSES, key.clone());
-            let startup = tokio::spawn({
-                let component = component.clone();
-                async move {
-                    ensure_served_indexer_service(
-                        component,
-                        ServedIndexerMode::Approximate,
-                        "model-a".to_string(),
-                        Indexer::None,
-                    )
-                    .await
-                }
-            });
-            reached.await.unwrap();
-            assert!(!SERVED_INDEXER_SERVICES.contains_key(&key));
-            let query = DiscoveryQuery::ComponentEndpoints {
-                namespace: component.namespace().name(),
-                component: component.name().to_string(),
-            };
-            assert_eq!(drt.discovery().list(query.clone()).await.unwrap().len(), 1);
-            startup.abort();
-            assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
-            drop(release);
-            while !drt
-                .discovery()
-                .list(query.clone())
-                .await
-                .unwrap()
-                .is_empty()
-            {
-                tokio::task::yield_now().await;
-            }
-            let handle = ensure_served_indexer_service(
-                component.clone(),
-                ServedIndexerMode::Approximate,
-                "model-a".to_string(),
-                Indexer::None,
+    async fn run_isolated(test: &str) -> bool {
+        // The process-global TCP accept loop must outlive each test's real queries.
+        let test_name = test.split_once("::").unwrap().1;
+        if std::env::var("DYNAMO_SERVED_INDEXER_TEST").as_deref() != Ok(test_name) {
+            let output = tokio::time::timeout(
+                Duration::from_secs(30),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("DYNAMO_SERVED_INDEXER_TEST", test_name)
+                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RPC_PORT", "0")
+                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
+                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
+                    .kill_on_drop(true)
+                    .output(),
             )
             .await
+            .expect("retirement subprocess must finish within its deadline")
             .unwrap();
-            assert_eq!(drt.discovery().list(query).await.unwrap().len(), 2);
-            drop(handle);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
+                "retirement subprocess must run exactly one passing test: {stdout}"
+            );
+            return true;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn cancelled_startup_blocks_replacement_until_cleanup_completes() {
+        if run_isolated(concat!(
+            module_path!(),
+            "::cancelled_startup_blocks_replacement_until_cleanup_completes"
+        ))
+        .await
+        {
+            return;
+        }
+        let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (drt, root) = registry_test_component("cancelled-startup").await;
+            for fail_record in [false, true] {
+                let component = root
+                    .namespace()
+                    .component(if fail_record {
+                        "cancelled-error"
+                    } else {
+                        "cancelled-acquisition"
+                    })
+                    .unwrap();
+                let key = service_key(&component);
+                let (startup_reached, startup_release) =
+                    install_pause(&STARTUP_PAUSES, key.clone());
+                let (cleanup_reached, cleanup_release) =
+                    install_pause(&RETIREMENT_PAUSES, key.clone());
+                let startup = tokio::spawn({
+                    let component = component.clone();
+                    async move {
+                        ensure_served_indexer_service(
+                            component,
+                            ServedIndexerMode::Approximate,
+                            "model-a".to_string(),
+                            Indexer::None,
+                        )
+                        .await
+                    }
+                });
+                startup_reached.await.unwrap();
+                assert!(!SERVED_INDEXER_SERVICES.contains_key(&key));
+                let conflicting_record = if fail_record {
+                    Some(
+                        drt.discovery()
+                            .register(dynamo_runtime::discovery::DiscoverySpec::Endpoint {
+                                namespace: component.namespace().name(),
+                                component: component.name().to_string(),
+                                endpoint: KV_INDEXER_RECORD_ROUTING_DECISION_ENDPOINT.to_string(),
+                                transport: dynamo_runtime::component::TransportType::Nats(
+                                    "conflict".to_string(),
+                                ),
+                                device_type: None,
+                                request_plane_codec: None,
+                            })
+                            .await
+                            .unwrap(),
+                    )
+                } else {
+                    startup.abort();
+                    None
+                };
+                startup_release.send(()).unwrap();
+                cleanup_reached.await.unwrap();
+                // The error variant cancels while startup is awaiting query cleanup.
+                startup.abort();
+                assert!(matches!(startup.await, Err(error) if error.is_cancelled()));
+                if let Some(record) = conflicting_record {
+                    drt.discovery().unregister(record).await.unwrap();
+                }
+                let mut replacement = Box::pin(ensure_served_indexer_service(
+                    component.clone(),
+                    ServedIndexerMode::EventDriven,
+                    "model-a".to_string(),
+                    Indexer::None,
+                ));
+                assert!(futures::poll!(replacement.as_mut()).is_pending());
+                assert!(service_creation_lock(&key).try_lock().is_err());
+                cleanup_release.send(()).unwrap();
+                let handle = replacement.await.unwrap();
+                assert_query_callable(&component).await;
+                let endpoints = drt
+                    .discovery()
+                    .list(DiscoveryQuery::ComponentEndpoints {
+                        namespace: component.namespace().name(),
+                        component: component.name().to_string(),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(endpoints.len(), 1);
+                drop(handle);
+            }
             shutdown_and_settle(drt).await;
         })
         .await
-        .expect("cancelled startup did not clean up and recover");
+        .expect("replacement raced cancelled startup cleanup");
     }
 
     #[tokio::test]
@@ -963,40 +1066,12 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_retirement_blocks_replacement_until_cleanup_completes() {
-        // The process-global TCP accept loop must outlive this test's real query.
-        const TEST: &str = concat!(
+        if run_isolated(concat!(
             module_path!(),
             "::interrupted_retirement_blocks_replacement_until_cleanup_completes"
-        );
-        let test_name = TEST.split_once("::").unwrap().1;
-        if std::env::var("DYNAMO_SERVED_INDEXER_TEST").as_deref() != Ok(test_name) {
-            let output = tokio::time::timeout(
-                Duration::from_secs(30),
-                tokio::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["--exact", test_name, "--nocapture"])
-                    .env("DYNAMO_SERVED_INDEXER_TEST", test_name)
-                    .env("DYN_TCP_RPC_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RPC_PORT", "0")
-                    .env("DYN_TCP_RESPONSE_STREAM_HOST", "127.0.0.1")
-                    .env("DYN_TCP_RESPONSE_STREAM_PORT", "0")
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .expect("retirement subprocess must finish within its deadline")
-            .unwrap();
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                output.status.success(),
-                "{stdout}\n{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(
-                stdout
-                    .lines()
-                    .any(|line| line.starts_with("test result: ok. 1 passed; 0 failed;")),
-                "retirement subprocess must run exactly one passing test: {stdout}"
-            );
+        ))
+        .await
+        {
             return;
         }
         let _zmq_gate = crate::kv_router::indexer::ZMQ_TEST_ISOLATION.lock().await;

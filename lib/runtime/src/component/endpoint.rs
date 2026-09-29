@@ -316,17 +316,21 @@ impl EndpointConfigBuilder {
             release_result
         });
 
-        let registration_lease = endpoint
-            .drt()
-            .register_endpoint_lease(discovery_spec)
-            .await
-            .inspect_err(|error| {
+        let registration_lease = match endpoint.drt().register_endpoint_lease(discovery_spec).await
+        {
+            Ok(lease) => lease,
+            Err(error) => {
                 tracing::error!(
                     %endpoint_id,
                     %error,
                     "Unable to register service for discovery"
                 );
-            })?;
+                startup_guard.cancellation.cancel();
+                drop(registration_tx);
+                task.await??;
+                return Err(error);
+            }
+        };
         if registration_tx.send(registration_lease).is_err() {
             anyhow::bail!("endpoint cleanup task ended before discovery registration completed");
         }
