@@ -88,7 +88,7 @@ spec:
                 matchExpressions:
                 - key: nvidia.com/dynamo-component-type
                   operator: In
-                  values: [worker]
+                  values: [prefill, decode]
     decode:
       extraPodMetadata:
         annotations:
@@ -133,4 +133,4 @@ spec:
                 matchExpressions:
                 - key: nvidia.com/dynamo-component-type
                   operator: In
-                  values: [worker]
+                  values: [prefill, decode]
