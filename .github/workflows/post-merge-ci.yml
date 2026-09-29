@@ -30,11 +30,17 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p cuda-probe-evidence
-          # Expand LD_PRELOAD inside the workload image, preserving its defaults.
+          # Expand the image defaults inside the container. Override only libcuda.
           # shellcheck disable=SC2016
           timeout --signal=TERM --kill-after=5s 100s kubectl -n "$PROBE_NAMESPACE" exec cuda-driver-probe -c probe -- \
             timeout --signal=TERM --kill-after=5s 90s bash -c \
-              'export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03:${LD_PRELOAD:-}"; exec python3 -u /probe/trtllm-host-driver-probe.py --mpi' \
+              'set -euo pipefail
+               driver_dir=$(mktemp -d /tmp/host-driver.XXXXXX)
+               ln -s /usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03 "$driver_dir/libcuda.so.1"
+               ln -s libcuda.so.1 "$driver_dir/libcuda.so"
+               export LD_LIBRARY_PATH="$driver_dir:${LD_LIBRARY_PATH:-}"
+               export LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libcuda.so.595.58.03:${LD_PRELOAD:-}"
+               exec python3 -u /probe/trtllm-host-driver-probe.py --mpi' \
             2>&1 | tee cuda-probe-evidence/result.log
       - name: Save pod state and events
         if: always()
