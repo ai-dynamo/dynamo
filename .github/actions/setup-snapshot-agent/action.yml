@@ -80,6 +80,7 @@ runs:
           --set storage.pvc.create=true \
           --set storage.pvc.size="${STORAGE_SIZE}" \
           --set-string storage.pvc.storageClass="${STORAGE_CLASS}" \
+          --set-json 'daemonset.imagePullSecrets=[]' \
           --debug
 
         kubectl wait --for=condition=Established \
