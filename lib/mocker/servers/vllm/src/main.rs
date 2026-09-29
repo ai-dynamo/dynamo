@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use tonic_health_v14 as tonic_health;
+use tonic_v14 as tonic;
+
 use std::net::SocketAddr;
 
 use anyhow::Context;
@@ -51,7 +54,7 @@ fn load_engine_args(value: Option<&str>) -> anyhow::Result<MockEngineArgs> {
             .map_err(anyhow::Error::msg)
             .with_context(|| format!("failed to load --extra-engine-args from {path}"))?,
     };
-    args.normalized().context("invalid Mocker engine arguments")
+    Ok(args)
 }
 
 #[tokio::main]

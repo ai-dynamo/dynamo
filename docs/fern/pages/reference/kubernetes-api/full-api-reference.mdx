@@ -385,7 +385,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -552,7 +552,7 @@ SubComponentType indicates the sub-role of this component (for example, "prefill
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2628,7 +2628,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2737,7 +2737,7 @@ See [ComponentType](#componenttype).
 </ParamField>
 
 <ParamField path="runtimeVersionOverride" type="string">
-RuntimeVersionOverride declares the Dynamo runtime compatibility version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
+RuntimeVersionOverride declares the Dynamo runtime version in this component's main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0". It does not change the image. Setting or changing an override that resolves to version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
 **Validation:** Pattern: `^(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})\.(0|[1-9][0-9]\{0,3\})$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -3689,7 +3689,7 @@ OverridesSpec allows customizing the profiling job and the generated DynamoGraph
 **Appears in:** [DynamoGraphDeploymentRequestSpec](#v1beta1-dynamographdeploymentrequestspec)
 
 <ParamField path="profilingJob" type="JobSpec">
-ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec.
+ProfilingJob allows overriding the profiling Job specification. Fields set here are merged into the controller-generated Job spec. Security: creating a DGDR is workload-creation authority in its namespace — these overrides carry the same blast radius as creating a Job or Pod directly there, by design. Pod security is enforced centrally by Kubernetes Pod Security Admission on the resulting Pods once the namespace is labeled (see pod-security.kubernetes.io/enforce): it applies the full Pod Security Standards — covering privileged, host namespaces, and hostPath, not only securityContext — not this API. ServiceAccount identity is a separate layer: these overrides can set serviceAccountName and automountServiceAccountToken, which are bounded by RBAC and namespace membership rather than PSA — the same authority any Pod author in the namespace already holds. Grant create/update on DGDRs only to principals trusted to create Pods in the namespace. The profiling Job always runs in the DGDR's own namespace and overrides cannot change that — but namespace containment is not node or cross-tenant isolation. Dynamo's workloads, including this Job, satisfy the baseline standard, so enforce baseline (non-exempt) on every resulting Pod to close the privileged, host-namespace, host-device, and hostPath paths.
 See [JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -4987,7 +4987,7 @@ These are injected into all components when the corresponding infrastructure ser
 | `DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS` | Endpoints whose health status is used for readiness | `["generate"]` | `string` (JSON array) |
 | `DYN_SYSTEM_PORT` | Port for the system HTTP server (health, metrics) | `9090` | `int` |
 | `DYN_HEALTH_CHECK_ENABLED` | Disables the legacy health check mechanism in favor of the system server | `false` | `string` (boolean) |
-| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection | `n` | `string` | Options: `y`, `n` |
+| `NIXL_TELEMETRY_ENABLE` | Enables or disables NIXL telemetry collection. Case-insensitive options: `y`, `1`, `yes`, `on`, `true`, `enable`, `n`, `0`, `no`, `off`, `false`, `disable`. Unrecognized values fail SGLang admission or worker validation. Use `y` to opt in to SGLang operator rank port declarations. | `n` | `string` |
 | `NIXL_TELEMETRY_EXPORTER` | Telemetry exporter format for NIXL metrics | `prometheus` | `string` |
 | `NIXL_TELEMETRY_PROMETHEUS_PORT` | Port for NIXL Prometheus metrics endpoint | `19090` | `int` |
 | `DYN_NAMESPACE_WORKER_SUFFIX` | Hash suffix appended to worker namespace for rolling updates | — | `string` | Only set during rolling update transitions |

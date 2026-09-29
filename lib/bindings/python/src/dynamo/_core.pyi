@@ -12,6 +12,7 @@ from typing import (
     List,
     Literal,
     Optional,
+    Protocol,
     Sequence,
     Set,
     Tuple,
@@ -336,6 +337,19 @@ class Client:
         ) -> int:
         """
         Wait for exactly one instance whose MDC runtime_data contains the given string value.
+        """
+        ...
+
+    async def wait_for_instances_by_runtime_data(
+            self,
+            key: str,
+            value: str,
+            min_count: int,
+            timeout_s: float | None = None,
+        ) -> List[int]:
+        """
+        Wait until at least min_count instances have MDC runtime_data containing the
+        given string value, and return their sorted instance IDs.
         """
         ...
 
@@ -748,8 +762,13 @@ class SelectionService:
         replica_sync_port: Optional[int] = None,
         replica_sync_peers: Optional[list[str]] = None,
         selection_cache: Optional[SelectionCacheConfig] = None,
+        session_affinity_ttl_secs: Optional[float] = None,
     ) -> None:
-        """Create a selection service. `indexer_threads` sizes the KV indexer pool."""
+        """Create a selection service. `indexer_threads` sizes the KV indexer pool.
+
+        `session_affinity_ttl_secs` enables session affinity with an idle TTL
+        between 1 and 31536000 seconds.
+        """
         ...
 
     def shutdown(self) -> None:
@@ -1458,12 +1477,25 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    def __init__(self, port: Optional[int] = None) -> None:
+    def __init__(
+        self, port: Optional[int] = None, *, wait_for_first_item: bool = False
+    ) -> None:
         """
         Create a new HTTP service.
 
         Args:
             port: Optional port number to bind the service to (default: 8080)
+            wait_for_first_item: When True, a streaming chat, completions,
+                responses, or Anthropic messages request waits for the engine's
+                first item before the HTTP status is committed, so an exception
+                raised by an engine generator before its first ``yield`` maps to
+                the same HTTP error response as it does for a non-streaming
+                request. When False (the default), the service inherits
+                ``DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS``: unset or ``0``, it commits
+                HTTP 200 without waiting and such an error arrives as an SSE
+                error frame; set to a positive number of milliseconds, it waits
+                that long and still maps an error that arrives inside the
+                window. True overrides the variable with an unbounded wait.
         """
         ...
 
@@ -1650,8 +1682,8 @@ class ModelInput:
 class ModelType:
     """OpenAI-style surfaces supported by a model.
 
-    Values are Chat, Completions, Embedding, Classify, Pooling, TensorBased,
-    Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
+    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1673,6 +1705,8 @@ class ModelType:
     # Raw pooler output served on /v1/pooling (token embeddings, logits, rewards).
     # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
     Pooling: ModelType
+    # Cross-encoder relevance scoring served on /v1/rerank.
+    Rerank: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
@@ -1691,6 +1725,10 @@ class ModelType:
 
     def supports_pooling(self) -> bool:
         """Return True if this model type supports /v1/pooling."""
+        ...
+
+    def supports_rerank(self) -> bool:
+        """Return True if this model type supports /v1/rerank."""
         ...
 
 class RouterMode:
@@ -1796,6 +1834,7 @@ class KvRouterConfig:
         router_queue_policy: str = "fcfs",
         use_remote_indexer: bool = False,
         serve_indexer: bool = False,
+        enable_session_prefix_index: bool = False,
         shared_cache_multiplier: float = 0.0,
         shared_cache_type: str = "none",
         router_predicted_ttl_secs: Optional[float] = None,
@@ -1870,6 +1909,10 @@ class KvRouterConfig:
                 "wspt": weighted shortest processing time (Smith's rule) — optimizes average TTFT.
             use_remote_indexer: Query a remote KV indexer served from the worker component (default: False).
             serve_indexer: Serve this router's local indexer from the worker component (default: False).
+            enable_session_prefix_index: Track per-session block lineage in a logical prefix index that outlives engine cache eviction (default: False).
+                Lineage is fed from two sources: routing-lookup matches, and stored-block KV events that carry a session ID. Stored blocks without a session ID do not update lineage.
+                The index neither holds nor restores KV cache, so a match is a routing hint rather than a guarantee that the blocks are still resident.
+                The index retains at most 16,384 least-recently-used sessions and opportunistically reclaims unreferenced logical leaves.
             shared_cache_multiplier: Credit multiplier for shared cache hits beyond the device prefix (default: 0.0).
             shared_cache_type: External shared KV cache type, "none" or "hicache" (default: "none").
             conditional_disagg_enabled: Enable conditional-disagg bypass from prefill to decode (default: False).
@@ -2446,6 +2489,63 @@ async def run_input(
     """
     ...
 
+class ReplaySchedulerMetricsSnapshot(TypedDict):
+    worker_id: int
+    dp_rank: int
+    active_blocks: int
+    inactive_blocks: int
+    total_blocks: int
+    active_cache_usage: float
+    physical_cache_usage: float
+    running_requests: int
+    waiting_requests: int
+
+class ReplaySchedulerIntervalMetrics(TypedDict):
+    cache_hit_tokens: int
+    cache_total_tokens: int
+    preemptions: int
+
+class ReplayTrafficMetricsSnapshot(TypedDict):
+    duration_s: float
+    arriving_requests: int
+    completed_requests: int
+    avg_isl: float
+    avg_osl: float
+    avg_ttft_ms: float
+    avg_itl_ms: float
+    ttft_count: int
+    itl_count: int
+    avg_router_kv_hit_rate: float
+    router_kv_hit_rate_count: int
+    avg_accept_length: Optional[float]
+    accept_length_forward_count: int
+
+class ReplayTelemetrySnapshot(TypedDict):
+    sample_ordinal: int
+    kind: Literal["baseline", "periodic", "final"]
+    interval_start_ms: float
+    sampled_at_ms: float
+    traffic: ReplayTrafficMetricsSnapshot
+    prefill_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    decode_scheduler_metrics: list[ReplaySchedulerMetricsSnapshot]
+    prefill_interval_metrics: ReplaySchedulerIntervalMetrics
+    decode_interval_metrics: ReplaySchedulerIntervalMetrics
+    router_pending_prefill_requests: int
+    router_pending_decode_requests: int
+    active_prefill_ids: list[int]
+    active_decode_ids: list[int]
+    starting_prefill_ids: list[int]
+    starting_decode_ids: list[int]
+    draining_prefill_ids: list[int]
+    draining_decode_ids: list[int]
+
+class ReplayTelemetryDetails(TypedDict):
+    sample_interval_ms: float
+    samples: list[ReplayTelemetrySnapshot]
+
+class ReplayTelemetryCallback(Protocol):
+    def __call__(self, snapshot: ReplayTelemetrySnapshot, /) -> None: ...
+
 class _OfflineReplayResult:
     @property
     def summary(self) -> Dict[str, Any]: ...
@@ -2455,6 +2555,8 @@ class _OfflineReplayResult:
     def coverage(self) -> Dict[str, Any]: ...
     @property
     def lifecycle_operations(self) -> List[Dict[str, Any]]: ...
+    @property
+    def telemetry(self) -> Optional[ReplayTelemetryDetails]: ...
 
 @overload
 def run_mocker_trace_replay(
@@ -2510,6 +2612,10 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 
@@ -2530,6 +2636,18 @@ def run_mocker_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    Replay telemetry is independent from ``scaling_policy``. Set
+    ``capture_telemetry`` to retain samples on the offline result, provide
+    ``telemetry_callback`` to consume each sample without retaining it, or set
+    ``telemetry_jsonl_path`` to stream one JSON object per sample. The positive
+    ``telemetry_sample_interval_ms`` cadence is measured in simulated time and
+    does not need to be a multiple of a Planner tick. Callbacks and per-sample
+    JSONL writes are synchronous and therefore extend replay wall time. The
+    final buffered-file flush occurs after the simulator finalizes
+    ``wall_time_ms``; time the outer call for end-to-end persistence overhead.
+    The JSONL target is opened on the first sample; after a write failure,
+    completed prior lines remain and the failing final line may be partial.
     """
     ...
 
@@ -2584,6 +2702,10 @@ def run_mocker_synthetic_trace_replay(
     capture_per_request: bool = False,
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
+    capture_telemetry: bool = False,
+    telemetry_sample_interval_ms: float = 1_000.0,
+    telemetry_callback: Optional[ReplayTelemetryCallback] = None,
+    telemetry_jsonl_path: Optional[str | os.PathLike[str]] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay a synthetic mocker workload without requiring a trace file.
 
@@ -2597,6 +2719,10 @@ def run_mocker_synthetic_trace_replay(
     ``scaling_policy`` is an optional offline callback implementing
     ``initial_tick_ms() -> float`` and ``on_tick(snapshot) -> dict``. Passing a
     policy in online mode raises ``ValueError``.
+
+    Replay telemetry uses the same policy-neutral capture, callback, and JSONL
+    options as ``run_mocker_trace_replay``. Its cadence is simulated time and
+    is independent from Planner ticks.
     """
     ...
 
@@ -2835,6 +2961,8 @@ class KvDcRelay:
         expected_unique_blocks: int = 1_048_576,
         bind: Optional[str] = None,
         tuning: Optional[Dict[str, int]] = None,
+        sources_file: Optional[str] = None,
+        connection_revision: Optional[str] = None,
     ) -> None:
         ...
 
@@ -3179,6 +3307,7 @@ class EntrypointArgs:
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
         *,
+        tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
@@ -3203,6 +3332,7 @@ class EntrypointArgs:
             http_metrics_port: HTTP metrics port (for gRPC service)
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
+            tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
             mocker_engine_args: Typed mocker engine arguments
             runtime_config: Optional runtime configuration for discovery registration
@@ -3271,7 +3401,10 @@ class VirtualConnectorClient:
         ...
 
     async def wait(self) -> None:
-        """Blocks until there is a new decision to fetch using 'get'"""
+        """Wait for an unacknowledged decision, including one already published.
+
+        Use get() to fetch the decision.
+        """
         ...
 
 
@@ -3395,6 +3528,7 @@ class backend:
             bootstrap_host: Optional[str] = None,
             bootstrap_port: Optional[int] = None,
             enable_eagle: bool = False,
+            max_gpu_lora_count: Optional[int] = None,
         ) -> None: ...
         @property
         def context_length(self) -> Optional[int]: ...
@@ -3416,6 +3550,8 @@ class backend:
         def bootstrap_port(self) -> Optional[int]: ...
         @property
         def enable_eagle(self) -> bool: ...
+        @property
+        def max_gpu_lora_count(self) -> Optional[int]: ...
 
     class EngineConfig:
         def __init__(

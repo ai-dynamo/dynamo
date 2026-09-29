@@ -7,7 +7,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "1.5.0"
+version = "1.6.0"
 edition = "2024"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -23,12 +23,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["custom-policy"]
-# Links the worker-selection policies Dynamo ships plus the replaceable catalog selected by the
+# Links the router plugins Dynamo ships plus the replaceable catalog selected by the
 # dependency alias below. Enabled by default so a deployment can select a shipped policy through
 # router-policy YAML without rebuilding. A private image replaces only the catalog dependency, so
 # its policies are added alongside the shipped ones rather than displacing them.
 custom-policy = [
-  "dep:dynamo-custom-policy-builtin",
   "dep:dynamo-worker-selection-policy-catalog",
   "dynamo-kv-router/standalone-selection",
 ]
@@ -49,7 +48,7 @@ nvtx = ["dynamo-runtime/nvtx"]
 # to keep the default wheel lean. Production containers and the MM
 # recipes pass this flag explicitly; the dev container's
 # `.devcontainer/post-create.sh` also enables it for local workflows.
-mm-routing = ["dynamo-llm/mm-routing"]
+mm-routing = ["dynamo-llm/mm-routing", "dynamo-vllm-sidecar/mm-routing"]
 # Enable the native S3 destination for the request-trace sink. Production wheel
 # builds enable this flag in container/templates/wheel_builder.Dockerfile so
 # `DYN_REQUEST_TRACE_SINKS=s3` works on shipped artifacts.
@@ -60,15 +59,15 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # former AIC crate surface. The `python` feature is required for
 # AicEngineBuilder; this extension supplies the interpreter, so the dependency
 # must not enable `extension-module`.
-aisimulate-core = { version = "=0.1.0-dev.2", optional = true, features = ["python"] }
+aisimulate-core = { version = "=0.12.0", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
-dynamo-parsers = { version = "8.1.0" }
+dynamo-parsers = { version = "9.0.0" }
 dynamo-backend-common = { path = "../../backend-common" }
 dynamo-sidecar-common = { path = "../../sidecar/common" }
 dynamo-sglang-sidecar = { path = "../../sidecar/sglang" }
 dynamo-trtllm-sidecar = { path = "../../sidecar/trtllm" }
-dynamo-vllm-sidecar = { path = "../../sidecar/vllm" }
+dynamo-vllm-sidecar = { path = "../../sidecar/vllm", default-features = false }
 
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
@@ -98,7 +97,7 @@ uuid = { version = "1.18.1" }
 
 # kv-indexer / slot-tracker / shared kv-router types
 dynamo-kv-router = { path = "../../kv-router" }
-dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin", optional = true }
+dynamo-custom-policy-builtin = { path = "../../router-plugins/builtin" }
 dynamo-worker-selection-policy-catalog = { path = "../../router-plugins/catalog", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

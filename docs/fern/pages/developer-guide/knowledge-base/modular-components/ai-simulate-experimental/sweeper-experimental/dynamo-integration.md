@@ -18,8 +18,8 @@ AISimulate requires Python 3.11 through 3.13. The `ai-dynamo` package remains in
 3.10, but the AISimulate dependency and CLI are not installed there.
 
 The supported prebuilt environment is the `dynamo-planner` image. The image stages and installs the
-published `aisimulate==0.1.0.dev2` wheel alongside the Dynamo wheels. Dynamo's Rust workspace
-resolves `aisimulate-core==0.1.0-dev.2` from crates.io.
+published `aisimulate==0.12.0` wheel alongside the Dynamo wheels. Dynamo's Rust workspace
+resolves `aisimulate-core==0.12.0` from crates.io.
 
 For Dynamo source development, install the published AISimulate wheel and build the matching
 Dynamo bindings:
@@ -30,7 +30,7 @@ cd lib/bindings/python
 maturin develop --uv --release --features aic-forward-pass
 cd ../../..
 python3 -m pip install --no-deps -e .
-python3 -m pip install "aisimulate==0.1.0.dev2"
+python3 -m pip install "aisimulate==0.12.0"
 python3 -m pip install -r container/deps/requirements.planner.txt
 ```
 
