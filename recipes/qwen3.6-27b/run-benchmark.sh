@@ -181,9 +181,9 @@ deploy() {
       wait_pod_created "$sel_fe" 900
       echo "[deploy] waiting for DGD Frontend pod ..."
       $K wait --for=condition=Ready pod -l "$sel_fe" --timeout=900s
-      echo "[deploy] waiting for VllmWorker pod to be created ..."
+      echo "[deploy] waiting for worker pod to be created ..."
       wait_pod_created "$sel_wk" 1500
-      echo "[deploy] waiting for VllmWorker pod ..."
+      echo "[deploy] waiting for worker pod ..."
       $K wait --for=condition=Ready pod -l "$sel_wk" --timeout=1500s
       ;;
     *)
