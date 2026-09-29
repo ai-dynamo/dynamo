@@ -598,18 +598,13 @@ runs:
         # propagation can lag in either direction. The Ready condition confirms
         # container readiness reported by each webhook-aware probe; the
         # admission smoke tests below are the authoritative end-to-end gate.
-        #
-        # Count ready Pods, not total Pods: a terminal Pod never becomes ready,
-        # so an exact count cannot converge once one is left behind. Select on
-        # the syncer's ownership labels because a shared host namespace holds
-        # identically named operator Pods from concurrent runs.
+        # Count ready Pods, not total: a terminal Pod never becomes ready. Scope
+        # to this run's vCluster; a shared namespace holds identically named Pods.
         VCLUSTER_POD_SELECTOR="vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default"
-        end=$((SECONDS + 600))
+        end=$((SECONDS + 1800))
         while true; do
-          # Keep polling through a failed query. The default shell is
-          # `bash -eo pipefail`, so an unguarded assignment would inherit
-          # kubectl's exit status and abandon the retry loop on one transient
-          # API-server error.
+          # Default shell is `bash -eo pipefail`, so a bare assignment would
+          # inherit kubectl's status and abandon the retry loop on one blip.
           if ! POD_STATE="$(
             kubectl get pods -n "${NAMESPACE}" -l "${VCLUSTER_POD_SELECTOR}" \
               -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
@@ -911,10 +906,8 @@ runs:
         kubectl describe pods -n ${NAMESPACE} 2>&1 || true
         echo "::endgroup::"
 
-        # Report every operator Pod, not the first match. A terminal Pod is
-        # often the reason this step is running, so its YAML and logs are
-        # evidence rather than noise -- and picking one Pod by name can report
-        # a Failed Pod in place of the live replacement.
+        # Report every operator Pod: a terminal one is usually the evidence this
+        # step exists to capture, and picking one by name can miss the live Pod.
         OPERATOR_PODS=$(kubectl get pods -n "${NAMESPACE}" \
           -l "vcluster.loft.sh/managed-by=${VCLUSTER_NAME},vcluster.loft.sh/namespace=default,control-plane=controller-manager" \
           -o name 2>/dev/null || true)
