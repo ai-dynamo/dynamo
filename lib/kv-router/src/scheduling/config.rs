@@ -473,7 +473,11 @@ impl fmt::Display for RouterQueuePolicy {
 pub enum RouterPrefillLoadModel {
     #[default]
     None,
-    #[serde(rename = "ais")]
+    // v1.5 frontends only recognize "aic" in worker cards.
+    // TODO(v1.8): write "ais" with alias="aic" when v1.5 leaves N-2.
+    // TODO(v1.10): remove the wire "aic" alias when v1.7 writers leave N-2,
+    // provided v1.8 and later consistently emit "ais".
+    #[serde(rename = "aic", alias = "ais")]
     Ais,
 }
 
@@ -492,7 +496,7 @@ impl FromStr for RouterPrefillLoadModel {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
-            "ais" => Ok(Self::Ais),
+            "ais" | "aic" => Ok(Self::Ais),
             _ => Err(format!(
                 "unknown prefill load model: {s:?}, expected 'none' or 'ais'"
             )),
@@ -1603,6 +1607,48 @@ mod tests {
     fn try_config_from_values(values: &[(&str, &str)]) -> Result<KvRouterConfig, String> {
         let values: HashMap<&str, &str> = values.iter().copied().collect();
         kv_router_config_from_lookup(|key| values.get(key).map(|value| (*value).to_string()))
+    }
+
+    #[test]
+    fn prefill_load_model_preserves_legacy_wire_value_and_canonical_name() {
+        // The v1.5 reader recognizes only these two wire variants.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "lowercase")]
+        enum LegacyPrefillLoadModel {
+            None,
+            Aic,
+        }
+
+        for spelling in ["aic", "ais"] {
+            let model: RouterPrefillLoadModel =
+                serde_json::from_value(serde_json::json!(spelling)).unwrap();
+            assert_eq!(model, RouterPrefillLoadModel::Ais);
+            assert_eq!(model.to_string(), "ais");
+            let wire = serde_json::to_string(&model).unwrap();
+            assert_eq!(wire, r#""aic""#);
+            assert_eq!(
+                serde_json::from_str::<LegacyPrefillLoadModel>(&wire).unwrap(),
+                LegacyPrefillLoadModel::Aic
+            );
+
+            let config = config_from_values(&[("DYN_ROUTER_PREFILL_LOAD_MODEL", spelling)]);
+            assert_eq!(
+                config.router_prefill_load_model,
+                RouterPrefillLoadModel::Ais
+            );
+        }
+        assert_eq!(
+            serde_json::from_str::<RouterPrefillLoadModel>(r#""none""#).unwrap(),
+            RouterPrefillLoadModel::None
+        );
+        assert_eq!(
+            serde_json::from_str::<LegacyPrefillLoadModel>(
+                &serde_json::to_string(&RouterPrefillLoadModel::None).unwrap()
+            )
+            .unwrap(),
+            LegacyPrefillLoadModel::None
+        );
+        assert!(serde_json::from_str::<RouterPrefillLoadModel>(r#""unknown""#).is_err());
     }
 
     #[test]
