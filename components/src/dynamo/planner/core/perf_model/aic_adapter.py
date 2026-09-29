@@ -16,6 +16,8 @@ import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from aiconfigurator_core.sdk.perf_database import get_latest_database_version
+
 from dynamo.common.forward_pass_metrics import (
     FPM_VERSION,
     ForwardPassMetrics,
@@ -41,6 +43,18 @@ _ENGINE_MODEL_INIT_EXCEPTIONS = (ImportError, *_ENGINE_MODEL_EXCEPTIONS)
 DEFAULT_MAX_NUM_BATCHED_TOKENS = 8192
 DEFAULT_MAX_NUM_SEQS = 512
 DEFAULT_MAX_KV_TOKENS = 2_000_000
+
+
+def _resolve_backend_version(spec: AICPerfModelSpec) -> Optional[str]:
+    """Resolve the packaged AIC perf-database version for a spec.
+
+    ``backend_version`` identifies an aiconfigurator-core data asset, not the
+    engine version a user runs, so a config that omits it is resolved here
+    rather than pushed onto the user.
+    """
+    if spec.backend_version is not None:
+        return spec.backend_version
+    return get_latest_database_version(spec.system, spec.backend)
 
 
 @dataclass(frozen=True)
@@ -242,13 +256,26 @@ class PlannerEnginePerfModel:
         pick = self._pick_for_worker(spec)
         if pick is None:
             return None
+        # aiconfigurator-core treats backend_version as required and raises a
+        # non-fallback-safe error when it is missing, so resolve the packaged
+        # database version here and drop to FPM regression when there is none.
+        backend_version = _resolve_backend_version(spec)
+        if backend_version is None:
+            logger.warning(
+                "No AIC performance database is available for system=%s, "
+                "backend=%s; using FPM regression instead of native AIC "
+                "estimates.",
+                spec.system,
+                spec.backend,
+            )
+            return None
         nextn = self._effective_speculative_nextn()
         return {
             "schema_version": 1,
             "model_name": spec.hf_id,
             "system_name": spec.system,
             "backend": spec.backend,
-            "backend_version": spec.backend_version,
+            "backend_version": backend_version,
             "kv_block_size": (
                 self._capabilities.kv_cache_block_size
                 if self._capabilities is not None
