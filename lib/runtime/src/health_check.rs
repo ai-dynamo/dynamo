@@ -10,6 +10,7 @@ use futures::StreamExt;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -20,6 +21,10 @@ pub struct HealthCheckConfig {
     pub canary_wait_time: Duration,
     /// Timeout for health check requests
     pub request_timeout: Duration,
+    /// Timeout for the first health check request per endpoint.
+    /// A cold engine's first generate can take far longer than steady state, so the first
+    /// canary is given this generous budget; every subsequent check uses `request_timeout`.
+    pub first_request_timeout: Duration,
 }
 
 impl Default for HealthCheckConfig {
@@ -28,6 +33,9 @@ impl Default for HealthCheckConfig {
             canary_wait_time: Duration::from_secs(crate::config::DEFAULT_CANARY_WAIT_TIME_SECS),
             request_timeout: Duration::from_secs(
                 crate::config::DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
+            ),
+            first_request_timeout: Duration::from_secs(
+                crate::config::DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS,
             ),
         }
     }
@@ -90,22 +98,57 @@ impl HealthCheckManager {
             .get_endpoint_health_check_notifier(&endpoint_subject)
             .expect("Notifier should exist for registered endpoint");
 
+        // Guards against overlapping canaries: the first canary may run for up to
+        // `first_request_timeout` while the loop keeps re-arming every `canary_wait`, so
+        // skip a tick whenever a canary is still in flight for this endpoint.
+        let in_flight = Arc::new(AtomicBool::new(false));
+
         let task = tokio::spawn(async move {
             let endpoint_subject = endpoint_subject_clone;
             info!("Health check task started for: {}", endpoint_subject);
+
+            // Sticky: once the endpoint has ever been Ready (via a successful canary or real
+            // activity), it is warm, so every later canary uses the tight `request_timeout`.
+            let mut warmed = false;
 
             loop {
                 // Wait for either timeout or activity notification
                 tokio::select! {
                     _ = tokio::time::sleep(canary_wait) => {
+                        if in_flight.load(Ordering::Acquire) {
+                            debug!("Canary still in flight for {}, skipping this tick", endpoint_subject);
+                            continue;
+                        }
+
+                        // A prior canary or real activity may have marked the endpoint Ready.
+                        if !warmed
+                            && manager
+                                .drt
+                                .system_health()
+                                .lock()
+                                .get_endpoint_health_status(&endpoint_subject)
+                                == Some(HealthStatus::Ready)
+                        {
+                            warmed = true;
+                        }
+
+                        let request_timeout = if warmed {
+                            manager.config.request_timeout
+                        } else {
+                            manager.config.first_request_timeout
+                        };
+
                         // Timeout - send health check for this specific endpoint
-                        debug!("Canary timer expired for {}, sending health check", endpoint_subject);
+                        debug!(
+                            "Canary timer expired for {}, sending health check (timeout: {:?})",
+                            endpoint_subject, request_timeout
+                        );
 
                         // Get the health check payload for this endpoint
                         let target = manager.drt.system_health().lock().get_health_check_target(&endpoint_subject);
 
                         if let Some(target) = target {
-                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload).await {
+                            if let Err(e) = manager.send_health_check_request(&endpoint_subject, &target.payload, request_timeout, in_flight.clone()).await {
                                 error!("Failed to send health check for {}: {}", endpoint_subject, e);
                             }
                         } else {
@@ -123,6 +166,7 @@ impl HealthCheckManager {
                         // A notification means push_handler successfully streamed
                         // a non-error response chunk, proving the engine is healthy.
                         debug!("Activity detected for {}, resetting health check timer", endpoint_subject);
+                        warmed = true;
                         manager.drt.system_health().lock().set_endpoint_health_status(
                             &endpoint_subject,
                             crate::config::HealthStatus::Ready,
@@ -201,6 +245,8 @@ impl HealthCheckManager {
         &self,
         endpoint_subject: &str,
         payload: &serde_json::Value,
+        timeout: Duration,
+        in_flight: Arc<AtomicBool>,
     ) -> anyhow::Result<()> {
         debug!(
             "Sending health check to {} via local registry",
@@ -222,7 +268,10 @@ impl HealthCheckManager {
         let system_health = self.drt.system_health().clone();
         let endpoint_subject_owned = endpoint_subject.to_string();
         let payload = payload.clone();
-        let timeout = self.config.request_timeout;
+
+        // Mark a canary in flight so the per-endpoint loop does not spawn overlapping
+        // canaries while this one runs (the first canary may run for the full timeout).
+        in_flight.store(true, Ordering::Release);
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
@@ -287,6 +336,10 @@ impl HealthCheckManager {
                     .lock()
                     .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
             }
+
+            // Canary finished (success, error, or timeout): release the in-flight guard so the
+            // loop can send the next one.
+            in_flight.store(false, Ordering::Release);
 
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
@@ -561,6 +614,7 @@ mod push_handler_notify_tests {
         let config = HealthCheckConfig {
             canary_wait_time: Duration::from_millis(canary_wait_ms),
             request_timeout: Duration::from_secs(1),
+            ..Default::default()
         };
         let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));
         manager.start().await.unwrap();
@@ -717,16 +771,36 @@ mod integration_tests {
 
         let canary_wait_time = Duration::from_secs(5);
         let request_timeout = Duration::from_secs(3);
+        let first_request_timeout = Duration::from_secs(120);
 
         let config = HealthCheckConfig {
             canary_wait_time,
             request_timeout,
+            first_request_timeout,
         };
 
         let manager = HealthCheckManager::new(drt.clone(), config);
 
         assert_eq!(manager.config.canary_wait_time, canary_wait_time);
         assert_eq!(manager.config.request_timeout, request_timeout);
+        assert_eq!(manager.config.first_request_timeout, first_request_timeout);
+    }
+
+    #[test]
+    fn test_health_check_config_default_first_request_timeout() {
+        // The first canary must get the generous cold-start budget by default so a
+        // slow-but-healthy large-model engine is not marked NotReady on its first generate.
+        let config = HealthCheckConfig::default();
+        assert_eq!(
+            config.first_request_timeout,
+            Duration::from_secs(crate::config::DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS)
+        );
+        // Steady-state stays tight.
+        assert_eq!(
+            config.request_timeout,
+            Duration::from_secs(crate::config::DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS)
+        );
+        assert!(config.first_request_timeout > config.request_timeout);
     }
 
     #[tokio::test]
@@ -794,6 +868,7 @@ mod integration_tests {
         let config = HealthCheckConfig {
             canary_wait_time: Duration::from_secs(5),
             request_timeout: Duration::from_secs(1),
+            ..Default::default()
         };
 
         let manager = Arc::new(HealthCheckManager::new(drt.clone(), config));

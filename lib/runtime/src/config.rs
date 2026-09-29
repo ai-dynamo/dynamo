@@ -31,6 +31,11 @@ const DEFAULT_SYSTEM_LIVE_PATH: &str = "/live";
 pub const DEFAULT_CANARY_WAIT_TIME_SECS: u64 = 10;
 /// Default timeout for individual health check requests
 pub const DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS: u64 = 3;
+/// Default timeout for the first health check request per endpoint.
+/// A cold engine's first generate (large model, no warmup batches) can take far longer
+/// than a steady-state request, so the first canary is given a generous budget before the
+/// tight `DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS` applies to all subsequent checks.
+pub const DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -184,6 +189,15 @@ pub struct RuntimeConfig {
     #[builder(default = "DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub health_check_request_timeout_secs: u64,
+
+    /// Timeout in seconds for the first health check request per endpoint.
+    /// A cold engine's first generate can take far longer than a steady-state request, so the
+    /// first canary is given this generous budget; every subsequent check uses
+    /// `health_check_request_timeout_secs`.
+    /// Set this at runtime with environment variable DYN_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT
+    #[builder(default = "DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub health_check_first_request_timeout_secs: u64,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -215,6 +229,11 @@ impl fmt::Display for RuntimeConfig {
             f,
             ", health_check_request_timeout_secs={}",
             self.health_check_request_timeout_secs
+        )?;
+        write!(
+            f,
+            ", health_check_first_request_timeout_secs={}",
+            self.health_check_first_request_timeout_secs
         )?;
 
         Ok(())
@@ -286,6 +305,7 @@ impl RuntimeConfig {
                         let mapped_key = match k.as_str() {
                             "ENABLED" => "health_check_enabled",
                             "REQUEST_TIMEOUT" => "health_check_request_timeout_secs",
+                            "FIRST_REQUEST_TIMEOUT" => "health_check_first_request_timeout_secs",
                             _ => k.as_str(),
                         };
                         Some(mapped_key.into())
@@ -368,6 +388,8 @@ impl RuntimeConfig {
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
+            health_check_first_request_timeout_secs:
+                DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS,
         }
     }
 
@@ -422,6 +444,8 @@ impl Default for RuntimeConfig {
             health_check_enabled: false,
             canary_wait_time_secs: DEFAULT_CANARY_WAIT_TIME_SECS,
             health_check_request_timeout_secs: DEFAULT_HEALTH_CHECK_REQUEST_TIMEOUT_SECS,
+            health_check_first_request_timeout_secs:
+                DEFAULT_HEALTH_CHECK_FIRST_REQUEST_TIMEOUT_SECS,
         }
     }
 }

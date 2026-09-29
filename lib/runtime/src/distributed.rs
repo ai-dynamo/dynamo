@@ -391,6 +391,9 @@ impl DistributedRuntime {
                 request_timeout: std::time::Duration::from_secs(
                     config.health_check_request_timeout_secs,
                 ),
+                first_request_timeout: std::time::Duration::from_secs(
+                    config.health_check_first_request_timeout_secs,
+                ),
             };
 
             // Start the health check manager (spawns per-endpoint monitoring tasks)
