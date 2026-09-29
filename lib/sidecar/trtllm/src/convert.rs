@@ -43,8 +43,13 @@ pub(crate) fn build_generate_request(
 
     // A prefill worker only needs the context phase; TensorRT-LLM still requires
     // a positive budget, and one token is what the context phase produces.
+    // No minimum check here: the minimum applies to the decode worker's budget,
+    // and discovery pairs the two roles without requiring equal context lengths
+    // (`discovery/model_manager.rs`). This worker's own window can neither
+    // prove the request impossible nor prove it servable, so checking it would
+    // reject requests a wider decode window would serve. Releasing the handoff
+    // when decode does reject is the sound fix and belongs on that side.
     let max_tokens = if mode.is_prefill() {
-        reject_impossible_minimum_before_prefill(request, limits)?;
         1
     } else {
         max_tokens(request, limits)?
@@ -198,36 +203,6 @@ fn reject_impossible_minimum(
         )));
     }
     Ok(())
-}
-
-/// Run decode's budget check on the prefill leg, where the request can still be
-/// refused for free. Past this point the context phase produces a `KvSessionRef`
-/// and a decode worker that then rejects the same request leaves those blocks
-/// with no consumer and no cancellation path -- the deferral in `engine.rs`
-/// guards the dispatch, not a failure this far upstream. A budget this worker
-/// cannot derive is not fatal here: only the decode worker's own context length
-/// governs the request it will run.
-fn reject_impossible_minimum_before_prefill(
-    request: &PreprocessedRequest,
-    limits: Option<ModelLimits>,
-) -> Result<(), DynamoError> {
-    if request.stop_conditions.min_tokens.is_none() {
-        return Ok(());
-    }
-    let Some(context_length) = limits.and_then(|limits| limits.context_length) else {
-        return Ok(());
-    };
-    let prompt_len = request.token_ids.len() as u32;
-    let remaining = context_length.saturating_sub(prompt_len).max(1);
-    let derived = match limits.unwrap_or_default().max_output_tokens {
-        Some(cap) => remaining.min(cap),
-        None => remaining,
-    };
-    // Deliberately ignore `stop_conditions.max_tokens`: the prefill router
-    // overwrites it with 1 before dispatch (`prefill_router/mod.rs:412`), so it
-    // describes this leg's one-token context phase, not the budget the decode
-    // worker will derive and check the minimum against.
-    reject_impossible_minimum(request, derived, context_length, prompt_len)
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<Option<i32>, DynamoError> {

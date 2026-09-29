@@ -218,45 +218,19 @@ fn a_derived_budget_below_min_tokens_is_rejected() {
     );
 }
 
-/// The prefill leg runs the same check. It sends `max_tokens: 1` and would
-/// otherwise sail past a minimum the window cannot fit, produce a
-/// `KvSessionRef`, and leave the decode worker to reject the request -- with
-/// the transferred blocks already sent and nothing left to consume them.
+/// The prefill worker must not judge the minimum: it applies to the decode
+/// worker's budget, and the two roles are paired without requiring equal
+/// context lengths. A window too small here says nothing about the window the
+/// decode worker will use.
 #[test]
-fn a_prefill_request_whose_minimum_cannot_fit_is_rejected_before_the_handoff() {
+fn a_prefill_request_does_not_judge_a_minimum_against_its_own_window() {
     let mut req = request();
     req.stop_conditions.max_tokens = None;
     req.stop_conditions.min_tokens = Some(64);
     let window = req.token_ids.len() as u32 + 8;
 
     build_generate_request(&req, "req", "model", limits(window), PREFILL)
-        .expect_err("prefill must refuse a minimum the decode leg cannot serve");
-}
-
-/// The shape the prefill router actually sends: it overwrites `max_tokens` with
-/// 1 before dispatch, so a minimum above that one token is not a conflict --
-/// the decode worker derives the real budget from the window.
-#[test]
-fn a_prefill_request_the_router_clamped_to_one_token_still_serves_its_minimum() {
-    let mut req = request();
-    req.stop_conditions.max_tokens = Some(1);
-    req.stop_conditions.min_tokens = Some(8);
-    let window = req.token_ids.len() as u32 + 64;
-
-    build_generate_request(&req, "req", "model", limits(window), PREFILL)
-        .expect("the router's one-token prefill budget is not a conflicting minimum");
-}
-
-/// A prefill worker that cannot size the window still dispatches: only the
-/// decode worker's own context length governs the request it will run.
-#[test]
-fn a_prefill_request_is_served_when_this_worker_cannot_size_the_window() {
-    let mut req = request();
-    req.stop_conditions.max_tokens = None;
-    req.stop_conditions.min_tokens = Some(64);
-
-    build_generate_request(&req, "req", "model", None, PREFILL)
-        .expect("an unknown window is the decode worker's problem, not a rejection here");
+        .expect("only the decode worker's window governs the minimum");
 }
 
 /// The same request is served when the window leaves room for the minimum --

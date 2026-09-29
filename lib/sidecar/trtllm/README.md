@@ -100,10 +100,9 @@ python -m tensorrt_llm.commands.serve <model> \
   --max_seq_len 4096
 ```
 
-Without `--max_seq_len` the servicer leaves `max_context_length` unset, and the
-sidecar below then has no context length from either source -- it retries until
-`--grpc-startup-deadline-secs` and exits. Pass it here, or pass
-`--context-length` to the sidecar.
+Without `--max_seq_len` the servicer leaves `max_context_length` unset. The
+sidecar below passes `--context-length`, so it starts either way; with neither
+setting it fails on the engine's first answer, naming both fixes.
 
 This listener is unauthenticated and plaintext. Keep colocated deployments on
 loopback or a private interface. Remote access requires network controls or a
@@ -122,9 +121,12 @@ The context length comes from `--context-length` (or `TRTLLM_CONTEXT_LENGTH`)
 when supplied, and from `Control.GetModelInfo` otherwise; a disagreement is
 logged at WARN and the configured value wins. Supply it whenever the engine was
 started without `--max_seq_len`, because TensorRT-LLM then leaves
-`max_context_length` unset. With neither source the sidecar retries until
-`--grpc-startup-deadline-secs` and then exits, rather than registering a worker
-that would reject every request omitting `max_tokens`.
+`max_context_length` unset. With neither source the sidecar fails as soon as the
+engine answers, rather than registering a worker that would reject every request
+omitting `max_tokens`. It does not wait out `--grpc-startup-deadline-secs` for
+that case: the engine binds its gRPC port only once the model has loaded, so an
+engine that answers is not going to start reporting a window. That deadline
+covers an engine that is not up yet, where only transport failures are retried.
 
 Use `DYN_SIDECAR_GRPC_ENDPOINT` instead of `--grpc-endpoint` when the endpoint is
 provided through the environment.
