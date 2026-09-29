@@ -21,8 +21,8 @@ def emit(**record):
     print(json.dumps(record), flush=True)
 
 
-def target():
-    cuda = ctypes.CDLL("libcuda.so.1")
+def target(driver):
+    cuda = ctypes.CDLL(driver)
 
     def call(name, types, *args):
         function = getattr(cuda, name)
@@ -63,17 +63,17 @@ def stop(process):
     process.wait(timeout=1)
 
 
-def probe():
+def probe(driver):
     mode = os.environ["PROBE_MODE"]
     status = dict(line.split(":", 1) for line in Path("/proc/self/status").read_text().splitlines())
-    has_ptrace = bool(int(status["CapEff"].strip(), 16) & (1 << 19))
-    emit(event="permissions", mode=mode, uid=os.getuid(), cap_effective=status["CapEff"].strip(), seccomp=status["Seccomp"].strip())
-    if has_ptrace != (mode == "sys-ptrace"):
-        raise RuntimeError("observed SYS_PTRACE capability does not match the requested case")
+    expected_uid = 1000 if mode == "nonroot-no-caps" else 0
+    emit(event="permissions", mode=mode, uid=os.getuid(), pid=os.getpid(), requested_driver=driver, cap_effective=status["CapEff"].strip(), seccomp=status["Seccomp"].strip())
+    if int(status["CapEff"].strip(), 16) != 0 or os.getuid() != expected_uid or os.getpid() == 1:
+        raise RuntimeError("expected runtime exec with the requested UID and no effective capabilities")
     environment = os.environ.copy()
     environment.pop("LD_PRELOAD", None)
     process = subprocess.Popen(
-        [sys.executable, "-S", __file__, "--target"], stdin=subprocess.PIPE,
+        [sys.executable, "-S", __file__, "--target", driver], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         env=environment, start_new_session=True,
     )
@@ -86,6 +86,8 @@ def probe():
         libraries = ready["mapped_drivers"]
         if len(libraries) != 1 or not Path(libraries[0]).is_file():
             raise RuntimeError(f"expected one accessible mapped CUDA library: {libraries}")
+        if driver != "libcuda.so.1" and not Path(libraries[0]).samefile(driver):
+            raise RuntimeError(f"target did not load the requested compatibility library: {libraries}")
         emit(mode=mode, **ready)
         environment["LD_PRELOAD"] = libraries[0]
         environment["LD_DEBUG"] = "libs"
@@ -130,7 +132,15 @@ if __name__ == "__main__":
     signal.signal(signal.SIGALRM, expired)
     signal.alarm(90)
     try:
-        raise SystemExit(target() if sys.argv[1:] == ["--target"] else probe())
+        if sys.argv[1:2] == ["--target"]:
+            raise SystemExit(target(sys.argv[2]))
+        compat = sorted({str(path.resolve()) for path in Path("/usr/local").glob("cuda*/compat/lib.real/libcuda.so.*") if path.is_file()})
+        if not compat:
+            raise RuntimeError("the pinned image has no discoverable CUDA compatibility libraries")
+        emit(event="driver_inventory", compatibility_libraries=compat)
+        results = [probe(driver) for driver in ["libcuda.so.1", *compat]]
+        emit(event="summary", success=not any(results), cases=len(results))
+        raise SystemExit(1 if any(results) else 0)
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
         emit(event="error", error=str(error))
         raise SystemExit(1)

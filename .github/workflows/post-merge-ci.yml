@@ -23,21 +23,21 @@ jobs:
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create serviceaccount cuda-runtime-permission-probe
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-permission-probe \
             --from-file=.github/scripts/cuda-runtime-permission-probe.py
-          control_passed=false
+          all_passed=true
           probe_node=""
-          for mode in no-ptrace sys-ptrace; do
+          for mode in root-no-caps nonroot-no-caps; do
             kubectl -n "$PROBE_NAMESPACE" create --dry-run=client -f .github/scripts/cuda-runtime-permission-probe-pod.yaml -o json \
               | jq --arg mode "$mode" --arg node "$probe_node" '.metadata.name=$mode | .spec.containers[0].env[0].value=$mode |
                   if $node != "" then .spec.nodeName=$node else . end |
-                  if $mode == "sys-ptrace" then .spec.containers[0].securityContext.capabilities.add=["SYS_PTRACE"] else . end' \
+                  if $mode == "nonroot-no-caps" then .spec.containers[0].securityContext.runAsUser=1000 |
+                    .spec.containers[0].securityContext.runAsGroup=1000 else . end' \
               | kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create -f -
             startup_deadline=$((SECONDS + 120))
-            running_deadline=0
             phase=Pending
             while true; do
               pod=$(kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" get pod "$mode" -o json)
               phase=$(jq -r '.status.phase' <<< "$pod")
-              [[ "$phase" == Succeeded || "$phase" == Failed ]] && break
+              [[ "$phase" == Running || "$phase" == Succeeded || "$phase" == Failed ]] && break
               if jq -e '[.status.initContainerStatuses[]?, .status.containerStatuses[]?] |
                   any(.state.waiting.reason == "ImagePullBackOff" or .state.waiting.reason == "ErrImagePull" or
                       .state.waiting.reason == "CreateContainerConfigError" or .state.waiting.reason == "RunContainerError")' \
@@ -45,25 +45,24 @@ jobs:
                 echo "::error::$mode has a container startup error"
                 break
               fi
-              if [[ "$phase" == Running && "$running_deadline" == 0 ]]; then
-                running_deadline=$((SECONDS + 90))
-                echo "$mode started; maximum remaining runtime 90s"
-              fi
-              if { [[ "$running_deadline" == 0 ]] && ((SECONDS >= startup_deadline)); } ||
-                 { [[ "$running_deadline" != 0 ]] && ((SECONDS >= running_deadline)); }; then
-                echo "::error::$mode reached its bounded startup/runtime deadline"
+              if ((SECONDS >= startup_deadline)); then
+                echo "::error::$mode reached its bounded startup deadline"
                 break
               fi
               sleep 2
             done
-            kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" logs "$mode" -c probe --tail=100 || true
+            result=1
+            if [[ "$phase" == Running ]]; then
+              if timeout --signal=KILL 95s kubectl --request-timeout=95s -n "$PROBE_NAMESPACE" exec "$mode" -c probe \
+                -- python3 -S /probe/cuda-runtime-permission-probe.py; then result=0; else result=$?; fi
+            fi
             kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" get events --field-selector "involvedObject.name=$mode" || true
-            echo "### $mode: $phase" >> "$GITHUB_STEP_SUMMARY"
+            echo "### $mode: exec exit $result (pod $phase)" >> "$GITHUB_STEP_SUMMARY"
             probe_node=$(jq -r '.spec.nodeName // ""' <<< "$pod")
-            if [[ "$mode" == sys-ptrace && "$phase" == Succeeded ]]; then control_passed=true; fi
+            if [[ "$result" != 0 ]]; then all_passed=false; fi
             kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" delete pod "$mode" --wait=true --timeout=10s
           done
-          "$control_passed"
+          "$all_passed"
       - name: Always remove isolated namespace
         if: always()
         shell: bash

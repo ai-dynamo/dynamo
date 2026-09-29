@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: no-ptrace
+  name: root-no-caps
 spec:
   serviceAccountName: cuda-runtime-permission-probe
   automountServiceAccountToken: false
@@ -28,15 +28,15 @@ spec:
   containers:
     - name: probe
       image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
-      command: ["python3", "-S", "/probe/cuda-runtime-permission-probe.py"]
+      command: ["/bin/sleep", "210"]
       env:
-        - {name: PROBE_MODE, value: no-ptrace}
+        - {name: PROBE_MODE, value: root-no-caps}
       securityContext:
         runAsUser: 0
         runAsGroup: 0
         allowPrivilegeEscalation: false
         capabilities: {drop: [ALL], add: []}
-        # Hold seccomp constant to isolate the capability requirement.
+        # Hold seccomp constant to isolate UID and capability requirements.
         seccompProfile: {type: Unconfined}
       resources:
         requests: {cpu: "1", memory: 2Gi}
