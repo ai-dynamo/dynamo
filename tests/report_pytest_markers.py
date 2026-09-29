@@ -285,11 +285,13 @@ STUB_MODULES = [
     "aisimulate.legacy_cli",
     "aisimulate.legacy_cli.main",
     "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
     "aisimulate_core.sdk.engine",
     "aisimulate_core.sdk.memory",
     "aisimulate_core.sdk.models",
     "aisimulate_core.sdk.perf_database",
     "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk.rust_engine_step",
     "plotly",
     "plotly.graph_objects",
     "plotly.subplots",
@@ -299,17 +301,20 @@ STUB_MODULES = [
     "blake3",
 ]
 
-# These APIs define the AIC 0.11 upper/core contract. The marker-report
-# environment may contain an older, otherwise importable AIC release, so force
+# These APIs define the AISimulate application/core contract. The marker-report
+# environment may contain an older, otherwise importable release, so force
 # stubs for these versioned modules during marker-only collection.
 FORCE_STUB_MODULES = {
     "aisimulate.sdk.task_v2",
     "aisimulate.legacy_cli.main",
+    "aisimulate_core.sdk.models",
+    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk",
+    "aisimulate_core.sdk.common",
     "aisimulate_core.sdk.engine",
     "aisimulate_core.sdk.memory",
-    "aisimulate_core.sdk.models",
     "aisimulate_core.sdk.perf_database",
-    "aisimulate_core.sdk.utils",
+    "aisimulate_core.sdk.rust_engine_step",
 }
 
 # Project paths for local imports

@@ -1152,7 +1152,7 @@ mod tests {
     fn router_config() -> KvRouterConfig {
         KvRouterConfig {
             router_track_prefill_tokens: true,
-            router_prefill_load_model: RouterPrefillLoadModel::Aic,
+            router_prefill_load_model: RouterPrefillLoadModel::Ais,
             ..KvRouterConfig::default()
         }
     }
@@ -1205,8 +1205,8 @@ mod tests {
         let router = OfflineReplayRouter::new(&replay_args(), None, None, 1).unwrap();
         let mut request = request(1, 7);
         request.replay_context = Some(ReplayRequestContext {
-            authored_id: "length-only".into(),
             agentic: None,
+            authored_id: "length-only".into(),
             session_id: None,
             turn_index: None,
             metadata: Value::Null,

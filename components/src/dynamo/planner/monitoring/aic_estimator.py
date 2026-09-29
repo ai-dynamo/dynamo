@@ -3,7 +3,7 @@
 
 """AIConfigurator performance estimator used by the planner (and the profiler).
 
-This thin wrapper around the standalone ``aisimulate_core`` SDK lets callers estimate
+This thin wrapper around the ``aisimulate_core`` SDK lets callers estimate
 prefill / decode latency and KV-cache capacity for a given model + system +
 backend + parallelism config without spinning up a real engine. The planner
 uses it to bootstrap regression models from an AIC spec in rapid mode.
@@ -24,8 +24,8 @@ logger.addHandler(console_handler)
 
 
 def _try_import_aisimulate_core():
-    """Load the AIC compatibility SDK shipped by AISimulate on demand."""
-    # Lazy-import aiconfigurator-core because it is an optional dependency.
+    """Load the AISimulate core estimator SDK on demand."""
+    # Lazy-import AISimulate because it is an optional dependency.
     import aisimulate_core.sdk.backends.factory
     import aisimulate_core.sdk.config
     import aisimulate_core.sdk.models
@@ -36,7 +36,7 @@ def _try_import_aisimulate_core():
 
 class AIConfiguratorPerfEstimator:
     """
-    This class is used to estimate the performance of a model using aisimulate.
+    This class is used to estimate the performance of a model using aiconfigurator.
     An instance of this class stores information about the model, system, and backend.
     Methods can be called to estimate prefill and/or decode perf for a given ISL, OSL,
     batch_size, and parallelism config.
@@ -50,9 +50,7 @@ class AIConfiguratorPerfEstimator:
     ):
         aisimulate_core = _try_import_aisimulate_core()
 
-        logger.info(
-            "Loading aiconfigurator-core database. This might take a few seconds..."
-        )
+        logger.info("Loading AISimulate database. This might take a few seconds...")
         version = aisimulate_core.sdk.perf_database.get_latest_database_version(
             system,
             backend,
@@ -66,7 +64,7 @@ class AIConfiguratorPerfEstimator:
             raise ValueError(
                 f"Database not found for system: {system}, backend: {backend}, version: {version}"
             )
-        logger.info("aiconfigurator-core database loaded.")
+        logger.info("AISimulate database loaded.")
 
         self.backend_name = backend
         self.backend = aisimulate_core.sdk.backends.factory.get_backend(backend)
@@ -92,7 +90,7 @@ class AIConfiguratorPerfEstimator:
     ) -> dict[str, Any]:
         """
         Estimate the perf of this model + system + backend + ISL/OSL/model_config
-        using aisimulate.
+        using aiconfigurator.
 
         Args:
             isl: Input sequence length

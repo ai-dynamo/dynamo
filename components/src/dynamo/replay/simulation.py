@@ -27,14 +27,14 @@ from aisimulate.sweeper.replay import (
     RunnerCapabilities,
 )
 
-from dynamo.llm import AicPerfConfig, KvRouterConfig
+from dynamo.llm import AisPerfConfig, KvRouterConfig
 from dynamo.mocker import MockEngineArgs
 from dynamo.replay.api import (
     TelemetryOptions,
     run_synthetic_trace_replay,
     run_trace_replay,
 )
-from dynamo.replay.config import lower_canonical_aic_timing, resolve_aic_num_gpu_blocks
+from dynamo.replay.config import lower_upstream_engine_args
 
 _PLANNER_HOOK = HookCapability(
     provider="dynamo.planner",
@@ -124,12 +124,12 @@ class DynamoReplayRunner:
             planner_config,
             router_mode,
             router_config,
-            aic_perf_config,
+            ais_perf_config,
         ) = self._resolve_hooks(spec.runtime_hooks)
         common: dict[str, Any] = {
             "router_mode": router_mode,
             "router_config": router_config,
-            "aic_perf_config": aic_perf_config,
+            "ais_perf_config": ais_perf_config,
             "arrival_speedup_ratio": self._arrival_speedup_ratio(spec),
             "replay_concurrency": self._effective_in_flight_cap(spec),
             "planner_config": planner_config,
@@ -185,12 +185,12 @@ class DynamoReplayRunner:
         dict[str, JSONValue] | None,
         str,
         KvRouterConfig | None,
-        AicPerfConfig | None,
+        AisPerfConfig | None,
     ]:
         planner_config: dict[str, JSONValue] | None = None
         router_mode = "round_robin"
         router_config: KvRouterConfig | None = None
-        aic_perf_config: AicPerfConfig | None = None
+        ais_perf_config: AisPerfConfig | None = None
         planner_seen = False
         router_seen = False
         for hook in hooks:
@@ -220,19 +220,19 @@ class DynamoReplayRunner:
                         "Dynamo Router hook config requires a router_config mapping"
                     )
                 router_config = KvRouterConfig.from_json(json.dumps(raw_config))
-                raw_aic = hook.config.get("aic_perf_config")
-                if raw_aic is not None:
-                    if not isinstance(raw_aic, dict):
+                raw_ais = hook.config.get("ais_perf_config")
+                if raw_ais is not None:
+                    if not isinstance(raw_ais, dict):
                         raise TypeError(
-                            "Dynamo Router AIC config must be a mapping or null"
+                            "Dynamo Router AIS config must be a mapping or null"
                         )
-                    aic_perf_config = AicPerfConfig(**raw_aic)
+                    ais_perf_config = AisPerfConfig(config=raw_ais)
                 continue
             raise ValueError(
                 f"unsupported Dynamo runtime hook "
                 f"{hook.provider}:{hook.kind}@{hook.api_version}"
             )
-        return planner_config, router_mode, router_config, aic_perf_config
+        return planner_config, router_mode, router_config, ais_perf_config
 
     @staticmethod
     def _is_trace(spec: ReplaySpec) -> bool:
@@ -293,15 +293,19 @@ class DynamoReplayRunner:
             role = "decode"
             raw_engine_args = deployment.decode_engine_args
 
+        # Accept both the upstream wire spelling and the canonical AIS identity.
+        candidates: list[Any] = []
         metadata = deployment.performance_model_metadata.get(role)
         if isinstance(metadata, Mapping):
             config = metadata.get("config")
             if isinstance(config, Mapping):
-                model = config.get("model_path")
-                if isinstance(model, str) and model.strip():
-                    return model.strip()
+                candidates += [config.get("model_path"), config.get("model")]
         if isinstance(raw_engine_args, Mapping):
-            model = raw_engine_args.get("aic_model_path")
+            candidates.append(raw_engine_args.get("aic_model_path"))
+            ais_config = raw_engine_args.get("ais_perf_config")
+            if isinstance(ais_config, Mapping):
+                candidates.append(ais_config.get("model"))
+        for model in candidates:
             if isinstance(model, str) and model.strip():
                 return model.strip()
         if trace_format == "dynamo":
@@ -314,51 +318,7 @@ class DynamoReplayRunner:
     def _engine_args(payload: dict[str, JSONValue] | None) -> MockEngineArgs:
         if payload is None:
             raise ValueError("ReplaySpec is missing required engine arguments")
-        lowered = dict(payload)
-        timing = lowered.get("timing_model")
-        if isinstance(timing, dict) and timing.get("type") in {
-            "fixed",
-            "polynomial",
-        }:
-            attention_dp = lowered.pop("aic_attention_dp_size", None)
-            if attention_dp is not None:
-                lowered["dp_size"] = attention_dp
-            for name in (
-                "aic_backend",
-                "aic_backend_version",
-                "aic_system",
-                "aic_model_path",
-            ):
-                lowered.pop(name, None)
-        resolve_aic_num_gpu_blocks(lowered)
-        lower_canonical_aic_timing(lowered)
-        # Pipeline parallelism is already represented in the public parallel
-        # mapping and used for AIC capacity. MockEngineArgs has no PP field.
-        lowered.pop("aic_pp_size", None)
-        # AISimulate exposes vLLM's attention-DP prefill cadence, while the
-        # current Dynamo replay engine does not. The public default is neutral,
-        # so remove it at this compatibility boundary; reject non-default
-        # values rather than silently changing replay semantics.
-        prefill_schedule_interval = lowered.pop("prefill_schedule_interval", 1)
-        if prefill_schedule_interval != 1:
-            raise ValueError(
-                "Dynamo replay does not support prefill_schedule_interval values "
-                "other than 1"
-            )
-        # SGLang's post-EXTEND prefill interval is also neutral at its default.
-        prefill_decode_interval = lowered.pop("prefill_decode_interval", 0)
-        if prefill_decode_interval != 0:
-            raise ValueError(
-                "Dynamo replay does not support prefill_decode_interval values "
-                "other than 0"
-            )
-        for field, default in (
-            ("aic_database_mode", "SILICON"),
-            ("cuda_graph_reserved_bytes", 0),
-        ):
-            if lowered.pop(field, default) != default:
-                raise ValueError(f"Dynamo replay does not support non-default {field}")
-        return MockEngineArgs.from_json(json.dumps(lowered))
+        return MockEngineArgs.from_json(json.dumps(lower_upstream_engine_args(payload)))
 
     def _run_trace(
         self,
