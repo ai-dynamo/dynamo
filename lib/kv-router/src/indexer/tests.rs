@@ -9,7 +9,6 @@ use rstest_reuse::{self, *};
 use tokio::time;
 use tokio_util::sync::CancellationToken;
 
-use super::concurrent_radix_tree::ConcurrentRadixTree;
 use super::concurrent_radix_tree_compressed::ConcurrentRadixTreeCompressed;
 use super::positional::{PositionalIndexer, SearchMode};
 use super::*;
@@ -32,38 +31,27 @@ use crate::test_utils::{
 // CKF is added selectively through `matching_indexer_template`; this template also drives
 // dump/restore, parent-structure, and implementation-specific tests that CKF does not support.
 fn indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent_compressed")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 fn matching_indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent_compressed")] variant: &str,
 ) {
 }
 
 #[template]
 #[rstest]
 // CKF exposes logical resident counts through Stats, not tree node shape.
-fn tree_size_indexer_template(
-    #[values("single", "concurrent", "concurrent_compressed")] variant: &str,
-) {
-}
-
-#[template]
-#[rstest]
-// CKF has no compressed-tree node representation.
-fn compressed_tree_size_indexer_template(
-    #[values("single", "concurrent_compressed")] variant: &str,
-) {
-}
+fn tree_size_indexer_template(#[values("single", "concurrent_compressed")] variant: &str) {}
 
 #[template]
 #[rstest]
 // CKF intentionally rejects approximate routing and pruning construction.
 fn approx_indexer_template(
-    #[values("single", "flat", "flat_binary", "concurrent", "concurrent_compressed")] variant: &str,
+    #[values("single", "flat", "flat_binary", "concurrent_compressed")] variant: &str,
 ) {
 }
 
@@ -153,12 +141,6 @@ fn make_indexer_with_metrics(
             kv_block_size,
             Some(metrics.clone()),
         )),
-        "concurrent" => Box::new(ThreadPoolIndexer::new_with_metrics(
-            ConcurrentRadixTree::new(),
-            4,
-            kv_block_size,
-            Some(metrics.clone()),
-        )),
         "concurrent_compressed" => Box::new(ThreadPoolIndexer::new_with_metrics(
             ConcurrentRadixTreeCompressed::new(),
             4,
@@ -197,12 +179,6 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
             kv_block_size,
             prune_config,
         )),
-        "concurrent" => Box::new(ThreadPoolIndexer::new_with_pruning(
-            ConcurrentRadixTree::new(),
-            4,
-            kv_block_size,
-            prune_config,
-        )),
         "concurrent_compressed" => Box::new(ThreadPoolIndexer::new_with_pruning(
             ConcurrentRadixTreeCompressed::new(),
             4,
@@ -215,7 +191,6 @@ fn make_approx_indexer(variant: &str, ttl: Duration) -> Box<dyn KvIndexerInterfa
 
 enum TreeSizeTestIndexer {
     Single(RadixTree),
-    Concurrent(ThreadPoolIndexer<ConcurrentRadixTree>),
     ConcurrentCompressed(ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
 }
 
@@ -223,9 +198,6 @@ impl TreeSizeTestIndexer {
     fn new(variant: &str) -> Self {
         match variant {
             "single" => Self::Single(RadixTree::new()),
-            "concurrent" => {
-                Self::Concurrent(ThreadPoolIndexer::new(ConcurrentRadixTree::new(), 4, 4))
-            }
             "concurrent_compressed" => Self::ConcurrentCompressed(ThreadPoolIndexer::new(
                 ConcurrentRadixTreeCompressed::new(),
                 4,
@@ -240,9 +212,6 @@ impl TreeSizeTestIndexer {
             Self::Single(index) => {
                 let _ = index.apply_event(event);
             }
-            Self::Concurrent(index) => {
-                KvIndexerInterface::apply_event(index, event).await;
-            }
             Self::ConcurrentCompressed(index) => {
                 KvIndexerInterface::apply_event(index, event).await;
             }
@@ -252,9 +221,6 @@ impl TreeSizeTestIndexer {
     async fn flush(&self) {
         match self {
             Self::Single(_) => {}
-            Self::Concurrent(index) => {
-                index.flush().await;
-            }
             Self::ConcurrentCompressed(index) => {
                 index.flush().await;
             }
@@ -264,7 +230,6 @@ impl TreeSizeTestIndexer {
     async fn tree_size_for_worker(&self, worker: WorkerWithDpRank) -> Option<usize> {
         match self {
             Self::Single(index) => index.tree_size_for_worker(worker),
-            Self::Concurrent(index) => Self::thread_pool_size_for_worker(index, worker).await,
             Self::ConcurrentCompressed(index) => {
                 Self::thread_pool_size_for_worker(index, worker).await
             }
@@ -287,7 +252,6 @@ impl TreeSizeTestIndexer {
     async fn live_thread_pool_worker_count(&self) -> Option<usize> {
         match self {
             Self::Single(_) => None,
-            Self::Concurrent(index) => Some(Self::thread_pool_worker_count(index).await),
             Self::ConcurrentCompressed(index) => Some(Self::thread_pool_worker_count(index).await),
         }
     }
@@ -305,7 +269,6 @@ impl TreeSizeTestIndexer {
         let query = query.iter().copied().map(LocalBlockHash).collect();
         match self {
             Self::Single(index) => index.find_matches(query, false),
-            Self::Concurrent(index) => index.backend().find_matches_impl(&query, false),
             Self::ConcurrentCompressed(index) => index.backend().find_matches_impl(&query, false),
         }
     }
@@ -329,9 +292,6 @@ impl TreeSizeTestIndexer {
     async fn snapshot_tree(&self) -> Vec<RouterEvent> {
         match self {
             Self::Single(index) => snapshot_events(index.dump_tree_as_events()),
-            Self::Concurrent(index) => {
-                snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
-            }
             Self::ConcurrentCompressed(index) => {
                 snapshot_events(KvIndexerInterface::dump_events(index).await.unwrap())
             }
@@ -601,7 +561,7 @@ mod interface_tests {
     }
 
     #[tokio::test]
-    #[apply(compressed_tree_size_indexer_template)]
+    #[apply(tree_size_indexer_template)]
     async fn test_mid_edge_remove_repairs_lookup_and_restores_explicitly(variant: &str) {
         let mut index = TreeSizeTestIndexer::new(variant);
         let worker = WorkerWithDpRank::new(0, 0);
@@ -1147,7 +1107,7 @@ mod interface_tests {
     #[tokio::test]
     async fn test_failed_threaded_approx_event_ack_does_not_register() {
         let index = ThreadPoolIndexer::new_with_pruning(
-            ConcurrentRadixTree::new(),
+            ConcurrentRadixTreeCompressed::new(),
             1,
             32,
             PruneConfig {
