@@ -1252,17 +1252,22 @@ pub fn chat_completion_to_response(
             output.push(make_text_message(message_id.clone(), content_text));
         }
 
-        // Reasoning is now always included above, so `output.is_empty()` alone
-        // would never fire again for a reasoning-only turn -- that turn already
-        // has a `Reasoning` item. A completed turn still needs an assistant
-        // `Message`, even an empty one, so callers that only look for one are
-        // not left with just a reasoning item; an incomplete turn (Length or
-        // ContentFilter) is left as reasoning-only, since the model was cut off
-        // mid-thought and never got to an answer.
-        if incomplete_reason.is_none()
-            && !output
-                .iter()
-                .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)))
+        // Reasoning is now always included above, so a reasoning-only turn no
+        // longer has an empty `output` -- that turn already has a `Reasoning`
+        // item. `output.is_empty()` still fires for a turn with neither
+        // reasoning nor a message/tool call (e.g. an empty `Length` turn), and
+        // that case gets the backstop `Message` regardless of `incomplete_reason`
+        // so it keeps returning `[message ""]` rather than `[]`. Otherwise, a
+        // completed turn still needs an assistant `Message`, even an empty one,
+        // so callers that only look for one are not left with just a reasoning
+        // item; an incomplete turn (Length or ContentFilter) with reasoning
+        // already present is left as reasoning-only, since the model was cut
+        // off mid-thought and never got to an answer.
+        if output.is_empty()
+            || (incomplete_reason.is_none()
+                && !output.iter().any(|item| {
+                    matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_))
+                }))
         {
             output.push(make_text_message(message_id, String::new()));
         }
@@ -3709,6 +3714,29 @@ mod tests {
                 .all(|item| !matches!(item, OutputItem::Reasoning(_))),
             "whitespace-only reasoning must not produce a reasoning item"
         );
+    }
+
+    /// An empty `Length` turn with no reasoning, no message, and no tool call
+    /// still gets the backstop `Message` (marked incomplete), matching main's
+    /// pre-PR behavior. `output.is_empty()` has to trigger the backstop on its
+    /// own here, independent of `incomplete_reason`, or this turn would return
+    /// `output: []` instead.
+    #[test]
+    fn test_empty_length_turn_with_no_reasoning_backstops_a_message() {
+        let mut chat_resp = make_chat_resp_with_text("");
+        chat_resp.inner.choices[0].message.content = None;
+        chat_resp.inner.choices[0].finish_reason =
+            Some(dynamo_protocols::types::FinishReason::Length);
+
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default(), None)
+            .unwrap()
+            .inner;
+        assert_eq!(response.status, Status::Incomplete);
+        assert_eq!(response.output.len(), 1);
+        let OutputItem::Message(message) = &response.output[0] else {
+            panic!("expected a backstop message even though the turn was truncated");
+        };
+        assert_eq!(message.status, OutputStatus::Incomplete);
     }
 
     #[test]
