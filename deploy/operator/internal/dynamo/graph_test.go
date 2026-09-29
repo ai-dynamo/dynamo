@@ -1818,6 +1818,122 @@ func TestGenerateBasePodSpecEnvironmentOrderByOrigin(t *testing.T) {
 	})
 }
 
+func TestGenerateBasePodSpecBackendEnvironmentOrderByOrigin(t *testing.T) {
+	const backendEnvironmentName = "OMPI_MCA_orte_keep_fqdn_hostnames"
+	userEnvironment := []corev1.EnvVar{
+		{Name: "A_DERIVED", Value: "$(OMPI_MCA_orte_keep_fqdn_hostnames)"},
+		{Name: backendEnvironmentName, Value: "user"},
+	}
+	backendEnvironment := corev1.EnvVar{Name: backendEnvironmentName, Value: "1"}
+
+	render := func(t *testing.T, origin string) []corev1.EnvVar {
+		t.Helper()
+		component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+			ComponentName: "worker",
+			ComponentType: v1beta1.ComponentTypeWorker,
+			PodTemplate: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: origin,
+				}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "example/engine:1.6.0",
+					Env:   slices.Clone(userEnvironment),
+				}}},
+			},
+		}
+		podSpec, err := GenerateBasePodSpec(
+			component,
+			BackendFrameworkTRTLLM,
+			&mockSecretsRetriever{},
+			"test-deployment",
+			"default",
+			RoleWorker,
+			2,
+			&configv1alpha1.OperatorConfiguration{},
+			commonconsts.MultinodeDeploymentTypeGrove,
+			"worker",
+			nil,
+			staticContainerGPUCount(0),
+		)
+		require.NoError(t, err)
+		require.Len(t, podSpec.Containers, 1)
+		return podSpec.Containers[0].Env
+	}
+
+	t.Run("origin 1.6 moves backend env before the ordered user suffix", func(t *testing.T) {
+		environment := render(t, "1.6.0")
+		wantSuffix := append([]corev1.EnvVar{backendEnvironment}, userEnvironment...)
+		require.Equal(t, wantSuffix, environment[len(environment)-len(wantSuffix):])
+	})
+
+	t.Run("origin 1.5 retains the legacy backend env suffix", func(t *testing.T) {
+		environment := render(t, "1.5.0")
+		require.Equal(t, backendEnvironment, environment[len(environment)-1])
+
+		var duplicateValues []string
+		for _, variable := range environment {
+			if variable.Name == backendEnvironmentName {
+				duplicateValues = append(duplicateValues, variable.Value)
+			}
+		}
+		require.Equal(t, []string{"user", "1"}, duplicateValues)
+	})
+}
+
+func TestGeneratePodSpecForComponentUsesDGDOriginForEnvironmentOrder(t *testing.T) {
+	dgdEnvironment := corev1.EnvVar{Name: "Z_DGD", Value: "source"}
+	componentEnvironment := corev1.EnvVar{Name: "A_COMPONENT", Value: "$(Z_DGD)"}
+	dynamoDeployment := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-deployment",
+			Namespace: "default",
+			Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Env: []corev1.EnvVar{dgdEnvironment},
+		},
+	}
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "worker",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+			}},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name:  commonconsts.MainContainerName,
+				Image: "example/engine:1.6.0",
+				Env:   []corev1.EnvVar{componentEnvironment},
+			}}},
+		},
+	}
+
+	t.Log("render a component whose pod template conflicts with the DGD origin")
+	podSpec, err := GeneratePodSpecForComponent(
+		component,
+		BackendFrameworkNoop,
+		&mockSecretsRetriever{},
+		dynamoDeployment,
+		RoleMain,
+		1,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"worker",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+	require.Len(t, podSpec.Containers, 1)
+
+	t.Log("verify every merge uses the DGD's ordered-composition gate")
+	wantSuffix := []corev1.EnvVar{dgdEnvironment, componentEnvironment}
+	environment := podSpec.Containers[0].Env
+	require.Equal(t, wantSuffix, environment[len(environment)-len(wantSuffix):])
+}
+
 func TestAddTransportTLSEnvVars(t *testing.T) {
 	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
 	tlsCases := []struct {
@@ -10280,6 +10396,18 @@ func TestPropagateDGDAnnotations(t *testing.T) {
 			serviceAnnotations: nil,
 			expectedAnnotation: map[string]string{
 				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.0.0",
+			},
+		},
+		{
+			name: "DGD origin version overrides conflicting service annotation",
+			dgdAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+			},
+			serviceAnnotations: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+			},
+			expectedAnnotation: map[string]string{
+				commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
 			},
 		},
 		{

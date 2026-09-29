@@ -1440,8 +1440,9 @@ const (
 // GPU count. The same resolver can be shared across all roles of a component.
 type ContainerGPUCount func() (int64, error)
 
-// Backend interface for modular backend logic
-// Each backend (SGLang, VLLM, etc.) implements this interface
+// Backend applies framework-specific container and pod mutations. UpdateContainer
+// may inspect existing environment variables but must append any new variables
+// without reordering or removing existing entries.
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs ContainerGPUCount) error
 	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer)
@@ -1698,7 +1699,13 @@ func generateBasePodSpecWithDefaults(
 		return nil, fmt.Errorf("failed to get base container: %w", err)
 	}
 
+	orderedEnvironment := compatibility.OrderedEnvironmentVariables.Enabled(annotations)
+	userEnvironmentCount := 0
 	if main := GetMainContainer(component); main != nil {
+		if orderedEnvironment {
+			userEnvironmentCount = len(main.Env)
+		}
+
 		// Copy the authored container before merging fields and environment variables.
 		main = main.DeepCopy()
 		baseEnv := container.Env
@@ -1747,8 +1754,21 @@ func generateBasePodSpecWithDefaults(
 	if backend == nil {
 		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
+	backendEnvironmentStart := len(container.Env)
 	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
+	}
+
+	// Backends inspect the effective environment and append their own variables.
+	// Move those additions before the user suffix for ordered composition so
+	// user references and overrides retain Kubernetes list semantics.
+	if orderedEnvironment && len(container.Env) > backendEnvironmentStart {
+		systemEnvironmentEnd := backendEnvironmentStart - userEnvironmentCount
+		container.Env = slices.Concat(
+			container.Env[:systemEnvironmentEnd],
+			container.Env[backendEnvironmentStart:],
+			container.Env[systemEnvironmentEnd:backendEnvironmentStart],
+		)
 	}
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
@@ -2328,22 +2348,23 @@ func appendTopologyLabelVolume(volumes []corev1.Volume, vol corev1.Volume) []cor
 	return append(filtered, vol)
 }
 
-// dgdPropagatedAnnotationKeys lists DGD metadata annotations that are propagated
-// to component-level annotations (for both the DCD/controller and Grove paths).
-// Service-level annotations take precedence (are never overwritten).
+// dgdPropagatedAnnotationKeys lists DGD metadata annotations that supply
+// component defaults for both the DCD/controller and Grove paths.
 var dgdPropagatedAnnotationKeys = []string{
 	commonconsts.KubeAnnotationEnableMetrics,
 	commonconsts.KubeAnnotationDynamoDiscoveryBackend,
 	commonconsts.KubeAnnotationDynamoKubeDiscoveryMode,
-	commonconsts.KubeAnnotationDynamoOperatorOriginVersion,
 	commonconsts.KubeAnnotationVLLMDistributedExecutorBackend,
 }
 
-// propagateDGDAnnotations copies DGD-level annotations into the component
-// annotations so that downstream logic can read them uniformly.
-// Service-level annotations take precedence (are never overwritten).
+// propagateDGDAnnotations copies DGD-level annotations into the component so
+// downstream logic can read them uniformly. Component annotations override
+// defaults, while the immutable DGD origin remains controller-authoritative.
 func propagateDGDAnnotations(dgdAnnotations map[string]string, component *v1beta1.DynamoComponentDeploymentSharedSpec) {
 	podTemplate := ensurePodTemplate(component)
+	if origin, exists := dgdAnnotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion]; exists {
+		podTemplate.Annotations[commonconsts.KubeAnnotationDynamoOperatorOriginVersion] = origin
+	}
 	for _, key := range dgdPropagatedAnnotationKeys {
 		if val, exists := dgdAnnotations[key]; exists {
 			if _, serviceHas := podTemplate.Annotations[key]; !serviceHas {

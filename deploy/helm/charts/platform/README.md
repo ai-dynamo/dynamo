@@ -55,8 +55,8 @@ versions, see the [compatibility matrix](#kai-scheduler-and-grove-configuration)
 **Change:** For DGDs created by Dynamo Operator 1.6.0 or later, the operator preserves environment
 variable order and duplicate names when it combines operator defaults, DGD-level `spec.env`, and
 component `podTemplate` environment variables. Operator-provided variables precede user-provided
-variables. Previously, the operator sorted the combined list alphabetically and collapsed entries
-with the same name.
+variables, including variables added by an inference backend. Previously, the operator sorted the
+combined list alphabetically and collapsed entries with the same name.
 
 Kubernetes expands `$(NAME)` references from earlier to later entries. The new behavior lets user
 variables reference operator-provided variables and lets a later user entry override an
