@@ -62,14 +62,14 @@ jobs:
           operator_tag: 51b83df91f3fca2f52ed644f744c4465c3d163b3-operator
           framework: checkpoint
           profile: dgd_restore
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
           test_name: checkpoint_rca_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
             -m snapshot_restore
             --checkpoint-backend=trtllm
-            --frontend-image=dynamoci.azurecr.io/ai-dynamo/dynamo@sha256:9b40f5e9d14f795143f950e1e6b126983ed816d0bf27165ab7716816f2b324cb
+            --frontend-image=dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-dynamo-frontend@sha256:9b40f5e9d14f795143f950e1e6b126983ed816d0bf27165ab7716816f2b324cb
       - name: Stop collector
         if: always()
         shell: bash

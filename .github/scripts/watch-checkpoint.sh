@@ -11,7 +11,7 @@ while ((SECONDS < deadline)); do
     sample="$diag_dir/$stamp"
     mkdir -p "$sample"
     kubectl --request-timeout=10s -n default get pods -o json > "$sample/pods.json" || true
-    kubectl --request-timeout=10s -n default get podsnapshotcontents,snapshotjobs,dynamocheckpoints -o json > "$sample/checkpoint-status.json" 2> "$sample/status-errors.log" || true
+    kubectl --request-timeout=10s -n default get podsnapshotcontents,snapshotjobs,podsnapshots -o json > "$sample/checkpoint-status.json" 2> "$sample/status-errors.log" || true
     while IFS=$'\t' read -r capture node; do
         [[ -n "$capture" && -n "$node" ]] || continue
         kubectl --request-timeout=10s -n default logs "$capture" -c main --tail=100 > "$sample/worker.log" 2>&1 || true
