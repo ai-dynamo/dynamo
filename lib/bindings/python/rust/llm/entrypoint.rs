@@ -825,13 +825,17 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> ChatEngineFactoryC
                         Py::new(py, crate::ModelCardInstanceId { inner: instance_id }).map_err(
                             |e| anyhow::anyhow!("Failed to create Python ModelCardInstanceId: {e}"),
                         )?;
+                    let kv_cache_block_size = card.kv_cache_block_size as usize;
                     // Create Python ModelDeploymentCard wrapper
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
                         .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
                     let py_routed = Py::new(
                         py,
-                        crate::llm::routed_engine::RoutedEngine::new(routed_engine),
+                        crate::llm::routed_engine::RoutedEngine::new(
+                            routed_engine,
+                            kv_cache_block_size,
+                        ),
                     )
                     .map_err(|e| anyhow::anyhow!("Failed to create Python RoutedEngine: {e}"))?;
 

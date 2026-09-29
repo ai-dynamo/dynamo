@@ -422,7 +422,7 @@ pub(crate) fn mark_capture_inactive() {
     CAPTURE_STATE.store(CAPTURE_INACTIVE, Ordering::Release);
 }
 
-pub(crate) fn capture_enabled() -> bool {
+pub fn capture_enabled() -> bool {
     let policy = policy();
     policy.enabled && CAPTURE_STATE.load(Ordering::Acquire) == CAPTURE_ACTIVE
 }
