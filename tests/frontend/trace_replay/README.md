@@ -62,3 +62,17 @@ python -m tests.frontend.trace_replay run \
 Leave the mocker's `--max-model-len` unset: it caps the script at `max_model_len - prompt_len` and turns full turns into truncated ones. Run the worker without parser flags and pass `--raw` to the runner to check the decoder alone: every reply must then equal the decoded script.
 
 Teachers are defined in `fixtures.TEACHERS` (dataset config, tokenizer repo, chat-template renderer, parser names). `tests/frontend/test_mocker_trace_replay.py` replays the small hand-written fixture in `fixtures/handwritten_qwen35/` in CI.
+
+## Cross-family replay
+
+Only the parsed fields of a trajectory are used, so one family's trajectories can be rendered as another family's output. The target supplies the chat template, tokenizer and parsers; the source supplies the conversation:
+
+```bash
+# Qwen3.8 trajectories, replayed as DeepSeek-V4 output (DSML tool calls, DeepSeek tokenizer).
+python -m tests.frontend.trace_replay build \
+  --teacher deepseek-v4 \
+  --source-teacher qwen3.8 \
+  --out /data/replay/deepseek-v4@qwen3.8
+```
+
+The source's `reasoning_effort` is mapped to the nearest level the target template accepts. Kimi K3 (`--teacher kimi-k3`) has no trajectories in the dataset, so it is a target only; its turns are token ids from the model's own segment encoder (`encoding_k3.py`) and tiktoken tokenizer, so `tiktoken` must be installed. This exercises the target's parsers with shapes its own traces may lack, such as parallel tool calls or edge whitespace in arguments. The formatting is canonical for the target, but the behavior (how often it calls tools, what it writes) is the source's, so same-family traces remain the reference.

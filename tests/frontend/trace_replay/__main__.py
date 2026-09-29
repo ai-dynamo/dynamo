@@ -34,6 +34,7 @@ def _build(args: argparse.Namespace) -> int:
         max_trajectories=args.max_trajectories,
         variant_every=args.variant_every,
         rows_file=args.rows_file,
+        source_key=args.source_teacher,
     )
     print(json.dumps(stats, indent=2))
     return 0
@@ -77,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     build.add_argument(
         "--rows-file", type=Path, help="JSON list of dataset-shaped rows to use instead"
+    )
+    build.add_argument(
+        "--source-teacher",
+        help="take trajectories from this teacher's dataset slice and render them "
+        "as --teacher's output (cross-family replay)",
     )
     build.set_defaults(func=_build)
 
