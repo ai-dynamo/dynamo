@@ -4,14 +4,13 @@
 
 # Diagnostic only: this run's vCluster and verified local pytest are the entire scope.
 set -uo pipefail
-[[ ${1:-} == --bounded ]] || exec timeout --signal=USR1 --kill-after=5s 420s bash "$0" --bounded
 diag_dir=checkpoint-diagnostics
 pytest_pid='' pytest_start='' agent=''
 kube() { kubectl --request-timeout=5s -n default "$@"; }
 start_time() { local stat; stat=$(<"/proc/$1/stat") || return 1; stat=${stat##*) }; awk '{print $20}' <<< "$stat"; }
 stop_test() {
     printf '%s\n' "$1" | tee "$sample/fatal.txt"
-    if [[ -n $agent && ${2:-} != deadline ]]; then
+    if [[ -n $agent ]]; then
         timeout --signal=KILL 10s kubectl --request-timeout=5s -n default exec -i "$agent" -c agent -- bash -s \
             < .github/scripts/checkpoint-process-probe.sh > "$sample/$agent-processes.log" 2>&1 || true
     fi
@@ -24,7 +23,6 @@ stop_test() {
     fi
     exit 0
 }
-trap 'stop_test "Overall diagnostic deadline reached (420 seconds)" deadline' USR1
 while :; do
     if [[ -z $pytest_pid && -f $diag_dir/pytest.pid ]]; then
         read -r pytest_pid < "$diag_dir/pytest.pid"

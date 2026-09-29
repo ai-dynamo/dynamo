@@ -71,10 +71,10 @@ CHECKPOINT_READY_TIMEOUT = 300
 RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
-# Temporary diagnostic branch: cap the entire comparison at seven minutes.
-DEPLOYMENT_READY_TIMEOUT = 420
+# Readiness and the final inference checks have separate time budgets.
+DEPLOYMENT_READY_TIMEOUT = 480
 IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 300
-TEST_TIMEOUT = 420
+TEST_TIMEOUT = 840
 
 
 @dataclass(frozen=True)
