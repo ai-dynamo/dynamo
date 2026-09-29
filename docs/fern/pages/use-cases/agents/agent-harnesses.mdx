@@ -212,19 +212,21 @@ The skill pins the Claude Code and Codex ACP adapters. If a harness release chan
 
 ## Compaction Signals
 
-An agent harness can compact older conversation history into a summary when its context approaches a limit. The harness creates the summary request and keeps the logical session ID stable. Dynamo observes supported compaction signals but does not start compaction.
+An agent harness can compact older conversation history into a summary when its context approaches a limit. Dynamo carries its signals in `AgentContext.agent_headers` without interpreting them. Plugin authors and trace consumers own any mapping between harnesses.
 
-| Harness | Signal recognized by Dynamo | Normalized agent context |
+| Harness | Example raw signals | Where to read them |
 | --- | --- | --- |
-| Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
-| Claude Code | No supported mapping | Unset |
-| OpenCode | No supported mapping | Unset |
+| Codex | `x-codex-turn-metadata`, including any compaction object | `agent_headers["x-codex-turn-metadata"]` |
+| Claude Code | `x-claude-code-compaction`, `x-claude-code-context-compacted` | Corresponding `agent_headers` entries |
+| OpenCode | Session and parent headers; no compaction interpretation supplied | `agent_headers["x-session-id"]`, `agent_headers["x-parent-session-id"]` |
 
-For Codex, Dynamo preserves the optional `trigger`, `reason`, `implementation`, `phase`, and `strategy` values. The object appears only on the inference request that creates the summary. Invalid JSON and other request kinds leave it unset.
+Capture includes every `x-claude-code-*` and `x-codex-*` header, plus `session-id`, `thread-id`, `x-openai-subagent`, `x-openai-memgen-request`, `x-session-id`, and `x-parent-session-id`. New names within these families require no Dynamo schema change. Names are lowercase. Values remain strings, including malformed JSON, percent encoding, whitespace, empty values, and repeated values in their received order. Core code only normalizes session identity and the explicit Dynamo terminal marker.
 
-Workers receive the field in `AgentContext` but do not act on it.
+Capture requires a recognized session identity and is bounded to 64 header values, 16 KiB per value, and 32 KiB total, counting the name once per value. Sensitive-marked and non-text values are skipped. Values exceeding the limits are omitted whole; retained values are never truncated. Missing metadata means no observation was captured, not that an event did not occur. Ordinary authentication, cookie, and unrelated protocol headers are excluded. Do not place credentials in an agent metadata header; these values are exposed to plugins and request traces.
 
-Compaction metadata is passive. It does not rotate `session_id`, change request routing, or evict KV cache blocks. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format.
+The map travels through the frontend and worker request envelope and is available through plugin `SessionContext.agent_headers()`. It contains HTTP headers only; request-body metadata is not captured. The default routing policy does not interpret the map. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format and [Custom Worker Selection](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#session-context) for plugin access.
+
+For Claude Code custom endpoints, enable gateway hints with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Its [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers) defines the header semantics. Preserving observations in `AgentContext` does not implement transparent Anthropic request-body or header forwarding to upstream providers.
 
 ## See Also
 
