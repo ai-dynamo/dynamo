@@ -39,40 +39,17 @@ impl GrpcChannelPool {
         let tonic_endpoint = Endpoint::from_shared(endpoint_label.clone()).map_err(|error| {
             invalid_argument(format!("invalid {peer} endpoint after validation: {error}"))
         })?;
-        let deadline = checked_instant_add(
-            Instant::now(),
-            transport.startup_deadline,
-            "gRPC startup deadline",
-        )?;
-        let first = connect_until_ready(
+        let channels = connect_pool_with(
             peer,
-            tonic_endpoint.clone(),
-            endpoint_label.clone(),
-            1,
+            &endpoint_label,
             transport,
-            deadline,
             bootstrap,
+            |_, attempt_timeout| {
+                let endpoint = tonic_endpoint.clone().connect_timeout(attempt_timeout);
+                async move { endpoint.connect().await }
+            },
         )
         .await?;
-        let mut channels = vec![first];
-        let remaining = try_join_all((1..transport.connections.get()).map(|index| {
-            let endpoint = tonic_endpoint.clone();
-            let endpoint_label = endpoint_label.clone();
-            async move {
-                connect_until_ready(
-                    peer,
-                    endpoint,
-                    endpoint_label,
-                    index + 1,
-                    transport,
-                    deadline,
-                    bootstrap,
-                )
-                .await
-            }
-        }))
-        .await?;
-        channels.extend(remaining);
         Ok(Self {
             channels,
             next: AtomicUsize::new(0),
@@ -93,15 +70,63 @@ impl GrpcChannelPool {
     }
 }
 
-async fn connect_until_ready(
+pub(crate) async fn connect_pool_with<C, F, E>(
     peer: &str,
-    endpoint: Endpoint,
-    endpoint_label: String,
+    endpoint: &str,
+    transport: GrpcTransportConfig,
+    bootstrap: bool,
+    connect: impl Fn(usize, Duration) -> F,
+) -> Result<Vec<C>, DynamoError>
+where
+    F: std::future::Future<Output = Result<C, E>>,
+    E: std::error::Error + 'static,
+{
+    let deadline = checked_instant_add(
+        Instant::now(),
+        transport.startup_deadline,
+        "gRPC startup deadline",
+    )?;
+    let first = connect_until_ready(
+        peer,
+        endpoint,
+        1,
+        transport,
+        deadline,
+        bootstrap,
+        |timeout| connect(1, timeout),
+    )
+    .await?;
+    let mut channels = vec![first];
+    let remaining = try_join_all((2..=transport.connections.get()).map(|slot| {
+        let connect = &connect;
+        connect_until_ready(
+            peer,
+            endpoint,
+            slot,
+            transport,
+            deadline,
+            bootstrap,
+            move |timeout| connect(slot, timeout),
+        )
+    }))
+    .await?;
+    channels.extend(remaining);
+    Ok(channels)
+}
+
+async fn connect_until_ready<C, F, E>(
+    peer: &str,
+    endpoint_label: &str,
     pool_slot: usize,
     transport: GrpcTransportConfig,
     deadline: Instant,
     bootstrap: bool,
-) -> Result<Channel, DynamoError> {
+    connect: impl Fn(Duration) -> F,
+) -> Result<C, DynamoError>
+where
+    F: std::future::Future<Output = Result<C, E>>,
+    E: std::error::Error + 'static,
+{
     let started = Instant::now();
     let mut attempt = 0_u64;
     let mut last_error = None;
@@ -113,7 +138,7 @@ async fn connect_until_ready(
         if remaining.is_zero() {
             return Err(startup_timeout(
                 peer,
-                &endpoint_label,
+                endpoint_label,
                 pool_slot,
                 attempt,
                 started.elapsed(),
@@ -123,10 +148,12 @@ async fn connect_until_ready(
         }
 
         attempt += 1;
-        let attempt_endpoint = endpoint
-            .clone()
-            .connect_timeout(transport.connect_attempt_timeout.min(remaining));
-        match timeout_at(deadline, attempt_endpoint.connect()).await {
+        match timeout_at(
+            deadline,
+            connect(transport.connect_attempt_timeout.min(remaining)),
+        )
+        .await
+        {
             Ok(Ok(channel)) => return Ok(channel),
             Ok(Err(error)) => {
                 let detailed_error = format_error_chain(&error);
@@ -173,7 +200,7 @@ async fn connect_until_ready(
             Err(_) => {
                 return Err(startup_timeout(
                     peer,
-                    &endpoint_label,
+                    endpoint_label,
                     pool_slot,
                     attempt,
                     started.elapsed(),
@@ -186,7 +213,7 @@ async fn connect_until_ready(
         if Instant::now() >= deadline {
             return Err(startup_timeout(
                 peer,
-                &endpoint_label,
+                endpoint_label,
                 pool_slot,
                 attempt,
                 started.elapsed(),

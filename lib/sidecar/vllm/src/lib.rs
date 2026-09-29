@@ -18,3 +18,6 @@ pub use engine::VllmSidecarEngine;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_fixtures;
