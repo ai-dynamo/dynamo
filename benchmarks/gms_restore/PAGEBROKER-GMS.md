@@ -2,9 +2,44 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # PageBroker as the GMS V1 weight-loading client
 
-This is an experimental integration design, not an implemented PageBroker API.
-The equal-payload probe links the actual PageBroker transfer implementation, but
-it does not yet load through a live GMS server or invoke the broker daemon.
+The native prototype is now implemented on
+`schwinns/gms-pagebroker-restore-20260929`; GPU qualification is in progress.
+Snapshot commit `7e347afb62690103d53ea867265167ba9d2b886d` adds the trusted-node
+`LoadGmsWeights` operation, a native V1 client, and fair per-GPU buffer scheduling.
+[pagebroker-gms-native.patch](pagebroker-gms-native.patch) records that exact
+source change against qualified PageBroker base `ca369464`.
+
+The earlier equal-payload probe did not exercise live GMS ownership or the broker
+daemon. Likewise, the earlier resident Python-loader trials selected their capture
+before DGD creation and dispatched loads concurrently with the creation request.
+Those are optimistic controls, not measurements of artifact discovery after a
+DGD exists. The new native measurement includes DGD creation, Snapshot content
+lookup, and fresh GMS manifest discovery before any weight-transfer submission.
+
+```mermaid
+flowchart LR
+    D[DGD creation] --> S[Resolve selected Snapshot content]
+    S --> M[GMS capture manifest on PVC]
+    M --> P[Resident PageBroker GPU engine]
+    W[Exact GMS V1 PVC weight artifacts] -->|O_DIRECT| P
+    P -->|V1 allocate/export; copy; drain; commit| G[Independent GMS server DaemonSet]
+    D --> E[Dynamo operator engine Pod]
+    A[Resident Snapshot agent] -->|CRIU and CUDA restore| E
+    G -->|All-rank publication gate| E
+```
+
+GMS servers start with only their service lifetime and named DRA GPU identity.
+They have no selected capture and no weight-PVC mount. A CPU coordinator reads
+the matching capture descriptor only after receiving the created DGD UID and its
+Snapshot content UID. The descriptor is adjacent to the retained Snapshot
+artifacts; it references the exact existing V1 payloads on that same PVC. No
+weight payload was copied or staged in host RAM for this integration.
+
+Each server remains an ordinary V1 allocation service. This first qualification
+uses one load per coordinator/server incarnation, rejects retries that could
+reopen a destructive RW epoch, and recreates the control generation between
+trials. General multi-DGD lease retirement and operator lifecycle integration
+remain prototype limitations; this is not a production DGD API.
 
 ## Resource ownership and container count
 

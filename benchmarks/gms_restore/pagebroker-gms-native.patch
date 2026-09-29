@@ -1,0 +1,3622 @@
+From 7e347afb62690103d53ea867265167ba9d2b886d Mon Sep 17 00:00:00 2001
+From: Schwinn Saereesitthipitak <schwinns@nvidia.com>
+Date: Tue, 29 Sep 2026 06:59:00 +0000
+Subject: [PATCH] feat(pagebroker): prototype native GMS V1 artifact loading
+
+Signed-off-by: Schwinn Saereesitthipitak <schwinns@nvidia.com>
+---
+ agent/internal/pagebroker/pagebroker.pb.go    | 508 ++++++++++++++----
+ agent/pagebroker/Dockerfile                   |   3 +-
+ agent/pagebroker/Dockerfile.gpu               |   6 +-
+ agent/pagebroker/Makefile                     |  50 +-
+ agent/pagebroker/broker.cpp                   |  78 +++
+ agent/pagebroker/broker.hpp                   |  15 +
+ agent/pagebroker/daemon.cpp                   |   4 +
+ agent/pagebroker/fair_transfer_mutex.hpp      |  39 ++
+ agent/pagebroker/fair_transfer_mutex_test.cpp |  39 ++
+ agent/pagebroker/fake_gms_gpu_engine.cpp      |  40 ++
+ agent/pagebroker/fake_gpu_engine.cpp          |  15 +
+ agent/pagebroker/fd_transport.hpp             |   3 +-
+ agent/pagebroker/gms_admission.cpp            | 147 +++++
+ agent/pagebroker/gms_admission.hpp            |  14 +
+ agent/pagebroker/gms_admission_test.cpp       | 327 +++++++++++
+ agent/pagebroker/gms_load_layout.cpp          |  82 +++
+ agent/pagebroker/gms_load_layout.hpp          |  23 +
+ agent/pagebroker/gms_load_layout_test.cpp     |  99 ++++
+ agent/pagebroker/gms_load_operation.cpp       | 225 ++++++++
+ agent/pagebroker/gms_load_operation.hpp       |  24 +
+ agent/pagebroker/gms_v1_client.cpp            | 336 ++++++++++++
+ agent/pagebroker/gms_v1_client.hpp            |  62 +++
+ agent/pagebroker/gms_v1_client_mock.py        |  43 ++
+ agent/pagebroker/gms_v1_client_test.cpp       | 377 +++++++++++++
+ agent/pagebroker/gpu_engine.cpp               |  15 +
+ agent/pagebroker/gpu_engine.hpp               |   1 +
+ agent/pagebroker/gpu_engine.proto             |   3 +
+ agent/pagebroker/gpu_engine_test.cpp          |  29 +
+ agent/pagebroker/gpu_engine_worker.cpp        |  47 +-
+ agent/pagebroker/v1/pagebroker.proto          |  25 +
+ 30 files changed, 2556 insertions(+), 123 deletions(-)
+ create mode 100644 agent/pagebroker/fair_transfer_mutex.hpp
+ create mode 100644 agent/pagebroker/fair_transfer_mutex_test.cpp
+ create mode 100644 agent/pagebroker/fake_gms_gpu_engine.cpp
+ create mode 100644 agent/pagebroker/gms_admission.cpp
+ create mode 100644 agent/pagebroker/gms_admission.hpp
+ create mode 100644 agent/pagebroker/gms_admission_test.cpp
+ create mode 100644 agent/pagebroker/gms_load_layout.cpp
+ create mode 100644 agent/pagebroker/gms_load_layout.hpp
+ create mode 100644 agent/pagebroker/gms_load_layout_test.cpp
+ create mode 100644 agent/pagebroker/gms_load_operation.cpp
+ create mode 100644 agent/pagebroker/gms_load_operation.hpp
+ create mode 100644 agent/pagebroker/gms_v1_client.cpp
+ create mode 100644 agent/pagebroker/gms_v1_client.hpp
+ create mode 100644 agent/pagebroker/gms_v1_client_mock.py
+ create mode 100644 agent/pagebroker/gms_v1_client_test.cpp
+
+diff --git a/agent/internal/pagebroker/pagebroker.pb.go b/agent/internal/pagebroker/pagebroker.pb.go
+index c2a290bc..c7e68640 100644
+--- a/agent/internal/pagebroker/pagebroker.pb.go
++++ b/agent/internal/pagebroker/pagebroker.pb.go
+@@ -193,7 +193,7 @@ func (x Failure_Code) Number() protoreflect.EnumNumber {
+ 
+ // Deprecated: Use Failure_Code.Descriptor instead.
+ func (Failure_Code) EnumDescriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18, 0}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{21, 0}
+ }
+ 
+ type FilesystemStorage struct {
+@@ -424,6 +424,236 @@ func (x *NativeSessionReply) GetFailure() *Failure {
+ 	return nil
+ }
+ 
++// Experimental trusted-node admission. All payload I/O and CUDA work belongs
++// to PageBroker; GMS retains allocation ownership and publishes after commit.
++type GmsAllocation struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	AllocationId  string                 `protobuf:"bytes,1,opt,name=allocation_id,json=allocationId,proto3" json:"allocation_id,omitempty"`
++	AlignedSize   uint64                 `protobuf:"varint,2,opt,name=aligned_size,json=alignedSize,proto3" json:"aligned_size,omitempty"`
++	Shard         string                 `protobuf:"bytes,3,opt,name=shard,proto3" json:"shard,omitempty"`
++	Offset        uint64                 `protobuf:"varint,4,opt,name=offset,proto3" json:"offset,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *GmsAllocation) Reset() {
++	*x = GmsAllocation{}
++	mi := &file_v1_pagebroker_proto_msgTypes[4]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *GmsAllocation) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*GmsAllocation) ProtoMessage() {}
++
++func (x *GmsAllocation) ProtoReflect() protoreflect.Message {
++	mi := &file_v1_pagebroker_proto_msgTypes[4]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use GmsAllocation.ProtoReflect.Descriptor instead.
++func (*GmsAllocation) Descriptor() ([]byte, []int) {
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{4}
++}
++
++func (x *GmsAllocation) GetAllocationId() string {
++	if x != nil {
++		return x.AllocationId
++	}
++	return ""
++}
++
++func (x *GmsAllocation) GetAlignedSize() uint64 {
++	if x != nil {
++		return x.AlignedSize
++	}
++	return 0
++}
++
++func (x *GmsAllocation) GetShard() string {
++	if x != nil {
++		return x.Shard
++	}
++	return ""
++}
++
++func (x *GmsAllocation) GetOffset() uint64 {
++	if x != nil {
++		return x.Offset
++	}
++	return 0
++}
++
++type LoadGmsWeightsRequest struct {
++	state               protoimpl.MessageState `protogen:"open.v1"`
++	CaptureId           string                 `protobuf:"bytes,1,opt,name=capture_id,json=captureId,proto3" json:"capture_id,omitempty"`
++	Generation          string                 `protobuf:"bytes,2,opt,name=generation,proto3" json:"generation,omitempty"`
++	Rank                uint32                 `protobuf:"varint,3,opt,name=rank,proto3" json:"rank,omitempty"`
++	DestinationUuid     string                 `protobuf:"bytes,4,opt,name=destination_uuid,json=destinationUuid,proto3" json:"destination_uuid,omitempty"`
++	ExpectedServerNonce string                 `protobuf:"bytes,5,opt,name=expected_server_nonce,json=expectedServerNonce,proto3" json:"expected_server_nonce,omitempty"`
++	SocketPath          string                 `protobuf:"bytes,6,opt,name=socket_path,json=socketPath,proto3" json:"socket_path,omitempty"`
++	ArtifactDirectory   string                 `protobuf:"bytes,7,opt,name=artifact_directory,json=artifactDirectory,proto3" json:"artifact_directory,omitempty"`
++	ManifestSha256      string                 `protobuf:"bytes,8,opt,name=manifest_sha256,json=manifestSha256,proto3" json:"manifest_sha256,omitempty"`
++	Allocations         []*GmsAllocation       `protobuf:"bytes,9,rep,name=allocations,proto3" json:"allocations,omitempty"`
++	TimeoutSeconds      uint32                 `protobuf:"varint,10,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
++	unknownFields       protoimpl.UnknownFields
++	sizeCache           protoimpl.SizeCache
++}
++
++func (x *LoadGmsWeightsRequest) Reset() {
++	*x = LoadGmsWeightsRequest{}
++	mi := &file_v1_pagebroker_proto_msgTypes[5]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *LoadGmsWeightsRequest) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*LoadGmsWeightsRequest) ProtoMessage() {}
++
++func (x *LoadGmsWeightsRequest) ProtoReflect() protoreflect.Message {
++	mi := &file_v1_pagebroker_proto_msgTypes[5]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use LoadGmsWeightsRequest.ProtoReflect.Descriptor instead.
++func (*LoadGmsWeightsRequest) Descriptor() ([]byte, []int) {
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{5}
++}
++
++func (x *LoadGmsWeightsRequest) GetCaptureId() string {
++	if x != nil {
++		return x.CaptureId
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetGeneration() string {
++	if x != nil {
++		return x.Generation
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetRank() uint32 {
++	if x != nil {
++		return x.Rank
++	}
++	return 0
++}
++
++func (x *LoadGmsWeightsRequest) GetDestinationUuid() string {
++	if x != nil {
++		return x.DestinationUuid
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetExpectedServerNonce() string {
++	if x != nil {
++		return x.ExpectedServerNonce
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetSocketPath() string {
++	if x != nil {
++		return x.SocketPath
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetArtifactDirectory() string {
++	if x != nil {
++		return x.ArtifactDirectory
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetManifestSha256() string {
++	if x != nil {
++		return x.ManifestSha256
++	}
++	return ""
++}
++
++func (x *LoadGmsWeightsRequest) GetAllocations() []*GmsAllocation {
++	if x != nil {
++		return x.Allocations
++	}
++	return nil
++}
++
++func (x *LoadGmsWeightsRequest) GetTimeoutSeconds() uint32 {
++	if x != nil {
++		return x.TimeoutSeconds
++	}
++	return 0
++}
++
++type GmsWeightsLoaded struct {
++	state         protoimpl.MessageState `protogen:"open.v1"`
++	Report        string                 `protobuf:"bytes,1,opt,name=report,proto3" json:"report,omitempty"`
++	unknownFields protoimpl.UnknownFields
++	sizeCache     protoimpl.SizeCache
++}
++
++func (x *GmsWeightsLoaded) Reset() {
++	*x = GmsWeightsLoaded{}
++	mi := &file_v1_pagebroker_proto_msgTypes[6]
++	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++	ms.StoreMessageInfo(mi)
++}
++
++func (x *GmsWeightsLoaded) String() string {
++	return protoimpl.X.MessageStringOf(x)
++}
++
++func (*GmsWeightsLoaded) ProtoMessage() {}
++
++func (x *GmsWeightsLoaded) ProtoReflect() protoreflect.Message {
++	mi := &file_v1_pagebroker_proto_msgTypes[6]
++	if x != nil {
++		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
++		if ms.LoadMessageInfo() == nil {
++			ms.StoreMessageInfo(mi)
++		}
++		return ms
++	}
++	return mi.MessageOf(x)
++}
++
++// Deprecated: Use GmsWeightsLoaded.ProtoReflect.Descriptor instead.
++func (*GmsWeightsLoaded) Descriptor() ([]byte, []int) {
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{6}
++}
++
++func (x *GmsWeightsLoaded) GetReport() string {
++	if x != nil {
++		return x.Report
++	}
++	return ""
++}
++
+ type StorageBackend struct {
+ 	state protoimpl.MessageState `protogen:"open.v1"`
+ 	// Requests require exactly one storage kind.
+@@ -438,7 +668,7 @@ type StorageBackend struct {
+ 
+ func (x *StorageBackend) Reset() {
+ 	*x = StorageBackend{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[4]
++	mi := &file_v1_pagebroker_proto_msgTypes[7]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -450,7 +680,7 @@ func (x *StorageBackend) String() string {
+ func (*StorageBackend) ProtoMessage() {}
+ 
+ func (x *StorageBackend) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[4]
++	mi := &file_v1_pagebroker_proto_msgTypes[7]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -463,7 +693,7 @@ func (x *StorageBackend) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use StorageBackend.ProtoReflect.Descriptor instead.
+ func (*StorageBackend) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{4}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{7}
+ }
+ 
+ func (x *StorageBackend) GetKind() isStorageBackend_Kind {
+@@ -500,7 +730,7 @@ type PosixCopyIOEngine struct {
+ 
+ func (x *PosixCopyIOEngine) Reset() {
+ 	*x = PosixCopyIOEngine{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[5]
++	mi := &file_v1_pagebroker_proto_msgTypes[8]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -512,7 +742,7 @@ func (x *PosixCopyIOEngine) String() string {
+ func (*PosixCopyIOEngine) ProtoMessage() {}
+ 
+ func (x *PosixCopyIOEngine) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[5]
++	mi := &file_v1_pagebroker_proto_msgTypes[8]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -525,7 +755,7 @@ func (x *PosixCopyIOEngine) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use PosixCopyIOEngine.ProtoReflect.Descriptor instead.
+ func (*PosixCopyIOEngine) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{5}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{8}
+ }
+ 
+ type IOEngine struct {
+@@ -542,7 +772,7 @@ type IOEngine struct {
+ 
+ func (x *IOEngine) Reset() {
+ 	*x = IOEngine{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[6]
++	mi := &file_v1_pagebroker_proto_msgTypes[9]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -554,7 +784,7 @@ func (x *IOEngine) String() string {
+ func (*IOEngine) ProtoMessage() {}
+ 
+ func (x *IOEngine) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[6]
++	mi := &file_v1_pagebroker_proto_msgTypes[9]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -567,7 +797,7 @@ func (x *IOEngine) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use IOEngine.ProtoReflect.Descriptor instead.
+ func (*IOEngine) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{6}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{9}
+ }
+ 
+ func (x *IOEngine) GetKind() isIOEngine_Kind {
+@@ -606,7 +836,7 @@ type StagedRestoreRequest struct {
+ 
+ func (x *StagedRestoreRequest) Reset() {
+ 	*x = StagedRestoreRequest{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[7]
++	mi := &file_v1_pagebroker_proto_msgTypes[10]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -618,7 +848,7 @@ func (x *StagedRestoreRequest) String() string {
+ func (*StagedRestoreRequest) ProtoMessage() {}
+ 
+ func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[7]
++	mi := &file_v1_pagebroker_proto_msgTypes[10]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -631,7 +861,7 @@ func (x *StagedRestoreRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use StagedRestoreRequest.ProtoReflect.Descriptor instead.
+ func (*StagedRestoreRequest) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{7}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
+ }
+ 
+ func (x *StagedRestoreRequest) GetSource() *StorageBackend {
+@@ -659,7 +889,7 @@ type DirectRestoreRequest struct {
+ 
+ func (x *DirectRestoreRequest) Reset() {
+ 	*x = DirectRestoreRequest{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[8]
++	mi := &file_v1_pagebroker_proto_msgTypes[11]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -671,7 +901,7 @@ func (x *DirectRestoreRequest) String() string {
+ func (*DirectRestoreRequest) ProtoMessage() {}
+ 
+ func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[8]
++	mi := &file_v1_pagebroker_proto_msgTypes[11]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -684,7 +914,7 @@ func (x *DirectRestoreRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use DirectRestoreRequest.ProtoReflect.Descriptor instead.
+ func (*DirectRestoreRequest) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{8}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
+ }
+ 
+ func (x *DirectRestoreRequest) GetSource() *StorageBackend {
+@@ -711,7 +941,7 @@ type PrepareStagedCheckpointRequest struct {
+ 
+ func (x *PrepareStagedCheckpointRequest) Reset() {
+ 	*x = PrepareStagedCheckpointRequest{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[9]
++	mi := &file_v1_pagebroker_proto_msgTypes[12]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -723,7 +953,7 @@ func (x *PrepareStagedCheckpointRequest) String() string {
+ func (*PrepareStagedCheckpointRequest) ProtoMessage() {}
+ 
+ func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[9]
++	mi := &file_v1_pagebroker_proto_msgTypes[12]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -736,7 +966,7 @@ func (x *PrepareStagedCheckpointRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use PrepareStagedCheckpointRequest.ProtoReflect.Descriptor instead.
+ func (*PrepareStagedCheckpointRequest) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{9}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
+ }
+ 
+ func (x *PrepareStagedCheckpointRequest) GetDestination() *StorageBackend {
+@@ -764,7 +994,7 @@ type CommitRequest struct {
+ 
+ func (x *CommitRequest) Reset() {
+ 	*x = CommitRequest{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[10]
++	mi := &file_v1_pagebroker_proto_msgTypes[13]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -776,7 +1006,7 @@ func (x *CommitRequest) String() string {
+ func (*CommitRequest) ProtoMessage() {}
+ 
+ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[10]
++	mi := &file_v1_pagebroker_proto_msgTypes[13]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -789,7 +1019,7 @@ func (x *CommitRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use CommitRequest.ProtoReflect.Descriptor instead.
+ func (*CommitRequest) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{10}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
+ }
+ 
+ // Releases PageBroker state for a live transaction. PageBroker retains up to 1,024 terminal transactions for up to
+@@ -803,7 +1033,7 @@ type AbortRequest struct {
+ 
+ func (x *AbortRequest) Reset() {
+ 	*x = AbortRequest{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[11]
++	mi := &file_v1_pagebroker_proto_msgTypes[14]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -815,7 +1045,7 @@ func (x *AbortRequest) String() string {
+ func (*AbortRequest) ProtoMessage() {}
+ 
+ func (x *AbortRequest) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[11]
++	mi := &file_v1_pagebroker_proto_msgTypes[14]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -828,7 +1058,7 @@ func (x *AbortRequest) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use AbortRequest.ProtoReflect.Descriptor instead.
+ func (*AbortRequest) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{11}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
+ }
+ 
+ type Request struct {
+@@ -846,6 +1076,7 @@ type Request struct {
+ 	//	*Request_Abort
+ 	//	*Request_DirectRestore
+ 	//	*Request_BindNative
++	//	*Request_LoadGmsWeights
+ 	Command       isRequest_Command `protobuf_oneof:"command"`
+ 	unknownFields protoimpl.UnknownFields
+ 	sizeCache     protoimpl.SizeCache
+@@ -853,7 +1084,7 @@ type Request struct {
+ 
+ func (x *Request) Reset() {
+ 	*x = Request{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[12]
++	mi := &file_v1_pagebroker_proto_msgTypes[15]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -865,7 +1096,7 @@ func (x *Request) String() string {
+ func (*Request) ProtoMessage() {}
+ 
+ func (x *Request) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[12]
++	mi := &file_v1_pagebroker_proto_msgTypes[15]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -878,7 +1109,7 @@ func (x *Request) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Request.ProtoReflect.Descriptor instead.
+ func (*Request) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{12}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
+ }
+ 
+ func (x *Request) GetRequestId() string {
+@@ -956,6 +1187,15 @@ func (x *Request) GetBindNative() *BindNativeSession {
+ 	return nil
+ }
+ 
++func (x *Request) GetLoadGmsWeights() *LoadGmsWeightsRequest {
++	if x != nil {
++		if x, ok := x.Command.(*Request_LoadGmsWeights); ok {
++			return x.LoadGmsWeights
++		}
++	}
++	return nil
++}
++
+ type isRequest_Command interface {
+ 	isRequest_Command()
+ }
+@@ -984,6 +1224,10 @@ type Request_BindNative struct {
+ 	BindNative *BindNativeSession `protobuf:"bytes,9,opt,name=bind_native,json=bindNative,proto3,oneof"`
+ }
+ 
++type Request_LoadGmsWeights struct {
++	LoadGmsWeights *LoadGmsWeightsRequest `protobuf:"bytes,10,opt,name=load_gms_weights,json=loadGmsWeights,proto3,oneof"`
++}
++
+ func (*Request_StagedRestore) isRequest_Command() {}
+ 
+ func (*Request_PrepareStagedCheckpoint) isRequest_Command() {}
+@@ -996,6 +1240,8 @@ func (*Request_DirectRestore) isRequest_Command() {}
+ 
+ func (*Request_BindNative) isRequest_Command() {}
+ 
++func (*Request_LoadGmsWeights) isRequest_Command() {}
++
+ type StagedRestoreDirectory struct {
+ 	state          protoimpl.MessageState `protogen:"open.v1"`
+ 	ImageDirectory *string                `protobuf:"bytes,1,opt,name=image_directory,json=imageDirectory,proto3,oneof" json:"image_directory,omitempty"`
+@@ -1005,7 +1251,7 @@ type StagedRestoreDirectory struct {
+ 
+ func (x *StagedRestoreDirectory) Reset() {
+ 	*x = StagedRestoreDirectory{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[13]
++	mi := &file_v1_pagebroker_proto_msgTypes[16]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1017,7 +1263,7 @@ func (x *StagedRestoreDirectory) String() string {
+ func (*StagedRestoreDirectory) ProtoMessage() {}
+ 
+ func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[13]
++	mi := &file_v1_pagebroker_proto_msgTypes[16]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1030,7 +1276,7 @@ func (x *StagedRestoreDirectory) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use StagedRestoreDirectory.ProtoReflect.Descriptor instead.
+ func (*StagedRestoreDirectory) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{13}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
+ }
+ 
+ func (x *StagedRestoreDirectory) GetImageDirectory() string {
+@@ -1048,7 +1294,7 @@ type DirectRestoreReady struct {
+ 
+ func (x *DirectRestoreReady) Reset() {
+ 	*x = DirectRestoreReady{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[14]
++	mi := &file_v1_pagebroker_proto_msgTypes[17]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1060,7 +1306,7 @@ func (x *DirectRestoreReady) String() string {
+ func (*DirectRestoreReady) ProtoMessage() {}
+ 
+ func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[14]
++	mi := &file_v1_pagebroker_proto_msgTypes[17]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1073,7 +1319,7 @@ func (x *DirectRestoreReady) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use DirectRestoreReady.ProtoReflect.Descriptor instead.
+ func (*DirectRestoreReady) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{14}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{17}
+ }
+ 
+ type StagedCheckpointDirectory struct {
+@@ -1085,7 +1331,7 @@ type StagedCheckpointDirectory struct {
+ 
+ func (x *StagedCheckpointDirectory) Reset() {
+ 	*x = StagedCheckpointDirectory{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[15]
++	mi := &file_v1_pagebroker_proto_msgTypes[18]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1097,7 +1343,7 @@ func (x *StagedCheckpointDirectory) String() string {
+ func (*StagedCheckpointDirectory) ProtoMessage() {}
+ 
+ func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[15]
++	mi := &file_v1_pagebroker_proto_msgTypes[18]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1110,7 +1356,7 @@ func (x *StagedCheckpointDirectory) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use StagedCheckpointDirectory.ProtoReflect.Descriptor instead.
+ func (*StagedCheckpointDirectory) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{15}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18}
+ }
+ 
+ func (x *StagedCheckpointDirectory) GetImageDirectory() string {
+@@ -1128,7 +1374,7 @@ type CommitComplete struct {
+ 
+ func (x *CommitComplete) Reset() {
+ 	*x = CommitComplete{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[16]
++	mi := &file_v1_pagebroker_proto_msgTypes[19]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1140,7 +1386,7 @@ func (x *CommitComplete) String() string {
+ func (*CommitComplete) ProtoMessage() {}
+ 
+ func (x *CommitComplete) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[16]
++	mi := &file_v1_pagebroker_proto_msgTypes[19]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1153,7 +1399,7 @@ func (x *CommitComplete) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use CommitComplete.ProtoReflect.Descriptor instead.
+ func (*CommitComplete) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{16}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{19}
+ }
+ 
+ // Confirms only that PageBroker transaction state/content was released; it says nothing about the target
+@@ -1166,7 +1412,7 @@ type AbortComplete struct {
+ 
+ func (x *AbortComplete) Reset() {
+ 	*x = AbortComplete{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[17]
++	mi := &file_v1_pagebroker_proto_msgTypes[20]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1178,7 +1424,7 @@ func (x *AbortComplete) String() string {
+ func (*AbortComplete) ProtoMessage() {}
+ 
+ func (x *AbortComplete) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[17]
++	mi := &file_v1_pagebroker_proto_msgTypes[20]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1191,7 +1437,7 @@ func (x *AbortComplete) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use AbortComplete.ProtoReflect.Descriptor instead.
+ func (*AbortComplete) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{17}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{20}
+ }
+ 
+ type Failure struct {
+@@ -1204,7 +1450,7 @@ type Failure struct {
+ 
+ func (x *Failure) Reset() {
+ 	*x = Failure{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[18]
++	mi := &file_v1_pagebroker_proto_msgTypes[21]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1216,7 +1462,7 @@ func (x *Failure) String() string {
+ func (*Failure) ProtoMessage() {}
+ 
+ func (x *Failure) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[18]
++	mi := &file_v1_pagebroker_proto_msgTypes[21]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1229,7 +1475,7 @@ func (x *Failure) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Failure.ProtoReflect.Descriptor instead.
+ func (*Failure) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{18}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{21}
+ }
+ 
+ func (x *Failure) GetCode() Failure_Code {
+@@ -1259,6 +1505,7 @@ type Response struct {
+ 	//	*Response_Failure
+ 	//	*Response_DirectRestoreReady
+ 	//	*Response_NativeSession
++	//	*Response_GmsWeightsLoaded
+ 	Result        isResponse_Result `protobuf_oneof:"result"`
+ 	unknownFields protoimpl.UnknownFields
+ 	sizeCache     protoimpl.SizeCache
+@@ -1266,7 +1513,7 @@ type Response struct {
+ 
+ func (x *Response) Reset() {
+ 	*x = Response{}
+-	mi := &file_v1_pagebroker_proto_msgTypes[19]
++	mi := &file_v1_pagebroker_proto_msgTypes[22]
+ 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 	ms.StoreMessageInfo(mi)
+ }
+@@ -1278,7 +1525,7 @@ func (x *Response) String() string {
+ func (*Response) ProtoMessage() {}
+ 
+ func (x *Response) ProtoReflect() protoreflect.Message {
+-	mi := &file_v1_pagebroker_proto_msgTypes[19]
++	mi := &file_v1_pagebroker_proto_msgTypes[22]
+ 	if x != nil {
+ 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+ 		if ms.LoadMessageInfo() == nil {
+@@ -1291,7 +1538,7 @@ func (x *Response) ProtoReflect() protoreflect.Message {
+ 
+ // Deprecated: Use Response.ProtoReflect.Descriptor instead.
+ func (*Response) Descriptor() ([]byte, []int) {
+-	return file_v1_pagebroker_proto_rawDescGZIP(), []int{19}
++	return file_v1_pagebroker_proto_rawDescGZIP(), []int{22}
+ }
+ 
+ func (x *Response) GetRequestId() string {
+@@ -1378,6 +1625,15 @@ func (x *Response) GetNativeSession() *NativeSessionReply {
+ 	return nil
+ }
+ 
++func (x *Response) GetGmsWeightsLoaded() *GmsWeightsLoaded {
++	if x != nil {
++		if x, ok := x.Result.(*Response_GmsWeightsLoaded); ok {
++			return x.GmsWeightsLoaded
++		}
++	}
++	return nil
++}
++
+ type isResponse_Result interface {
+ 	isResponse_Result()
+ }
+@@ -1410,6 +1666,10 @@ type Response_NativeSession struct {
+ 	NativeSession *NativeSessionReply `protobuf:"bytes,10,opt,name=native_session,json=nativeSession,proto3,oneof"`
+ }
+ 
++type Response_GmsWeightsLoaded struct {
++	GmsWeightsLoaded *GmsWeightsLoaded `protobuf:"bytes,11,opt,name=gms_weights_loaded,json=gmsWeightsLoaded,proto3,oneof"`
++}
++
+ func (*Response_StagedRestoreDirectory) isResponse_Result() {}
+ 
+ func (*Response_StagedCheckpointDirectory) isResponse_Result() {}
+@@ -1424,6 +1684,8 @@ func (*Response_DirectRestoreReady) isResponse_Result() {}
+ 
+ func (*Response_NativeSession) isResponse_Result() {}
+ 
++func (*Response_GmsWeightsLoaded) isResponse_Result() {}
++
+ var File_v1_pagebroker_proto protoreflect.FileDescriptor
+ 
+ const file_v1_pagebroker_proto_rawDesc = "" +
+@@ -1456,7 +1718,30 @@ const file_v1_pagebroker_proto_rawDesc = "" +
+ 	"\bCOMPLETE\x10\x04\"g\n" +
+ 	"\x12NativeSessionReply\x12\x16\n" +
+ 	"\x06report\x18\x01 \x01(\tR\x06report\x129\n" +
+-	"\afailure\x18\x02 \x01(\v2\x1f.snapshot.pagebroker.v1.FailureR\afailure\"e\n" +
++	"\afailure\x18\x02 \x01(\v2\x1f.snapshot.pagebroker.v1.FailureR\afailure\"\x85\x01\n" +
++	"\rGmsAllocation\x12#\n" +
++	"\rallocation_id\x18\x01 \x01(\tR\fallocationId\x12!\n" +
++	"\faligned_size\x18\x02 \x01(\x04R\valignedSize\x12\x14\n" +
++	"\x05shard\x18\x03 \x01(\tR\x05shard\x12\x16\n" +
++	"\x06offset\x18\x04 \x01(\x04R\x06offset\"\xb4\x03\n" +
++	"\x15LoadGmsWeightsRequest\x12\x1d\n" +
++	"\n" +
++	"capture_id\x18\x01 \x01(\tR\tcaptureId\x12\x1e\n" +
++	"\n" +
++	"generation\x18\x02 \x01(\tR\n" +
++	"generation\x12\x12\n" +
++	"\x04rank\x18\x03 \x01(\rR\x04rank\x12)\n" +
++	"\x10destination_uuid\x18\x04 \x01(\tR\x0fdestinationUuid\x122\n" +
++	"\x15expected_server_nonce\x18\x05 \x01(\tR\x13expectedServerNonce\x12\x1f\n" +
++	"\vsocket_path\x18\x06 \x01(\tR\n" +
++	"socketPath\x12-\n" +
++	"\x12artifact_directory\x18\a \x01(\tR\x11artifactDirectory\x12'\n" +
++	"\x0fmanifest_sha256\x18\b \x01(\tR\x0emanifestSha256\x12G\n" +
++	"\vallocations\x18\t \x03(\v2%.snapshot.pagebroker.v1.GmsAllocationR\vallocations\x12'\n" +
++	"\x0ftimeout_seconds\x18\n" +
++	" \x01(\rR\x0etimeoutSeconds\"*\n" +
++	"\x10GmsWeightsLoaded\x12\x16\n" +
++	"\x06report\x18\x01 \x01(\tR\x06report\"e\n" +
+ 	"\x0eStorageBackend\x12K\n" +
+ 	"\n" +
+ 	"filesystem\x18\x01 \x01(\v2).snapshot.pagebroker.v1.FilesystemStorageH\x00R\n" +
+@@ -1477,7 +1762,7 @@ const file_v1_pagebroker_proto_rawDesc = "" +
+ 	"\vdestination\x18\x01 \x01(\v2&.snapshot.pagebroker.v1.StorageBackendR\vdestination\x12=\n" +
+ 	"\tio_engine\x18\x02 \x01(\v2 .snapshot.pagebroker.v1.IOEngineR\bioEngine\"\x0f\n" +
+ 	"\rCommitRequest\"\x0e\n" +
+-	"\fAbortRequest\"\xf7\x04\n" +
++	"\fAbortRequest\"\xd2\x05\n" +
+ 	"\aRequest\x12\"\n" +
+ 	"\n" +
+ 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
+@@ -1488,7 +1773,9 @@ const file_v1_pagebroker_proto_rawDesc = "" +
+ 	"\x05abort\x18\x06 \x01(\v2$.snapshot.pagebroker.v1.AbortRequestH\x00R\x05abort\x12U\n" +
+ 	"\x0edirect_restore\x18\a \x01(\v2,.snapshot.pagebroker.v1.DirectRestoreRequestH\x00R\rdirectRestore\x12L\n" +
+ 	"\vbind_native\x18\t \x01(\v2).snapshot.pagebroker.v1.BindNativeSessionH\x00R\n" +
+-	"bindNativeB\t\n" +
++	"bindNative\x12Y\n" +
++	"\x10load_gms_weights\x18\n" +
++	" \x01(\v2-.snapshot.pagebroker.v1.LoadGmsWeightsRequestH\x00R\x0eloadGmsWeightsB\t\n" +
+ 	"\acommandB\r\n" +
+ 	"\v_request_idB\x11\n" +
+ 	"\x0f_transaction_id\"Z\n" +
+@@ -1514,7 +1801,7 @@ const file_v1_pagebroker_proto_rawDesc = "" +
+ 	"\x0eINTERNAL_ERROR\x10\x06B\a\n" +
+ 	"\x05_codeB\n" +
+ 	"\n" +
+-	"\b_message\"\xfc\x05\n" +
++	"\b_message\"\xd6\x06\n" +
+ 	"\bResponse\x12\"\n" +
+ 	"\n" +
+ 	"request_id\x18\x01 \x01(\tH\x01R\trequestId\x88\x01\x01\x12*\n" +
+@@ -1526,7 +1813,8 @@ const file_v1_pagebroker_proto_rawDesc = "" +
+ 	"\afailure\x18\a \x01(\v2\x1f.snapshot.pagebroker.v1.FailureH\x00R\afailure\x12^\n" +
+ 	"\x14direct_restore_ready\x18\b \x01(\v2*.snapshot.pagebroker.v1.DirectRestoreReadyH\x00R\x12directRestoreReady\x12S\n" +
+ 	"\x0enative_session\x18\n" +
+-	" \x01(\v2*.snapshot.pagebroker.v1.NativeSessionReplyH\x00R\rnativeSessionB\b\n" +
++	" \x01(\v2*.snapshot.pagebroker.v1.NativeSessionReplyH\x00R\rnativeSession\x12X\n" +
++	"\x12gms_weights_loaded\x18\v \x01(\v2(.snapshot.pagebroker.v1.GmsWeightsLoadedH\x00R\x10gmsWeightsLoadedB\b\n" +
+ 	"\x06resultB\r\n" +
+ 	"\v_request_idB\x11\n" +
+ 	"\x0f_transaction_idB9Z7github.com/ai-dynamo/snapshot/agent/internal/pagebrokerb\x06proto3"
+@@ -1544,7 +1832,7 @@ func file_v1_pagebroker_proto_rawDescGZIP() []byte {
+ }
+ 
+ var file_v1_pagebroker_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+-var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
++var file_v1_pagebroker_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+ var file_v1_pagebroker_proto_goTypes = []any{
+ 	(BindNativeSession_Direction)(0),       // 0: snapshot.pagebroker.v1.BindNativeSession.Direction
+ 	(NativeSessionRequest_Operation)(0),    // 1: snapshot.pagebroker.v1.NativeSessionRequest.Operation
+@@ -1553,54 +1841,60 @@ var file_v1_pagebroker_proto_goTypes = []any{
+ 	(*BindNativeSession)(nil),              // 4: snapshot.pagebroker.v1.BindNativeSession
+ 	(*NativeSessionRequest)(nil),           // 5: snapshot.pagebroker.v1.NativeSessionRequest
+ 	(*NativeSessionReply)(nil),             // 6: snapshot.pagebroker.v1.NativeSessionReply
+-	(*StorageBackend)(nil),                 // 7: snapshot.pagebroker.v1.StorageBackend
+-	(*PosixCopyIOEngine)(nil),              // 8: snapshot.pagebroker.v1.PosixCopyIOEngine
+-	(*IOEngine)(nil),                       // 9: snapshot.pagebroker.v1.IOEngine
+-	(*StagedRestoreRequest)(nil),           // 10: snapshot.pagebroker.v1.StagedRestoreRequest
+-	(*DirectRestoreRequest)(nil),           // 11: snapshot.pagebroker.v1.DirectRestoreRequest
+-	(*PrepareStagedCheckpointRequest)(nil), // 12: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+-	(*CommitRequest)(nil),                  // 13: snapshot.pagebroker.v1.CommitRequest
+-	(*AbortRequest)(nil),                   // 14: snapshot.pagebroker.v1.AbortRequest
+-	(*Request)(nil),                        // 15: snapshot.pagebroker.v1.Request
+-	(*StagedRestoreDirectory)(nil),         // 16: snapshot.pagebroker.v1.StagedRestoreDirectory
+-	(*DirectRestoreReady)(nil),             // 17: snapshot.pagebroker.v1.DirectRestoreReady
+-	(*StagedCheckpointDirectory)(nil),      // 18: snapshot.pagebroker.v1.StagedCheckpointDirectory
+-	(*CommitComplete)(nil),                 // 19: snapshot.pagebroker.v1.CommitComplete
+-	(*AbortComplete)(nil),                  // 20: snapshot.pagebroker.v1.AbortComplete
+-	(*Failure)(nil),                        // 21: snapshot.pagebroker.v1.Failure
+-	(*Response)(nil),                       // 22: snapshot.pagebroker.v1.Response
++	(*GmsAllocation)(nil),                  // 7: snapshot.pagebroker.v1.GmsAllocation
++	(*LoadGmsWeightsRequest)(nil),          // 8: snapshot.pagebroker.v1.LoadGmsWeightsRequest
++	(*GmsWeightsLoaded)(nil),               // 9: snapshot.pagebroker.v1.GmsWeightsLoaded
++	(*StorageBackend)(nil),                 // 10: snapshot.pagebroker.v1.StorageBackend
++	(*PosixCopyIOEngine)(nil),              // 11: snapshot.pagebroker.v1.PosixCopyIOEngine
++	(*IOEngine)(nil),                       // 12: snapshot.pagebroker.v1.IOEngine
++	(*StagedRestoreRequest)(nil),           // 13: snapshot.pagebroker.v1.StagedRestoreRequest
++	(*DirectRestoreRequest)(nil),           // 14: snapshot.pagebroker.v1.DirectRestoreRequest
++	(*PrepareStagedCheckpointRequest)(nil), // 15: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
++	(*CommitRequest)(nil),                  // 16: snapshot.pagebroker.v1.CommitRequest
++	(*AbortRequest)(nil),                   // 17: snapshot.pagebroker.v1.AbortRequest
++	(*Request)(nil),                        // 18: snapshot.pagebroker.v1.Request
++	(*StagedRestoreDirectory)(nil),         // 19: snapshot.pagebroker.v1.StagedRestoreDirectory
++	(*DirectRestoreReady)(nil),             // 20: snapshot.pagebroker.v1.DirectRestoreReady
++	(*StagedCheckpointDirectory)(nil),      // 21: snapshot.pagebroker.v1.StagedCheckpointDirectory
++	(*CommitComplete)(nil),                 // 22: snapshot.pagebroker.v1.CommitComplete
++	(*AbortComplete)(nil),                  // 23: snapshot.pagebroker.v1.AbortComplete
++	(*Failure)(nil),                        // 24: snapshot.pagebroker.v1.Failure
++	(*Response)(nil),                       // 25: snapshot.pagebroker.v1.Response
+ }
+ var file_v1_pagebroker_proto_depIdxs = []int32{
+ 	0,  // 0: snapshot.pagebroker.v1.BindNativeSession.direction:type_name -> snapshot.pagebroker.v1.BindNativeSession.Direction
+ 	1,  // 1: snapshot.pagebroker.v1.NativeSessionRequest.operation:type_name -> snapshot.pagebroker.v1.NativeSessionRequest.Operation
+-	21, // 2: snapshot.pagebroker.v1.NativeSessionReply.failure:type_name -> snapshot.pagebroker.v1.Failure
+-	3,  // 3: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
+-	8,  // 4: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
+-	7,  // 5: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+-	9,  // 6: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+-	7,  // 7: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
+-	9,  // 8: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+-	7,  // 9: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
+-	9,  // 10: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
+-	10, // 11: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
+-	12, // 12: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
+-	13, // 13: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
+-	14, // 14: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
+-	11, // 15: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
+-	4,  // 16: snapshot.pagebroker.v1.Request.bind_native:type_name -> snapshot.pagebroker.v1.BindNativeSession
+-	2,  // 17: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
+-	16, // 18: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
+-	18, // 19: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
+-	19, // 20: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
+-	20, // 21: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
+-	21, // 22: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
+-	17, // 23: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
+-	6,  // 24: snapshot.pagebroker.v1.Response.native_session:type_name -> snapshot.pagebroker.v1.NativeSessionReply
+-	25, // [25:25] is the sub-list for method output_type
+-	25, // [25:25] is the sub-list for method input_type
+-	25, // [25:25] is the sub-list for extension type_name
+-	25, // [25:25] is the sub-list for extension extendee
+-	0,  // [0:25] is the sub-list for field type_name
++	24, // 2: snapshot.pagebroker.v1.NativeSessionReply.failure:type_name -> snapshot.pagebroker.v1.Failure
++	7,  // 3: snapshot.pagebroker.v1.LoadGmsWeightsRequest.allocations:type_name -> snapshot.pagebroker.v1.GmsAllocation
++	3,  // 4: snapshot.pagebroker.v1.StorageBackend.filesystem:type_name -> snapshot.pagebroker.v1.FilesystemStorage
++	11, // 5: snapshot.pagebroker.v1.IOEngine.posix_copy:type_name -> snapshot.pagebroker.v1.PosixCopyIOEngine
++	10, // 6: snapshot.pagebroker.v1.StagedRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
++	12, // 7: snapshot.pagebroker.v1.StagedRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
++	10, // 8: snapshot.pagebroker.v1.DirectRestoreRequest.source:type_name -> snapshot.pagebroker.v1.StorageBackend
++	12, // 9: snapshot.pagebroker.v1.DirectRestoreRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
++	10, // 10: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.destination:type_name -> snapshot.pagebroker.v1.StorageBackend
++	12, // 11: snapshot.pagebroker.v1.PrepareStagedCheckpointRequest.io_engine:type_name -> snapshot.pagebroker.v1.IOEngine
++	13, // 12: snapshot.pagebroker.v1.Request.staged_restore:type_name -> snapshot.pagebroker.v1.StagedRestoreRequest
++	15, // 13: snapshot.pagebroker.v1.Request.prepare_staged_checkpoint:type_name -> snapshot.pagebroker.v1.PrepareStagedCheckpointRequest
++	16, // 14: snapshot.pagebroker.v1.Request.commit:type_name -> snapshot.pagebroker.v1.CommitRequest
++	17, // 15: snapshot.pagebroker.v1.Request.abort:type_name -> snapshot.pagebroker.v1.AbortRequest
++	14, // 16: snapshot.pagebroker.v1.Request.direct_restore:type_name -> snapshot.pagebroker.v1.DirectRestoreRequest
++	4,  // 17: snapshot.pagebroker.v1.Request.bind_native:type_name -> snapshot.pagebroker.v1.BindNativeSession
++	8,  // 18: snapshot.pagebroker.v1.Request.load_gms_weights:type_name -> snapshot.pagebroker.v1.LoadGmsWeightsRequest
++	2,  // 19: snapshot.pagebroker.v1.Failure.code:type_name -> snapshot.pagebroker.v1.Failure.Code
++	19, // 20: snapshot.pagebroker.v1.Response.staged_restore_directory:type_name -> snapshot.pagebroker.v1.StagedRestoreDirectory
++	21, // 21: snapshot.pagebroker.v1.Response.staged_checkpoint_directory:type_name -> snapshot.pagebroker.v1.StagedCheckpointDirectory
++	22, // 22: snapshot.pagebroker.v1.Response.commit_complete:type_name -> snapshot.pagebroker.v1.CommitComplete
++	23, // 23: snapshot.pagebroker.v1.Response.abort_complete:type_name -> snapshot.pagebroker.v1.AbortComplete
++	24, // 24: snapshot.pagebroker.v1.Response.failure:type_name -> snapshot.pagebroker.v1.Failure
++	20, // 25: snapshot.pagebroker.v1.Response.direct_restore_ready:type_name -> snapshot.pagebroker.v1.DirectRestoreReady
++	6,  // 26: snapshot.pagebroker.v1.Response.native_session:type_name -> snapshot.pagebroker.v1.NativeSessionReply
++	9,  // 27: snapshot.pagebroker.v1.Response.gms_weights_loaded:type_name -> snapshot.pagebroker.v1.GmsWeightsLoaded
++	28, // [28:28] is the sub-list for method output_type
++	28, // [28:28] is the sub-list for method input_type
++	28, // [28:28] is the sub-list for extension type_name
++	28, // [28:28] is the sub-list for extension extendee
++	0,  // [0:28] is the sub-list for field type_name
+ }
+ 
+ func init() { file_v1_pagebroker_proto_init() }
+@@ -1609,24 +1903,25 @@ func file_v1_pagebroker_proto_init() {
+ 		return
+ 	}
+ 	file_v1_pagebroker_proto_msgTypes[0].OneofWrappers = []any{}
+-	file_v1_pagebroker_proto_msgTypes[4].OneofWrappers = []any{
++	file_v1_pagebroker_proto_msgTypes[7].OneofWrappers = []any{
+ 		(*StorageBackend_Filesystem)(nil),
+ 	}
+-	file_v1_pagebroker_proto_msgTypes[6].OneofWrappers = []any{
++	file_v1_pagebroker_proto_msgTypes[9].OneofWrappers = []any{
+ 		(*IOEngine_PosixCopy)(nil),
+ 	}
+-	file_v1_pagebroker_proto_msgTypes[12].OneofWrappers = []any{
++	file_v1_pagebroker_proto_msgTypes[15].OneofWrappers = []any{
+ 		(*Request_StagedRestore)(nil),
+ 		(*Request_PrepareStagedCheckpoint)(nil),
+ 		(*Request_Commit)(nil),
+ 		(*Request_Abort)(nil),
+ 		(*Request_DirectRestore)(nil),
+ 		(*Request_BindNative)(nil),
++		(*Request_LoadGmsWeights)(nil),
+ 	}
+-	file_v1_pagebroker_proto_msgTypes[13].OneofWrappers = []any{}
+-	file_v1_pagebroker_proto_msgTypes[15].OneofWrappers = []any{}
++	file_v1_pagebroker_proto_msgTypes[16].OneofWrappers = []any{}
+ 	file_v1_pagebroker_proto_msgTypes[18].OneofWrappers = []any{}
+-	file_v1_pagebroker_proto_msgTypes[19].OneofWrappers = []any{
++	file_v1_pagebroker_proto_msgTypes[21].OneofWrappers = []any{}
++	file_v1_pagebroker_proto_msgTypes[22].OneofWrappers = []any{
+ 		(*Response_StagedRestoreDirectory)(nil),
+ 		(*Response_StagedCheckpointDirectory)(nil),
+ 		(*Response_CommitComplete)(nil),
+@@ -1634,6 +1929,7 @@ func file_v1_pagebroker_proto_init() {
+ 		(*Response_Failure)(nil),
+ 		(*Response_DirectRestoreReady)(nil),
+ 		(*Response_NativeSession)(nil),
++		(*Response_GmsWeightsLoaded)(nil),
+ 	}
+ 	type x struct{}
+ 	out := protoimpl.TypeBuilder{
+@@ -1641,7 +1937,7 @@ func file_v1_pagebroker_proto_init() {
+ 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
+ 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_pagebroker_proto_rawDesc), len(file_v1_pagebroker_proto_rawDesc)),
+ 			NumEnums:      3,
+-			NumMessages:   20,
++			NumMessages:   23,
+ 			NumExtensions: 0,
+ 			NumServices:   0,
+ 		},
+diff --git a/agent/pagebroker/Dockerfile b/agent/pagebroker/Dockerfile
+index 51cf6879..78035296 100644
+--- a/agent/pagebroker/Dockerfile
++++ b/agent/pagebroker/Dockerfile
+@@ -6,6 +6,7 @@ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca0
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+     build-essential \
+     libprotobuf-dev \
++    libssl-dev \
+     protobuf-compiler \
+     && rm -rf /var/lib/apt/lists/*
+ 
+@@ -15,7 +16,7 @@ RUN make daemon
+ 
+ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+ 
+-RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 \
++RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 libssl3t64 \
+     && rm -rf /var/lib/apt/lists/*
+ 
+ COPY --from=build /src/pagebroker /usr/local/bin/pagebroker
+diff --git a/agent/pagebroker/Dockerfile.gpu b/agent/pagebroker/Dockerfile.gpu
+index 989a3dec..3e9950be 100644
+--- a/agent/pagebroker/Dockerfile.gpu
++++ b/agent/pagebroker/Dockerfile.gpu
+@@ -32,7 +32,7 @@ RUN git init /tmp/nixl && cd /tmp/nixl \
+     && tar -czf /nixl-src.tar.gz -C /tmp --exclude-vcs nixl
+ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254 AS build
+ RUN apt-get update && apt-get install -y --no-install-recommends \
+-    build-essential pkg-config libprotobuf-dev protobuf-compiler libgtest-dev libaio-dev libssl-dev \
++    build-essential pkg-config libprotobuf-dev protobuf-compiler libgtest-dev libaio-dev libssl-dev libmsgpack-cxx-dev \
+     && rm -rf /var/lib/apt/lists/*
+ COPY --from=headers /usr/local/cuda/include/ /opt/cuda/include/
+ COPY --from=headers /usr/local/cuda/lib64/stubs/ /opt/cuda/lib64/stubs/
+@@ -42,10 +42,10 @@ ENV NIXL_PLUGIN_DIR=/usr/local/lib/plugins
+ WORKDIR /src
+ COPY pagebroker/ pagebroker/
+ COPY cmd/cuda-checkpoint-helper/custom_storage* cmd/cuda-checkpoint-helper/
+-RUN make -C pagebroker daemon gpu-engine test-storage test-cuda-transfer test-cuda-helper check-transfer-contracts-cuda CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
++RUN make -C pagebroker daemon gpu-engine test test-storage test-cuda-transfer test-cuda-helper check-transfer-contracts-cuda CUDA_ROOT=/opt/cuda NIXL_ROOT=/usr/local
+ 
+ FROM ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
+-RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 libaio1t64 \
++RUN apt-get update && apt-get install -y --no-install-recommends libprotobuf32t64 libaio1t64 libssl3t64 \
+     && rm -rf /var/lib/apt/lists/*
+ COPY --from=build /src/pagebroker/pagebroker /usr/local/bin/pagebroker
+ COPY --from=build /src/pagebroker/build/pagebroker-gpu-engine /usr/local/bin/pagebroker-gpu-engine
+diff --git a/agent/pagebroker/Makefile b/agent/pagebroker/Makefile
+index 172255d0..0fe014ed 100644
+--- a/agent/pagebroker/Makefile
++++ b/agent/pagebroker/Makefile
+@@ -3,7 +3,7 @@
+ 
+ PROTO := v1/pagebroker.proto
+ GTEST_FLAGS = $(shell pkg-config --cflags --libs gtest_main)
+-BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp
++BROKER_SOURCES := broker.cpp checkpoint_transaction_descriptor.cpp posix_copy_engine.cpp restore_transaction_descriptor.cpp transaction.cpp transfer_engine.cpp file_descriptor.cpp native_session.cpp gpu_engine.cpp fd_transport.cpp storage_manifest.cpp gms_admission.cpp integrity/content_digest.cpp
+ DAEMON_SOURCES := $(BROKER_SOURCES) daemon.cpp main.cpp
+ 
+ .PHONY: daemon generate test
+@@ -12,11 +12,11 @@ generate:
+ 	protoc --proto_path=. --cpp_out=. $(PROTO) gpu_engine.proto
+ 
+ daemon: generate
+-	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -o pagebroker
++	c++ -I. -std=c++20 -Wall -Werror $(DAEMON_SOURCES) v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -lcrypto -o pagebroker
+ 
+-test: test-gpu-engine generate $(BROKER_SOURCES) daemon_test.cpp
++test: test-gpu-engine test-gms-v1-client test-gms-load-layout test-fair-transfer-mutex test-gms-admission generate $(BROKER_SOURCES) daemon_test.cpp
+ 	mkdir -p build
+-	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf $(GTEST_FLAGS) -o build/pagebroker-test
++	c++ -I. -std=c++20 -Wall -Werror $(BROKER_SOURCES) daemon_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc -lprotobuf -lcrypto $(GTEST_FLAGS) -o build/pagebroker-test
+ 	./build/pagebroker-test
+ 
+ .PHONY: test-storage
+@@ -25,8 +25,8 @@ test-storage: test-integrity test-transfer-contracts
+ 	$(CXX) -std=c++20 -O2 -Wall -Wextra -Werror storage_manifest.cpp storage_manifest_test.cpp -o build/storage-manifest-test
+ 	./build/storage-manifest-test
+ 
+-# Optional modules are tested here but are not linked into the production data
+-# plane. Keeping them available adds no hashing or layout planning to transfers.
++# These CPU checks cover integrity and transfer-policy helpers. The broker uses
++# ContentDigest for GMS manifest admission; GPU payload copying stays unchanged.
+ .PHONY: test-integrity test-transfer-contracts check-transfer-contracts-cuda
+ test-integrity:
+ 	mkdir -p build
+@@ -69,6 +69,7 @@ gpu-engine: generate
+ 	mkdir -p build
+ 	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. -I$(CUDA_ROOT)/include \
+ 		gpu_engine_worker.cpp fd_transport.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
++		gms_v1_client.cpp gms_load_operation.cpp gms_load_layout.cpp \
+ 		file_descriptor.cpp cuda_posix_transfer.cpp $(TRANSFER_SOURCES) storage_manifest.cpp \
+ 		../cmd/cuda-checkpoint-helper/custom_storage.cpp \
+ 		-L$(CUDA_LIB_DIR) -lcuda -lprotobuf -pthread $(TRANSFER_FLAGS) -o build/pagebroker-gpu-engine
+@@ -82,6 +83,43 @@ test-gpu-engine: generate
+ 		file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc -lprotobuf $(GTEST_FLAGS) -pthread -o build/gpu-engine-test
+ 	./build/gpu-engine-test
+ 
++# The GMS protocol client is CPU-only and uses header-only msgpack-cxx. CUDA
++# imports and payload transfers remain in the GPU engine operation.
++.PHONY: build-gms-v1-client-test test-gms-v1-client
++build-gms-v1-client-test:
++	mkdir -p build
++	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. \
++		gms_v1_client.cpp gms_v1_client_test.cpp file_descriptor.cpp \
++		$(GTEST_FLAGS) -pthread -o build/gms-v1-client-test
++
++test-gms-v1-client: build-gms-v1-client-test
++	./build/gms-v1-client-test
++
++.PHONY: test-gms-load-layout test-fair-transfer-mutex
++test-gms-load-layout: generate
++	mkdir -p build
++	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. \
++		gms_load_layout.cpp gms_load_layout_test.cpp file_descriptor.cpp v1/pagebroker.pb.cc \
++		-lprotobuf $(GTEST_FLAGS) -pthread -o build/gms-load-layout-test
++	./build/gms-load-layout-test
++
++test-fair-transfer-mutex:
++	mkdir -p build
++	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. \
++		fair_transfer_mutex_test.cpp $(GTEST_FLAGS) -pthread -o build/fair-transfer-mutex-test
++	./build/fair-transfer-mutex-test
++
++.PHONY: test-gms-admission
++test-gms-admission: generate
++	mkdir -p build
++	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. \
++		fake_gms_gpu_engine.cpp fd_transport.cpp file_descriptor.cpp gpu_engine.pb.cc v1/pagebroker.pb.cc \
++		-lprotobuf -pthread -o build/fake-gms-gpu-engine
++	$(CXX) -O2 -std=c++20 -Wall -Wextra -Werror -I. \
++		$(BROKER_SOURCES) gms_admission_test.cpp v1/pagebroker.pb.cc gpu_engine.pb.cc \
++		-lprotobuf -lcrypto $(GTEST_FLAGS) -pthread -o build/gms-admission-test
++	./build/gms-admission-test
++
+ .PHONY: test-cuda-helper
+ test-cuda-helper:
+ 	mkdir -p build
+diff --git a/agent/pagebroker/broker.cpp b/agent/pagebroker/broker.cpp
+index 82c58607..12ebbb5e 100644
+--- a/agent/pagebroker/broker.cpp
++++ b/agent/pagebroker/broker.cpp
+@@ -14,6 +14,8 @@
+ #include "posix_copy_engine.hpp"
+ #include "native_session.hpp"
+ #include "gpu_engine.hpp"
++#include "gms_admission.hpp"
++#include "fd_transport.hpp"
+ 
+ namespace snapshot::pagebroker {
+ namespace fs = std::filesystem;
+@@ -259,7 +261,15 @@ Broker::HandleRequest(const Request& request)
+ 
+   Response response;
+   try {
++    if (!request.has_load_gms_weights()) {
++      std::lock_guard lock(gms_mutex_);
++      if (gms_transactions_.contains(request.transaction_id()))
++        return Fail(request, Failure::TRANSACTION_CONFLICT, "transaction belongs to a one-shot GMS admission");
++    }
+     switch (request.command_case()) {
++      case Request::kLoadGmsWeights:
++        response = LoadGms(request);
++        break;
+       case Request::kStagedRestore:
+         response = Restore(request);
+         break;
+@@ -291,6 +301,74 @@ Broker::HandleRequest(const Request& request)
+   return response;
+ }
+ 
++Response
++Broker::LoadGms(const Request& request)
++{
++  const auto& operation = request.load_gms_weights();
++  StorageBackend storage;
++  storage.mutable_filesystem()->set_directory(operation.artifact_directory());
++  auto source = Engine(TransferEngineType::POSIX_COPY).OpenRestoreSource(storage);
++  ValidateGmsArtifact(operation, source.get());
++  if (!gpu_engine_)
++    return Fail(request, Failure::INVALID_REQUEST, "GMS loading requires a configured GPU engine");
++  if (FindTransaction(request.transaction_id()))
++    return Fail(request, Failure::TRANSACTION_CONFLICT, "GMS transaction conflicts with native transaction");
++  const auto binding = operation.SerializeAsString();
++  const auto identity = operation.destination_uuid() + "\n" + operation.expected_server_nonce();
++  std::shared_ptr<GmsAttempt> attempt;
++  {
++    std::unique_lock lock(gms_mutex_);
++    const auto existing = gms_attempts_.find(identity);
++    if (existing != gms_attempts_.end()) {
++      attempt = existing->second;
++      if (attempt->binding != binding || attempt->transaction != request.transaction_id())
++        return Fail(request, Failure::TRANSACTION_CONFLICT, "GMS server incarnation already admitted; no RW retry allowed");
++      if (!attempt->changed.wait_for(lock, std::chrono::seconds(operation.timeout_seconds()),
++                                     [&] { return attempt->complete; }))
++        return Fail(request, Failure::TRANSACTION_CONFLICT, "GMS admission still running; duplicate did not acquire RW");
++      auto response = attempt->response;
++      response.set_request_id(request.request_id());
++      return response;
++    }
++    if (gms_transactions_.contains(request.transaction_id()) || gms_attempts_.size() >= 1024)
++      return Fail(request, Failure::TRANSACTION_CONFLICT, "GMS transaction reused or one-shot ledger full");
++    attempt = std::make_shared<GmsAttempt>();
++    attempt->binding = binding;
++    attempt->transaction = request.transaction_id();
++    gms_attempts_.emplace(identity, attempt);
++    gms_transactions_.emplace(request.transaction_id(), identity);
++  }
++  auto response = Reply(request);
++  try {
++    auto endpoint = ConnectGmsEndpoint(operation);
++    v1::NativeSessionReply reply;
++    std::vector<FileDescriptor> descriptors;
++    try {
++      auto session = gpu_engine_->LoadGms(operation, source.get(), endpoint.get());
++      if (!ReceiveFrame(session.get(), reply, descriptors) || !descriptors.empty())
++        throw std::runtime_error("GMS GPU reply missing or carried unexpected descriptors");
++    } catch (...) {
++      // Reap the GPU worker before releasing the pinned artifact admission.
++      // A lost reply alone cannot prove outstanding DMA stopped.
++      gpu_engine_->Stop();
++      throw;
++    }
++    if (reply.has_failure())
++      *response.mutable_failure() = reply.failure();
++    else
++      response.mutable_gms_weights_loaded()->set_report(reply.report());
++  } catch (const std::exception& error) {
++    response = Fail(request, Failure::STORAGE_ERROR, error.what());
++  }
++  {
++    std::lock_guard lock(gms_mutex_);
++    attempt->response = response;
++    attempt->complete = true;
++  }
++  attempt->changed.notify_all();
++  return response;
++}
++
+ Response
+ Broker::Restore(const Request& request)
+ {
+diff --git a/agent/pagebroker/broker.hpp b/agent/pagebroker/broker.hpp
+index f9dbe915..b70ef993 100644
+--- a/agent/pagebroker/broker.hpp
++++ b/agent/pagebroker/broker.hpp
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <chrono>
++#include <condition_variable>
+ #include <deque>
+ #include <exception>
+ #include <memory>
+@@ -50,6 +51,7 @@ class Broker {
+       const Request& request, Transaction& transaction, const Path& staging_directory, const std::exception& error);
+   Response Restore(const Request& request);
+   Response DirectRestore(const Request& request);
++  Response LoadGms(const Request& request);
+   Response StageRestore(const Request& request, const StorageBackend& source, const TransferEngine& engine);
+   Response PrepareCheckpoint(const Request& request);
+   Response StageCheckpoint(const Request& request, const StorageBackend& destination, const TransferEngine& engine);
+@@ -68,5 +70,18 @@ class Broker {
+   std::mutex terminal_transactions_mutex_;
+   std::deque<TerminalTransaction> terminal_transactions_;
+   uintmax_t reserved_staging_bytes_ = 0;
++  // A V1 RW handshake clears an allocation epoch. Keep a one-shot ledger for
++  // each server incarnation, including failures/uncertain commits. Unlike the
++  // ordinary transaction cache this is never evicted to permit a retry.
++  struct GmsAttempt {
++    std::string binding;
++    std::string transaction;
++    bool complete = false;
++    Response response;
++    std::condition_variable changed;
++  };
++  std::mutex gms_mutex_;
++  std::unordered_map<std::string, std::shared_ptr<GmsAttempt>> gms_attempts_;
++  std::unordered_map<std::string, std::string> gms_transactions_;
+ };
+ }  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/daemon.cpp b/agent/pagebroker/daemon.cpp
+index 09142c1b..74eda0fc 100644
+--- a/agent/pagebroker/daemon.cpp
++++ b/agent/pagebroker/daemon.cpp
+@@ -178,6 +178,8 @@ const char*
+ CommandName(Request::CommandCase command)
+ {
+   switch (command) {
++    case Request::kLoadGmsWeights:
++      return "load_gms_weights";
+     case Request::kStagedRestore:
+       return "staged_restore";
+     case Request::kPrepareStagedCheckpoint:
+@@ -195,6 +197,8 @@ const char*
+ ResultName(const Response& response)
+ {
+   switch (response.result_case()) {
++    case Response::kGmsWeightsLoaded:
++      return "gms_weights_loaded";
+     case Response::kStagedRestoreDirectory:
+       return "staged_restore";
+     case Response::kStagedCheckpointDirectory:
+diff --git a/agent/pagebroker/fair_transfer_mutex.hpp b/agent/pagebroker/fair_transfer_mutex.hpp
+new file mode 100644
+index 00000000..b9b6aecc
+--- /dev/null
++++ b/agent/pagebroker/fair_transfer_mutex.hpp
+@@ -0,0 +1,39 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include <condition_variable>
++#include <cstdint>
++#include <mutex>
++
++namespace snapshot::pagebroker {
++// A rank releases its ring after every shard. FIFO admission prevents the next
++// shard from overtaking a native residual transfer already waiting for the GPU.
++class FairTransferMutex {
++ public:
++  void lock() {
++    std::unique_lock lock(mutex_);
++    const auto ticket = next_++;
++    changed_.wait(lock, [&] { return ticket == serving_; });
++    held_ = true;
++  }
++  void unlock() {
++    {
++      std::lock_guard lock(mutex_);
++      held_ = false;
++      ++serving_;
++    }
++    changed_.notify_all();
++  }
++  size_t waiters() {
++    std::lock_guard lock(mutex_);
++    return next_ - serving_ - (held_ ? 1 : 0);
++  }
++ private:
++  std::mutex mutex_;
++  std::condition_variable changed_;
++  uint64_t next_ = 0;
++  uint64_t serving_ = 0;
++  bool held_ = false;
++};
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/fair_transfer_mutex_test.cpp b/agent/pagebroker/fair_transfer_mutex_test.cpp
+new file mode 100644
+index 00000000..d4edce73
+--- /dev/null
++++ b/agent/pagebroker/fair_transfer_mutex_test.cpp
+@@ -0,0 +1,39 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "fair_transfer_mutex.hpp"
++#include <gtest/gtest.h>
++#include <chrono>
++#include <future>
++#include <thread>
++#include <vector>
++
++namespace snapshot::pagebroker {
++TEST(FairTransferMutexTest, NextShardCannotOvertakeQueuedNativeTransfer) {
++  FairTransferMutex ring;
++  std::vector<int> order;
++  ring.lock();  // The current GMS shard is transferring.
++  auto native = std::async(std::launch::async, [&] {
++    std::lock_guard lease(ring);
++    order.push_back(1);
++  });
++  auto await_waiters = [&](size_t count) {
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
++    while (ring.waiters() != count && std::chrono::steady_clock::now() < deadline)
++      std::this_thread::yield();
++    return ring.waiters() == count;
++  };
++  const bool native_queued = await_waiters(1);
++  auto next_shard = std::async(std::launch::async, [&] {
++    std::lock_guard lease(ring);
++    order.push_back(2);
++  });
++  const bool both_queued = await_waiters(2);
++  ring.unlock();
++  native.get();
++  next_shard.get();
++  EXPECT_TRUE(native_queued);
++  EXPECT_TRUE(both_queued);
++  EXPECT_EQ(order, (std::vector<int>{1, 2}));
++  EXPECT_EQ(ring.waiters(), 0U);
++}
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/fake_gms_gpu_engine.cpp b/agent/pagebroker/fake_gms_gpu_engine.cpp
+new file mode 100644
+index 00000000..97184374
+--- /dev/null
++++ b/agent/pagebroker/fake_gms_gpu_engine.cpp
+@@ -0,0 +1,40 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++
++// Test-only engine: exercise the broker's FD admission and one-shot ledger
++// without CUDA or a real destructive GMS RW lease.
++#include "fd_transport.hpp"
++#include "gpu_engine.pb.h"
++
++#include <chrono>
++#include <filesystem>
++#include <fstream>
++#include <thread>
++
++using namespace snapshot::pagebroker;
++
++int main() {
++  v1::NativeSessionReply ready;
++  ready.set_report("fake-gms-ready");
++  SendFrame(3, ready);
++  internal::NativeBinding binding;
++  std::vector<FileDescriptor> descriptors;
++  while (ReceiveFrame(3, binding, descriptors)) {
++    if (!binding.has_gms_load() || descriptors.size() != 3) return 2;
++    std::thread([rights = std::move(descriptors)] {
++      const std::filesystem::path root("/proc/self/fd/" + std::to_string(rights[1].get()));
++      std::ofstream(root / "gms-calls", std::ios::app) << "admitted\n";
++      while (std::filesystem::exists(root / "hold-gms"))
++        std::this_thread::sleep_for(std::chrono::milliseconds(1));
++      v1::NativeSessionReply reply;
++      if (std::filesystem::exists(root / "fail-gms")) {
++        reply.mutable_failure()->set_code(v1::Failure::STORAGE_ERROR);
++        reply.mutable_failure()->set_message("injected GMS load failure");
++      } else {
++        reply.set_report("{\"published\":true}");
++      }
++      SendFrame(rights[0].get(), reply);
++    }).detach();
++    descriptors.clear();
++  }
++}
+diff --git a/agent/pagebroker/fake_gpu_engine.cpp b/agent/pagebroker/fake_gpu_engine.cpp
+index ee448921..dfcab89a 100644
+--- a/agent/pagebroker/fake_gpu_engine.cpp
++++ b/agent/pagebroker/fake_gpu_engine.cpp
+@@ -16,6 +16,21 @@ int main() {
+   internal::NativeBinding binding;
+   std::vector<FileDescriptor> descriptors;
+   while (ReceiveFrame(3, binding, descriptors)) {
++    if (binding.has_gms_load()) {
++      if (descriptors.size() != 3 || binding.has_binding() || binding.host_pid() || binding.has_load_manifest()) return 1;
++      std::thread([binding, connection = std::move(descriptors[0]), directory = std::move(descriptors[1]), gms = std::move(descriptors[2])]() {
++        const std::filesystem::path path("/proc/self/fd/" + std::to_string(directory.get()));
++        std::ofstream(path / "gms-rank") << binding.gms_load().rank();
++        const char marker[] = "gms-fd-probe";
++        if (write(gms.get(), marker, sizeof(marker)) != sizeof(marker)) return;
++        v1::NativeSessionReply reply;
++        reply.set_report("gms-loaded");
++        SendFrame(connection.get(), reply);
++      }).detach();
++      descriptors.clear();
++      continue;
++    }
++    if (descriptors.size() != 2 || !binding.has_binding()) return 1;
+     std::thread([binding, connection = std::move(descriptors[0]), directory = std::move(descriptors[1])]() {
+       const std::filesystem::path path("/proc/self/fd/" + std::to_string(directory.get()));
+       std::ofstream(path / "engine-pid") << getpid();
+diff --git a/agent/pagebroker/fd_transport.hpp b/agent/pagebroker/fd_transport.hpp
+index 73656050..a8ddb83a 100644
+--- a/agent/pagebroker/fd_transport.hpp
++++ b/agent/pagebroker/fd_transport.hpp
+@@ -8,7 +8,8 @@
+ #include "file_descriptor.hpp"
+ 
+ namespace snapshot::pagebroker {
+-constexpr size_t kFrameDescriptorLimit = 2;
++// Native admission still requires exactly two; GMS admission requires three.
++constexpr size_t kFrameDescriptorLimit = 3;
+ constexpr size_t kFrameSizeLimit = 64 << 10;
+ 
+ // All rights accompany the first bytes of the network-order length prefix.
+diff --git a/agent/pagebroker/gms_admission.cpp b/agent/pagebroker/gms_admission.cpp
+new file mode 100644
+index 00000000..612df9fe
+--- /dev/null
++++ b/agent/pagebroker/gms_admission.cpp
+@@ -0,0 +1,147 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_admission.hpp"
++
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/un.h>
++#include <unistd.h>
++#include <google/protobuf/struct.pb.h>
++#include <google/protobuf/util/json_util.h>
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <filesystem>
++#include <map>
++#include <set>
++#include <stdexcept>
++#include <system_error>
++#include <tuple>
++#include <vector>
++#include "integrity/content_digest.hpp"
++
++namespace snapshot::pagebroker {
++namespace {
++using Object = google::protobuf::Struct;
++using Value = google::protobuf::Value;
++using Record = std::tuple<std::string, uint64_t, std::string, uint64_t>;
++
++void Require(bool condition, const char* message) {
++  if (!condition) throw std::invalid_argument(message);
++}
++bool Text(const std::string& s) {
++  return !s.empty() && s.size() <= 256 && s.find('\0') == std::string::npos;
++}
++const Value& Field(const Object& o, const char* name) {
++  auto it = o.fields().find(name);
++  Require(it != o.fields().end(), "GMS manifest missing field");
++  return it->second;
++}
++uint64_t Integer(const Value& v) {
++  Require(v.kind_case() == Value::kNumberValue && std::isfinite(v.number_value()) &&
++          v.number_value() >= 0 && v.number_value() < 9007199254740992.0 &&
++          std::floor(v.number_value()) == v.number_value(), "GMS manifest invalid integer");
++  return static_cast<uint64_t>(v.number_value());
++}
++std::string String(const Value& v) {
++  Require(v.kind_case() == Value::kStringValue, "GMS manifest invalid string");
++  return v.string_value();
++}
++}
++
++void ValidateGmsArtifact(const v1::LoadGmsWeightsRequest& r, int directory) {
++  Require(Text(r.capture_id()) && Text(r.generation()) && Text(r.destination_uuid()) &&
++          Text(r.expected_server_nonce()), "GMS identity fields are required");
++  Require(r.rank() < 1024 && r.timeout_seconds() > 0 && r.timeout_seconds() <= 240,
++          "GMS rank or deadline is invalid");
++  Require(r.allocations_size() > 0 && r.allocations_size() <= 1024,
++          "GMS allocation count is invalid");
++  Require(cuda_checkpoint_storage::IsSHA256Hex(r.manifest_sha256()), "GMS manifest digest is required");
++  const auto& socket = r.socket_path();
++  Require(!socket.empty() && socket.front() == '/' && socket.size() < sizeof(sockaddr_un::sun_path) &&
++          socket.find('\0') == std::string::npos && std::filesystem::path(socket).lexically_normal() == socket,
++          "GMS socket must be an absolute normalized path");
++
++  FileDescriptor manifest(openat(directory, "manifest.json", O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
++  if (manifest.get() < 0) throw std::system_error(errno, std::generic_category(), "open GMS manifest");
++  struct stat st{};
++  Require(fstat(manifest.get(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 1048576,
++          "GMS manifest must be a small regular file");
++  std::string bytes(static_cast<size_t>(st.st_size), '\0');
++  size_t offset = 0;
++  while (offset < bytes.size()) {
++    const auto n = read(manifest.get(), bytes.data() + offset, bytes.size() - offset);
++    if (n < 0 && errno == EINTR) continue;
++    Require(n > 0, "GMS manifest truncated");
++    offset += n;
++  }
++  char trailing;
++  Require(read(manifest.get(), &trailing, 1) == 0, "GMS manifest changed during admission");
++  cuda_checkpoint_storage::ContentDigest digest;
++  std::string actual, error;
++  if (!digest.Update(bytes.data(), bytes.size(), &error) || !digest.Finalize(&actual, &error))
++    throw std::runtime_error(error);
++  Require(actual == r.manifest_sha256(), "GMS manifest digest mismatch");
++  Object json;
++  Require(google::protobuf::util::JsonStringToMessage(bytes, &json).ok(), "GMS manifest invalid JSON");
++  Require(json.fields_size() == 2 && Integer(Field(json, "version")) == 1, "GMS manifest version invalid");
++  const auto& allocations = Field(json, "allocations");
++  Require(allocations.kind_case() == Value::kListValue, "GMS manifest allocations must be a list");
++  std::vector<Record> saved, requested;
++  for (const auto& v : allocations.list_value().values()) {
++    Require(v.kind_case() == Value::kStructValue && v.struct_value().fields_size() == 4,
++            "GMS manifest allocation fields invalid");
++    const auto& a = v.struct_value();
++    saved.emplace_back(String(Field(a, "allocation_id")), Integer(Field(a, "aligned_size")),
++                       String(Field(a, "shard")), Integer(Field(a, "offset")));
++  }
++  std::set<std::string> ids;
++  std::map<std::string, std::vector<std::pair<uint64_t, uint64_t>>> shards;
++  for (const auto& a : r.allocations()) {
++    Require(Text(a.allocation_id()) && ids.insert(a.allocation_id()).second, "GMS allocation ID duplicate or invalid");
++    const std::filesystem::path path(a.shard());
++    Require(path.parent_path() == "shards" && path.filename() != "." && path.filename() != ".." &&
++            Text(path.filename().string()) && a.shard().find('\\') == std::string::npos,
++            "GMS shard must be a direct child of shards");
++    Require(a.aligned_size() > 0 && a.aligned_size() < (uint64_t{1} << 53) &&
++            a.offset() < (uint64_t{1} << 53) && a.aligned_size() % 4096 == 0 && a.offset() % 4096 == 0,
++            "GMS extent size or alignment is invalid");
++    requested.emplace_back(a.allocation_id(), a.aligned_size(), a.shard(), a.offset());
++    shards[a.shard()].emplace_back(a.offset(), a.aligned_size());
++  }
++  std::sort(saved.begin(), saved.end());
++  std::sort(requested.begin(), requested.end());
++  Require(saved == requested, "GMS requested allocations differ from captured manifest");
++  FileDescriptor shard_directory(openat(directory, "shards", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
++  Require(shard_directory.get() >= 0, "GMS shards directory unavailable");
++  for (auto& [name, extents] : shards) {
++    std::sort(extents.begin(), extents.end());
++    uint64_t end = 0;
++    for (auto [start, size] : extents) {
++      Require(start == end, "GMS shard extents must be contiguous and non-overlapping");
++      end += size;
++    }
++    FileDescriptor file(openat(shard_directory.get(), std::filesystem::path(name).filename().c_str(),
++                               O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
++    Require(file.get() >= 0 && fstat(file.get(), &st) == 0 && S_ISREG(st.st_mode) &&
++            st.st_size >= 0 && static_cast<uint64_t>(st.st_size) == end, "GMS shard size mismatch");
++  }
++}
++
++FileDescriptor ConnectGmsEndpoint(const v1::LoadGmsWeightsRequest& r) {
++  FileDescriptor fd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
++  if (fd.get() < 0) throw std::system_error(errno, std::generic_category(), "create GMS connection");
++  timeval deadline{static_cast<time_t>(r.timeout_seconds()), 0};
++  if (setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &deadline, sizeof(deadline)) < 0 ||
++      setsockopt(fd.get(), SOL_SOCKET, SO_SNDTIMEO, &deadline, sizeof(deadline)) < 0)
++    throw std::system_error(errno, std::generic_category(), "set GMS connection deadline");
++  sockaddr_un address{};
++  address.sun_family = AF_UNIX;
++  Require(r.socket_path().size() < sizeof(address.sun_path), "GMS socket path too long");
++  std::memcpy(address.sun_path, r.socket_path().c_str(), r.socket_path().size() + 1);
++  if (connect(fd.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0)
++    throw std::system_error(errno, std::generic_category(), "connect GMS endpoint");
++  return fd;
++}
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_admission.hpp b/agent/pagebroker/gms_admission.hpp
+new file mode 100644
+index 00000000..3c1d35b3
+--- /dev/null
++++ b/agent/pagebroker/gms_admission.hpp
+@@ -0,0 +1,14 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include "file_descriptor.hpp"
++#include "v1/pagebroker.pb.h"
++
++namespace snapshot::pagebroker {
++// Metadata only: verify the immutable manifest and every payload extent before
++// acquiring the destructive V1 RW lease. The artifact directory is already
++// pinned beneath the broker's configured storage root.
++void ValidateGmsArtifact(const v1::LoadGmsWeightsRequest& request, int directory);
++FileDescriptor ConnectGmsEndpoint(const v1::LoadGmsWeightsRequest& request);
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_admission_test.cpp b/agent/pagebroker/gms_admission_test.cpp
+new file mode 100644
+index 00000000..686040da
+--- /dev/null
++++ b/agent/pagebroker/gms_admission_test.cpp
+@@ -0,0 +1,327 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++
++#include "broker.hpp"
++#include "gms_admission.hpp"
++#include "integrity/content_digest.hpp"
++
++#include <gtest/gtest.h>
++#include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <future>
++#include <sstream>
++#include <thread>
++
++namespace snapshot::pagebroker {
++namespace {
++namespace fs = std::filesystem;
++
++class GmsAdmissionTest : public ::testing::Test {
++ protected:
++  void SetUp() override {
++    char path[] = "/tmp/pb-gms-admit-XXXXXX";
++    ASSERT_NE(mkdtemp(path), nullptr);
++    root_ = path;
++    artifact_ = root_ / "storage" / "artifact";
++    fs::create_directories(artifact_ / "shards");
++    std::ofstream(artifact_ / "shards" / "weights.bin") << std::string(12288, 'w');
++    request_.set_capture_id("capture-A");
++    request_.set_generation("restore-generation-A");
++    request_.set_rank(1);
++    request_.set_destination_uuid("GPU-10000000-0000-0000-0000-000000000001");
++    request_.set_expected_server_nonce("server-incarnation-A");
++    request_.set_socket_path((root_ / "gms.sock").string());
++    request_.set_artifact_directory(artifact_.string());
++    request_.set_timeout_seconds(5);
++    auto* a = request_.add_allocations();
++    a->set_allocation_id("captured-allocation-a");
++    a->set_aligned_size(4096);
++    a->set_shard("shards/weights.bin");
++    a = request_.add_allocations();
++    a->set_allocation_id("captured-allocation-b");
++    a->set_aligned_size(8192);
++    a->set_offset(4096);
++    a->set_shard("shards/weights.bin");
++    SaveMatchingManifest();
++    directory_ = FileDescriptor(open(artifact_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
++    ASSERT_GE(directory_.get(), 0);
++  }
++
++  void TearDown() override { fs::remove_all(root_); }
++
++  void SaveManifest(const std::string& bytes) {
++    std::ofstream(artifact_ / "manifest.json", std::ios::trunc) << bytes;
++    cuda_checkpoint_storage::ContentDigest hash;
++    std::string digest, error;
++    ASSERT_TRUE(hash.Update(bytes.data(), bytes.size(), &error)) << error;
++    ASSERT_TRUE(hash.Finalize(&digest, &error)) << error;
++    request_.set_manifest_sha256(digest);
++  }
++
++  void SaveMatchingManifest() {
++    std::ostringstream manifest;
++    manifest << "{\"version\":1,\"allocations\":[";
++    for (int i = 0; i < request_.allocations_size(); ++i) {
++      const auto& a = request_.allocations(i);
++      if (i) manifest << ',';
++      manifest << "{\"allocation_id\":\"" << a.allocation_id()
++               << "\",\"aligned_size\":" << a.aligned_size()
++               << ",\"shard\":\"" << a.shard() << "\",\"offset\":" << a.offset() << '}';
++    }
++    manifest << "]}";
++    SaveManifest(manifest.str());
++  }
++
++  void ExpectRejected(const v1::LoadGmsWeightsRequest& request, const std::string& reason) {
++    try {
++      ValidateGmsArtifact(request, directory_.get());
++      FAIL() << "invalid artifact was accepted";
++    } catch (const std::exception& error) {
++      EXPECT_NE(std::string(error.what()).find(reason), std::string::npos) << error.what();
++    }
++  }
++
++  Request Envelope(std::string id = "load-1", std::string transaction = "transaction-1") {
++    Request r;
++    r.set_request_id(std::move(id));
++    r.set_transaction_id(std::move(transaction));
++    *r.mutable_load_gms_weights() = request_;
++    return r;
++  }
++
++  void Listen() {
++    listener_ = FileDescriptor(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
++    ASSERT_GE(listener_.get(), 0);
++    sockaddr_un address{};
++    address.sun_family = AF_UNIX;
++    std::memcpy(address.sun_path, request_.socket_path().c_str(), request_.socket_path().size() + 1);
++    ASSERT_EQ(bind(listener_.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)), 0);
++    ASSERT_EQ(listen(listener_.get(), 16), 0);
++  }
++
++  bool WaitForAdmission() {
++    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
++    while (std::chrono::steady_clock::now() < deadline) {
++      if (Calls() != 0) return true;
++      std::this_thread::sleep_for(std::chrono::milliseconds(1));
++    }
++    return false;
++  }
++
++  size_t Calls() {
++    std::ifstream file(artifact_ / "gms-calls");
++    size_t count = 0;
++    std::string line;
++    while (std::getline(file, line)) ++count;
++    return count;
++  }
++
++  fs::path root_, artifact_;
++  FileDescriptor directory_{-1}, listener_{-1};
++  v1::LoadGmsWeightsRequest request_;
++};
++
++TEST_F(GmsAdmissionTest, AcceptsExactCapturedAllocationsRegardlessOfRequestOrder) {
++  EXPECT_NO_THROW(ValidateGmsArtifact(request_, directory_.get()));
++  request_.mutable_allocations()->SwapElements(0, 1);
++  EXPECT_NO_THROW(ValidateGmsArtifact(request_, directory_.get()));
++}
++
++TEST_F(GmsAdmissionTest, RejectsCorruptManifestDigestBeforeOpeningPayloads) {
++  fs::remove_all(artifact_ / "shards");
++  std::ofstream(artifact_ / "manifest.json", std::ios::app) << ' ';
++  ExpectRejected(request_, "digest mismatch");
++}
++
++TEST_F(GmsAdmissionTest, RejectsEquivalentSizesWithWrongAllocationIdentity) {
++  request_.mutable_allocations(0)->set_allocation_id("unrelated-capture-allocation");
++  ExpectRejected(request_, "differ from captured manifest");
++}
++
++TEST_F(GmsAdmissionTest, RejectsWrongAllocationSizesOrOffsets) {
++  auto changed = request_;
++  changed.mutable_allocations(0)->set_aligned_size(8192);
++  ExpectRejected(changed, "differ from captured manifest");
++  changed = request_;
++  changed.mutable_allocations(1)->set_offset(8192);
++  ExpectRejected(changed, "differ from captured manifest");
++}
++
++TEST_F(GmsAdmissionTest, RejectsEmptyOrUnalignedAllocationExtents) {
++  for (uint64_t size : {0ULL, 4095ULL}) {
++    auto changed = request_;
++    changed.mutable_allocations(0)->set_aligned_size(size);
++    ExpectRejected(changed, "size or alignment");
++  }
++  auto changed = request_;
++  changed.mutable_allocations(1)->set_offset(4097);
++  ExpectRejected(changed, "size or alignment");
++}
++
++TEST_F(GmsAdmissionTest, RejectsTruncatedAndOversizedShards) {
++  fs::resize_file(artifact_ / "shards" / "weights.bin", 12287);
++  ExpectRejected(request_, "shard size mismatch");
++  fs::resize_file(artifact_ / "shards" / "weights.bin", 12289);
++  ExpectRejected(request_, "shard size mismatch");
++}
++
++TEST_F(GmsAdmissionTest, RejectsDuplicateIdsHolesAndOverlapsEvenWithMatchingManifest) {
++  const auto original = request_;
++  request_.mutable_allocations(1)->set_allocation_id(request_.allocations(0).allocation_id());
++  SaveMatchingManifest();
++  ExpectRejected(request_, "ID duplicate");
++  for (uint64_t offset : {0ULL, 8192ULL}) {
++    request_ = original;
++    request_.mutable_allocations(1)->set_offset(offset);
++    SaveMatchingManifest();
++    ExpectRejected(request_, "contiguous and non-overlapping");
++  }
++}
++
++TEST_F(GmsAdmissionTest, RejectsTraversalAndAbsoluteShardPaths) {
++  for (const auto* path : {"../weights.bin", "/tmp/weights.bin", "shards/../weights.bin", "shards/sub/weights.bin"}) {
++    SCOPED_TRACE(path);
++    auto changed = request_;
++    changed.mutable_allocations(0)->set_shard(path);
++    ExpectRejected(changed, "direct child of shards");
++  }
++}
++
++TEST_F(GmsAdmissionTest, RejectsSymlinkedManifestShardAndShardDirectory) {
++  fs::rename(artifact_ / "manifest.json", artifact_ / "manifest-real.json");
++  fs::create_symlink("manifest-real.json", artifact_ / "manifest.json");
++  ExpectRejected(request_, "open GMS manifest");
++  fs::remove(artifact_ / "manifest.json");
++  fs::rename(artifact_ / "manifest-real.json", artifact_ / "manifest.json");
++  fs::rename(artifact_ / "shards" / "weights.bin", artifact_ / "weights-real.bin");
++  fs::create_symlink("../weights-real.bin", artifact_ / "shards" / "weights.bin");
++  ExpectRejected(request_, "shard size mismatch");
++  fs::remove(artifact_ / "shards" / "weights.bin");
++  fs::rename(artifact_ / "weights-real.bin", artifact_ / "shards" / "weights.bin");
++  fs::rename(artifact_ / "shards", artifact_ / "shards-real");
++  fs::create_directory_symlink("shards-real", artifact_ / "shards");
++  ExpectRejected(request_, "shards directory unavailable");
++}
++
++TEST_F(GmsAdmissionTest, RejectsInvalidIdentityDeadlineAndSocketBeforeManifestAccess) {
++  fs::remove(artifact_ / "manifest.json");
++  auto changed = request_;
++  changed.clear_expected_server_nonce();
++  ExpectRejected(changed, "identity fields");
++  changed = request_;
++  changed.set_timeout_seconds(0);
++  ExpectRejected(changed, "deadline");
++  changed = request_;
++  changed.set_socket_path("/tmp/../gms.sock");
++  ExpectRejected(changed, "absolute normalized path");
++}
++
++TEST_F(GmsAdmissionTest, RejectsInvalidManifestSchemaAndUnrepresentableIntegers) {
++  SaveManifest("{\"version\":1,\"allocations\":[],\"unexpected\":true}");
++  ExpectRejected(request_, "version invalid");
++  SaveManifest("{\"version\":1,\"allocations\":[{\"allocation_id\":\"a\",\"aligned_size\":9007199254740992,\"shard\":\"shards/weights.bin\",\"offset\":0}]}");
++  ExpectRejected(request_, "invalid integer");
++}
++
++TEST_F(GmsAdmissionTest, BrokerWithoutGpuRejectsBeforeConnectingToGms) {
++  Broker broker(root_ / "staging", root_ / "storage");
++  const auto response = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(response.has_failure());
++  EXPECT_EQ(response.failure().code(), v1::Failure::INVALID_REQUEST);
++  EXPECT_NE(response.failure().message().find("configured GPU engine"), std::string::npos);
++}
++
++TEST_F(GmsAdmissionTest, BrokerRejectsArtifactOutsideConfiguredRoot) {
++  Broker broker(root_ / "staging", artifact_ / "shards");
++  const auto response = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(response.has_failure());
++  EXPECT_EQ(response.failure().code(), v1::Failure::INVALID_REQUEST);
++  EXPECT_NE(response.failure().message().find("within storage root"), std::string::npos);
++  EXPECT_EQ(Calls(), 0u);
++}
++
++TEST_F(GmsAdmissionTest, BrokerRejectsSymlinkedArtifactDirectory) {
++  fs::create_directory_symlink(artifact_, root_ / "storage" / "alias");
++  request_.set_artifact_directory((root_ / "storage" / "alias").string());
++  Broker broker(root_ / "staging", root_ / "storage");
++  const auto response = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(response.has_failure());
++  EXPECT_EQ(response.failure().code(), v1::Failure::INVALID_REQUEST);
++  EXPECT_NE(response.failure().message().find("contains symlink"), std::string::npos);
++  EXPECT_EQ(Calls(), 0u);
++}
++
++TEST_F(GmsAdmissionTest, BrokerReplaysPublishedResultWithoutSecondGpuAdmission) {
++  Listen();
++  Broker broker(root_ / "staging", root_ / "storage", fs::absolute("build/fake-gms-gpu-engine"));
++  broker.StartGpuEngine();
++  const auto first = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(first.has_gms_weights_loaded()) << first.DebugString();
++  const auto second = broker.HandleRequest(Envelope("load-2"));
++  ASSERT_TRUE(second.has_gms_weights_loaded()) << second.DebugString();
++  EXPECT_EQ(second.request_id(), "load-2");
++  EXPECT_EQ(second.gms_weights_loaded().report(), first.gms_weights_loaded().report());
++  EXPECT_EQ(Calls(), 1u);
++  request_.set_generation("different-generation");
++  const auto changed = broker.HandleRequest(Envelope("load-3"));
++  ASSERT_TRUE(changed.has_failure());
++  EXPECT_EQ(changed.failure().code(), v1::Failure::TRANSACTION_CONFLICT);
++  EXPECT_EQ(Calls(), 1u);
++}
++
++TEST_F(GmsAdmissionTest, BrokerConcurrentDuplicatesWaitForSingleAdmission) {
++  Listen();
++  std::ofstream(artifact_ / "hold-gms") << '1';
++  Broker broker(root_ / "staging", root_ / "storage", fs::absolute("build/fake-gms-gpu-engine"));
++  broker.StartGpuEngine();
++  auto first = std::async(std::launch::async, [&] { return broker.HandleRequest(Envelope()); });
++  const bool admitted = WaitForAdmission();
++  auto second = std::async(std::launch::async, [&] { return broker.HandleRequest(Envelope("load-2")); });
++  const auto second_state = second.wait_for(std::chrono::milliseconds(50));
++  fs::remove(artifact_ / "hold-gms");
++  EXPECT_TRUE(admitted);
++  EXPECT_EQ(second_state, std::future_status::timeout);
++  EXPECT_TRUE(first.get().has_gms_weights_loaded());
++  EXPECT_TRUE(second.get().has_gms_weights_loaded());
++  EXPECT_EQ(Calls(), 1u);
++}
++
++TEST_F(GmsAdmissionTest, BrokerRetainsFailedAdmissionWithoutDestructiveRetry) {
++  Listen();
++  std::ofstream(artifact_ / "fail-gms") << '1';
++  Broker broker(root_ / "staging", root_ / "storage", fs::absolute("build/fake-gms-gpu-engine"));
++  broker.StartGpuEngine();
++  const auto first = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(first.has_failure());
++  fs::remove(artifact_ / "fail-gms");
++  const auto retry = broker.HandleRequest(Envelope("retry"));
++  ASSERT_TRUE(retry.has_failure());
++  EXPECT_EQ(retry.failure().message(), first.failure().message());
++  EXPECT_EQ(Calls(), 1u);
++  const auto different_transaction = broker.HandleRequest(Envelope("other", "transaction-2"));
++  ASSERT_TRUE(different_transaction.has_failure());
++  EXPECT_EQ(different_transaction.failure().code(), v1::Failure::TRANSACTION_CONFLICT);
++  EXPECT_EQ(Calls(), 1u);
++}
++
++TEST_F(GmsAdmissionTest, BrokerConnectionFailureIsStickyEvenIfEndpointAppears) {
++  Broker broker(root_ / "staging", root_ / "storage", fs::absolute("build/fake-gms-gpu-engine"));
++  broker.StartGpuEngine();
++  const auto first = broker.HandleRequest(Envelope());
++  ASSERT_TRUE(first.has_failure());
++  EXPECT_NE(first.failure().message().find("connect GMS endpoint"), std::string::npos);
++  Listen();
++  const auto retry = broker.HandleRequest(Envelope("retry"));
++  ASSERT_TRUE(retry.has_failure());
++  EXPECT_EQ(retry.failure().message(), first.failure().message());
++  EXPECT_EQ(Calls(), 0u);
++}
++}  // namespace
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_load_layout.cpp b/agent/pagebroker/gms_load_layout.cpp
+new file mode 100644
+index 00000000..c4e39e98
+--- /dev/null
++++ b/agent/pagebroker/gms_load_layout.cpp
+@@ -0,0 +1,82 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_load_layout.hpp"
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <algorithm>
++#include <limits>
++#include <stdexcept>
++
++namespace snapshot::pagebroker {
++namespace {
++void Require(bool ok, const char* message) {
++  if (!ok) throw std::runtime_error(message);
++}
++FileDescriptor OpenShard(int directory, const std::string& path) {
++  Require(!path.empty() && path.front() != '/' && path.find('\0') == std::string::npos,
++          "GMS shard must be a relative path");
++  FileDescriptor parent(fcntl(directory, F_DUPFD_CLOEXEC, 0));
++  Require(parent.get() >= 0, "duplicate GMS artifact directory");
++  size_t begin = 0;
++  while (true) {
++    const size_t end = path.find('/', begin);
++    const std::string component = path.substr(begin, end - begin);
++    Require(!component.empty() && component != "." && component != "..", "unsafe GMS shard path");
++    const bool last = end == std::string::npos;
++    FileDescriptor next(openat(parent.get(), component.c_str(), O_CLOEXEC | O_NOFOLLOW |
++                               (last ? O_RDONLY | O_DIRECT : O_RDONLY | O_DIRECTORY)));
++    Require(next.get() >= 0, "open pinned GMS shard without symlinks");
++    if (last) return next;
++    parent = std::move(next);
++    begin = end + 1;
++  }
++}
++
++}  // namespace
++std::vector<GmsShardSource> ValidateGmsSources(
++    const v1::LoadGmsWeightsRequest& request, int directory, size_t granularity,
++    std::map<std::string, uint64_t>* expected, size_t* bytes) {
++  Require(granularity > 0, "invalid GMS allocation granularity");
++  Require(!request.capture_id().empty() && !request.generation().empty() &&
++          !request.expected_server_nonce().empty() && request.allocations_size() > 0,
++          "GMS load requires capture, generation, server incarnation and allocations");
++  std::map<std::string, std::vector<const v1::GmsAllocation*>> groups;
++  *bytes = 0;
++  for (const auto& allocation : request.allocations()) {
++    Require(!allocation.allocation_id().empty() && allocation.aligned_size() > 0 &&
++            allocation.aligned_size() % granularity == 0 && allocation.offset() % granularity == 0,
++            "invalid GMS allocation ID, size or alignment");
++    Require(expected->emplace(allocation.allocation_id(), allocation.aligned_size()).second,
++            "duplicate GMS allocation ID");
++    Require(allocation.aligned_size() <= std::numeric_limits<size_t>::max() - *bytes,
++            "GMS byte count overflows");
++    *bytes += allocation.aligned_size();
++    groups[allocation.shard()].push_back(&allocation);
++  }
++  std::vector<GmsShardSource> shards;
++  for (auto& [path, allocations] : groups) {
++    std::sort(allocations.begin(), allocations.end(), [](const auto* a, const auto* b) {
++      return a->offset() < b->offset();
++    });
++    size_t size = 0;
++    for (const auto* allocation : allocations) {
++      Require(allocation->offset() == size && allocation->aligned_size() <=
++              std::numeric_limits<size_t>::max() - size, "GMS shard extents must cover the file contiguously");
++      size += allocation->aligned_size();
++    }
++    GmsShardSource shard{OpenShard(directory, path), {}, 0, {}};
++    struct stat info{};
++    Require(!fstat(shard.file.get(), &info) && S_ISREG(info.st_mode) &&
++            info.st_size >= 0 && static_cast<uint64_t>(info.st_size) == size,
++            "GMS shard file size does not match allocations");
++    const int flags = fcntl(shard.file.get(), F_GETFL);
++    Require(flags >= 0 && (flags & O_DIRECT), "GMS shard must use O_DIRECT");
++    shard.path = path;
++    shard.size = size;
++    shard.allocations = std::move(allocations);
++    shards.push_back(std::move(shard));
++  }
++  return shards;
++}
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_load_layout.hpp b/agent/pagebroker/gms_load_layout.hpp
+new file mode 100644
+index 00000000..b0f35c16
+--- /dev/null
++++ b/agent/pagebroker/gms_load_layout.hpp
+@@ -0,0 +1,23 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include "file_descriptor.hpp"
++#include "v1/pagebroker.pb.h"
++#include <map>
++#include <string>
++#include <vector>
++
++namespace snapshot::pagebroker {
++struct GmsShardSource {
++  FileDescriptor file;
++  std::string path;
++  size_t size;
++  std::vector<const v1::GmsAllocation*> allocations;
++};
++// Validates the manifest shape and pins every exact O_DIRECT source file before
++// an RW lease can mutate GMS. Allocation pointers borrow the immutable request.
++std::vector<GmsShardSource> ValidateGmsSources(
++    const v1::LoadGmsWeightsRequest&, int directory, size_t granularity,
++    std::map<std::string, uint64_t>* expected, size_t* bytes);
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_load_layout_test.cpp b/agent/pagebroker/gms_load_layout_test.cpp
+new file mode 100644
+index 00000000..11805d69
+--- /dev/null
++++ b/agent/pagebroker/gms_load_layout_test.cpp
+@@ -0,0 +1,99 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_load_layout.hpp"
++#include <gtest/gtest.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <filesystem>
++
++namespace snapshot::pagebroker {
++namespace {
++class GmsLayoutTest : public testing::Test {
++ protected:
++  void SetUp() override {
++    char pattern[] = "/tmp/pagebroker-gms-layout-XXXXXX";
++    auto* made = mkdtemp(pattern);
++    ASSERT_NE(made, nullptr);
++    path = made;
++    std::filesystem::create_directory(path / "shards");
++    directory = FileDescriptor(open(path.c_str(), O_DIRECTORY | O_CLOEXEC));
++    ASSERT_GE(directory.get(), 0);
++    FileDescriptor file(open((path / "shards/data.bin").c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600));
++    ASSERT_GE(file.get(), 0);
++    ASSERT_EQ(ftruncate(file.get(), 8192), 0);
++    request.set_capture_id("capture");
++    request.set_generation("generation");
++    request.set_expected_server_nonce("nonce");
++    // Intentionally reverse manifest order; offset governs the imported VA.
++    Add("second", 4096, 4096);
++    Add("first", 4096, 0);
++  }
++  void TearDown() override { std::filesystem::remove_all(path); }
++  void Add(const std::string& id, uint64_t size, uint64_t offset) {
++    auto* allocation = request.add_allocations();
++    allocation->set_allocation_id(id);
++    allocation->set_aligned_size(size);
++    allocation->set_offset(offset);
++    allocation->set_shard("shards/data.bin");
++  }
++  auto Validate() {
++    std::map<std::string, uint64_t> expected;
++    size_t bytes = 0;
++    return ValidateGmsSources(request, directory.get(), 4096, &expected, &bytes);
++  }
++  std::filesystem::path path;
++  FileDescriptor directory{-1};
++  v1::LoadGmsWeightsRequest request;
++};
++
++TEST_F(GmsLayoutTest, ContiguousAllocationsBecomeOneWholeFileWithDirectIO) {
++  std::map<std::string, uint64_t> expected;
++  size_t bytes = 0;
++  auto sources = ValidateGmsSources(request, directory.get(), 4096, &expected, &bytes);
++  ASSERT_EQ(sources.size(), 1U);
++  EXPECT_EQ(sources[0].size, 8192U);
++  EXPECT_EQ(bytes, 8192U);
++  EXPECT_EQ(expected.size(), 2U);
++  EXPECT_EQ(sources[0].allocations[0]->allocation_id(), "first");
++  EXPECT_EQ(sources[0].allocations[1]->offset(), 4096U);
++  EXPECT_TRUE(fcntl(sources[0].file.get(), F_GETFL) & O_DIRECT);
++}
++TEST_F(GmsLayoutTest, RejectsDuplicateCapturedAllocationID) {
++  request.mutable_allocations(0)->set_allocation_id("first");
++  EXPECT_THROW(Validate(), std::runtime_error);
++}
++TEST_F(GmsLayoutTest, RejectsGapsOverlapsAndUnalignedSizes) {
++  request.mutable_allocations(0)->set_offset(8192);
++  EXPECT_THROW(Validate(), std::runtime_error);
++  request.mutable_allocations(0)->set_offset(0);
++  EXPECT_THROW(Validate(), std::runtime_error);
++  request.mutable_allocations(0)->set_offset(4096);
++  request.mutable_allocations(0)->set_aligned_size(4095);
++  EXPECT_THROW(Validate(), std::runtime_error);
++}
++TEST_F(GmsLayoutTest, RejectsFilesLongerOrShorterThanCapturedExtents) {
++  FileDescriptor file(open((path / "shards/data.bin").c_str(), O_RDWR));
++  ASSERT_EQ(ftruncate(file.get(), 12288), 0);
++  EXPECT_THROW(Validate(), std::runtime_error);
++  ASSERT_EQ(ftruncate(file.get(), 4096), 0);
++  EXPECT_THROW(Validate(), std::runtime_error);
++}
++TEST_F(GmsLayoutTest, RejectsTraversalAndIntermediateSymlinks) {
++  for (const std::string name : {"../data.bin", "/data.bin", "shards//data.bin", "./shards/data.bin"}) {
++    for (auto& allocation : *request.mutable_allocations()) allocation.set_shard(name);
++    EXPECT_THROW(Validate(), std::runtime_error);
++  }
++  std::filesystem::create_directory_symlink(path / "shards", path / "alias");
++  for (auto& allocation : *request.mutable_allocations()) allocation.set_shard("alias/data.bin");
++  EXPECT_THROW(Validate(), std::runtime_error);
++}
++TEST_F(GmsLayoutTest, RejectsFinalSymlinkAndMissingServerIncarnation) {
++  std::filesystem::create_symlink(path / "shards/data.bin", path / "alias.bin");
++  for (auto& allocation : *request.mutable_allocations()) allocation.set_shard("alias.bin");
++  EXPECT_THROW(Validate(), std::runtime_error);
++  for (auto& allocation : *request.mutable_allocations()) allocation.set_shard("shards/data.bin");
++  request.clear_expected_server_nonce();
++  EXPECT_THROW(Validate(), std::runtime_error);
++}
++}  // namespace
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_load_operation.cpp b/agent/pagebroker/gms_load_operation.cpp
+new file mode 100644
+index 00000000..dfdc4120
+--- /dev/null
++++ b/agent/pagebroker/gms_load_operation.cpp
+@@ -0,0 +1,225 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_load_operation.hpp"
++#include "gms_v1_client.hpp"
++#include "gms_load_layout.hpp"
++
++#include <fcntl.h>
++#include <sys/stat.h>
++#include <unistd.h>
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <iostream>
++#include <limits>
++#include <map>
++#include <memory>
++#include <set>
++#include <sstream>
++#include <stdexcept>
++#include <syncstream>
++
++namespace snapshot::pagebroker {
++namespace {
++using Clock = std::chrono::steady_clock;
++void Require(bool ok, const char* message) {
++  if (!ok) throw std::runtime_error(message);
++}
++void Check(CUresult result, const char* operation) {
++  if (result == CUDA_SUCCESS) return;
++  const char* name = nullptr;
++  cuGetErrorName(result, &name);
++  throw std::runtime_error(std::string(operation) + ": " + (name ? name : "unknown CUDA error"));
++}
++void DrainCheck(CUresult result, const char* operation) noexcept {
++  if (result == CUDA_SUCCESS) return;
++  // Never release the V1 lease while imported memory or DMA has an unknown
++  // lifetime. As with native sessions, engine death is the failure boundary.
++  std::fprintf(stderr, "GMS CUDA cleanup failed: %s\n", operation);
++  std::_Exit(1);
++}
++double Seconds(Clock::time_point start) {
++  return std::chrono::duration<double>(Clock::now() - start).count();
++}
++std::string Quote(const std::string& text) {
++  std::string out = "\"";
++  constexpr char hex[] = "0123456789abcdef";
++  for (const unsigned char c : text) {
++    if (c == '\\' || c == '"') { out += '\\'; out += c; }
++    else if (c < 32) { out += "\\u00"; out += hex[c >> 4]; out += hex[c & 15]; }
++    else out += c;
++  }
++  return out + '"';
++}
++class Trace {
++ public:
++  explicit Trace(const v1::LoadGmsWeightsRequest& request) : request_(request) {}
++  void Emit(const char* phase, const std::string& extra = "") const {
++    const auto epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::system_clock::now().time_since_epoch()).count();
++    std::osyncstream(std::cerr) << "{\"event\":\"gms_load_phase\",\"phase\":" << Quote(phase)
++      << ",\"capture_id\":" << Quote(request_.capture_id())
++      << ",\"generation\":" << Quote(request_.generation()) << ",\"rank\":" << request_.rank()
++      << ",\"destination_uuid\":" << Quote(request_.destination_uuid())
++      << ",\"epoch_ns\":" << epoch << ",\"elapsed_seconds\":" << Seconds(start_) << extra << "}\n";
++  }
++  double Elapsed() const { return Seconds(start_); }
++ private:
++  const v1::LoadGmsWeightsRequest& request_;
++  Clock::time_point start_ = Clock::now();
++};
++
++
++struct Reservation {
++  CUdeviceptr base = 0;
++  size_t size = 0;
++  ~Reservation() {
++    if (base) DrainCheck(cuMemAddressFree(base, size), "free shard VA");
++  }
++};
++struct Mapping {
++  CUmemGenericAllocationHandle handle = 0;
++  CUdeviceptr base = 0;
++  size_t size = 0;
++  bool mapped = false;
++  ~Mapping() {
++    if (mapped) DrainCheck(cuMemUnmap(base, size), "unmap GMS allocation");
++    if (handle) DrainCheck(cuMemRelease(handle), "release imported GMS handle");
++  }
++};
++struct Shard : GmsShardSource {
++  explicit Shard(GmsShardSource source) : GmsShardSource(std::move(source)) {}
++  // Destruction order: unmap every handle before freeing the VA reservation.
++  Reservation reservation;
++  std::vector<std::unique_ptr<Mapping>> mappings;
++};
++struct Stream {
++  CUstream value = nullptr;
++  ~Stream() {
++    if (!value) return;
++    DrainCheck(cuStreamSynchronize(value), "drain GMS stream");
++    DrainCheck(cuStreamDestroy(value), "destroy GMS stream");
++  }
++};
++
++
++}  // namespace
++
++std::string LoadGmsWeights(const v1::LoadGmsWeightsRequest& request,
++                           FileDescriptor directory, FileDescriptor socket,
++                           GmsTransferDevice device) {
++  const Trace trace(request);
++  const auto deadline = Clock::now() + std::chrono::seconds(request.timeout_seconds() ? request.timeout_seconds() : 300);
++  auto check_deadline = [&] { Require(Clock::now() < deadline, "GMS load deadline exceeded"); };
++  Require(request.destination_uuid() == device.uuid, "GMS load GPU UUID mismatch");
++  struct stat directory_info{};
++  Require(!fstat(directory.get(), &directory_info) && S_ISDIR(directory_info.st_mode), "GMS source is not a directory");
++  Check(cuCtxSetCurrent(device.context), "set GMS engine context");
++  CUmemAllocationProp properties{};
++  properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
++  properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
++  properties.location.id = device.device;
++  properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
++  size_t granularity = 0;
++  Check(cuMemGetAllocationGranularity(&granularity, &properties, CU_MEM_ALLOC_GRANULARITY_MINIMUM), "get GMS allocation granularity");
++  Require(granularity > 0, "invalid GMS allocation granularity");
++
++  // Construct the lease before mappings and the stream last: every exit drains
++  // CUDA, unmaps imports, and only then closes/aborts the server lease.
++  GmsV1Client client(std::move(socket));
++  std::map<std::string, uint64_t> expected;
++  size_t bytes = 0;
++  auto sources = ValidateGmsSources(request, directory.get(), granularity, &expected, &bytes);
++  std::vector<std::unique_ptr<Shard>> shards;
++  for (auto& source : sources) shards.push_back(std::make_unique<Shard>(std::move(source)));
++  Stream stream;
++  Check(cuStreamCreate(&stream.value, CU_STREAM_NON_BLOCKING), "create GMS stream");
++  trace.Emit("validated", ",\"bytes\":" + std::to_string(bytes) + ",\"shards\":" + std::to_string(shards.size()));
++  check_deadline();
++  trace.Emit("lease_start");
++  client.Handshake(request.destination_uuid(), request.expected_server_nonce());
++  trace.Emit("lease_acquired");
++  trace.Emit("allocation_import_start");
++  for (auto& shard : shards) {
++    shard->reservation.size = shard->size;
++    Check(cuMemAddressReserve(&shard->reservation.base, shard->size, granularity, 0, 0), "reserve GMS shard VA");
++    for (const auto* allocation : shard->allocations) {
++      check_deadline();
++      client.Allocate(allocation->allocation_id(), allocation->aligned_size());
++      auto fd = client.Export(allocation->allocation_id());
++      auto mapping = std::make_unique<Mapping>();
++      mapping->base = shard->reservation.base + allocation->offset();
++      mapping->size = allocation->aligned_size();
++      Check(cuMemImportFromShareableHandle(&mapping->handle, reinterpret_cast<void*>(static_cast<intptr_t>(fd.get())),
++                                         CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR), "import GMS allocation FD");
++      fd = FileDescriptor(-1);
++      CUmemAllocationProp imported{};
++      Check(cuMemGetAllocationPropertiesFromHandle(&imported, mapping->handle), "inspect imported GMS allocation");
++      Require(imported.location.type == CU_MEM_LOCATION_TYPE_DEVICE && imported.location.id == device.device,
++              "imported GMS allocation belongs to another GPU");
++      Check(cuMemMap(mapping->base, mapping->size, 0, mapping->handle, 0), "map GMS allocation");
++      mapping->mapped = true;
++      CUmemAccessDesc access{};
++      access.location = properties.location;
++      access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
++      Check(cuMemSetAccess(mapping->base, mapping->size, &access, 1), "enable GMS write access");
++      shard->mappings.push_back(std::move(mapping));
++    }
++  }
++  trace.Emit("allocation_import_complete");
++  double queue_seconds = 0, transfer_seconds = 0, storage_seconds = 0, cuda_wait_seconds = 0;
++  for (auto& shard : shards) {
++    check_deadline();
++    const std::string fields = ",\"shard\":" + Quote(shard->path) + ",\"bytes\":" + std::to_string(shard->size);
++    trace.Emit("ring_queue_start", fields);
++    const auto queued = Clock::now();
++    {
++      std::lock_guard lease(device.mutex);
++      const double wait = Seconds(queued);
++      queue_seconds += wait;
++      check_deadline();
++      trace.Emit("ring_acquired", fields + ",\"queue_seconds\":" + std::to_string(wait));
++      trace.Emit("read_copy_start", fields + ",\"o_direct\":true");
++      cuda::TransferMetrics metrics;
++      std::string error;
++      // Whole-file reads into adjacent imported allocations preserve the exact
++      // qualified 32-slot NIXL/POSIX/CUDA data path and its drain guarantee.
++      if (!device.buffers.Transfer(shard->file.get(), shard->reservation.base, shard->size, stream.value,
++                                   cuda::TransferOperation::kRestore, &metrics, &error))
++        throw std::runtime_error(error);
++      Require(metrics.bytes == shard->size, "incomplete GMS shard transfer");
++      transfer_seconds += metrics.total_seconds;
++      storage_seconds += metrics.storage_io_seconds;
++      cuda_wait_seconds += metrics.cuda_wait_seconds;
++      trace.Emit("read_copy_complete", fields + ",\"transfer_seconds\":" + std::to_string(metrics.total_seconds) +
++                 ",\"storage_request_service_seconds\":" + std::to_string(metrics.storage_io_seconds) +
++                 ",\"cuda_wait_seconds\":" + std::to_string(metrics.cuda_wait_seconds));
++    }
++  }
++  Check(cuStreamSynchronize(stream.value), "drain GMS copies before publication");
++  trace.Emit("copies_drained");
++  shards.clear();
++  trace.Emit("imports_released");
++  check_deadline();
++  std::map<std::string, uint64_t> actual;
++  for (const auto& allocation : client.ListAllocations())
++    Require(actual.emplace(allocation.allocation_id, allocation.aligned_size).second, "duplicate server GMS allocation ID");
++  Require(actual == expected, "GMS server allocation IDs or sizes differ from the capture");
++  trace.Emit("commit_start");
++  client.Commit();
++  const auto committed_epoch = std::chrono::duration_cast<std::chrono::nanoseconds>(
++      std::chrono::system_clock::now().time_since_epoch()).count();
++  trace.Emit("committed", ",\"bytes\":" + std::to_string(bytes));
++  std::ostringstream report;
++  report << "{\"event\":\"gms_weights_loaded\",\"capture_id\":" << Quote(request.capture_id())
++    << ",\"generation\":" << Quote(request.generation()) << ",\"rank\":" << request.rank()
++    << ",\"destination_uuid\":" << Quote(device.uuid)
++    << ",\"server_nonce\":" << Quote(client.server_nonce())
++    << ",\"manifest_sha256\":" << Quote(request.manifest_sha256())
++    << ",\"committed_epoch_ns\":" << committed_epoch << ",\"bytes\":" << bytes
++    << ",\"allocations\":" << expected.size() << ",\"queue_wait_seconds\":" << queue_seconds
++    << ",\"transfer_seconds\":" << transfer_seconds << ",\"storage_request_service_seconds\":" << storage_seconds
++    << ",\"cuda_wait_seconds\":" << cuda_wait_seconds << ",\"total_seconds\":" << trace.Elapsed() << "}";
++  return report.str();
++}
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_load_operation.hpp b/agent/pagebroker/gms_load_operation.hpp
+new file mode 100644
+index 00000000..4bff4637
+--- /dev/null
++++ b/agent/pagebroker/gms_load_operation.hpp
+@@ -0,0 +1,24 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include "cuda_posix_transfer.hpp"
++#include "fair_transfer_mutex.hpp"
++#include "file_descriptor.hpp"
++#include "v1/pagebroker.pb.h"
++
++namespace snapshot::pagebroker {
++struct GmsTransferDevice {
++  CUdevice device;
++  CUcontext context;
++  const std::string& uuid;
++  cuda::TransferBuffers& buffers;
++  FairTransferMutex& mutex;
++};
++
++// Own the V1 RW lease, imported mappings, native transfers and publication.
++// The CPU broker has validated the immutable artifact and connected endpoint.
++std::string LoadGmsWeights(const v1::LoadGmsWeightsRequest& request,
++                           FileDescriptor directory, FileDescriptor socket,
++                           GmsTransferDevice device);
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_v1_client.cpp b/agent/pagebroker/gms_v1_client.cpp
+new file mode 100644
+index 00000000..23646270
+--- /dev/null
++++ b/agent/pagebroker/gms_v1_client.cpp
+@@ -0,0 +1,336 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_v1_client.hpp"
++
++#include <msgpack.hpp>
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/socket.h>
++#include <unistd.h>
++#include <algorithm>
++#include <array>
++#include <cerrno>
++#include <climits>
++#include <cstring>
++#include <map>
++#include <set>
++#include <stdexcept>
++#include <utility>
++
++namespace snapshot::pagebroker {
++namespace {
++constexpr size_t kMaxFrame = 1U << 20;
++using Clock = std::chrono::steady_clock;
++using Deadline = Clock::time_point;
++using Fields = std::map<std::string, msgpack::object>;
++
++[[noreturn]] void IoError(const char* operation)
++{
++  throw std::runtime_error(std::string("GMS ") + operation + ": " + std::strerror(errno));
++}
++
++void Wait(int fd, short events, Deadline deadline)
++{
++  for (;;) {
++    const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
++    if (remaining <= 0) { throw std::runtime_error("GMS RPC deadline exceeded"); }
++    pollfd descriptor{fd, events, 0};
++    const int result = poll(&descriptor, 1, static_cast<int>(std::min<int64_t>(remaining, INT_MAX)));
++    if (result < 0 && errno == EINTR) { continue; }
++    if (result < 0) { IoError("poll"); }
++    if (result == 0) { continue; }
++    if (descriptor.revents & POLLNVAL) { throw std::runtime_error("GMS invalid socket"); }
++    if (descriptor.revents & (events | POLLERR | POLLHUP)) { return; }
++  }
++}
++
++void Send(int fd, const void* data, size_t length, Deadline deadline)
++{
++  const auto* bytes = static_cast<const char*>(data);
++  while (length) {
++    Wait(fd, POLLOUT, deadline);
++    const auto count = send(fd, bytes, length, MSG_NOSIGNAL | MSG_DONTWAIT);
++    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) { continue; }
++    if (count < 0) { IoError("send"); }
++    if (!count) { throw std::runtime_error("GMS send made no progress"); }
++    bytes += count;
++    length -= count;
++  }
++}
++
++void Receive(int fd, void* data, size_t length, Deadline deadline,
++             std::vector<FileDescriptor>& descriptors)
++{
++  auto* bytes = static_cast<char*>(data);
++  while (length) {
++    Wait(fd, POLLIN, deadline);
++    alignas(cmsghdr) std::array<char, CMSG_SPACE(16 * sizeof(int))> ancillary{};
++    iovec vector{bytes, length};
++    msghdr message{};
++    message.msg_iov = &vector;
++    message.msg_iovlen = 1;
++    message.msg_control = ancillary.data();
++    message.msg_controllen = ancillary.size();
++    const auto count = recvmsg(fd, &message, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
++    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) { continue; }
++    if (count < 0) { IoError("recvmsg"); }
++    // Own all delivered descriptors before checking truncation or multiplicity.
++    // Linux closes descriptors omitted by MSG_CTRUNC; we close those delivered.
++    for (auto* header = CMSG_FIRSTHDR(&message); header; header = CMSG_NXTHDR(&message, header)) {
++      if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS) { continue; }
++      if (header->cmsg_len < CMSG_LEN(0) || (header->cmsg_len - CMSG_LEN(0)) % sizeof(int)) {
++        throw std::runtime_error("GMS malformed descriptor ancillary data");
++      }
++      const size_t size = header->cmsg_len - CMSG_LEN(0);
++      for (size_t offset = 0; offset < size; offset += sizeof(int)) {
++        int received = -1;
++        std::memcpy(&received, CMSG_DATA(header) + offset, sizeof(received));
++        descriptors.emplace_back(received);
++      }
++    }
++    if (message.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) {
++      throw std::runtime_error("GMS truncated ancillary data or payload");
++    }
++    if (descriptors.size() > 1) { throw std::runtime_error("GMS received multiple descriptors"); }
++    if (!count) { throw std::runtime_error("GMS unexpected EOF"); }
++    bytes += count;
++    length -= count;
++  }
++}
++
++std::string String(const msgpack::object& object)
++{
++  if (object.type != msgpack::type::STR) { throw std::runtime_error("GMS expected string field"); }
++  return {object.via.str.ptr, object.via.str.size};
++}
++
++Fields Object(const msgpack::object& object)
++{
++  if (object.type != msgpack::type::MAP) { throw std::runtime_error("GMS expected map"); }
++  Fields result;
++  for (uint32_t i = 0; i < object.via.map.size; ++i) {
++    const auto& entry = object.via.map.ptr[i];
++    if (!result.emplace(String(entry.key), entry.val).second) {
++      throw std::runtime_error("GMS duplicate response field");
++    }
++  }
++  return result;
++}
++
++void Validate(const Fields& fields, std::initializer_list<const char*> required,
++              std::initializer_list<const char*> optional = {})
++{
++  std::set<std::string> allowed;
++  for (const auto* key : required) {
++    allowed.insert(key);
++    if (!fields.contains(key)) { throw std::runtime_error("GMS missing response field"); }
++  }
++  for (const auto* key : optional) { allowed.insert(key); }
++  for (const auto& [key, value] : fields) {
++    (void)value;
++    if (!allowed.contains(key)) { throw std::runtime_error("GMS unknown response field"); }
++  }
++}
++
++void Expected(const Fields& fields, const char* type)
++{
++  const auto found = fields.find("type");
++  if (found == fields.end() || String(found->second) != type) {
++    throw std::runtime_error("GMS unexpected response type");
++  }
++}
++
++template<class Fill>
++std::string Encode(const char* type, uint32_t fields, Fill fill)
++{
++  msgpack::sbuffer buffer;
++  msgpack::packer<msgpack::sbuffer> packer(buffer);
++  packer.pack_map(fields + 1);
++  packer.pack("type");
++  packer.pack(type);
++  fill(packer);
++  return {buffer.data(), buffer.size()};
++}
++
++std::string Encode(const char* type)
++{
++  return Encode(type, 0, [](auto&) {});
++}
++}  // namespace
++
++struct GmsV1Client::Reply {
++  msgpack::object_handle object;
++  FileDescriptor fd{-1};
++  Fields fields;
++};
++
++GmsV1Client::GmsV1Client(FileDescriptor connected_socket, std::chrono::milliseconds rpc_timeout)
++    : socket_(std::move(connected_socket)), timeout_(rpc_timeout)
++{
++  if (socket_.get() < 0 || timeout_.count() <= 0) {
++    throw std::invalid_argument("GMS requires a connected socket and positive RPC timeout");
++  }
++  const int flags = fcntl(socket_.get(), F_GETFD);
++  if (flags < 0 || fcntl(socket_.get(), F_SETFD, flags | FD_CLOEXEC) < 0) { IoError("fcntl"); }
++}
++
++GmsV1Client::~GmsV1Client() noexcept { Close(); }
++
++void GmsV1Client::Close() noexcept
++{
++  socket_ = FileDescriptor(-1);
++  state_ = State::Closed;
++}
++
++void GmsV1Client::Require(State state) const
++{
++  if (failed_ || state_ != state || socket_.get() < 0) {
++    throw std::runtime_error("GMS client is disconnected, failed, or in the wrong lease state");
++  }
++}
++
++GmsV1Client::Reply GmsV1Client::Exchange(const std::string& payload)
++{
++  if (payload.empty() || payload.size() > kMaxFrame) { throw std::runtime_error("GMS invalid request size"); }
++  const auto deadline = Clock::now() + timeout_;
++  uint32_t length = htonl(static_cast<uint32_t>(payload.size()));
++  Send(socket_.get(), &length, sizeof(length), deadline);
++  Send(socket_.get(), payload.data(), payload.size(), deadline);
++  std::vector<FileDescriptor> descriptors;
++  Receive(socket_.get(), &length, sizeof(length), deadline, descriptors);
++  length = ntohl(length);
++  if (!length || length > kMaxFrame) { throw std::runtime_error("GMS invalid response frame size"); }
++  std::string response(length, '\0');
++  Receive(socket_.get(), response.data(), response.size(), deadline, descriptors);
++  Reply reply;
++  size_t offset = 0;
++  try {
++    reply.object = msgpack::unpack(response.data(), response.size(), offset, nullptr, nullptr,
++                                  msgpack::unpack_limit(65536, 16, kMaxFrame, 0, 0, 8));
++  } catch (const std::exception&) {
++    throw std::runtime_error("GMS invalid MessagePack response");
++  }
++  if (offset != response.size()) { throw std::runtime_error("GMS trailing MessagePack data"); }
++  if (!descriptors.empty()) { reply.fd = std::move(descriptors.front()); }
++  reply.fields = Object(reply.object.get());
++  const auto type = reply.fields.find("type");
++  if (type == reply.fields.end()) { throw std::runtime_error("GMS missing response type"); }
++  if (String(type->second) == "error_response") {
++    Validate(reply.fields, {"type", "message"}, {"out_of_memory"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS error response carried descriptor"); }
++    if (reply.fields.contains("out_of_memory") &&
++        reply.fields.at("out_of_memory").type != msgpack::type::BOOLEAN) {
++      throw std::runtime_error("GMS invalid out_of_memory field");
++    }
++    throw std::runtime_error("GMS server error: " + String(reply.fields.at("message")));
++  }
++  return reply;
++}
++
++void GmsV1Client::Handshake(const std::string& expected_uuid, const std::string& expected_nonce)
++{
++  Require(State::New);
++  try {
++    if (expected_uuid.empty()) { throw std::invalid_argument("GMS expected GPU UUID is required"); }
++    auto reply = Exchange(Encode("handshake_request", 2, [&](auto& packer) {
++      packer.pack("lock_type"); packer.pack("rw");
++      packer.pack("expected_identity");
++      if (expected_nonce.empty()) { packer.pack_nil(); }
++      else { packer.pack_array(2); packer.pack(expected_nonce); packer.pack(expected_uuid); }
++    }));
++    Expected(reply.fields, "handshake_response");
++    Validate(reply.fields, {"type", "lock_type", "server_nonce", "gpu_uuid"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS handshake carried descriptor"); }
++    server_nonce_ = String(reply.fields.at("server_nonce"));
++    gpu_uuid_ = String(reply.fields.at("gpu_uuid"));
++    if (String(reply.fields.at("lock_type")) != "rw" || gpu_uuid_ != expected_uuid ||
++        server_nonce_.empty() || (!expected_nonce.empty() && server_nonce_ != expected_nonce)) {
++      throw std::runtime_error("GMS handshake lease, GPU UUID, or server nonce mismatch");
++    }
++    state_ = State::Writer;
++  } catch (...) { failed_ = true; throw; }
++}
++
++void GmsV1Client::Allocate(const std::string& allocation_id, uint64_t aligned_size)
++{
++  Require(State::Writer);
++  try {
++    if (allocation_id.empty() || !aligned_size) { throw std::invalid_argument("GMS allocation ID and size are required"); }
++    auto reply = Exchange(Encode("allocate_request", 2, [&](auto& packer) {
++      packer.pack("allocation_id"); packer.pack(allocation_id);
++      packer.pack("aligned_size"); packer.pack(aligned_size);
++    }));
++    Expected(reply.fields, "success_response");
++    Validate(reply.fields, {"type"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS allocate carried descriptor"); }
++  } catch (...) { failed_ = true; throw; }
++}
++
++FileDescriptor GmsV1Client::Export(const std::string& allocation_id)
++{
++  if (state_ != State::Writer && state_ != State::Reader) { Require(State::Writer); }
++  Require(state_);
++  try {
++    if (allocation_id.empty()) { throw std::invalid_argument("GMS allocation ID is required"); }
++    auto reply = Exchange(Encode("export_request", 1, [&](auto& packer) {
++      packer.pack("allocation_id"); packer.pack(allocation_id);
++    }));
++    Expected(reply.fields, "export_response");
++    Validate(reply.fields, {"type"});
++    if (reply.fd.get() < 0) { throw std::runtime_error("GMS export missing descriptor"); }
++    return std::move(reply.fd);
++  } catch (...) { failed_ = true; throw; }
++}
++
++std::vector<GmsAllocationRecord> GmsV1Client::ListAllocations()
++{
++  if (state_ != State::Writer && state_ != State::Reader) { Require(State::Writer); }
++  Require(state_);
++  try {
++    auto reply = Exchange(Encode("list_allocations_request"));
++    Expected(reply.fields, "list_allocations_response");
++    Validate(reply.fields, {"type", "allocations"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS inventory carried descriptor"); }
++    const auto& array = reply.fields.at("allocations");
++    if (array.type != msgpack::type::ARRAY) { throw std::runtime_error("GMS invalid inventory array"); }
++    std::vector<GmsAllocationRecord> result;
++    std::set<std::string> ids;
++    for (uint32_t i = 0; i < array.via.array.size; ++i) {
++      auto record = Object(array.via.array.ptr[i]);
++      Validate(record, {"allocation_id", "aligned_size"});
++      auto id = String(record.at("allocation_id"));
++      const auto& size = record.at("aligned_size");
++      if (id.empty() || !ids.insert(id).second || size.type != msgpack::type::POSITIVE_INTEGER || !size.via.u64) {
++        throw std::runtime_error("GMS invalid or duplicate allocation record");
++      }
++      result.push_back({std::move(id), size.via.u64});
++    }
++    return result;
++  } catch (...) { failed_ = true; throw; }
++}
++
++void GmsV1Client::Commit()
++{
++  Require(State::Writer);
++  try {
++    auto reply = Exchange(Encode("commit_request"));
++    Expected(reply.fields, "success_response");
++    Validate(reply.fields, {"type"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS commit carried descriptor"); }
++    state_ = State::Reader;
++  } catch (...) { failed_ = true; throw; }
++}
++
++void GmsV1Client::Abort()
++{
++  if (failed_ || state_ != State::Writer) { Close(); return; }
++  try {
++    auto reply = Exchange(Encode("abort_request"));
++    Expected(reply.fields, "success_response");
++    Validate(reply.fields, {"type"});
++    if (reply.fd.get() >= 0) { throw std::runtime_error("GMS abort carried descriptor"); }
++    Close();
++  } catch (...) { failed_ = true; Close(); throw; }
++}
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_v1_client.hpp b/agent/pagebroker/gms_v1_client.hpp
+new file mode 100644
+index 00000000..1b5be04c
+--- /dev/null
++++ b/agent/pagebroker/gms_v1_client.hpp
+@@ -0,0 +1,62 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#pragma once
++
++#include "file_descriptor.hpp"
++#include <chrono>
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace snapshot::pagebroker {
++
++struct GmsAllocationRecord {
++  std::string allocation_id;
++  uint64_t aligned_size;
++  bool operator==(const GmsAllocationRecord&) const = default;
++};
++
++// One exclusive V1 weights lease over an already-connected AF_UNIX stream.
++// No reconnect: acquiring a new RW lease clears the server's allocation epoch.
++// Construct this before GPU mapping resources so their destruction/drain occurs
++// before the socket closes. A failed RPC latches the client unusable, retaining
++// its lease until the caller drains GPU work and calls Close/Abort or destroys it.
++class GmsV1Client {
++ public:
++  explicit GmsV1Client(FileDescriptor connected_socket,
++                       std::chrono::milliseconds rpc_timeout = std::chrono::seconds(30));
++  ~GmsV1Client() noexcept;
++  GmsV1Client(const GmsV1Client&) = delete;
++  GmsV1Client& operator=(const GmsV1Client&) = delete;
++  GmsV1Client(GmsV1Client&&) noexcept = default;
++  GmsV1Client& operator=(GmsV1Client&&) = delete;
++
++  // A nonempty current server nonce fences incarnation/UUID before RW admission.
++  // An empty nonce discovers this new server's identity, then checks its UUID.
++  void Handshake(const std::string& expected_uuid, const std::string& expected_nonce = "");
++  void Allocate(const std::string& allocation_id, uint64_t aligned_size);
++  FileDescriptor Export(const std::string& allocation_id);
++  std::vector<GmsAllocationRecord> ListAllocations();
++  // Caller must synchronize every GPU transfer and drop writable mappings first.
++  void Commit();
++  // Caller must drain/unmap before abort/close. Broken wires are closed without RPC.
++  void Abort();
++  void Close() noexcept;
++  const std::string& server_nonce() const noexcept { return server_nonce_; }
++  const std::string& gpu_uuid() const noexcept { return gpu_uuid_; }
++
++ private:
++  enum class State { New, Writer, Reader, Closed };
++  struct Reply;
++  Reply Exchange(const std::string& payload);
++  void Require(State state) const;
++
++  FileDescriptor socket_;
++  std::chrono::milliseconds timeout_;
++  State state_ = State::New;
++  bool failed_ = false;
++  std::string server_nonce_;
++  std::string gpu_uuid_;
++};
++
++}  // namespace snapshot::pagebroker
+diff --git a/agent/pagebroker/gms_v1_client_mock.py b/agent/pagebroker/gms_v1_client_mock.py
+new file mode 100644
+index 00000000..c7f6c2f4
+--- /dev/null
++++ b/agent/pagebroker/gms_v1_client_mock.py
+@@ -0,0 +1,43 @@
++# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++# SPDX-License-Identifier: Apache-2.0
++"""CPU interoperability fixture using the actual Dynamo GMS V1 server/protocol."""
++
++import argparse
++import os
++from pathlib import Path
++import signal
++import sys
++import threading
++
++parser = argparse.ArgumentParser()
++parser.add_argument("--root", type=Path, required=True)
++args = parser.parse_args()
++dynamo = Path(os.environ["GMS_V1_DYNAMO_ROOT"])
++sys.path[:0] = [str(dynamo / "lib"), str(dynamo / "lib/gpu_memory_service/tests")]
++
++from _fake_vmm import FakeVMM
++from gpu_memory_service.v1.server.rpc import GMSRPCServer, GMSServerMemoryManager
++
++vmm = FakeVMM()
++manager = GMSServerMemoryManager("GPU-00000000-0000-0000-0000-000000000001", vmm, 0)
++stop = threading.Event()
++signal.signal(signal.SIGTERM, lambda *_: stop.set())
++
++with GMSRPCServer(str(args.root / "gms.sock"), manager) as server:
++    worker = threading.Thread(target=server.serve_forever, daemon=True)
++    worker.start()
++    (args.root / "identity").write_text(manager.identity[0] + "\n")
++    try:
++        while not stop.is_set():
++            state = manager.session_snapshot()
++            allocations = manager.allocation_snapshot()
++            temporary = args.root / "state.tmp"
++            temporary.write_text(
++                f"{int(state.committed)} {len(allocations)} {len(vmm.server_handles)} "
++                f"{state.rw_sessions} {state.ro_sessions}\n"
++            )
++            temporary.replace(args.root / "state")
++            stop.wait(0.01)
++    finally:
++        server.shutdown()
++        worker.join(timeout=5)
+diff --git a/agent/pagebroker/gms_v1_client_test.cpp b/agent/pagebroker/gms_v1_client_test.cpp
+new file mode 100644
+index 00000000..76e3fba6
+--- /dev/null
++++ b/agent/pagebroker/gms_v1_client_test.cpp
+@@ -0,0 +1,377 @@
++// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
++// SPDX-License-Identifier: Apache-2.0
++#include "gms_v1_client.hpp"
++#include <gtest/gtest.h>
++#include <msgpack.hpp>
++#include <arpa/inet.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <signal.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include <chrono>
++#include <cstring>
++#include <filesystem>
++#include <fstream>
++#include <functional>
++#include <future>
++#include <map>
++#include <stdexcept>
++#include <thread>
++
++using namespace snapshot::pagebroker;
++using namespace std::chrono_literals;
++
++namespace {
++constexpr const char* kUuid = "GPU-00000000-0000-0000-0000-000000000001";
++constexpr const char* kNonce = "fake-server-incarnation";
++
++void Check(bool okay) { if (!okay) { throw std::runtime_error("fake peer assertion failed"); } }
++
++template<class Fill>
++std::string Packed(const char* type, uint32_t extra, Fill fill)
++{
++  msgpack::sbuffer buffer;
++  msgpack::packer<msgpack::sbuffer> packer(buffer);
++  packer.pack_map(extra + 1); packer.pack("type"); packer.pack(type); fill(packer);
++  return {buffer.data(), buffer.size()};
++}
++
++std::string Packed(const char* type) { return Packed(type, 0, [](auto&) {}); }
++
++std::string Handshake(const char* uuid = kUuid, const char* nonce = kNonce, const char* lock = "rw")
++{
++  return Packed("handshake_response", 3, [&](auto& p) {
++    p.pack("gpu_uuid"); p.pack(uuid); p.pack("server_nonce"); p.pack(nonce);
++    p.pack("lock_type"); p.pack(lock);
++  });
++}
++
++void SendBytes(int fd, const std::string& bytes)
++{
++  size_t offset = 0;
++  while (offset < bytes.size()) {
++    const auto sent = send(fd, bytes.data() + offset, bytes.size() - offset, MSG_NOSIGNAL);
++    Check(sent > 0); offset += sent;
++  }
++}
++
++void Reply(int fd, const std::string& payload, const std::vector<int>& fds = {}, bool fragmented = false)
++{
++  uint32_t size = htonl(payload.size());
++  std::string frame(reinterpret_cast<char*>(&size), sizeof(size));
++  frame += payload;
++  if (fragmented) {
++    // Put descriptors on the first payload byte, after all four header reads.
++    for (size_t i = 0; i < 4; ++i) { SendBytes(fd, frame.substr(i, 1)); }
++    frame.erase(0, 4);
++  }
++  if (!fds.empty()) {
++    std::vector<char> control(CMSG_SPACE(fds.size() * sizeof(int)));
++    iovec vector{frame.data(), 1};
++    msghdr message{};
++    message.msg_iov = &vector; message.msg_iovlen = 1;
++    message.msg_control = control.data(); message.msg_controllen = control.size();
++    auto* header = CMSG_FIRSTHDR(&message);
++    header->cmsg_level = SOL_SOCKET; header->cmsg_type = SCM_RIGHTS;
++    header->cmsg_len = CMSG_LEN(fds.size() * sizeof(int));
++    std::memcpy(CMSG_DATA(header), fds.data(), fds.size() * sizeof(int));
++    Check(sendmsg(fd, &message, MSG_NOSIGNAL) == 1);
++    frame.erase(0, 1);
++  }
++  if (fragmented) {
++    for (const auto byte : frame) { SendBytes(fd, std::string(1, byte)); }
++  } else { SendBytes(fd, frame); }
++}
++
++msgpack::object_handle Request(int fd, const char* expected)
++{
++  auto exact = [&](void* destination, size_t count) {
++    auto* data = static_cast<char*>(destination);
++    while (count) { const auto read = recv(fd, data, count, 0); Check(read > 0); data += read; count -= read; }
++  };
++  uint32_t count = 0;
++  exact(&count, sizeof(count)); count = ntohl(count); Check(count <= (1U << 20));
++  std::string data(count, '\0'); exact(data.data(), data.size());
++  auto result = msgpack::unpack(data.data(), data.size());
++  std::map<std::string, msgpack::object> fields;
++  result.get().convert(fields); Check(fields.at("type").as<std::string>() == expected);
++  return result;
++}
++
++class Peer {
++ public:
++  explicit Peer(std::function<void(int)> work)
++  {
++    int sockets[2]; Check(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) == 0);
++    client = FileDescriptor(sockets[0]); server_ = FileDescriptor(sockets[1]);
++    timeval timeout{2, 0};
++    Check(setsockopt(server_.get(), SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0);
++    worker_ = std::thread([this, work = std::move(work)] {
++      try { work(server_.get()); } catch (...) { error_ = std::current_exception(); }
++    });
++  }
++  ~Peer() { shutdown(server_.get(), SHUT_RDWR); if (worker_.joinable()) { worker_.join(); } }
++  void Finish() { worker_.join(); if (error_) { std::rethrow_exception(error_); } }
++  FileDescriptor client{-1};
++ private:
++  FileDescriptor server_{-1};
++  std::thread worker_;
++  std::exception_ptr error_;
++};
++
++size_t DescriptorCount()
++{
++  return std::distance(std::filesystem::directory_iterator("/proc/self/fd"), std::filesystem::directory_iterator());
++}
++
++void Admit(int fd) { Request(fd, "handshake_request"); Reply(fd, Handshake()); }
++}  // namespace
++
++TEST(GmsV1Client, FragmentedFramesDescriptorsAndExactInventory)
++{
++  int pipe_fds[2]; ASSERT_EQ(pipe(pipe_fds), 0);
++  FileDescriptor read_fd(pipe_fds[0]), write_fd(pipe_fds[1]);
++  ASSERT_EQ(write(write_fd.get(), "ok", 2), 2);
++  Peer peer([&](int fd) {
++    auto handshake_object = Request(fd, "handshake_request");
++    auto handshake = handshake_object.get().as<std::map<std::string, msgpack::object>>();
++    Check(handshake.at("lock_type").as<std::string>() == "rw");
++    const auto identity = handshake.at("expected_identity").as<std::vector<std::string>>();
++    Check(identity == std::vector<std::string>{kNonce, kUuid});
++    Reply(fd, Handshake(), {}, true);
++    auto handle = Request(fd, "allocate_request");
++    auto allocation = handle.get().as<std::map<std::string, msgpack::object>>();
++    Check(allocation.at("allocation_id").as<std::string>() == "captured-allocation");
++    Check(allocation.at("aligned_size").as<uint64_t>() == (uint64_t{1} << 33));
++    Reply(fd, Packed("success_response"));
++    Request(fd, "export_request"); Reply(fd, Packed("export_response"), {read_fd.get()}, true);
++    Request(fd, "list_allocations_request");
++    Reply(fd, Packed("list_allocations_response", 1, [](auto& p) {
++      p.pack("allocations"); p.pack_array(1); p.pack_map(2);
++      p.pack("allocation_id"); p.pack("captured-allocation"); p.pack("aligned_size"); p.pack(uint64_t{1} << 33);
++    }));
++    Request(fd, "commit_request"); Reply(fd, Packed("success_response"));
++    char byte; Check(recv(fd, &byte, 1, 0) == 0);  // Destructor must not send abort after commit.
++  });
++  {
++    GmsV1Client client(std::move(peer.client));
++    client.Handshake(kUuid, kNonce);
++    EXPECT_EQ(client.gpu_uuid(), kUuid); EXPECT_EQ(client.server_nonce(), kNonce);
++    client.Allocate("captured-allocation", uint64_t{1} << 33);
++    auto fd = client.Export("captured-allocation");
++    EXPECT_NE(fcntl(fd.get(), F_GETFD) & FD_CLOEXEC, 0);
++    char value[2]; ASSERT_EQ(read(fd.get(), value, 2), 2); EXPECT_EQ(std::string(value, 2), "ok");
++    EXPECT_EQ(client.ListAllocations(), (std::vector<GmsAllocationRecord>{{"captured-allocation", uint64_t{1} << 33}}));
++    client.Commit();
++    EXPECT_THROW(client.Allocate("new", 4096), std::runtime_error);
++  }
++  peer.Finish();
++}
++
++TEST(GmsV1Client, RejectsWrongIdentityOrLease)
++{
++  for (const auto& response : {Handshake("wrong-gpu"), Handshake(kUuid, "wrong-nonce"), Handshake(kUuid, kNonce, "ro")}) {
++    Peer peer([&](int fd) { Request(fd, "handshake_request"); Reply(fd, response); });
++    GmsV1Client client(std::move(peer.client));
++    EXPECT_THROW(client.Handshake(kUuid, kNonce), std::runtime_error);
++    EXPECT_THROW(client.Allocate("id", 4096), std::runtime_error);
++    client.Close(); peer.Finish();
++  }
++}
++
++TEST(GmsV1Client, RejectsMissingExtraTruncatedOrUnexpectedDescriptorsWithoutLeaks)
++{
++  for (const int count : {0, 2, 32, -1}) {
++    const auto before = DescriptorCount();
++    {
++      FileDescriptor descriptor(open("/dev/null", O_RDONLY | O_CLOEXEC));
++      Peer peer([&](int fd) {
++        Admit(fd);
++        Request(fd, count < 0 ? "allocate_request" : "export_request");
++        Reply(fd, Packed(count < 0 ? "success_response" : "export_response"),
++              std::vector<int>(count < 0 ? 1 : count, descriptor.get()));
++      });
++      GmsV1Client client(std::move(peer.client)); client.Handshake(kUuid);
++      if (count < 0) { EXPECT_THROW(client.Allocate("id", 4096), std::runtime_error); }
++      else { EXPECT_THROW(client.Export("id"), std::runtime_error); }
++      client.Close(); peer.Finish();
++    }
++    EXPECT_EQ(DescriptorCount(), before) << "descriptor count " << count;
++  }
++}
++
++TEST(GmsV1Client, RejectsMalformedUnexpectedAndErrorResponses)
++{
++  const auto error = Packed("error_response", 2, [](auto& p) {
++    p.pack("message"); p.pack("fake allocation failure"); p.pack("out_of_memory"); p.pack(true);
++  });
++  const auto unknown = Packed("success_response", 1, [](auto& p) { p.pack("extra"); p.pack(1); });
++  const auto duplicate = Packed("success_response", 1, [](auto& p) { p.pack("type"); p.pack("success_response"); });
++  for (const auto& response : {error, unknown, duplicate, Packed("export_response"), std::string(1, '\xc1'), Packed("success_response") + "x"}) {
++    Peer peer([&](int fd) { Admit(fd); Request(fd, "allocate_request"); Reply(fd, response); });
++    GmsV1Client client(std::move(peer.client)); client.Handshake(kUuid);
++    EXPECT_THROW(client.Allocate("id", 4096), std::runtime_error);
++    EXPECT_THROW(client.Commit(), std::runtime_error);
++    client.Abort(); peer.Finish();
++  }
++}
++
++TEST(GmsV1Client, RejectsDuplicateInventoryIdsAndInvalidSizes)
++{
++  for (const bool duplicate : {false, true}) {
++    Peer peer([&](int fd) {
++      Admit(fd); Request(fd, "list_allocations_request");
++      Reply(fd, Packed("list_allocations_response", 1, [&](auto& p) {
++        p.pack("allocations"); p.pack_array(2);
++        for (int i = 0; i < 2; ++i) {
++          p.pack_map(2); p.pack("allocation_id"); p.pack(duplicate ? "same" : std::to_string(i));
++          p.pack("aligned_size"); p.pack(duplicate ? 4096 : -1);
++        }
++      }));
++    });
++    GmsV1Client client(std::move(peer.client)); client.Handshake(kUuid);
++    EXPECT_THROW(client.ListAllocations(), std::runtime_error);
++    client.Close(); peer.Finish();
++  }
++}
++
++TEST(GmsV1Client, RejectsOversizedTruncatedAndDeepFrames)
++{
++  for (int mode = 0; mode < 3; ++mode) {
++    Peer peer([&](int fd) {
++      Request(fd, "handshake_request");
++      if (mode == 2) {
++        std::string deep(32, '\x91'); deep += '\xc0'; Reply(fd, deep);
++      } else {
++        uint32_t size = htonl(mode == 0 ? (1U << 20) + 1 : 10);
++        SendBytes(fd, std::string(reinterpret_cast<char*>(&size), sizeof(size)));
++        if (mode == 1) { SendBytes(fd, "short"); shutdown(fd, SHUT_WR); }
++      }
++    });
++    GmsV1Client client(std::move(peer.client));
++    EXPECT_THROW(client.Handshake(kUuid), std::runtime_error);
++    client.Close(); peer.Finish();
++  }
++}
++
++TEST(GmsV1Client, WholeRpcDeadlineStopsSlowFragmentTrickleAndRetainsLeaseUntilClose)
++{
++  std::promise<void> may_finish;
++  auto finish = may_finish.get_future();
++  Peer peer([&](int fd) {
++    Request(fd, "handshake_request");
++    uint32_t length = htonl(100);
++    SendBytes(fd, std::string(reinterpret_cast<char*>(&length), sizeof(length)));
++    for (int i = 0; i < 3; ++i) { SendBytes(fd, "x"); std::this_thread::sleep_for(35ms); }
++    pollfd descriptor{fd, POLLIN, 0};
++    Check(poll(&descriptor, 1, 0) == 0);  // Failure has not closed/aborted the lease.
++    finish.wait();
++  });
++  GmsV1Client client(std::move(peer.client), 80ms);
++  const auto started = std::chrono::steady_clock::now();
++  EXPECT_THROW(client.Handshake(kUuid), std::runtime_error);
++  EXPECT_LT(std::chrono::steady_clock::now() - started, 500ms);
++  EXPECT_THROW(client.Commit(), std::runtime_error);
++  may_finish.set_value(); peer.Finish(); client.Close();
++}
++
++TEST(GmsV1Client, ExplicitAbortSendsAbortOnceAndThenCloses)
++{
++  Peer peer([](int fd) {
++    Admit(fd); Request(fd, "abort_request"); Reply(fd, Packed("success_response"));
++    char byte; Check(recv(fd, &byte, 1, 0) == 0);
++  });
++  GmsV1Client client(std::move(peer.client)); client.Handshake(kUuid); client.Abort(); client.Abort();
++  peer.Finish();
++}
++
++namespace {
++class PythonServer {
++ public:
++  PythonServer()
++  {
++    char directory[] = "/tmp/pb-gms-test-XXXXXX";
++    const char* made = mkdtemp(directory); Check(made != nullptr); root = made;
++    path = (root / "gms.sock").string();
++    pid_ = fork(); Check(pid_ >= 0);
++    if (!pid_) {
++      const char* python = std::getenv("GMS_V1_PYTHON"); if (!python) { python = "python3"; }
++      execlp(python, python, "gms_v1_client_mock.py", "--root", root.c_str(), nullptr);
++      _exit(127);
++    }
++    for (int i = 0; i < 300; ++i) {
++      std::ifstream(root / "identity") >> nonce;
++      if (!nonce.empty()) { return; }
++      std::this_thread::sleep_for(10ms);
++    }
++    kill(pid_, SIGKILL); waitpid(pid_, nullptr, 0); pid_ = -1;
++    throw std::runtime_error("Python GMS mock did not become ready");
++  }
++  ~PythonServer()
++  {
++    if (pid_ > 0) { kill(pid_, SIGTERM); waitpid(pid_, nullptr, 0); }
++    std::filesystem::remove_all(root);
++  }
++  FileDescriptor Connect()
++  {
++    FileDescriptor fd(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
++    sockaddr_un address{}; address.sun_family = AF_UNIX;
++    Check(path.size() < sizeof(address.sun_path)); std::strcpy(address.sun_path, path.c_str());
++    Check(connect(fd.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0); return fd;
++  }
++  bool State(const std::string& expected)
++  {
++    for (int i = 0; i < 200; ++i) {
++      std::string state; std::getline(std::ifstream(root / "state"), state);
++      if (state == expected) { return true; }
++      std::this_thread::sleep_for(10ms);
++    }
++    return false;
++  }
++  std::filesystem::path root;
++  std::string path, nonce;
++ private:
++  pid_t pid_ = -1;
++};
++}  // namespace
++
++TEST(GmsV1Client, ActualPythonV1ProtocolAndServerFakeVmm)
++{
++  if (!std::getenv("GMS_V1_DYNAMO_ROOT")) { GTEST_SKIP() << "Set GMS_V1_DYNAMO_ROOT for actual Dynamo V1 interoperability"; }
++  PythonServer server;
++  const std::vector<GmsAllocationRecord> expected{{"captured-one", 2147483648ULL}, {"captured-two", 4294967296ULL}};
++  {
++    GmsV1Client client(server.Connect()); client.Handshake(kUuid, server.nonce);
++    for (const auto& record : expected) { client.Allocate(record.allocation_id, record.aligned_size); }
++    EXPECT_EQ(client.ListAllocations(), expected);
++    auto exported = client.Export(expected.front().allocation_id);
++    EXPECT_NE(fcntl(exported.get(), F_GETFD) & FD_CLOEXEC, 0);
++    client.Commit(); EXPECT_EQ(client.ListAllocations(), expected);
++  }
++  EXPECT_TRUE(server.State("1 2 2 0 0"));
++  {
++    GmsV1Client wrong(server.Connect()); EXPECT_THROW(wrong.Handshake(kUuid, "wrong-incarnation"), std::runtime_error);
++  }
++  EXPECT_TRUE(server.State("1 2 2 0 0"));
++  {
++    GmsV1Client client(server.Connect()); client.Handshake(kUuid, server.nonce);
++    EXPECT_TRUE(client.ListAllocations().empty());  // New RW replaces committed epoch.
++    client.Allocate("aborted", 4096); client.Abort();
++  }
++  EXPECT_TRUE(server.State("0 0 0 0 0"));
++  {
++    GmsV1Client client(server.Connect()); client.Handshake(kUuid, server.nonce);
++    client.Allocate("uncommitted", 4096);  // Destructor disconnect clears epoch.
++  }
++  EXPECT_TRUE(server.State("0 0 0 0 0"));
++  {
++    GmsV1Client client(server.Connect()); client.Handshake(kUuid, server.nonce);
++    client.Allocate("duplicate", 4096);
++    EXPECT_THROW(client.Allocate("duplicate", 4096), std::runtime_error);
++    client.Abort();
++  }
++  EXPECT_TRUE(server.State("0 0 0 0 0"));
++}
+diff --git a/agent/pagebroker/gpu_engine.cpp b/agent/pagebroker/gpu_engine.cpp
+index 4edc4fc5..c707ee86 100644
+--- a/agent/pagebroker/gpu_engine.cpp
++++ b/agent/pagebroker/gpu_engine.cpp
+@@ -60,6 +60,21 @@ FileDescriptor GpuEngine::Bind(const v1::BindNativeSession& binding, int target,
+   return connection;
+ }
+ 
++FileDescriptor GpuEngine::LoadGms(const v1::LoadGmsWeightsRequest& binding,
++                                 int directory, int connected_socket) {
++  std::lock_guard lock(mutex_);
++  if (process_ <= 0) throw std::runtime_error("GPU engine is not running");
++  int sockets[2];
++  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets))
++    throw std::runtime_error("GPU engine GMS session socketpair");
++  FileDescriptor connection(sockets[0]), peer(sockets[1]);
++  SetSessionTimeout(connection.get());
++  internal::NativeBinding request;
++  *request.mutable_gms_load() = binding;
++  SendFrame(control_.get(), request, {peer.get(), directory, connected_socket});
++  return connection;
++}
++
+ void GpuEngine::Stop() noexcept {
+   std::lock_guard lock(mutex_);
+   if (process_ <= 0) return;
+diff --git a/agent/pagebroker/gpu_engine.hpp b/agent/pagebroker/gpu_engine.hpp
+index 59cc4179..8f4d9a65 100644
+--- a/agent/pagebroker/gpu_engine.hpp
++++ b/agent/pagebroker/gpu_engine.hpp
+@@ -19,6 +19,7 @@ class GpuEngine {
+   // LOAD admissions carry the manifest the broker already read and size-checked.
+   FileDescriptor Bind(const v1::BindNativeSession&, int host_pid, int directory,
+                       const internal::LoadManifest* load = nullptr);
++  FileDescriptor LoadGms(const v1::LoadGmsWeightsRequest&, int directory, int connected_socket);
+   // Transport failure is an engine-wide fault. Reap before releasing storage
+   // admission: a disconnected session socket alone does not prove DMA drained.
+   void Stop() noexcept;
+diff --git a/agent/pagebroker/gpu_engine.proto b/agent/pagebroker/gpu_engine.proto
+index 745d67dd..7baba57f 100644
+--- a/agent/pagebroker/gpu_engine.proto
++++ b/agent/pagebroker/gpu_engine.proto
+@@ -13,6 +13,9 @@ message NativeBinding {
+   // the session is bound, before CRIU and before any participant transfers, so
+   // PREPARE does no storage metadata I/O behind other participants' reads.
+   LoadManifest load_manifest = 3;
++  // Alternative admission, mutually exclusive with fields 1-3. Carries three
++  // rights: reply socket, pinned artifact directory, connected GMS V1 socket.
++  v1.LoadGmsWeightsRequest gms_load = 4;
+ }
+ message LoadManifest {
+   repeated LoadExtent extents = 1;
+diff --git a/agent/pagebroker/gpu_engine_test.cpp b/agent/pagebroker/gpu_engine_test.cpp
+index a41011f7..042e6371 100644
+--- a/agent/pagebroker/gpu_engine_test.cpp
++++ b/agent/pagebroker/gpu_engine_test.cpp
+@@ -5,6 +5,7 @@
+ #include "fd_transport.hpp"
+ #include <gtest/gtest.h>
+ #include <fcntl.h>
++#include <sys/socket.h>
+ #include <unistd.h>
+ #include <fstream>
+ 
+@@ -50,3 +51,31 @@ TEST(GpuEngine, ReusesReadyProcessAndAcknowledgesDrain)
+   engine.Stop();
+   std::filesystem::remove_all(root);
+ }
++
++TEST(GpuEngine, GmsAdmissionPassesConnectedLeaseAndDirectoryWithTerminalReply)
++{
++  char directory[] = "/tmp/pagebroker-gms-engine-XXXXXX";
++  ASSERT_NE(mkdtemp(directory), nullptr);
++  GpuEngine engine(std::filesystem::absolute("build/fake-gpu-engine"));
++  engine.Start();
++  int sockets[2];
++  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets), 0);
++  FileDescriptor gms(sockets[0]), server(sockets[1]);
++  FileDescriptor source(open(directory, O_DIRECTORY | O_CLOEXEC));
++  v1::LoadGmsWeightsRequest request;
++  request.set_rank(7);
++  auto connection = engine.LoadGms(request, source.get(), gms.get());
++  v1::NativeSessionReply reply;
++  std::vector<FileDescriptor> descriptors;
++  ASSERT_TRUE(ReceiveFrame(connection.get(), reply, descriptors));
++  EXPECT_TRUE(descriptors.empty());
++  EXPECT_EQ(reply.report(), "gms-loaded");
++  char marker[13]{};
++  EXPECT_EQ(read(server.get(), marker, sizeof(marker)), 13);
++  EXPECT_STREQ(marker, "gms-fd-probe");
++  int rank = -1;
++  std::ifstream(std::filesystem::path(directory) / "gms-rank") >> rank;
++  EXPECT_EQ(rank, 7);
++  engine.Stop();
++  std::filesystem::remove_all(directory);
++}
+diff --git a/agent/pagebroker/gpu_engine_worker.cpp b/agent/pagebroker/gpu_engine_worker.cpp
+index 94b50c26..a7758e68 100644
+--- a/agent/pagebroker/gpu_engine_worker.cpp
++++ b/agent/pagebroker/gpu_engine_worker.cpp
+@@ -4,6 +4,7 @@
+ #include "gpu_engine.pb.h"
+ #include "cuda_posix_transfer.hpp"
+ #include "storage_manifest.hpp"
++#include "gms_load_operation.hpp"
+ #include "../cmd/cuda-checkpoint-helper/custom_storage.hpp"
+ 
+ #include <fcntl.h>
+@@ -56,7 +57,7 @@ struct Device {
+   CUdevice device;
+   CUcontext context;
+   std::string uuid;
+-  std::mutex mutex;
++  FairTransferMutex mutex;
+   transfer::TransferBuffers buffers{kTransferOptions};
+ };
+ 
+@@ -193,7 +194,9 @@ class Operation {
+       Require(file.get() >= 0 && (!save_ || !ftruncate(file.get(), data.size)), "open or size native extent");
+       transfer::TransferMetrics metrics;
+       auto& device = *owners_[job.device_index];
++      const auto queued = Clock::now();
+       std::lock_guard lease(device.mutex);
++      queue_seconds_ += Seconds(queued);
+       std::string error;
+       if (!device.buffers.Transfer(file.get(), data.devPtr, data.size, data.stream,
+                                    save_ ? transfer::TransferOperation::kCheckpoint : transfer::TransferOperation::kRestore,
+@@ -206,8 +209,8 @@ class Operation {
+     const auto end = Clock::now();
+     transfer_seconds_ = std::chrono::duration<double>(end - begin).count();
+     return Report("{\"event\":\"transferred\",\"bytes\":%zu,\"transfer_seconds\":%.6f,"
+-                  "\"transfer_start_ns\":%lld,\"transfer_end_ns\":%lld}", bytes_, transfer_seconds_,
+-                  Nanoseconds(begin), Nanoseconds(end));
++                  "\"transfer_start_ns\":%lld,\"transfer_end_ns\":%lld,\"queue_wait_seconds\":%.6f}", bytes_, transfer_seconds_,
++                  Nanoseconds(begin), Nanoseconds(end), queue_seconds_);
+   }
+ 
+   std::string Complete() {
+@@ -246,6 +249,7 @@ class Operation {
+   Clock::time_point start_;
+   size_t bytes_ = 0;
+   double prepare_seconds_ = 0, transfer_seconds_ = 0, setup_seconds_ = 0, storage_seconds_ = 0, cuda_wait_seconds_ = 0;
++  double queue_seconds_ = 0;
+ };
+ 
+ void ServeSession(Engine& engine, internal::NativeBinding binding, FileDescriptor connection,
+@@ -291,6 +295,28 @@ void ServeSession(Engine& engine, internal::NativeBinding binding, FileDescripto
+   reply.set_report("drained");
+   try { SendFrame(connection.get(), reply); } catch (const std::exception&) {}
+ }
++
++void ServeGmsSession(Engine& engine, v1::LoadGmsWeightsRequest request,
++                     FileDescriptor connection, FileDescriptor directory, FileDescriptor gms) {
++  v1::NativeSessionReply reply;
++  try {
++    Device* selected = nullptr;
++    for (const auto& [context, device] : engine.devices) {
++      if (device->uuid != request.destination_uuid()) continue;
++      Require(selected == nullptr, "ambiguous GMS destination GPU");
++      selected = device.get();
++    }
++    Require(selected != nullptr, "GMS destination GPU is not available in the persistent engine");
++    reply.set_report(LoadGmsWeights(request, std::move(directory), std::move(gms),
++        {selected->device, selected->context, selected->uuid, selected->buffers, selected->mutex}));
++  } catch (const std::exception& error) {
++    // LoadGmsWeights unwinds the stream/mappings before closing its RW lease.
++    // Unknown drain outcomes are engine-fatal and never reach this reply.
++    reply.mutable_failure()->set_code(v1::Failure::INTERNAL_ERROR);
++    reply.mutable_failure()->set_message(error.what());
++  }
++  try { SendFrame(connection.get(), reply); } catch (const std::exception&) {}
++}
+ }  // namespace
+ 
+ int main() {
+@@ -307,14 +333,23 @@ int main() {
+     internal::NativeBinding binding;
+     std::vector<FileDescriptor> descriptors;
+     while (ReceiveFrame(3, binding, descriptors)) {
+-      Require(descriptors.size() == 2, "GPU admission requires session and directory descriptors");
++      if (binding.has_gms_load()) {
++        Require(descriptors.size() == 3 && !binding.has_binding() && !binding.host_pid() &&
++                !binding.has_load_manifest(), "GMS admission requires only its binding and exactly three descriptors");
++      } else {
++        Require(descriptors.size() == 2 && binding.has_binding(), "native GPU admission requires exactly two descriptors");
++      }
+       std::erase_if(sessions, [](auto& session) {
+         if (session.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+         session.get();
+         return true;
+       });
+-      sessions.push_back(std::async(std::launch::async, ServeSession, std::ref(engine), binding,
+-                                    std::move(descriptors[0]), std::move(descriptors[1])));
++      if (binding.has_gms_load())
++        sessions.push_back(std::async(std::launch::async, ServeGmsSession, std::ref(engine), binding.gms_load(),
++                                     std::move(descriptors[0]), std::move(descriptors[1]), std::move(descriptors[2])));
++      else
++        sessions.push_back(std::async(std::launch::async, ServeSession, std::ref(engine), binding,
++                                     std::move(descriptors[0]), std::move(descriptors[1])));
+       descriptors.clear();
+     }
+     // Process exit is the engine's context-lifetime boundary. No per-session
+diff --git a/agent/pagebroker/v1/pagebroker.proto b/agent/pagebroker/v1/pagebroker.proto
+index e884df7f..dfe76356 100644
+--- a/agent/pagebroker/v1/pagebroker.proto
++++ b/agent/pagebroker/v1/pagebroker.proto
+@@ -40,6 +40,29 @@ message NativeSessionReply {
+   string report = 1;
+   Failure failure = 2;
+ }
++// Experimental trusted-node admission. All payload I/O and CUDA work belongs
++// to PageBroker; GMS retains allocation ownership and publishes after commit.
++message GmsAllocation {
++  string allocation_id = 1;
++  uint64 aligned_size = 2;
++  string shard = 3;
++  uint64 offset = 4;
++}
++message LoadGmsWeightsRequest {
++  string capture_id = 1;
++  string generation = 2;
++  uint32 rank = 3;
++  string destination_uuid = 4;
++  string expected_server_nonce = 5;
++  string socket_path = 6;
++  string artifact_directory = 7;
++  string manifest_sha256 = 8;
++  repeated GmsAllocation allocations = 9;
++  uint32 timeout_seconds = 10;
++}
++message GmsWeightsLoaded {
++  string report = 1;
++}
+ message StorageBackend
+ {
+   // Requests require exactly one storage kind.
+@@ -98,6 +121,7 @@ message Request
+     AbortRequest abort = 6;
+     DirectRestoreRequest direct_restore = 7;
+     BindNativeSession bind_native = 9;
++    LoadGmsWeightsRequest load_gms_weights = 10;
+   }
+ }
+ 
+@@ -148,5 +172,6 @@ message Response
+     Failure failure = 7;
+     DirectRestoreReady direct_restore_ready = 8;
+     NativeSessionReply native_session = 10;
++    GmsWeightsLoaded gms_weights_loaded = 11;
+   }
+ }
+-- 
+2.39.5
+

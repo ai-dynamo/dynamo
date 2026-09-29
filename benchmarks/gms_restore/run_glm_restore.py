@@ -57,6 +57,7 @@ p.add_argument(
     help="Use the validated runtime sandbox IP before cached Pod status arrives",
 )
 p.add_argument("--resident-gms", action="store_true")
+p.add_argument("--pagebroker-gms", action="store_true")
 p.add_argument("--resident-gms-pod")
 p.add_argument("--resident-gms-host-path")
 p.add_argument("--resident-gms-url")
@@ -89,6 +90,8 @@ if a.preinstalled_cuda_host_path:
         )
     except ValueError as error:
         p.error(str(error))
+if a.pagebroker_gms and not a.resident_gms:
+    p.error("--pagebroker-gms requires --resident-gms")
 if a.resident_gms:
     if not (a.dgd and a.early_trigger and a.same_claim):
         p.error("--resident-gms requires --dgd --early-trigger --same-claim")
@@ -138,7 +141,12 @@ def host_name(virtual_name=None):
 
 
 def remote(cmd, container="gms-0"):
-    target = resident_host if a.resident_gms and container.startswith("gms-") else host
+    target = (
+        resident_host
+        if a.resident_gms
+        and (container.startswith("gms-") or container == "coordinator")
+        else host
+    )
     return subprocess.check_output(
         base + ["exec", target, "-c", container, "--", *cmd], text=True
     )
@@ -389,6 +397,8 @@ dgd = build_dgd(pod) if a.dgd else None
 if a.dgd:
     save(out / "dgd-manifest.json", dgd)
 resident_load = None
+resident_load_generation = a.resident_gms_generation
+snapshot_selection = None
 if a.resident_gms:
     resident = core.read_namespaced_pod(a.resident_gms_pod, ns)
     validate_resident_pod(
@@ -404,17 +414,81 @@ if a.resident_gms:
     resident_host = host_name(a.resident_gms_pod)
     resident_ready = coordinator_request(a.resident_gms_url, "/ready")
     assert resident_ready["ready"] is True
-    assert resident_ready["capture_id"] == capture["capture_id"]
-    assert resident_ready["generation"] == a.resident_gms_generation
+    if a.pagebroker_gms:
+        assert resident_ready["service_generation"] == a.resident_gms_generation
+        assert resident_ready.get("capture_id") is None
+    else:
+        assert resident_ready["capture_id"] == capture["capture_id"]
+        assert resident_ready["generation"] == a.resident_gms_generation
     assert resident_ready["publications"] == 0, (
         "resident weights were published before t0"
     )
-    validate_resident_online(resident_ready, a.workers, a.chunk_mib)
+    if a.pagebroker_gms:
+        assert resident_ready["transfer_owner"] == "resident_pagebroker_gpu_engine"
+        assert resident_ready["transfer_slots_per_gpu"] == a.workers == 32
+        assert resident_ready["chunk_mib"] == a.chunk_mib == 128
+        assert len(resident_ready["online"]) == 8
+        for rank in resident_ready["online"]:
+            assert rank["mode"] == "pagebroker"
+            assert rank["cuda_context_current"] is False
+            assert rank["cuda_primary_context_active"] is False
+            assert rank["payload_bytes_read"] == rank["weight_allocations"] == 0
+    else:
+        validate_resident_online(resident_ready, a.workers, a.chunk_mib)
     save(out / "resident-gms-ready.json", resident_ready)
     resident_ready_verified_epoch = time.time()
 started = time.time()
 if a.dgd:
-    if a.resident_gms:
+    if a.pagebroker_gms:
+        created_dgd = custom.create_namespaced_custom_object(
+            "nvidia.com", "v1beta1", ns, "dynamographdeployments", dgd
+        )
+        create_returned = time.time()
+        # Select artifacts from the created DGD. This dependency, API discovery,
+        # and the coordinator's fresh PVC metadata reads are inside the timer.
+        discovery_started = time.time()
+        selected_name = created_dgd["spec"]["components"][0]["podTemplate"]["metadata"][
+            "annotations"
+        ]["nvidia.com/gms-prototype-restore-from"]
+        selected = custom.get_namespaced_custom_object(
+            "nvidia.com", "v1alpha1", ns, "podsnapshots", selected_name
+        )
+        content = custom.get_cluster_custom_object(
+            "nvidia.com",
+            "v1alpha1",
+            "podsnapshotcontents",
+            selected["status"]["boundSnapshotContentName"],
+        )
+        content_uid = content["metadata"]["uid"]
+        resident_load_generation = created_dgd["metadata"]["uid"]
+        snapshot_selection = {
+            "dgd_uid": resident_load_generation,
+            "snapshot_name": selected_name,
+            "snapshot_id": content_uid,
+            "capture_manifest_path": f"/checkpoints/artifacts/{content_uid}/gms/capture.json",
+            "discovery_started_epoch": discovery_started,
+            "discovery_completed_epoch": time.time(),
+        }
+        save(out / "snapshot-selection.json", snapshot_selection)
+        requested = time.time()
+        response = coordinator_request(
+            a.resident_gms_url,
+            "/load",
+            {
+                "dgd_uid": resident_load_generation,
+                "snapshot_id": content_uid,
+                "generation": resident_load_generation,
+                "capture_manifest_path": snapshot_selection["capture_manifest_path"],
+            },
+        )
+        resident_load = {
+            "request_epoch": requested,
+            "trigger_written_epoch": response["trigger_written_epoch"],
+            "return_epoch": time.time(),
+            "response": response,
+        }
+        save(out / "resident-gms-trigger.json", resident_load)
+    elif a.resident_gms:
         # The resident coordinator and Kubernetes API receive independent requests at t0.
         with ThreadPoolExecutor(max_workers=1) as pool:
             pending_load = pool.submit(
@@ -598,7 +672,7 @@ if a.fast_gate:
     if a.resident_gms:
         for record in records:
             assert record["capture_id"] == capture["capture_id"]
-            assert record["generation"] == a.resident_gms_generation
+            assert record["generation"] == resident_load_generation
             assert record["uuid"] == targets[record["rank"]]
             assert record["workers"] == a.workers
             assert record["chunk_mib"] == a.chunk_mib
@@ -617,8 +691,15 @@ result = {
     "runtime_discovery": a.runtime_discovery,
     "runtime_network_discovery": a.runtime_network_discovery,
     "resident_gms": a.resident_gms,
+    "pagebroker_gms": a.pagebroker_gms,
+    "weight_transfer_owner": "pagebroker" if a.pagebroker_gms else "gms_python_loader",
     "resident_gms_pod": a.resident_gms_pod,
-    "resident_gms_generation": a.resident_gms_generation,
+    "resident_gms_generation": resident_load_generation,
+    "resident_gms_service_generation": a.resident_gms_generation,
+    "snapshot_selection": snapshot_selection,
+    "artifact_selection_timing": "after_dgd_creation"
+    if a.pagebroker_gms
+    else "preselected_capture",
     "resident_gms_host_path": a.resident_gms_host_path,
     "preinstalled_cuda_host_path": a.preinstalled_cuda_host_path,
     "resident_gms_load_trigger": resident_load,
@@ -626,7 +707,9 @@ result = {
     if a.resident_gms
     else None,
     "deployment_mode": "dgd" if a.dgd else "pod",
-    "timer_origin": "dgd_and_resident_load_requests"
+    "timer_origin": "dgd_create_request"
+    if a.pagebroker_gms
+    else "dgd_and_resident_load_requests"
     if a.resident_gms
     else "dgd_create_request"
     if a.dgd
@@ -670,7 +753,10 @@ result = {
 save(out / "timing.json", result)
 print(json.dumps(result), flush=True)
 mount = json.loads(
-    remote(["findmnt", "-J", "-T", "/checkpoints", "-o", "SOURCE,FSTYPE,OPTIONS"])
+    remote(
+        ["findmnt", "-J", "-T", "/checkpoints", "-o", "SOURCE,FSTYPE,OPTIONS"],
+        "coordinator" if a.pagebroker_gms else "gms-0",
+    )
 )
 save(out / "pvc-mount.json", mount)
 if a.qualified_pvc_mount:
