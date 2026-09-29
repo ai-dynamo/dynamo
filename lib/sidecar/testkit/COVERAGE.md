@@ -3,12 +3,14 @@
 
 # Coverage and execution ledger
 
-All five tabs of the sidecar testing DEP remain read-only. The user-approved
+The planned tabs of the sidecar testing DEP remain design references. The
+SGLang follow-up updates the requested Actual unit matrix and Bugs found tab.
+The user-approved
 stack is [#14879](https://github.com/ai-dynamo/dynamo/pull/14879) (DIS-2941,
 shared CPU foundation), [#15089](https://github.com/ai-dynamo/dynamo/pull/15089)
 (DIS-2942, isolated units), and
 [#15091](https://github.com/ai-dynamo/dynamo/pull/15091) (DIS-2943, additional
-vLLM integration). This draft is a separate alternative to #15089 on the same
+vLLM integration). The parent #15243 is a separate alternative to #15089 on the same
 foundation base; the original PR remains unchanged. #15088 is superseded.
 The foundation is refreshed onto main
 `4a0547f8ba2675f14d50e48d6aec53b1bc3cf3e3`; pins remain vLLM 0.29.0 and
@@ -17,13 +19,15 @@ The foundation is refreshed onto main
 ## Coverage at the foundation and unit boundaries
 
 The foundation's four families remain instantiated for both vLLM and SGLang.
-This alternative places unit cases beside their production owners: 11 common
+The parent vLLM increment places unit cases beside their production owners: 11 common
 and 71 vLLM cases (82 total), all ordinary Rust tests without lane markers.
 They run in pre-merge and normal nightly coverage. The existing LoRA lock-registry
 test moves from `vllm/src/tests.rs` into `lora.rs`; all of its assertions remain,
 and the broader file retains 37 tests. The ten formerly shared vLLM scenarios
 remain ordinary local cases. No shared unit layer is added. SGLang units remain
-follow-up work. Native fixtures, including `minimal_request()`, move into the
+follow-up work in that parent revision. The follow-up stacked on #15243 adds
+48 isolated SGLang cases and retains 35, for 83 SGLang units; see the
+[SGLang accounting](UNITS.md#sglang-follow-up). Native fixtures, including `minimal_request()`, move into the
 vLLM crate and remove its testkit dev-dependency. Shared integration keeps its
 separate testkit helpers. Historical execution results are recorded below.
 
@@ -33,11 +37,11 @@ separate testkit helpers. Historical execution results are recorded below.
 | R11/C6/C7 opening failure, premature EOF, stream read error, exact delivered prefix and remote release | #14879 shared failure scenario | Preserve vLLM `Unknown` versus SGLang `EngineShutdown` EOF expectations and typed injected errors. |
 | R12/R14/C8 cancellation before native submission, while opening and during read; request A cancellation leaves B live | #14879 shared cancellation scenario | Preserve both backend enrollments, independent request controls, cancelled terminal/usage and successful completion of B. |
 | R13 active cleanup, cancelled terminal/usage, remote route release and repeated cleanup | #14879 shared cleanup scenario; vLLM isolated worker units | Move only vLLM's no-I/O before-start/idempotent-cleanup subsection after replacement validation. Preserve SGLang's original subsection and both active-stream checks. |
-| R01–R32 endpoint/configuration, conversion, validation and state transitions | [Local isolated units](UNITS.md) | Common and vLLM cases retain mapped assertions beside production; SGLang/TRT unit setup deferred. |
+| R01–R32 endpoint/configuration, conversion, validation and state transitions | [Local isolated units](UNITS.md) | Common/vLLM coverage is retained; the SGLang follow-up adds its mapped request, response, discovery and worker cases. TRT additions remain deferred. |
 | Native request mapping, gRPC rank metadata, discovery/health, connection pool, decode cancellation, opaque handoff, media/Encode, LoRA and RL | Existing [vLLM library tests](../vllm/src/tests.rs) | Preserve transport/runtime assertions. Pure definitions and exact request-field assertions move only to their mapped isolated replacements. |
 | vLLM Mocker streaming/logprobs/usage, opaque prefill/decode, explicit cancellation of active scheduler work, KV relay/indexer | Existing [vLLM Mocker suite](../../mocker/servers/vllm/tests/sidecar.rs) | Retain all four cases at this boundary; replacement deletions belong to #15091. |
 | SGLang Mocker incremental tokens/logprobs/usage, opaque prefill/decode, Abort release, two-request cancellation isolation and shutdown | Existing [SGLang Mocker suite](../../mocker/servers/sglang/tests/sidecar.rs) | Retain all four cases and their distinct assertions. |
-| Existing SGLang/TensorRT-LLM production tests and E2E | Existing owning suites/workflows | Preserve coverage and scheduling; no new backend fixture migration or activation. |
+| Existing SGLang/TensorRT-LLM production tests and E2E | Existing owning suites/workflows | Preserve all assertions and scheduling. SGLang's 12 protocol cases move into adjacent test modules; existing socket, protobuf and executable cases remain. |
 
 ## Additional integration owned by #15091
 

@@ -3070,6 +3070,7 @@ dependencies = [
  "tonic 0.13.1",
  "tonic-build 0.13.1",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 

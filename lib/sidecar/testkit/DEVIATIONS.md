@@ -3,13 +3,14 @@
 
 # Deviations from the sidecar testing DEP
 
-The DEP and all five tabs remain read-only. This report records departures from
+The planned DEP tabs remain unchanged; the explicitly requested SGLang follow-up
+updates the Actual unit matrix and Bugs found tab. This report records departures from
 the framework, plan, matrices and previous rollout separately. The user's
 approved restack supersedes the earlier independent-three-PR instruction.
-This draft is a separate alternative to #15089 on the same foundation base;
+The parent #15243 is a separate alternative to #15089 on the same foundation base;
 the original PR remains unchanged.
 
-## Foundation and rollout
+## Foundation and parent rollout
 
 | Original requirement | Change | Justification | Affected PRs/tests |
 | --- | --- | --- | --- |
@@ -22,7 +23,7 @@ the original PR remains unchanged.
 | Approximate scenario counts in the plan | Track distinct obligations, collected names and execution evidence instead of targeting a count | User requires sufficient boundaries and no duplicate or unexecuted coverage credit | All stack boundaries |
 | Reuse earlier successful stack validation as completion evidence | Preserve it as historical, revision-specific evidence; collect and validate each refreshed boundary | Main and shared dependencies changed; prior green checks cover their original heads only | #14879 and #15089 refreshed local validation in UNITS.md and COVERAGE.md; new-head CI tracked separately |
 
-## Isolated unit increment
+## Parent vLLM unit increment
 
 | Original requirement | Change | Justification | Affected PRs/tests |
 | --- | --- | --- | --- |
@@ -40,6 +41,20 @@ the original PR remains unchanged.
 | Common transport coverage needs the `tonic-v14` implementation | The vLLM dependency enables it for combined common/vLLM and workspace runs; a common-only invocation needs an explicit feature | No redundant CI feature flag is needed | Common error/transport units and local commands in UNITS.md |
 | Shared wire lifecycle checks unstarted generation and repeated cleanup for both backends | Move only the vLLM no-I/O subsection into its isolated worker test after replacement validation; retain SGLang's original subsection | vLLM units cannot replace SGLang assertions; both active-stream cleanup paths remain wire-owned | #15089 `unstarted_generation_fails_and_cleanup_is_idempotent`; #14879 retained SGLang cleanup |
 | Route workspace execution and a second pre-merge CPU run through the unit runner | Restore one `cargo test --locked --all-targets` invocation; remove the additional container run and Dockerfile | Without lane filters, no package split is needed; ordinary workspace execution avoids building dependencies again with different features | Normal module names replace `unit_`; common transport retains its one-time registration; all 82 units remain pre-merge and nightly coverage remains unchanged |
+
+## SGLang follow-up on #15243
+
+SGLang units use the final local-module design from #15243, with direct Cargo
+execution and no shared unit layer. The follow-up preserves all existing
+SGLang assertions and integration suites. [UNITS.md](UNITS.md#sglang-follow-up)
+records the exact new/retained split and remaining integration obligations.
+
+The old matrix's cumulative-output and success-terminal-only rendezvous
+assumptions do not match the current native protocol. Tests retain incremental
+output and the existing early handoff after response headers. JSON plus regex
+keeps its current forwarding behavior pending a separate policy decision.
+The reproduced hidden/system stop-ID leak is corrected to match the existing
+Python handler's user-stop contract, with a regression that failed before the fix.
 
 Additional wire/process/native implementation and its departures belong to
 #15091. The unit boundary does not claim those additions, actual native KV

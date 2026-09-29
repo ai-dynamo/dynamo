@@ -12,13 +12,14 @@ The original PR remains unchanged. Pinned versions remain vLLM 0.29.0
 The source matrix used older Dynamo snapshots and vLLM 0.28.0. Current native
 Control discovery, health, metadata, multimodal forwarding, LoRA, Encode, RL
 administration, priority and rank selection are supported and retain their
-existing assertions. The DEP and its five tabs remain read-only; departures are
+existing assertions. Planned DEP tabs remain unchanged; the SGLang follow-up
+updates the requested Actual unit matrix and Bugs found tab. Departures are
 recorded separately in [DEVIATIONS.md](DEVIATIONS.md).
 
 Tests live beside production as ordinary `#[cfg(test)]` child modules. They use
 no sockets, processes, engines or model downloads. The common suite runs once,
-and the vLLM suite calls its private production functions directly. SGLang
-units remain follow-up work. The existing shared wire suite still runs both
+and the backend suites call their private production functions directly. The
+[SGLang follow-up](#sglang-follow-up) extends this layout. The existing shared wire suite still runs both
 backends, both retained Mocker suites remain, and E2E allocation is unchanged.
 Additional wire, process and native integration belong to
 [#15091](https://github.com/ai-dynamo/dynamo/pull/15091), as mapped in
@@ -28,8 +29,9 @@ Additional wire, process and native integration belong to
 
 The former `testkit/tests/unit/` tree and its source-group/setup macros are
 removed. Each test keeps its inputs, production calls and assertions beside
-the code it exercises. Private production functions remain private;
-relocating the tests changes no production behavior.
+the code it exercises. Private production functions remain private; the parent vLLM relocation
+changes no production behavior. The SGLang follow-up also fixes the reproduced
+stop-reason defect described below.
 
 ```text
 lib/sidecar/
@@ -41,6 +43,10 @@ lib/sidecar/
     convert/request_tests.rs        # Request and candidate assertions
     convert/response_tests.rs       # Response assertions and local setup
     test_fixtures.rs                # Native builders, including minimal_request
+  sglang/src/
+    client.rs, engine.rs, native_http.rs  # Inline SGLang units; retained socket tests
+    protocol/request_tests.rs       # Native request assertions
+    protocol/response_tests.rs      # Native response assertions
   testkit/
     src/fixtures.rs                 # Shared integration request helpers
     src/assert.rs                   # Existing integration output assertions
@@ -85,7 +91,7 @@ fn preserves_request_fields() {
 }
 ```
 
-The suite contains **82 isolated cases: 11 common and 71 vLLM**. It preserves
+The parent vLLM increment contains **82 isolated cases: 11 common and 71 vLLM**. It preserves
 the prior 81 scenarios and moves the existing LoRA lock-registry test from
 `vllm/src/tests.rs` into `lora.rs::tests`, with its inputs and assertions intact.
 The broader file retains 37 tests. This is one reclassified test, not new
@@ -105,13 +111,16 @@ artifact export remains owned by that integration PR; it must replace its
 calls to the removed runner and container tooling. That PR is not changed by
 this unit cleanup.
 
-## Deferred SGLang units
+## SGLang work deferred by parent #15243
+
+These observations describe the parent vLLM boundary; the
+[SGLang follow-up](#sglang-follow-up) records the implemented coverage.
 
 Future SGLang units should live beside their production owners with local
 fixtures. Shared scenarios remain an integration concern. Existing SGLang model,
 rank-fallback and other assertions must be preserved before any old test is removed. Its live response
 conversion stays at the integration boundary unless a callable production
-helper provides an isolated boundary. Worker construction currently performs
+helper provides an isolated boundary. At that boundary, worker construction performs
 bootstrap I/O; a private in-memory construction seam is separate follow-up work.
 
 Typed gRPC and opaque HTTP paths have distinct contracts: typed gRPC rejects
@@ -122,9 +131,9 @@ need their own assertions. These are unexecuted parity observations, not
 confirmed user-facing failures. Early bootstrap handoff also needs its own
 protocol assertions rather than vLLM's completed-prefill expectation.
 
-## R01–R32 mapping
+## Parent vLLM R01–R32 mapping
 
-Each row credits retained assertions before additions. File links identify the
+Deferred SGLang entries below describe the parent scope. Each row credits retained assertions before additions. File links identify the
 executable owner; deferred scenarios do not count as executed coverage.
 
 | ID | Retained coverage, additions or justified disposition | Owner |
@@ -203,7 +212,7 @@ field assertions moved into
 boundary. Its current replacements are direct native sampling, stopping and
 extension-field assertions; execution evidence is recorded below.
 Registration, transport DP metadata, tokens/text/logprobs and usage assertions remain at their wire boundary. No existing SGLang/TRT or
-Python/E2E test is migrated or removed by this increment. The four retained
+Python/E2E test is migrated or removed by the parent vLLM increment. The four retained
 Mocker tests for each of vLLM and SGLang remain; the five additional vLLM wire
 replacements are reserved for #15091, not this unit boundary.
 
@@ -218,7 +227,7 @@ The remaining mixed tests are split by obligation:
 | Stream chunks, terminal reasons, stop visibility, logprob alignment and prompt metadata | Local response assertions for terminal reasons, prompt metadata, streaming conversion, stop visibility, selected/top logprobs, invalid shapes, ranks, normalization and early-frame details. |
 | Worker identity/options and cleanup before startup | Local worker scenarios, parser/Encode rejection and native administration checks. |
 
-## Pinned native limitations
+## Pinned vLLM native limitations
 
 vLLM 0.29.0's [`inference.proto`](https://github.com/vllm-project/vllm/blob/98dff2a81d747d1dba01a47f939f48c3526d4206/rust/proto/inference.proto)
 defines zero max-new-tokens as a sentinel. Tests forward it without calculating
@@ -240,6 +249,59 @@ inputs receive explicit rejection tests. Native messages cannot expose missing
 cached-token, expert-tensor or thinking-token fields. GPU work release and KV
 transfer require the separate native integration evidence.
 
+## SGLang follow-up
+
+The SGLang increment is stacked on #15243 at `40c329fe2b`. It adds **48 isolated
+cases** and retains all **35 existing isolated cases**, including the released
+protobuf test: **83 SGLang units**, or **165 with the parent common/vLLM units**.
+Twelve existing protocol tests move intact into ordinary child modules; their
+assertions remain. Tests use local values and production functions without
+sockets, model downloads, engine processes or GPUs. No runner, lane markers,
+shared unit adapter, testing feature or new CI job is introduced.
+
+| Source / DEP rows | Isolated cases | Assertions |
+| --- | --- | --- |
+| [`client.rs`](../sglang/src/client.rs), R05/R23; RPC portion of R04 | 9 | Numeric bounds, incremental-output requirement, malformed discovery JSON, model/tokenizer/alias/context precedence, all native status categories, RPC success/error/deadline. |
+| [`engine.rs`](../sglang/src/engine.rs), R03/R24/R26 | 26 | Worker options, discovered identity/role, independent parser precedence, bootstrap hosts/ports, optional registration metadata and KV-event source/rank/topology validation. Existing capacity tests are retained; no new engine arithmetic is duplicated. |
+| [`protocol/request_tests.rs`](../sglang/src/protocol/request_tests.rs), R06–R08/R27/R28 | 18 | Exact sampling/stopping fields, absent/zero values, opt-ins and ranges, unsupported typed controls, native guides, LoRA/rank/routing fields, signed room bounds and handoff source precedence. |
+| [`protocol/response_tests.rs`](../sglang/src/protocol/response_tests.rs), R09/R10/R15–R17 | 18 | Token/count conversion, terminal reasons/usage/errors, selected/top/prompt logprob values and malformed shapes, opaque routed experts, user versus system/hidden stop IDs. |
+| [`native_http.rs`](../sglang/src/native_http.rs), R06/R26–R29 | 11 | Opaque envelope preservation, routing overrides, prefill sampling/handoff fields, envelope validation, HTTP endpoint discovery/status mapping, output envelopes and pre-cancelled generation. One thread-local trace case checks both HTTP and gRPC forwarding. |
+| [`proto_contract.rs`](../sglang/tests/proto_contract.rs), R30 | 1 | Existing exact released token/request-ID wire tags; unchanged. |
+
+The `from_discovered` construction helper is private and used by the real
+constructor after discovery. It lets worker tests supply metadata directly
+without replacing construction logic or starting a server. The only additional
+test dependency is the workspace's existing `tracing-subscriber`, used with a
+thread-local subscriber; no global logging state is changed.
+
+The library has **88 cases: 82 isolated and six retained socket tests**. The
+separate protobuf case brings the isolated count to 83. The executable smoke
+test is process coverage, not an isolated unit. These selections overlap and
+must not be added together. Shared conformance and both Mocker suites remain
+unchanged, as do native-engine and E2E scheduling.
+
+The new stop-reason regression failed before the fix: native matched ID
+`128001` became `Some(Int(128001))` without a user stop request. The SGLang
+converter now receives the request's stop conditions, preserves explicitly
+requested scalar IDs (including user/hidden overlap), and suppresses system
+and hidden-only IDs. String stops remain unchanged. This matches the existing
+Python SGLang handler contract; the native HTTP envelope remains opaque.
+
+The old planned matrix predates incremental SGLang output and the current
+early rendezvous handshake. It does not override those native contracts.
+Combined JSON/regex guides retain the current forwarding policy; the matrix's
+conflict-policy question remains unresolved. SGLang's separate connection/pool
+retry policy, readiness transitions and changed-role startup, targeted remote
+Abort, actual stream consumption/cancellation and successful KV transfer are
+not established by these new isolated tests. Retained wire tests cover their
+existing scenarios only. No new coverage is claimed for engine-owned behavior.
+
+Run the backend directly:
+
+```sh
+cargo test --locked -p dynamo-sglang-sidecar --all-targets
+```
+
 ## Current local commands
 
 Use Rust 1.96.1, protoc 30.2 and an external `CARGO_TARGET_DIR`. Set `PROTOC` and
@@ -260,6 +322,21 @@ when validating a new revision. Wire-preservation commands are in
 [COVERAGE.md](COVERAGE.md).
 
 ## Validation
+
+### SGLang follow-up on #15243
+
+`cargo test --locked -p dynamo-sidecar-common -p dynamo-vllm-sidecar -p dynamo-sglang-sidecar --all-targets`
+passed 212 tests: 13 common, 108 vLLM and 88 SGLang library cases, two executable
+tests and one protobuf contract test. This includes all 165 isolated cases
+(11 common, 71 vLLM and 83 SGLang). The SGLang-only all-targets run also passed
+all 90 cases. These selections overlap.
+
+All eight shared conformance cases and both four-case Mocker sidecar suites
+passed, with zero failed or ignored tests. Targeted SGLang Clippy with
+`--all-targets --no-deps -- -D warnings`, workspace formatting, pre-commit on
+the changed files and CODEOWNERS coverage for new paths passed. Independent
+source review confirmed the retained assertions and native contract boundaries.
+The full workspace, GitHub CI and native-engine/GPU suites were not run locally.
 
 ### Local lane-marker removal
 

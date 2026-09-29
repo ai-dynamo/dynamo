@@ -24,7 +24,8 @@ This draft is a separate alternative to
 base, with unit tests beside the production code they exercise. The original
 PR remains unchanged. Additional vLLM wire, process and native integration
 remain in [#15091](https://github.com/ai-dynamo/dynamo/pull/15091).
-The unit suite covers common code and vLLM; SGLang units remain follow-up work.
+The unit suite covers common code, vLLM and SGLang. The SGLang follow-up builds
+on [#15243](https://github.com/ai-dynamo/dynamo/pull/15243)'s local test layout.
 Existing shared integration scenarios, reusable fixtures, SGLang wire cases and
 E2E allocation remain in place.
 
@@ -85,6 +86,13 @@ Tests use ordinary `#[test]` or `#[tokio::test]` attributes. Native builders,
 including `minimal_request()`, live in `vllm/src/test_fixtures.rs` under `#[cfg(test)]`,
 reused by vLLM units and its retained fake-server tests. Shared integration
 helpers remain in testkit; no shared unit-testing layer is introduced.
+
+SGLang discovery, worker and native HTTP units stay in their owning modules.
+Its larger protocol suites use adjacent `protocol/request_tests.rs` and
+`protocol/response_tests.rs` files. Run them with
+`cargo test --locked -p dynamo-sglang-sidecar --all-targets`; this also runs
+the retained socket, executable and released-protobuf tests. See
+[UNITS.md](UNITS.md#sglang-follow-up) for the isolated/integration accounting.
 
 ## Request controls and observations
 
@@ -189,7 +197,7 @@ scenarios. They cover logprobs, scheduler cancellation, and prefill/decode hando
 that these shared scenarios do not replace. This harness adds coverage without
 removing those suites.
 
-For this increment, acceptance requires eight shared cases passing, including
+For the shared foundation, acceptance requires eight shared cases passing, including
 two-request cancellation isolation, the existing Mocker sidecar integration
 tests passing, formatting and Clippy passing, and no production sidecar/Mocker
 behavior changes. When native protocol APIs change, update the adapters and
@@ -215,12 +223,13 @@ suite.
 <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-## Isolated units beside production
+## Parent vLLM units beside production
 
 This alternative preserves the 81 isolated cases from #15089 and moves the
 existing LoRA lock-registry unit into `lora.rs`, bringing the isolated selection
 to **82 cases: 11 common and 71 vLLM**. The ten formerly shared vLLM scenarios
-remain local. No assertions are removed and no SGLang unit coverage is claimed.
+remain local. No assertions are removed. The SGLang follow-up is accounted
+separately in [UNITS.md](UNITS.md#sglang-follow-up).
 The broader `vllm/src/tests.rs` retains 37 tests.
 
 Common argument, endpoint and error units are inline in `common/src`; transport
@@ -263,4 +272,4 @@ passed. These are historical results, not validation of the current cleanup.
 [UNITS.md](UNITS.md) records the source layout, assertion mapping, direct Cargo
 commands. [COVERAGE.md](COVERAGE.md) records retained
 integration coverage and revision-specific execution;
-[DEVIATIONS.md](DEVIATIONS.md) records departures from the read-only DEP.
+[DEVIATIONS.md](DEVIATIONS.md) records departures from the planned DEP tabs.
