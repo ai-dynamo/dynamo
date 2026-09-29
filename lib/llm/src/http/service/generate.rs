@@ -821,8 +821,9 @@ impl GenerateMetricCollector {
         let cached_tokens = output
             .completion_usage
             .as_ref()
-            // A migrated attempt includes already-delivered output tokens in
-            // its prompt. Ignore that attempt-local usage for this logical
+            // RetryManager rebases a migrated attempt's usage onto the client's
+            // prompt and drops its cached count, which describes the replayed
+            // prompt. Ignore any usage that still doesn't match this logical
             // request and let the RequestTracker fallback run on drop.
             .filter(|usage| usage.prompt_tokens as usize == self.input_tokens)
             .and_then(|usage| usage.prompt_tokens_details.as_ref())
