@@ -210,21 +210,15 @@ Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent n
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
 
-## Compaction Signals
+## Agent Headers
 
-An agent harness can compact older conversation history into a summary when its context approaches a limit. Dynamo carries its signals in `AgentContext.agent_headers` without interpreting them. Plugin authors and trace consumers own any mapping between harnesses.
+Dynamo carries raw coding-agent HTTP headers in `AgentContext.agent_headers` without interpreting them. Capture includes the open `x-claude-code-*` and `x-codex-*` families alongside supported session and subagent headers. Names within those families are not hardcoded: new headers are captured without a Dynamo schema change. Header names and values can change as coding harnesses evolve. Plugin authors and trace consumers own any parsing or normalization between harnesses.
 
-| Harness | Example raw signals | Where to read them |
-| --- | --- | --- |
-| Codex | `x-codex-turn-metadata`, including any compaction object | `agent_headers["x-codex-turn-metadata"]` |
-| Claude Code | `x-claude-code-compaction`, `x-claude-code-context-compacted` | Corresponding `agent_headers` entries |
-| OpenCode | Session and parent headers; no compaction interpretation supplied | `agent_headers["x-session-id"]`, `agent_headers["x-parent-session-id"]` |
-
-Capture includes every `x-claude-code-*` and `x-codex-*` header, plus `session-id`, `thread-id`, `x-openai-subagent`, `x-openai-memgen-request`, `x-session-id`, and `x-parent-session-id`. The generic `session-id` header is captured only when `thread-id` contains a nonempty text value after trimming whitespace, even when another header supplies the session identity. New names within these families require no Dynamo schema change. Names are lowercase. Values remain strings, including malformed JSON, percent encoding, whitespace, empty values, and repeated values in their received order. Core code only normalizes session identity and the explicit Dynamo terminal marker.
+Names are lowercase. Values remain strings, including malformed JSON, percent encoding, whitespace, empty values, and repeated values in their received order. Core code only normalizes session identity and the explicit Dynamo terminal marker.
 
 Capture requires a recognized session identity and is bounded to 64 header values, 16 KiB per value, and 32 KiB total, counting the name once per value. Sensitive-marked and non-text values are skipped. Values exceeding the limits are omitted whole; retained values are never truncated. Missing metadata means no observation was captured, not that an event did not occur. Ordinary authentication, cookie, and unrelated protocol headers are excluded. Do not place credentials in an agent metadata header; these values are exposed to plugins and request traces.
 
-The map travels through the frontend and worker request envelope and is available through plugin `SessionContext.agent_headers()`. It contains HTTP headers only; request-body metadata is not captured. The default routing policy does not interpret the map. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format and [Custom Worker Selection](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#session-context) for plugin access.
+The map travels through the frontend and worker request envelope and is available through plugin `SessionContext.agent_headers()`. It contains HTTP headers only; request-body metadata is not captured. The default routing policy does not interpret the map. See [Agent Tracing](agent-tracing.md#dynamo-request_end-record) for the request-trace format and [Custom Worker Selection](../../developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx#session-context) for plugin access.
 
 For Claude Code custom endpoints, enable gateway hints with `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1`. Its [gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers) defines the header semantics. Preserving observations in `AgentContext` does not implement transparent Anthropic request-body or header forwarding to upstream providers.
 

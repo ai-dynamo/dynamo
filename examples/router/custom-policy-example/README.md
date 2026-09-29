@@ -35,23 +35,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 The `simple-filter-score-pick` policy filters on minimum device overlap and scores active requests above the least-loaded worker. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
-Custom filters, scorers, and pickers can also read opaque agent headers from the same session context, without an additional `WorkerInputs` group:
-
-```rust
-use dynamo_kv_router::plugins::worker_selection::SessionContext;
-
-fn has_context_compacted_hint(session: &SessionContext) -> bool {
-    session
-        .agent_headers()
-        .contains_key("x-claude-code-context-compacted")
-}
-```
-
-With gateway hints enabled, Claude Code sends `x-claude-code-context-compacted` on the first main-conversation request after compaction. Its value identifies the trigger (`auto`, `manual`, or `reactive`); this helper checks only whether the hint was captured. See the [gateway hint protocol](https://code.claude.com/docs/en/llm-gateway-protocol#gateway-hint-headers).
-
-A custom soft-pin policy could use this hint to reconsider its own previous-worker preference, choosing among eligible workers using current cache overlap and load. This is an extension idea, not behavior implemented by the example policies. The hint does not imply zero prefix reuse, override a hard pin, or trigger KV eviction.
-
-Header values are untrusted observations for the current request. A missing key means no hint was captured, not that compaction did not occur. The map preserves unknown names within supported header families and repeated values. A plugin owns any cross-agent normalization; Dynamo does not classify raw compaction or request-class headers. Capture limits are documented in [Agent Harnesses](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx#compaction-signals).
+Custom filters, scorers, and pickers can also read opaque agent headers through `session_context().agent_headers()`, without an additional `WorkerInputs` group. Header values are untrusted observations for the current request. A missing key means no observation was captured. The map preserves unknown names within supported header families and repeated values; plugins own any parsing and cross-agent normalization. See [Agent Harnesses](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/use-cases/agents/agent-harnesses.mdx#agent-headers) for capture rules and limits.
 
 The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 

@@ -178,25 +178,7 @@ Dynamo emits `request_end` after an eligible response stream finishes or is drop
 
 </details>
 
-### Compaction Metadata
-
-Request traces preserve compaction signals as opaque strings in `agent_context.agent_headers`. Dynamo does not normalize compaction between harnesses. Trace consumers decide how to interpret the headers and must tolerate unknown names, values, and embedded JSON fields.
-
-For example, a Codex compaction request can produce:
-
-```json
-{
-  "agent_context": {
-    "session_id": "codex-thread-id",
-    "agent_headers": {
-      "thread-id": ["codex-thread-id"],
-      "x-codex-turn-metadata": ["{\"request_kind\":\"compaction\",\"compaction\":{\"trigger\":\"auto\",\"phase\":\"pre_turn\"}}"]
-    }
-  }
-}
-```
-
-Use `session_id` to group requests before, during, and after compaction. Captured headers do not change request placement or evict cached blocks. See [Agent Harnesses](agent-harnesses.mdx#compaction-signals) for capture rules and limits. Older trace rows may contain a normalized `compaction` object; new rows emit the raw headers instead. Older frontends cannot supply the new map during a rolling upgrade.
+Requests with recognized session identity can include opaque strings in `agent_context.agent_headers`. Trace consumers decide how to interpret the headers and must tolerate unknown names, values, and embedded JSON fields. Captured headers do not change request placement or evict cached blocks. See [Agent Harnesses](agent-harnesses.mdx#agent-headers) for capture rules and limits. Older frontends cannot supply the map during a rolling upgrade.
 
 For chat streams, Dynamo records finish metadata after parser and jail rewrites. Completion streams record the final OpenAI-compatible completion finish reason.
 
