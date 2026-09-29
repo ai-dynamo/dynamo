@@ -180,7 +180,21 @@ CHECKPOINT_BACKENDS = {
         # pods keep weights without a model-cache PVC; when CI passes
         # --model-cache-pvc, _new_checkpoint_spec skips this HF_HOME so the
         # shared cache mount can own it (same as regular deploy tests).
-        env=(("UCX_TLS", "tcp,self"), ("HF_HOME", TRTLLM_HF_HOME)),
+        env=(
+            ("UCX_TLS", "tcp,self"),
+            ("HF_HOME", TRTLLM_HF_HOME),
+            # Match worker/helper libcuda; remove host-driver overrides once CI
+            # adopts the fix for https://github.com/ai-dynamo/snapshot/issues/412.
+            # Preserve the image's libstdc++ and NIXL preloads.
+            (
+                "LD_PRELOAD",
+                (
+                    "/usr/$LIB/libcuda.so.1:"
+                    "/opt/dynamo/libstdc++.so.6:"
+                    "/usr/local/lib/python3.12/dist-packages/tensorrt_llm/libs/nixl/libnixl.so"
+                ),
+            ),
+        ),
         # Match the base TRTLLM snapshot recipe and avoid cold-worker/restore
         # rollout overlap during initial DGD startup.
         checkpoint_startup_policy="WaitForCheckpoint",
