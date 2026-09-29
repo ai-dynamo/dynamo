@@ -110,8 +110,25 @@ fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
     }
 }
 
-fn is_ipv6_endpoint(endpoint: &str) -> bool {
-    endpoint.starts_with("tcp://[")
+/// Returns whether `endpoint` needs `ZMQ_IPV6`.
+///
+/// Rejects unbracketed IPv6 literals: without `ZMQ_IPV6`, libzmq resolves them
+/// as IPv4 and retries the connection forever without reporting an error.
+fn ipv6_option_for(endpoint: &str) -> Result<bool> {
+    let Some(address) = endpoint.strip_prefix("tcp://") else {
+        return Ok(false);
+    };
+    if address.starts_with('[') {
+        return Ok(true);
+    }
+    if let Some((host, _port)) = address.rsplit_once(':')
+        && host.parse::<std::net::Ipv6Addr>().is_ok()
+    {
+        anyhow::bail!(
+            "Invalid ZMQ endpoint '{endpoint}': IPv6 addresses must be bracketed, for example tcp://[{host}]:<port>"
+        );
+    }
+    Ok(false)
 }
 
 fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
@@ -119,7 +136,7 @@ where
     T: tmq::FromZmqSocket<T>,
 {
     builder
-        .set_ipv6(is_ipv6_endpoint(endpoint))
+        .set_ipv6(ipv6_option_for(endpoint)?)
         .bind(endpoint)
         .map_err(map_socket_creation_error)
 }
@@ -129,15 +146,16 @@ where
     T: tmq::FromZmqSocket<T>,
 {
     builder
-        .set_ipv6(is_ipv6_endpoint(endpoint))
+        .set_ipv6(ipv6_option_for(endpoint)?)
         .connect(endpoint)
         .map_err(map_socket_creation_error)
 }
 
 fn connect_zmq_socket(socket: &impl AsZmqSocket, endpoint: &str) -> Result<()> {
+    let ipv6 = ipv6_option_for(endpoint)?;
     let socket = socket.get_socket();
     // ZMQ snapshots this option per connection; keep hostname resolution on IPv4.
-    socket.set_ipv6(is_ipv6_endpoint(endpoint))?;
+    socket.set_ipv6(ipv6)?;
     socket.connect(endpoint)?;
     Ok(())
 }
@@ -797,6 +815,44 @@ mod tests {
         assert_eq!(map_socket_creation_error(error).to_string(), original);
     }
 
+    #[test]
+    fn ipv6_option_follows_endpoint_address_family() {
+        for (endpoint, expected) in [
+            ("tcp://[::1]:5555", true),
+            ("tcp://[::]:*", true),
+            ("tcp://[2001:db8::10]:5555", true),
+            ("tcp://127.0.0.1:5555", false),
+            ("tcp://0.0.0.0:*", false),
+            ("tcp://localhost:5555", false),
+            ("tcp://*:5555", false),
+            ("inproc://events", false),
+        ] {
+            assert_eq!(ipv6_option_for(endpoint).unwrap(), expected, "{endpoint}");
+        }
+
+        for endpoint in ["tcp://::1:5555", "tcp://2001:db8::10:5555"] {
+            let error = ipv6_option_for(endpoint).unwrap_err().to_string();
+            assert!(
+                error.contains("IPv6 addresses must be bracketed"),
+                "{endpoint}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unbracketed_ipv6_endpoints_fail_before_connecting() {
+        let error = ZmqSubTransport::connect_broker("tcp://::1:5555", "topic")
+            .await
+            .err()
+            .expect("unbracketed IPv6 endpoint should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("IPv6 addresses must be bracketed"),
+            "{error}"
+        );
+    }
+
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher
             .socket
@@ -1150,7 +1206,7 @@ mod tests {
         #[case] endpoint_a: &str,
         #[case] endpoint_b: &str,
     ) {
-        if (is_ipv6_endpoint(endpoint_a) || is_ipv6_endpoint(endpoint_b))
+        if (ipv6_option_for(endpoint_a).unwrap() || ipv6_option_for(endpoint_b).unwrap())
             && let Err(error) = std::net::TcpListener::bind("[::1]:0")
         {
             eprintln!("Skipping mixed IPv4/IPv6 subscriber test: {error}");

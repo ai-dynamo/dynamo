@@ -221,7 +221,8 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 
   Event-plane PUB/SUB sockets support IPv4 addresses and bracketed IPv6 addresses, including
   connections to configured ZMQ brokers. Hostnames retain IPv4 resolution. For an IPv6 broker,
-  use a bracketed address such as `tcp://[2001:db8::10]:5555`. This variable does not affect NATS
+  use a bracketed address such as `tcp://[2001:db8::10]:5555`; Dynamo rejects an unbracketed IPv6
+  address. This variable does not affect NATS
   or ZMQ broker mode.
 </ParamField>
 
