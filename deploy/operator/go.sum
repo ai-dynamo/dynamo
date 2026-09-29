@@ -18,8 +18,8 @@ github.com/Masterminds/sprig/v3 v3.3.0 h1:mQh0Yrg1XPo6vjYXgtf5OtijNAKJRNcTdOOGZe
 github.com/Masterminds/sprig/v3 v3.3.0/go.mod h1:Zy1iXRYNqNLUolqCpL4uhk6SHUMAOSCzdgBfDb35Lz0=
 github.com/NYTimes/gziphandler v1.1.1 h1:ZUDjpQae29j0ryrS0u/B8HZfJBtBQHjqw2rQ2cqUQ3I=
 github.com/NYTimes/gziphandler v1.1.1/go.mod h1:n/CVRwUEOgIxrgPvAQhUUr9oeUtvrhMomdKFjzJNB0c=
-github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13 h1:eVDVuyh5vDgWG6I2Mffs68g+25qW94VAG3EfDTxbhc0=
-github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.13/go.mod h1:csL4kgDc1MoD7Erjyu8QyVrbL/dv8fIZ3sYkJcc2nrQ=
+github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.14-rc1 h1:dvSPEfdcb6KNB2DPgJZ1LKNrEpnVGm+zgIIYtRHn5QU=
+github.com/ai-dynamo/grove/operator/api v0.1.0-alpha.14-rc1/go.mod h1:csL4kgDc1MoD7Erjyu8QyVrbL/dv8fIZ3sYkJcc2nrQ=
 github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f h1:PBmn3itAlMFHc0HgDOcr0IwV0uiUDQehcg7/aumIobU=
 github.com/ai-dynamo/modelexpress/modelexpress_client/go v0.0.0-20260428070018-96d409e6f37f/go.mod h1:i7tIkusSEcMQqN4IDd3cXZ6EL0Kfke6F00Nn5WbuH3Y=
 github.com/ai-dynamo/snapshot/api v0.1.0 h1:S8HG6K+YhloUc/usu03wiJ8fTo3Mhju/oWQVFDYVw/o=

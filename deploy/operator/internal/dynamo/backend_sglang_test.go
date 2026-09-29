@@ -34,6 +34,10 @@ func (m *MockSimpleDeployer) GetNodeRank() (string, bool) {
 	return "1", false // simple rank, no shell interpretation needed
 }
 
+func (m *MockSimpleDeployer) GetPodRank() string {
+	return "1"
+}
+
 func (m *MockSimpleDeployer) NeedsDNSWait() bool {
 	return false
 }
@@ -56,6 +60,10 @@ func (m *MockShellDeployer) GetHostNames(serviceName string, numberOfNodes int32
 
 func (m *MockShellDeployer) GetNodeRank() (string, bool) {
 	return "$(WORKER_INDEX)", true // needs shell interpretation
+}
+
+func (m *MockShellDeployer) GetPodRank() string {
+	return "$(WORKER_INDEX)"
 }
 
 func (m *MockShellDeployer) NeedsDNSWait() bool {

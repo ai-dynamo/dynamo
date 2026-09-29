@@ -183,6 +183,10 @@ const (
 	DynamoComponentEnvVar             = "DYN_COMPONENT"
 	DynamoDiscoveryBackendEnvVar      = "DYN_DISCOVERY_BACKEND"
 
+	// Multinode topology aliases are operator-owned and independent of the deployment provider.
+	DynamoRankEnvVar          = "DYNAMO_RANK"
+	DynamoLeaderAddressEnvVar = "DYNAMO_LEADER_ADDRESS"
+
 	GlobalDynamoNamespace = "dynamo"
 
 	ComponentTypePlanner  = "planner"

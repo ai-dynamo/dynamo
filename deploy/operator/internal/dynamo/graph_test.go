@@ -1765,6 +1765,153 @@ func TestAddStandardEnvVars_NATS(t *testing.T) {
 	}
 }
 
+func TestAddMultinodeTopologyEnvVars(t *testing.T) {
+	enabledAnnotations := map[string]string{
+		commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+	}
+	legacyAnnotations := map[string]string{
+		commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.5.0",
+	}
+
+	tests := []struct {
+		name          string
+		numberOfNodes int32
+		annotations   map[string]string
+		deployer      MultinodeDeployer
+		initialEnv    []corev1.EnvVar
+		wantLeader    string
+		wantRank      string
+		wantAliases   bool
+	}{
+		{
+			name:          "new Grove deployment gets topology aliases",
+			numberOfNodes: 2,
+			annotations:   enabledAnnotations,
+			deployer:      &GroveMultinodeDeployer{},
+			wantLeader:    "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-0.$(GROVE_HEADLESS_SERVICE)",
+			wantRank:      "$(GROVE_PCSG_POD_INDEX)",
+			wantAliases:   true,
+		},
+		{
+			name:          "new LWS deployment gets topology aliases",
+			numberOfNodes: 2,
+			annotations:   enabledAnnotations,
+			deployer:      &LWSMultinodeDeployer{},
+			wantLeader:    "$(LWS_LEADER_ADDRESS)",
+			wantRank:      "$(LWS_WORKER_INDEX)",
+			wantAliases:   true,
+		},
+		{
+			name:          "inter-pod GMS uses engine rank instead of flat Grove pod index",
+			numberOfNodes: 3,
+			annotations:   enabledAnnotations,
+			deployer:      &GroveMultinodeDeployer{IsInterPodGMS: true, Rank: 2},
+			wantLeader:    "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-$(GROVE_PCLQ_POD_INDEX).$(GROVE_HEADLESS_SERVICE)",
+			wantRank:      "2",
+			wantAliases:   true,
+		},
+		{
+			name:          "operator values override user aliases",
+			numberOfNodes: 2,
+			annotations:   enabledAnnotations,
+			deployer:      &LWSMultinodeDeployer{},
+			initialEnv: []corev1.EnvVar{
+				{Name: commonconsts.DynamoLeaderAddressEnvVar, Value: "user-leader"},
+				{Name: commonconsts.DynamoRankEnvVar, Value: "99"},
+			},
+			wantLeader:  "$(LWS_LEADER_ADDRESS)",
+			wantRank:    "$(LWS_WORKER_INDEX)",
+			wantAliases: true,
+		},
+		{
+			name:          "legacy deployment stays unchanged on operator upgrade",
+			numberOfNodes: 2,
+			annotations:   legacyAnnotations,
+			deployer:      &GroveMultinodeDeployer{},
+			wantAliases:   false,
+		},
+		{
+			name:          "deployment without origin stays unchanged on operator upgrade",
+			numberOfNodes: 2,
+			deployer:      &GroveMultinodeDeployer{},
+			wantAliases:   false,
+		},
+		{
+			name:          "single-node component does not get topology aliases",
+			numberOfNodes: 1,
+			annotations:   enabledAnnotations,
+			deployer:      &GroveMultinodeDeployer{},
+			wantAliases:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("inject topology aliases into the rendered main container")
+			container := &corev1.Container{Env: tt.initialEnv}
+			addMultinodeTopologyEnvVars(container, tt.numberOfNodes, "Engine", tt.deployer, tt.annotations)
+
+			t.Log("verify aliases are present only for eligible multinode deployments")
+			leader := findEnvVar(container.Env, commonconsts.DynamoLeaderAddressEnvVar)
+			rank := findEnvVar(container.Env, commonconsts.DynamoRankEnvVar)
+			if !tt.wantAliases {
+				require.Nil(t, leader)
+				require.Nil(t, rank)
+				return
+			}
+			require.NotNil(t, leader)
+			require.NotNil(t, rank)
+			require.Equal(t, tt.wantLeader, leader.Value)
+			require.Equal(t, tt.wantRank, rank.Value)
+		})
+	}
+}
+
+func TestGenerateBasePodSpecInjectsMultinodeTopologyEnvVars(t *testing.T) {
+	t.Log("render a new multinode component through the production pod-spec path")
+	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentName: "Engine",
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					commonconsts.KubeAnnotationDynamoOperatorOriginVersion: "1.6.0",
+				},
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  commonconsts.MainContainerName,
+					Image: "example/engine:1.6.0",
+				}},
+			},
+		},
+	}
+	podSpec, err := GenerateBasePodSpec(
+		component,
+		BackendFrameworkNoop,
+		&mockSecretsRetriever{},
+		"test-deployment",
+		"default",
+		RoleLeader,
+		2,
+		&configv1alpha1.OperatorConfiguration{},
+		commonconsts.MultinodeDeploymentTypeGrove,
+		"Engine",
+		nil,
+		staticContainerGPUCount(0),
+	)
+	require.NoError(t, err)
+
+	t.Log("verify the rendered main container exposes the topology aliases")
+	require.NotEmpty(t, podSpec.Containers)
+	leader := findEnvVar(podSpec.Containers[0].Env, commonconsts.DynamoLeaderAddressEnvVar)
+	rank := findEnvVar(podSpec.Containers[0].Env, commonconsts.DynamoRankEnvVar)
+	require.NotNil(t, leader)
+	require.NotNil(t, rank)
+	require.Equal(t, "$(GROVE_PCSG_NAME)-$(GROVE_PCSG_INDEX)-engine-ldr-0.$(GROVE_HEADLESS_SERVICE)", leader.Value)
+	require.Equal(t, "$(GROVE_PCSG_POD_INDEX)", rank.Value)
+}
+
 func TestAddTransportTLSEnvVars(t *testing.T) {
 	t.Log("Each non-empty Infrastructure TLS path injects the matching env var.")
 	tlsCases := []struct {
