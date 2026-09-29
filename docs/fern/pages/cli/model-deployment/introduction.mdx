@@ -48,7 +48,7 @@ docker exec -it <container_id> bash
     export MODEL="oci://ghcr.io/org/model:tag"
     ```
 
-    This pulls from an ordinary container registry, reusing the registry, credentials and mirroring a deployment already has for container images — which is often easier to run air-gapped than Hugging Face. It requires the [`llmman`](https://github.com/llmmanorg/llmman) binary on `PATH` (or `DYN_LLMMAN_BIN` pointing at it), and is only consulted for references that actually carry the `oci://` scheme.
+    This pulls from an ordinary container registry, reusing the registry, credentials and mirroring a deployment already has for container images, which is often easier to run air-gapped than Hugging Face. It requires the [`llmman`](https://github.com/llmmanorg/llmman) binary on `PATH` (or `DYN_LLMMAN_BIN` pointing at it), and is only consulted for references that actually carry the `oci://` scheme. If the `llmman serve` daemon uses a custom store via `LLMMAN_MODELS`, set the same value for Dynamo.
     </Note>
   </Step>
 

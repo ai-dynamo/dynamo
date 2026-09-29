@@ -60,7 +60,11 @@ const DEFAULT_PORT: u16 = 17434;
 /// Case-insensitive: a URI scheme is case-insensitive per RFC 3986, and
 /// `OCI://` is a plausible thing for a user to type.
 pub fn is_oci_ref(value: &str) -> bool {
-    value.len() > SCHEME.len() && value[..SCHEME.len()].eq_ignore_ascii_case(SCHEME)
+    // `get` rather than slicing: a multi-byte char can straddle the boundary.
+    value.len() > SCHEME.len()
+        && value
+            .get(..SCHEME.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(SCHEME))
 }
 
 /// Drop the `oci://` prefix, leaving the bare reference `llmman` understands.
@@ -163,12 +167,14 @@ struct PullLine {
 
 /// The subset of `llmman resolve`'s output contract we depend on.
 ///
-/// Deliberately ignores unknown fields: `format` and `mmproj` are part of the
-/// documented output but are not needed here, and the contract is allowed to
-/// grow.
+/// Deliberately ignores unknown fields: `mmproj` is part of the documented
+/// output but is not needed here, and the contract is allowed to grow.
 #[derive(Deserialize)]
 struct ResolveOutput {
     path: String,
+    /// `safetensors` (a directory) or `gguf` (a single file).
+    #[serde(default)]
+    format: Option<String>,
 }
 
 /// Confirm a llmman daemon is listening and answering.
@@ -338,11 +344,14 @@ fn parse_resolve_output(stdout: &[u8], reference: &str) -> anyhow::Result<PathBu
         anyhow::bail!("llmman resolve '{reference}': returned an empty path");
     }
 
+    // Only model directories load; a single-file `gguf` result does not.
     let path = PathBuf::from(parsed.path);
-    if !path.exists() {
+    if !path.is_dir() {
         anyhow::bail!(
-            "llmman resolve '{reference}': reported path '{}' does not exist",
-            path.display()
+            "llmman resolve '{reference}': reported path '{}' is not an existing model \
+             directory (format: {}). Single-file GGUF models are not supported.",
+            path.display(),
+            parsed.format.as_deref().unwrap_or("unknown")
         );
     }
 
@@ -355,11 +364,10 @@ fn parse_resolve_output(stdout: &[u8], reference: &str) -> anyhow::Result<PathBu
 ///
 /// `reference` may be given with or without the `oci://` prefix.
 pub async fn from_oci(reference: &str) -> anyhow::Result<PathBuf> {
-    let bare = strip_scheme(reference);
-    if bare.trim().is_empty() {
+    let bare = strip_scheme(reference).trim();
+    if bare.is_empty() {
         anyhow::bail!("empty OCI model reference: '{reference}'");
     }
-    let bare = bare.trim();
 
     let base = endpoint();
     let client = reqwest::Client::new();
@@ -394,6 +402,9 @@ mod tests {
         assert!(!is_oci_ref(""));
         // Scheme with nothing after it is not a usable reference.
         assert!(!is_oci_ref("oci://"));
+        // Valid UTF-8 whose char straddles the scheme boundary must not panic.
+        assert!(!is_oci_ref("oci:/\u{e9}"));
+        assert!(!is_oci_ref("\u{e9}\u{e9}\u{e9}\u{e9}"));
     }
 
     #[test]
@@ -476,9 +487,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().display().to_string();
         let line = format!(
-            r#"{{"reference":"r","path":"{path}","format":"gguf","mmproj":"/x","future":1}}"#
+            r#"{{"reference":"r","path":"{path}","format":"safetensors","mmproj":"/x","future":1}}"#
         );
         assert!(parse_resolve_output(line.as_bytes(), "r").is_ok());
+    }
+
+    #[test]
+    fn rejects_a_single_file_gguf_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("model.gguf");
+        std::fs::write(&file, b"GGUF").unwrap();
+        let line = format!(r#"{{"path":"{}","format":"gguf"}}"#, file.display());
+        let err = parse_resolve_output(line.as_bytes(), "r").unwrap_err();
+        assert!(err.to_string().contains("gguf"));
     }
 
     #[test]
@@ -547,7 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_reference_is_rejected_without_contacting_the_daemon() {
-        assert!(from_oci("oci://").await.is_err());
-        assert!(from_oci("oci://   ").await.is_err());
+        let err = from_oci("oci://   ").await.unwrap_err();
+        assert!(err.to_string().contains("empty OCI model reference"));
     }
 }

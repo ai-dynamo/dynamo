@@ -689,8 +689,7 @@ impl LocalModel {
                 .context("move_to_self_host")?;
         }
 
-        let source_path = PathBuf::from(self.card.source_path());
-        if !source_path.exists() {
+        if is_remote_repo_source(self.card.source_path()) {
             // The consumers of MDC (frontend) might not have the same local path as us, so
             // replace disk paths with a custom URL like "hf://Qwen/Qwen3-0.6B/config.json".
             //
@@ -872,6 +871,13 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     }
 }
 
+/// True if `source` names a remote Hugging Face repo rather than something on
+/// disk. An `oci://` source resolves to a local directory, so like a local
+/// model it must not be rewritten to a `hf://` URL.
+fn is_remote_repo_source(source: &str) -> bool {
+    !Path::new(source).exists() && !super::hub::oci::is_oci_ref(source)
+}
+
 /// `None` when `system_status_server` isn't running (no `DYN_SYSTEM_PORT`)
 /// — lets default-on behavior degrade gracefully without erroring.
 pub(crate) fn self_host_base_url(
@@ -943,6 +949,19 @@ mod self_host_metadata_default_tests {
         assert!(self_host_metadata_default(Some(""))); // empty
         assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
         assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
+    }
+}
+
+#[cfg(test)]
+mod is_remote_repo_source_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_missing_non_oci_source_is_a_remote_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_remote_repo_source("Qwen/Qwen3-0.6B"));
+        assert!(!is_remote_repo_source(dir.path().to_str().unwrap()));
+        assert!(!is_remote_repo_source("oci://ghcr.io/org/model:tag"));
     }
 }
 
