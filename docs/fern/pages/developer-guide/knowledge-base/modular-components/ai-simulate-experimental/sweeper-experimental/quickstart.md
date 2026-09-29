@@ -9,6 +9,13 @@ subtitle: Run a backend-neutral sweep with an injected replay runtime
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
+> [!NOTE]
+> **Retained Python SDK.** This quickstart uses `SmartSearchConfig` and an application-supplied
+> runner. For a command-line sweep, follow [Sweep DynoSim
+> Configurations](../../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx).
+> The SDK YAML file below cannot be passed directly to `aisimulate recommend`; see [SDK and CLI
+> configuration](overview.md#sdk-and-cli-configuration).
+
 Install AISimulate:
 
 ```bash
