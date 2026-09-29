@@ -16,15 +16,6 @@ spec:
   tolerations:
     - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
     - {key: dedicated, operator: Exists, effect: NoSchedule}
-  initContainers:
-    - name: helper
-      image: dynamoci.azurecr.io/ghcr.io/ai-dynamo/snapshot/agent@sha256:42b340a7a58feadae76f209c066c08a3f3cb9262cee12487425808e39303e301
-      command: ["/bin/cp", "/usr/local/bin/cuda-checkpoint-helper", "/helpers/cuda-checkpoint-helper"]
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities: {drop: [ALL]}
-      volumeMounts:
-        - {name: helpers, mountPath: /helpers}
   containers:
     - name: probe
       image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.6.0-ci-51b83df91f3fca2f52ed644f744c4465c3d163b3-trtllm-placeholder@sha256:350a865ffd4eff81a428ca80da945869d4755b7553ce9a743fc2d2166050ab86
@@ -45,6 +36,7 @@ spec:
         - {name: helpers, mountPath: /helpers, readOnly: true}
         - {name: probe, mountPath: /probe, readOnly: true}
   volumes:
-    - {name: helpers, emptyDir: {}}
+    - name: helpers
+      configMap: {name: cuda-runtime-helper, defaultMode: 0555}
     - name: probe
       configMap: {name: cuda-runtime-permission-probe}

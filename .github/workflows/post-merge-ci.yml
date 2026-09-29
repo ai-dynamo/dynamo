@@ -17,12 +17,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          command -v gcc dpkg-deb curl sha256sum
+          build_dir=$(mktemp -d "$RUNNER_TEMP/cuda-runtime-helper.XXXXXX")
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-cudart-dev-13-0_13.0.96-1_amd64.deb \
+            --output "$build_dir/cuda-headers.deb"
+          printf '%s  %s\n' fb74ece01ea01e6c44335967fae3d47ff60524a5e061037b6be446dcc9ef1ee3 "$build_dir/cuda-headers.deb" | sha256sum --check
+          dpkg-deb --extract "$build_dir/cuda-headers.deb" "$build_dir/headers"
+          gcc -std=gnu11 -O2 -Wall -Wextra -Werror .github/scripts/cuda-runtime-helper.c \
+            -I "$build_dir/headers/usr/local/cuda-13.0/targets/x86_64-linux/include" -ldl -o "$build_dir/cuda-checkpoint-helper"
           kubectl --request-timeout=10s create namespace "$PROBE_NAMESPACE"
           kubectl --request-timeout=10s label namespace "$PROBE_NAMESPACE" \
             nscleanup/enabled=true nscleanup/ttl=600 dynamo.github/run-id="${GITHUB_RUN_ID}"
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create serviceaccount cuda-runtime-permission-probe
           kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-permission-probe \
             --from-file=.github/scripts/cuda-runtime-permission-probe.py
+          kubectl --request-timeout=10s -n "$PROBE_NAMESPACE" create configmap cuda-runtime-helper \
+            --from-file=cuda-checkpoint-helper="$build_dir/cuda-checkpoint-helper"
           all_passed=true
           probe_node=""
           for mode in root-no-caps nonroot-no-caps; do

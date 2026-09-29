@@ -89,13 +89,12 @@ def probe(driver):
         if driver != "libcuda.so.1" and not Path(libraries[0]).samefile(driver):
             raise RuntimeError(f"target did not load the requested compatibility library: {libraries}")
         emit(mode=mode, **ready)
-        environment["LD_PRELOAD"] = libraries[0]
         environment["LD_DEBUG"] = "libs"
         for action in ("lock", "checkpoint", "restore", "unlock"):
             started = time.monotonic()
             emit(event="helper_start", mode=mode, action=action, driver=libraries[0], target_pid=process.pid, parent_pid=os.getpid())
             helper = subprocess.Popen(
-                ["/helpers/cuda-checkpoint-helper", "--action", action, "--pid", str(process.pid)],
+                ["/helpers/cuda-checkpoint-helper", "--driver-library", libraries[0], "--action", action, "--pid", str(process.pid)],
                 env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, start_new_session=True,
             )
