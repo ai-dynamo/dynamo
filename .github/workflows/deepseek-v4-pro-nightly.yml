@@ -106,11 +106,11 @@ jobs:
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           selector=nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg
           "${k[@]}" create -f "$ARTIFACTS/deploy.yaml"
-          # Reconnect logs each minute to discover new pods and reload tbot certificates.
+          # Reconnect logs every two minutes to discover new pods and reload tbot certificates.
           until "${k[@]}" wait dgd/dsv4-pro-agg --for=condition=Ready --timeout=5s; do
             "${k[@]}" get dgd dsv4-pro-agg
             "${k[@]}" get pods -l "$selector" -o wide
-            timeout 60s "${k[@]}" logs -f -l "$selector" -c main \
+            timeout 120s "${k[@]}" logs --request-timeout=0 -f -l "$selector" -c main \
               --prefix --timestamps --since=1m --tail=20 --ignore-errors || true
             sleep 5
           done
@@ -126,7 +126,7 @@ jobs:
             "${k[@]}" get job dsv4-bench -o json |
               jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
             "${k[@]}" get pods -l job-name=dsv4-bench -o wide
-            timeout 60s "${k[@]}" logs -f job/dsv4-bench \
+            timeout 120s "${k[@]}" logs --request-timeout=0 -f job/dsv4-bench \
               --prefix --timestamps --since=1m --tail=20 --ignore-errors || true
             sleep 5
           done
