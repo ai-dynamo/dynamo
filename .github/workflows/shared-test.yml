@@ -220,9 +220,6 @@ jobs:
           MINIO_ROOT_PASSWORD: minioadmin
           MINIO_VOLUMES: /tmp/minio-data
           MINIO_CONSOLE_ADDRESS: ':9001'
-        ports:
-          - 9000:9000
-          - 9001:9001
     steps:
       - name: Checkout repository
         id: checkout

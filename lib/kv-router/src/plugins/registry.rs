@@ -13,7 +13,7 @@ use super::request_classifier::RequestClassifierRegistry;
 use super::request_classifier::{
     RequestClassifierFactory, RequestClassifierProvider, RequestClassifierRegistryError,
 };
-use super::worker_selection::{WorkerSelectionPolicy, WorkerSelectionPolicyFactory};
+use super::worker_selection::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 use crate::config::KvRouterConfig;
 use crate::scheduling::config::WorkerSelectionPolicySelections;
@@ -69,6 +69,7 @@ impl WorkerSelectionPolicyProviderError {
 pub struct RouterPluginRegistry {
     providers: HashMap<String, WorkerSelectionPolicyProvider>,
     request_classifiers: RequestClassifierRegistry,
+    default_factory: Option<WorkerSelectionPolicyFactory>,
 }
 
 /// Existing catalogs can retain their worker-selection registration signature.
@@ -80,6 +81,8 @@ pub type WorkerSelectionPolicyRegistry = RouterPluginRegistry;
 pub enum WorkerSelectionPolicyRegistryError {
     #[error("worker-selection policy type must not be empty")]
     EmptyName,
+    #[error("routing host must supply a default worker-selection policy factory")]
+    MissingDefault,
     #[error("worker-selection policy type 'default' is reserved for Dynamo's built-in selector")]
     ReservedDefault,
     #[error("worker-selection policy type {name:?} is already registered")]
@@ -99,6 +102,12 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl RouterPluginRegistry {
+    /// Supply the host default while preserving registered custom plugin types.
+    pub fn with_default_factory(mut self, factory: WorkerSelectionPolicyFactory) -> Self {
+        self.default_factory = Some(factory);
+        self
+    }
+
     /// Resolve every configured plugin once before constructing any routers.
     pub fn resolve_plugins(
         &self,
@@ -106,6 +115,10 @@ impl RouterPluginRegistry {
     ) -> Result<super::RouterPlugins, super::RouterPluginRegistryError> {
         Ok(super::RouterPlugins {
             worker_selection: self.resolve(config)?,
+            custom_worker_selection: config
+                .selected_worker_selection_policy_instance()
+                .map_err(WorkerSelectionPolicyRegistryError::from)?
+                .is_some(),
             request_classifier: self.resolve_request_classifier(config)?,
         })
     }
@@ -215,23 +228,28 @@ impl RouterPluginRegistry {
             self.resolve_selected_cached(policy_config, selected.encode.as_deref(), &mut resolved)?;
 
         if aggregated.is_none() && prefill.is_none() && decode.is_none() && encode.is_none() {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
 
+        let [aggregated, prefill, decode, encode] = [aggregated, prefill, decode, encode]
+            .map(|factory| factory.or_else(|| self.default_factory.clone()));
+        let required = |factory: Option<WorkerSelectionPolicyFactory>| {
+            factory.ok_or(WorkerSelectionPolicyRegistryError::MissingDefault)
+        };
+        let (aggregated, prefill, decode, encode) = (
+            required(aggregated)?,
+            required(prefill)?,
+            required(decode)?,
+            required(encode)?,
+        );
         Ok(Some(Arc::new(move |config, worker_type, partition| {
             let selected = match worker_type {
-                WorkerType::Aggregated => aggregated.as_ref(),
-                WorkerType::Prefill => prefill.as_ref(),
-                WorkerType::Decode => decode.as_ref(),
-                WorkerType::Encode => encode.as_ref(),
+                WorkerType::Aggregated => &aggregated,
+                WorkerType::Prefill => &prefill,
+                WorkerType::Decode => &decode,
+                WorkerType::Encode => &encode,
             };
-            match selected {
-                Some(factory) => factory(config, worker_type, partition),
-                None => WorkerSelectionPolicy::default(
-                    config.clone(),
-                    worker_type.default_selector_label(),
-                ),
-            }
+            selected(config, worker_type, partition)
         })))
     }
 
@@ -262,10 +280,10 @@ impl RouterPluginRegistry {
         selected: Option<&str>,
     ) -> Result<Option<WorkerSelectionPolicyFactory>, WorkerSelectionPolicyRegistryError> {
         let Some(selected) = selected else {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         };
         if selected == "default" {
-            return Ok(None);
+            return Ok(self.default_factory.clone());
         }
         let instance = config
             .and_then(|config| config.instance(selected))
@@ -525,6 +543,23 @@ worker_selection:
                 (2, "encode".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn partial_role_selection_requires_an_explicit_fallback() {
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry.register("alpha", Arc::new(provider)).unwrap();
+        let config = config();
+        let selections = WorkerSelectionPolicySelections {
+            aggregated: Some("first".to_string()),
+            prefill: None,
+            decode: None,
+            encode: None,
+        };
+        assert!(matches!(
+            registry.resolve_selections(Some(&config), selections),
+            Err(WorkerSelectionPolicyRegistryError::MissingDefault)
+        ));
     }
 
     #[test]

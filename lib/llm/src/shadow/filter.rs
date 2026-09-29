@@ -169,6 +169,7 @@ pub fn project(request: &PreprocessedRequest, projection: Projection) -> Preproc
         require_reasoning,
         router,
         agent_context,
+        image_cache_scope,
         mm_processor_kwargs,
         media_io_kwargs,
         request_timestamp_ms,
@@ -199,6 +200,7 @@ pub fn project(request: &PreprocessedRequest, projection: Projection) -> Preproc
         mm_routing_info: multimodal.then(|| mm_routing_info.clone()).flatten(),
         mm_processor_kwargs: multimodal.then(|| mm_processor_kwargs.clone()).flatten(),
         media_io_kwargs: multimodal.then(|| media_io_kwargs.clone()).flatten(),
+        image_cache_scope: multimodal.then(|| image_cache_scope.clone()).flatten(),
         extra_args: keep(Projection::EXTRA_ARGS)
             .then(|| extra_args.clone())
             .flatten(),

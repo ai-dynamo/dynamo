@@ -178,7 +178,8 @@ jobs:
   # ============================================================================
   sidecar-build:
     name: dynamo-sidecar
-    if: github.event_name != 'workflow_dispatch'
+    needs: [config]
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true' || needs.config.outputs.run_sglang == 'true'
     permissions:
       actions: read
       contents: read
@@ -470,6 +471,46 @@ jobs:
   # ============================================================================
   # TEST JOBS
   # ============================================================================
+
+  sidecar-vllm-test:
+    name: sidecar-runtime
+    needs: [vllm-build, sidecar-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: vllm
+      framework: vllm
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.vllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: (pre_merge or post_merge) and sidecar and vllm and gpu_1
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: vllm
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-sglang-test:
+    name: sidecar-runtime
+    needs: [sglang-build, sidecar-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: sglang
+      framework: sglang
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
+      cuda_version: '["13.0"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: (pre_merge or post_merge) and sidecar and sglang and gpu_1
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: sglang
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
 
   vllm-test:
     name: vllm-runtime # This name overlaps with other vllm jobs to group them in the UI
@@ -1662,7 +1703,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [ deploy-status-check ]
+    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
