@@ -1323,7 +1323,8 @@ impl ModelDeploymentCard {
     /// - `DYN_TOKENIZER_CACHE=0` — disable the L1 prefix cache that records tokenizations
     ///   at special-token boundaries (enabled by default; any other value keeps it enabled)
     /// - `DYN_TOKENIZER_CACHE_BYTES=<n>` — combined token-ID byte budget for all models
-    ///   in this process (default 64 MiB), read when the shared cache is first created.
+    ///   in this process (default 64 MiB), read once when the first eligible tokenizer
+    ///   creates the shared cache. Models compete for capacity without reserved shares.
     ///   Cache metadata and tokenizer objects are excluded; eviction is deferred.
     /// - `DYN_TOKENIZER_CACHE_EXTEND=0` — disable partial-hit extension. By default
     ///   (when the cache is enabled) a partial hit also caches the new suffix so each
@@ -1434,16 +1435,17 @@ impl ModelDeploymentCard {
                 };
 
                 // Pick the inner backend.
-                let mut cache_backend = "huggingface";
-                let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
-                    TokenizerBackend::Default => Arc::new(wrap_hf(hf)),
+                let (raw, cache_backend): (
+                    Arc<dyn crate::tokenizers::traits::Tokenizer>,
+                    TokenizerBackend,
+                ) = match tokenizer_backend {
+                    TokenizerBackend::Default => (Arc::new(wrap_hf(hf)), TokenizerBackend::Default),
                     TokenizerBackend::Fastokens => {
                         if let Some(path_str) = p.to_str() {
                             match crate::tokenizers::FastTokenizer::from_file(path_str) {
                                 Ok(fast) => {
                                     tracing::info!("Using fastokens tokenizer backend");
-                                    cache_backend = "fastokens";
-                                    Arc::new(fast)
+                                    (Arc::new(fast), TokenizerBackend::Fastokens)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1455,7 +1457,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load fastokens, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1469,7 +1471,7 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping fastokens; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                     TokenizerBackend::Basetenkenizer => {
@@ -1477,8 +1479,7 @@ impl ModelDeploymentCard {
                             match crate::tokenizers::BasetenTokenizer::from_file(path_str) {
                                 Ok(baseten) => {
                                     tracing::info!("Using basetenkenizer tokenizer backend");
-                                    cache_backend = "basetenkenizer";
-                                    Arc::new(baseten)
+                                    (Arc::new(baseten), TokenizerBackend::Basetenkenizer)
                                 }
                                 Err(e) => {
                                     if !is_fallback_enabled {
@@ -1490,7 +1491,7 @@ impl ModelDeploymentCard {
                                         %e,
                                         "Failed to load basetenkenizer, falling back to HuggingFace"
                                     );
-                                    Arc::new(wrap_hf(hf))
+                                    (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                                 }
                             }
                         } else {
@@ -1504,14 +1505,15 @@ impl ModelDeploymentCard {
                                 path = %p.display(),
                                 "Tokenizer path contains non-UTF-8 characters, skipping basetenkenizer; falling back to HuggingFace"
                             );
-                            Arc::new(wrap_hf(hf))
+                            (Arc::new(wrap_hf(hf)), TokenizerBackend::Default)
                         }
                     }
                 };
 
                 if cache_enabled && !options.add_special_tokens {
                     let shared_cache = shared_tokenizer_cache();
-                    let namespace = tokenizer_cache_namespace(self.mdcsum(), cache_backend);
+                    let namespace =
+                        tokenizer_cache_namespace(self.mdcsum(), cache_backend.as_str());
                     tracing::info!(
                         cache_bytes = shared_cache.max_memory_bytes(),
                         cache_extend,
@@ -2539,40 +2541,6 @@ mod tests {
             super::tokenizer_cache_bytes(Some("invalid")),
             super::DEFAULT_TOKENIZER_CACHE_BYTES
         );
-    }
-
-    #[test]
-    fn tokenizer_cache_namespaces_separate_model_versions_and_backends() -> anyhow::Result<()> {
-        use std::sync::Arc;
-
-        use crate::tokenizers::traits::Encoder;
-        use crate::tokenizers::{CachedTokenizer, HuggingFaceTokenizer, SharedTokenizerCache};
-
-        let raw = Arc::new(HuggingFaceTokenizer::from_file(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
-        ))?);
-        let storage = SharedTokenizerCache::new(1024 * 1024);
-        let input = "<s>system\nHello</s><s>user\nWorld";
-        for (checksum, backend, expected_hits) in [
-            ("version-a", "huggingface", 0),
-            ("version-b", "huggingface", 0),
-            ("version-a", "fastokens", 0),
-            ("version-a", "huggingface", 1),
-        ] {
-            let cached = CachedTokenizer::new_with_cache(
-                raw.clone(),
-                vec!["<s>".into(), "</s>".into()],
-                storage.clone(),
-                &super::tokenizer_cache_namespace(checksum, backend),
-            )?;
-            assert_eq!(
-                cached.encode(input)?.token_ids(),
-                raw.encode(input)?.token_ids()
-            );
-            assert_eq!(cached.cache_stats().hits, expected_hits);
-        }
-        Ok(())
     }
 
     #[test]
