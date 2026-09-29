@@ -123,3 +123,85 @@ async def test_get_overlap_scores_forwards_cache_namespace() -> None:
         False,
         "tenant-a",
     )
+
+
+def stream(*chunks):
+    async def generator():
+        for chunk in chunks:
+            yield chunk
+
+    return generator()
+
+
+@pytest.mark.asyncio
+async def test_generate_forwards_request_fields_it_does_not_use() -> None:
+    handler, router = handler_with_router()
+    router.generate_from_request.return_value = stream()
+    request = {
+        "model": "qwen-vl",
+        "token_ids": [1, 2, 3],
+        "multi_modal_data": {"image_url": [{"Url": "https://example.com/a.png"}]},
+        "multi_modal_uuids": {"image_url": ["img-0"]},
+        "media_io_kwargs": {"image": {"num_frames": 1}},
+        "kv_hint": {"cache_namespace": "tenant-a"},
+        "agent_context": {"program_id": "p-1"},
+        "require_reasoning": True,
+        "request_timestamp_ms": 1.5,
+    }
+
+    _ = [chunk async for chunk in handler.generate(request)]
+
+    forwarded = router.generate_from_request.await_args.args[0]
+    for key, value in request.items():
+        assert forwarded[key] == value, key
+
+
+@pytest.mark.asyncio
+async def test_generate_keeps_defaults_and_legacy_dp_rank() -> None:
+    handler, router = handler_with_router()
+    router.generate_from_request.return_value = stream()
+
+    _ = [chunk async for chunk in handler.generate({"token_ids": [1], "dp_rank": 3})]
+
+    forwarded = router.generate_from_request.await_args.args[0]
+    assert forwarded["model"] == "unknown"
+    assert forwarded["stop_conditions"] == {}
+    assert forwarded["sampling_options"] == {}
+    assert forwarded["output_options"] == {}
+    assert forwarded["eos_token_ids"] == []
+    assert forwarded["annotations"] == []
+    assert forwarded["routing"] == {"dp_rank": 3}
+
+
+@pytest.mark.asyncio
+async def test_generate_does_not_override_explicit_routing_with_dp_rank() -> None:
+    handler, router = handler_with_router()
+    router.generate_from_request.return_value = stream()
+    routing = {"dp_rank": 1, "backend_instance_id": 9}
+
+    _ = [
+        chunk
+        async for chunk in handler.generate(
+            {"token_ids": [1], "routing": routing, "dp_rank": 3}
+        )
+    ]
+
+    assert router.generate_from_request.await_args.args[0]["routing"] == routing
+
+
+@pytest.mark.asyncio
+async def test_generate_forwards_worker_output_unchanged() -> None:
+    handler, router = handler_with_router()
+    chunk = {
+        "token_ids": [],
+        "output_type": "image",
+        "content_parts": [{"type": "image_url", "image_url": {"url": "data:,"}}],
+        "encoder_result": {"embeddings_ref": "e-0"},
+        "worker_trace_link": {"trace_id": "t-0"},
+        "finish_reason": "stop",
+    }
+    router.generate_from_request.return_value = stream(chunk)
+
+    outputs = [output async for output in handler.generate({"token_ids": [1]})]
+
+    assert outputs == [chunk]
