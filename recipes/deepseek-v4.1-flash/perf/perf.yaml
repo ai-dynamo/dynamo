@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # AIPerf 0.10.0 sequential Mooncake trace replay for the four vLLM targets.
-# Defaults to B200 aggregated, C168. Configure cache reset and warm-up separately.
-# This Job records the exact client configuration and corpus SHA256 per run.
+# Defaults to B200 aggregated, C168. Run after the deployment is ready.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -37,42 +36,14 @@ spec:
             topologyKey: kubernetes.io/hostname
       containers:
       - name: perf
-        image: python:3.12-slim
+        image: nvcr.io/nvidia/ai-dynamo/aiperf:0.10.0
         imagePullPolicy: IfNotPresent
-        workingDir: /workspace
         command:
         - /bin/bash
         - -c
         - |
           set -euo pipefail
           ulimit -n 600000
-          apt-get update && apt-get install -y --no-install-recommends curl jq procps git ca-certificates build-essential && apt-get clean
-          pip install --no-cache-dir "aiperf==${AIPERF_VERSION}" "protobuf==7.35.0" "transformers==4.57.3" "tiktoken==0.13.0"
-
-          wait_for_model_ready() {
-            local max_attempts=${WAIT_FOR_MODEL_MAX_ATTEMPTS:-720}
-            local attempt=0
-            echo "Waiting for model '${TARGET_MODEL}' at http://${ENDPOINT}/v1/models"
-            while ! curl -sf "http://${ENDPOINT}/v1/models" | jq -e --arg m "${TARGET_MODEL}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-              attempt=$((attempt + 1))
-              if [ "${attempt}" -ge "${max_attempts}" ]; then
-                echo "ERROR: model '${TARGET_MODEL}' did not become ready after ${max_attempts} attempts"
-                curl -s "http://${ENDPOINT}/v1/models" || true
-                exit 1
-              fi
-              echo "[$(date '+%H:%M:%S')] not ready (${attempt}/${max_attempts}), sleeping 5s"
-              sleep 5
-            done
-            curl -s "http://${ENDPOINT}/v1/models" | jq .
-          }
-
-          if [ ! -f "${TRACE_FILE}" ]; then
-            echo "ERROR: trace file not found: ${TRACE_FILE}"
-            exit 1
-          fi
-
-          wait_for_model_ready
-
           EPOCH=$(date +%s)
           ROOT_DIR="${ROOT_ARTIFACT_DIR}/${EPOCH}_${JOB_NAME}"
           RUN_DIR="${ROOT_DIR}/trace_c${CONCURRENCY}"
@@ -80,7 +51,6 @@ spec:
 
           TRACE_LINES=$(wc -l < "${TRACE_FILE}")
 
-          echo "AIPerf trace replay: endpoint=${ENDPOINT} model=${TARGET_MODEL} trace=${TRACE_FILE} lines=${TRACE_LINES} concurrency=${CONCURRENCY}"
           sha256sum "${TRACE_FILE}" > "${RUN_DIR}/trace.sha256"
           cat > "${RUN_DIR}/client.yaml" <<EOF
           endpoint:
@@ -126,8 +96,6 @@ spec:
           value: '168'
         - name: REQUEST_TIMEOUT_SECONDS
           value: '21600'
-        - name: AIPERF_VERSION
-          value: 0.10.0
         - name: AIPERF_API_PORT
           value: '18090'
         - name: JOB_NAME

@@ -6,10 +6,10 @@ SPDX-License-Identifier: Apache-2.0
 # DeepSeek-V4.1-Flash vLLM benchmark
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
-[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. It waits for the target
-model on the DGD frontend, replays the trace at one `CONCURRENCY` value, and
-writes raw artifacts to the shared `shared-model-cache` PVC. It pins AIPerf
-0.10.0 to match the recorded client version.
+[`perf.yaml`](perf.yaml) — covers all four vLLM DGDs. It replays the trace
+at one `CONCURRENCY` value against a ready DGD frontend and
+writes raw artifacts to the shared `shared-model-cache` PVC. It uses the AIPerf
+0.10.0 container to match the recorded client version.
 
 ## Targeting a variant
 
@@ -96,6 +96,8 @@ Keep `pvc-helper` for fetching artifacts afterwards, or delete it once staging
 is done. It sleeps for 24 h so it outlives the benchmark Job.
 
 ### 3. Run the benchmark
+
+Run after the deployment is ready and the recipe smoke test passes.
 
 ```bash
 kubectl apply -f perf.yaml -n ${NAMESPACE}
