@@ -180,8 +180,8 @@ class TRTLLMEnginePauseController:
 
 
 class _Abortable(Protocol):
-    """Structural type for objects that support abort(). Satisfied by both
-    GenerationResult and _DeferredAbort."""
+    """Structural type for objects that support abort(). Satisfied by
+    GenerationResult, _DeferredAbort, and _PrefillAbortGuard."""
 
     def abort(self) -> None:
         ...
@@ -224,6 +224,36 @@ class _DeferredAbort:
             pass
         self._generation_result.abort()
         logging.debug("Deferred abort: deferred path, engine abort fired")
+
+
+class _PrefillAbortGuard:
+    """Makes a context-only request's abort and its KV handoff mutually exclusive.
+
+    The router routes a request to decode as soon as it has handoff parameters,
+    and aborting the context request while decode collects its KV orphans that
+    KV until kv_transfer_timeout_ms reclaims it. So an abort only reaches the
+    engine while no result has been claimed for handoff, and a result that
+    arrives after an abort is reported as cancelled instead of handed off.
+    """
+
+    def __init__(self, generation_result: GenerationResult):
+        self._generation_result = generation_result
+        self._handoff_claimed = False
+        self._aborted = False
+
+    def claim_handoff(self) -> bool:
+        """Claim a result for handoff; False if the request was already aborted."""
+        if self._aborted:
+            return False
+        self._handoff_claimed = True
+        return True
+
+    def abort(self) -> None:
+        if self._handoff_claimed:
+            logging.debug("Prefill abort skipped: handoff already returned")
+            return
+        self._aborted = True
+        self._generation_result.abort()
 
 
 @dataclass
@@ -1332,15 +1362,37 @@ class HandlerBase(BaseGenerativeHandler):
                 and not bypass_remote_prefill
                 else None
             )
+            prefill_guard = (
+                _PrefillAbortGuard(generation_result)
+                if self.disaggregation_mode == DisaggregationMode.PREFILL
+                else None
+            )
 
             # Monitor for cancellation triggers and cancel by calling abort()
             async with self._cancellation_monitor(
-                abort_guard or generation_result, context
+                abort_guard or prefill_guard or generation_result, context
             ):
                 async for res in generation_result:
                     # Signal first token to deferred abort guard
                     if abort_guard is not None:
                         abort_guard.signal_first_token()
+                    if prefill_guard is not None and not prefill_guard.claim_handoff():
+                        # An aborted request normally ends with a cancelled
+                        # result. Anything else means the abort reached the
+                        # engine after the context phase finished, so its KV
+                        # may be held until kv_transfer_timeout_ms. Either way
+                        # it is not handed off, so decode is never routed.
+                        if any(
+                            getattr(output, "finish_reason", None) != "cancelled"
+                            for output in res.outputs
+                        ):
+                            logging.warning(
+                                "Prefill for request %s completed after abort; "
+                                "reporting it as cancelled instead of handing off",
+                                context.id(),
+                            )
+                        yield {"finish_reason": "cancelled", "token_ids": []}
+                        break
 
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
