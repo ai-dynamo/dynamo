@@ -602,7 +602,7 @@ jobs:
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   kimi-k25-agg-perf:
-    name: Kimi K2.5 aggregated nightly
+    name: Kimi K2.5 aggregated functional smoke
     needs: [compute-release-mode, resolve-source-sha, trtllm-copy-to-acr]
     if: ${{ needs.compute-release-mode.outputs.run_tests == 'true' }}
     uses: $/.github/workflows/kimi-k25-nightly.yml

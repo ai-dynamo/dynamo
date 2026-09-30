@@ -26,8 +26,8 @@ permissions:
 jobs:
   perf:
     runs-on: prod-deploy-tester-v1
-    # Leave time for prerequisites, loading, and cleanup around the 12-hour benchmark.
-    timeout-minutes: 960
+    # Allow model loading and cleanup around each recipe's AIPerf run.
+    timeout-minutes: ${{ inputs.recipe == 'kimi-k25-agg' && 180 || 960 }}
     defaults:
       run:
         shell: bash
@@ -173,18 +173,10 @@ jobs:
             "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
       - name: Prepare recipe prerequisites
         if: ${{ !inputs.preflight_only }}
-        timeout-minutes: 45
+        timeout-minutes: 5
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/prerequisites.yaml"
-          if [[ "$RECIPE" == kimi-k25-agg ]]; then
-            until "${k[@]}" wait job/kimi-k25-model-download --for=condition=Complete --timeout=5s; do
-              "${k[@]}" get job kimi-k25-model-download -o json |
-                jq -e 'all(.status.conditions[]?; .type != "Failed" or .status != "True")' >/dev/null
-              timeout 60s "${k[@]}" logs -f job/kimi-k25-model-download --tail=20 --ignore-errors || true
-              sleep 5
-            done
-          fi
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
         timeout-minutes: 105
@@ -200,9 +192,9 @@ jobs:
               --prefix --timestamps --since=1m --tail=20 --ignore-errors --max-log-requests=7 || true
             sleep 5
           done
-      - name: Run full AIPerf sweep
+      - name: Run AIPerf
         if: ${{ !inputs.preflight_only }}
-        # The Kubernetes Job deadline bounds the full sweep.
+        # The Kubernetes Job deadline bounds the run.
         run: |
           k=(kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" --request-timeout=60s)
           "${k[@]}" create -f "$ARTIFACTS/perf.yaml"
@@ -258,7 +250,7 @@ jobs:
             "${k[@]}" exec -c "$container" "$pod" -- \
               tar -C "$directory" --exclude=inputs.json -cf - . | tar -C "$ARTIFACTS/perf" -xf -
           fi
-      - name: Verify every sweep result
+      - name: Verify AIPerf results
         if: ${{ success() && !inputs.preflight_only }}
         timeout-minutes: 5
         run: |

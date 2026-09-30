@@ -55,6 +55,7 @@ spec:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: Exists
     agg:
+      replicas: 1
       resources:
         requests:
           gpu: "4"

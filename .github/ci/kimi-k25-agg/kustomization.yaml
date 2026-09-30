@@ -10,18 +10,9 @@ resources:
 - ../../../recipes/kimi-k2.5/trtllm/agg-eagle-kv-router/deploy.yaml
 - ../../../recipes/kimi-k2.5/model-cache/compute-domain.yaml
 - perf.yaml
-- ../../../recipes/kimi-k2.5/model-cache/model-download.yaml
 patches:
 - path: patch-deploy.yaml
 - path: patch-perf.yaml
-- path: patch-download.yaml
-- target:
-    kind: Job
-    name: model-download
-  patch: |-
-    - op: replace
-      path: /metadata/name
-      value: kimi-k25-model-download
 - target:
     kind: ComputeDomain
     name: your-compute-domain

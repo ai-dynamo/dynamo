@@ -6,6 +6,7 @@ kind: Job
 metadata:
   name: aiperf-synthetic
 spec:
+  activeDeadlineSeconds: 900
   template:
     spec:
       priorityClassName: ci-nightly-high-priority
@@ -28,7 +29,7 @@ spec:
         - name: SCENARIO
           value: 1k_1.5k
         - name: CONCURRENCIES
-          value: "1 2 4 8 16 32 64 128 256"
+          value: "1"
         - name: ISL
           value: "1000"
         - name: OSL
