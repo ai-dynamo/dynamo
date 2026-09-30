@@ -52,7 +52,9 @@ EXCLUDE_NAMES = frozenset({"kvbm-consolidator"})
 PUBLISH_TOOLCHAIN = "1.95.0"
 # No bare "HTTP/2" alternation here: cargo dumps the raw status line ("HTTP/2 415")
 # on every HTTP error, which made deterministic 4xx failures retry as transient.
-RETRYABLE = re.compile(r"stream error|INTERNAL_ERROR|connection error|timed out|\b(429|50[0-9])\b")
+RETRYABLE = re.compile(
+    r"stream error|INTERNAL_ERROR|connection error|timed out|\b(429|50[0-9])\b"
+)
 ALREADY = re.compile(r"already exists|409 Conflict|already uploaded")
 # Sparse-index propagation lag after publishing a dep — retried before failing.
 DEP_NOT_INDEXED = re.compile(r"no matching package named")
@@ -61,7 +63,10 @@ DEP_NOT_INDEXED = re.compile(r"no matching package named")
 def cargo_metadata(root: Path) -> dict:
     out = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        cwd=root, check=True, capture_output=True, text=True,
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout
     return json.loads(out)
 
@@ -85,8 +90,11 @@ def publishable(meta: dict) -> dict[str, dict]:
 def topo_order(pkgs: dict[str, dict]) -> list[str]:
     names = set(pkgs)
     incoming = {
-        n: {d["name"] for d in pkgs[n]["dependencies"]
-            if d["name"] in names and d["name"] != n and d.get("kind") != "dev"}
+        n: {
+            d["name"]
+            for d in pkgs[n]["dependencies"]
+            if d["name"] in names and d["name"] != n and d.get("kind") != "dev"
+        }
         for n in names
     }
     order: list[str] = []
@@ -101,7 +109,9 @@ def topo_order(pkgs: dict[str, dict]) -> list[str]:
                     ready.append(m)
         ready.sort()
     if len(order) != len(names):
-        raise RuntimeError(f"dependency cycle among crates: {sorted(names - set(order))}")
+        raise RuntimeError(
+            f"dependency cycle among crates: {sorted(names - set(order))}"
+        )
     return order
 
 
@@ -119,7 +129,9 @@ def write_cargo_config(root: Path, alias: str, index: str) -> None:
     # Header-anchored so [registries.x]/[registry] count but comments don't;
     # checked AFTER stripping our block so a re-run can't mask a foreign table.
     if re.search(r"(?m)^\s*\[registr(?:y|ies)[\].]", text):
-        raise RuntimeError(".cargo/config.toml already defines registry tables; refusing to append conflicting ones")
+        raise RuntimeError(
+            ".cargo/config.toml already defines registry tables; refusing to append conflicting ones"
+        )
     cfg.write_text(
         f"{text}\n{marker}\n"
         f'[registries]\n{alias} = {{ index = "{index}" }}\n\n'
@@ -128,7 +140,9 @@ def write_cargo_config(root: Path, alias: str, index: str) -> None:
     )
 
 
-def inject_registry(manifests: list[Path], names: list[str], alias: str, versions: dict[str, str]) -> None:
+def inject_registry(
+    manifests: list[Path], names: list[str], alias: str, versions: dict[str, str]
+) -> None:
     # Internal deps must carry a registry + a version when published, else cargo
     # publish defaults them to crates.io / rejects them. `workspace = true` deps
     # inherit both from the root table (which we also rewrite), so skip them.
@@ -182,27 +196,40 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
     versioned dep redirected by [patch.crates-io] — can't resolve faithfully for
     a registry consumer. Only optional deps are dropped (non-optional is a hard
     error); the feature KEY is kept (emptied) so `<crate>/<feature>` refs resolve."""
-    git_names = set(re.findall(
-        r'(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=',
-        (root / "Cargo.toml").read_text()))
+    git_names = set(
+        re.findall(
+            r"(?m)^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}\n]*\bgit\s*=",
+            (root / "Cargo.toml").read_text(),
+        )
+    )
     if not git_names:
         return
     for mp in manifests:
         orig = mp.read_text()
         kept, removed = [], set()
         for line in orig.splitlines(keepends=True):
-            m = re.match(r'^[ \t]*([A-Za-z0-9_-]+)[ \t]*=[ \t]*\{(.*)\}[ \t]*$', line)
-            if m and (re.search(r'\bgit\s*=', m.group(2))
-                      or (m.group(1) in git_names and re.search(r'\bworkspace\s*=\s*true', m.group(2)))):
+            m = re.match(r"^[ \t]*([A-Za-z0-9_-]+)[ \t]*=[ \t]*\{(.*)\}[ \t]*$", line)
+            if m and (
+                re.search(r"\bgit\s*=", m.group(2))
+                or (
+                    m.group(1) in git_names
+                    and re.search(r"\bworkspace\s*=\s*true", m.group(2))
+                )
+            ):
                 removed.add(m.group(1))
                 continue
-            if m and m.group(1) in git_names and re.search(r'\bversion\s*=', m.group(2)):
+            if (
+                m
+                and m.group(1) in git_names
+                and re.search(r"\bversion\s*=", m.group(2))
+            ):
                 # Versioned dep git-patched via [patch.crates-io]: droppable only if optional.
-                if not re.search(r'\boptional\s*=\s*true', m.group(2)):
+                if not re.search(r"\boptional\s*=\s*true", m.group(2)):
                     raise RuntimeError(
                         f"{mp}: non-optional dependency '{m.group(1)}' is git-patched in the "
                         "workspace; a registry consumer would resolve different code. "
-                        "Vendor/publish the patched crate or make the dependency optional.")
+                        "Vendor/publish the patched crate or make the dependency optional."
+                    )
                 removed.add(m.group(1))
                 continue
             kept.append(line)
@@ -212,9 +239,9 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
         for nm in removed:
             # scrub feature-array tokens: "dep:nm", "nm", "nm/feat", "nm?/feat"
             text = re.sub(rf'"(?:dep:)?{re.escape(nm)}(?:\?)?(?:/[^"]*)?"', "", text)
-        text = re.sub(r'\[\s*,', "[", text)          # [ , ...   -> [ ...
-        text = re.sub(r',\s*,', ",", text)            # , ,       -> ,
-        text = re.sub(r',(\s*[\]\n])', r'\1', text)   # , ]  / ,\n -> ] / \n
+        text = re.sub(r"\[\s*,", "[", text)  # [ , ...   -> [ ...
+        text = re.sub(r",\s*,", ",", text)  # , ,       -> ,
+        text = re.sub(r",(\s*[\]\n])", r"\1", text)  # , ]  / ,\n -> ] / \n
         mp.write_text(text)
         print(f"strip-git-deps: removed {sorted(removed)} from {mp}")
 
@@ -222,7 +249,9 @@ def strip_git_deps(root: Path, manifests: list[Path]) -> None:
 def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
     # 200 -> present, 404 -> absent; anything else (auth/outage) is a hard error.
     url = f"{raw_base}/{name}/{name}-{version}.crate"
-    req = urllib.request.Request(url, method="HEAD", headers={"Authorization": f"Bearer {token}"})
+    req = urllib.request.Request(
+        url, method="HEAD", headers={"Authorization": f"Bearer {token}"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.status == 200
@@ -231,9 +260,13 @@ def crate_exists(raw_base: str, name: str, version: str, token: str) -> bool:
             return False
         # Path only — the registry host is workflow-secret-derived and error
         # strings end up in public Actions logs.
-        raise RuntimeError(f"registry HEAD {urllib.parse.urlparse(url).path} failed: HTTP {e.code} (bad ARTIFACTORY_TOKEN or registry outage?)") from e
+        raise RuntimeError(
+            f"registry HEAD {urllib.parse.urlparse(url).path} failed: HTTP {e.code} (bad ARTIFACTORY_TOKEN or registry outage?)"
+        ) from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"registry HEAD {urllib.parse.urlparse(url).path} unreachable: {e.reason}") from e
+        raise RuntimeError(
+            f"registry HEAD {urllib.parse.urlparse(url).path} unreachable: {e.reason}"
+        ) from e
 
 
 def publish(manifest: str, alias: str, env: dict) -> str:
@@ -241,9 +274,20 @@ def publish(manifest: str, alias: str, env: dict) -> str:
     # failure — the caller records it and continues (fail-soft).
     for attempt in range(1, 4):
         r = subprocess.run(
-            ["cargo", f"+{PUBLISH_TOOLCHAIN}", "publish", "--allow-dirty", "--no-verify",
-             "--manifest-path", manifest, "--registry", alias],
-            env=env, capture_output=True, text=True,
+            [
+                "cargo",
+                f"+{PUBLISH_TOOLCHAIN}",
+                "publish",
+                "--allow-dirty",
+                "--no-verify",
+                "--manifest-path",
+                manifest,
+                "--registry",
+                alias,
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
         )
         sys.stdout.write(r.stdout)
         sys.stderr.write(r.stderr)
@@ -254,7 +298,9 @@ def publish(manifest: str, alias: str, env: dict) -> str:
             print(f"  -> {manifest}: skip (already present)")
             return "already"
         if attempt < 3 and DEP_NOT_INDEXED.search(out):
-            print(f"  -> dep not yet indexed (sparse-index lag?), retry in 15s ({attempt}/3)")
+            print(
+                f"  -> dep not yet indexed (sparse-index lag?), retry in 15s ({attempt}/3)"
+            )
             time.sleep(15)
             continue
         if attempt < 3 and RETRYABLE.search(out):
@@ -269,23 +315,35 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--registry", default="artifactory", help="cargo registry alias")
     ap.add_argument("--root", default=".", help="repo root")
-    ap.add_argument("--expect-version", default=os.environ.get("EXPECT_VERSION", ""),
-                    help="fail fast if any publishable crate's version differs from this")
-    ap.add_argument("--only", default=os.environ.get("CRATE_SUBSET", ""),
-                    help="csv of crate names to publish (strict: must be dependency-closed); "
-                         "empty/'all' = every publishable crate")
-    ap.add_argument("--stage-version", default=os.environ.get("STAGE_VERSION", ""),
-                    help="rewrite every publishable crate's version to this exact value before "
-                         "publishing (internal staging rc disambiguator, e.g. 0.1.0-rc0), so a "
-                         "re-stage of the same release doesn't collide on the immutable registry. "
-                         "Empty = leave the committed versions as-is")
+    ap.add_argument(
+        "--expect-version",
+        default=os.environ.get("EXPECT_VERSION", ""),
+        help="fail fast if any publishable crate's version differs from this",
+    )
+    ap.add_argument(
+        "--only",
+        default=os.environ.get("CRATE_SUBSET", ""),
+        help="csv of crate names to publish (strict: must be dependency-closed); "
+        "empty/'all' = every publishable crate",
+    )
+    ap.add_argument(
+        "--stage-version",
+        default=os.environ.get("STAGE_VERSION", ""),
+        help="rewrite every publishable crate's version to this exact value before "
+        "publishing (internal staging rc disambiguator, e.g. 0.1.0-rc0), so a "
+        "re-stage of the same release doesn't collide on the immutable registry. "
+        "Empty = leave the committed versions as-is",
+    )
     args = ap.parse_args()
 
     # ARTIFACTORY ONLY — never crates.io. Refuse a crates.io alias outright; every
     # `cargo publish` below passes --registry <this alias> and write_cargo_config
     # sets it as the default registry, so crates.io is never a publish target.
     if args.registry in ("crates-io", "crates.io", "crates_io"):
-        print("::error::refusing to publish to crates.io; this stages to Artifactory only", file=sys.stderr)
+        print(
+            "::error::refusing to publish to crates.io; this stages to Artifactory only",
+            file=sys.stderr,
+        )
         return 1
 
     # Reuse the wheel-upload token; keep the registry location out of the workflow
@@ -293,11 +351,17 @@ def main() -> int:
     token = os.environ.get("ARTIFACTORY_TOKEN", "")
     index = os.environ.get("ARTIFACTORY_CARGO_INDEX", "")
     if not token or not index:
-        print("::error::ARTIFACTORY_TOKEN and ARTIFACTORY_CARGO_INDEX must be set", file=sys.stderr)
+        print(
+            "::error::ARTIFACTORY_TOKEN and ARTIFACTORY_CARGO_INDEX must be set",
+            file=sys.stderr,
+        )
         return 1
     m = re.match(r"sparse\+(https://.+?)/api/cargo/([^/]+)/index/?$", index)
     if not m:
-        print("::error::ARTIFACTORY_CARGO_INDEX must be 'sparse+https://<host>/.../api/cargo/<repo>/index/'", file=sys.stderr)
+        print(
+            "::error::ARTIFACTORY_CARGO_INDEX must be 'sparse+https://<host>/.../api/cargo/<repo>/index/'",
+            file=sys.stderr,
+        )
         return 1
     raw_base = f"{m.group(1)}/{m.group(2)}/crates"
 
@@ -325,20 +389,40 @@ def main() -> int:
         # checked on what actually exists here.
         unknown = selected - set(pkgs)
         if unknown:
-            print(f"::warning::skipping requested crate(s) not publishable on this branch: "
-                  f"{sorted(unknown)} (branch publishable set: {sorted(pkgs)})", file=sys.stderr)
+            print(
+                f"::warning::skipping requested crate(s) not publishable on this branch: "
+                f"{sorted(unknown)} (branch publishable set: {sorted(pkgs)})",
+                file=sys.stderr,
+            )
             selected -= unknown
         if not selected:
-            print("::error::none of the requested crates are publishable on this branch", file=sys.stderr)
+            print(
+                "::error::none of the requested crates are publishable on this branch",
+                file=sys.stderr,
+            )
             return 1
-        gaps = {n: sorted({d["name"] for d in pkgs[n]["dependencies"]
-                           if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"} - selected)
-                for n in selected}
+        gaps = {
+            n: sorted(
+                {
+                    d["name"]
+                    for d in pkgs[n]["dependencies"]
+                    if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"
+                }
+                - selected
+            )
+            for n in selected
+        }
         gaps = {n: g for n, g in gaps.items() if g}
         if gaps:
             for n, g in gaps.items():
-                print(f"::error::crate {n} depends on un-selected workspace crate(s) {g}", file=sys.stderr)
-            print("::error::crate subset is not dependency-closed; add the missing crate(s) or use 'all'", file=sys.stderr)
+                print(
+                    f"::error::crate {n} depends on un-selected workspace crate(s) {g}",
+                    file=sys.stderr,
+                )
+            print(
+                "::error::crate subset is not dependency-closed; add the missing crate(s) or use 'all'",
+                file=sys.stderr,
+            )
             return 1
         order = [n for n in order if n in selected]
         print("Selected crates (dependency-closed):", " ".join(order))
@@ -349,22 +433,34 @@ def main() -> int:
     # then validates the new value, and cargo publish uploads it (--allow-dirty).
     stage_version = args.stage_version.strip()
     if stage_version:
-        wm = re.search(r'\[workspace\.package\][^\[]*?\n\s*version\s*=\s*"([^"]+)"',
-                       (root / "Cargo.toml").read_text())
+        wm = re.search(
+            r'\[workspace\.package\][^\[]*?\n\s*version\s*=\s*"([^"]+)"',
+            (root / "Cargo.toml").read_text(),
+        )
         if not wm:
-            print("::error::--stage-version: cannot read [workspace.package].version", file=sys.stderr)
+            print(
+                "::error::--stage-version: cannot read [workspace.package].version",
+                file=sys.stderr,
+            )
             return 1
         cur = wm.group(1)
         # STAGE_VERSION's base comes from pyproject.toml (release.yml); nothing
         # else gates pyproject against Cargo.toml, so a bump that missed one
         # file would otherwise publish crates under the wrong base silently.
         if not (stage_version == cur or stage_version.startswith(f"{cur}-")):
-            print(f"::warning::stage-version '{stage_version}' does not extend the "
-                  f"workspace version '{cur}' — pyproject.toml and Cargo.toml may "
-                  f"have drifted", file=sys.stderr)
+            print(
+                f"::warning::stage-version '{stage_version}' does not extend the "
+                f"workspace version '{cur}' — pyproject.toml and Cargo.toml may "
+                f"have drifted",
+                file=sys.stderr,
+            )
         if cur != stage_version:
-            n = rewrite_versions([root / "Cargo.toml", *member_manifests], cur, stage_version)
-            print(f"stage-version: rewrote {cur} -> {stage_version} across {n} manifest(s)")
+            n = rewrite_versions(
+                [root / "Cargo.toml", *member_manifests], cur, stage_version
+            )
+            print(
+                f"stage-version: rewrote {cur} -> {stage_version} across {n} manifest(s)"
+            )
             for nm in pkgs:
                 if pkgs[nm]["version"] == cur:
                     pkgs[nm]["version"] = stage_version
@@ -372,18 +468,30 @@ def main() -> int:
     # Fail fast BEFORE any build/publish if a crate carries an unexpected version
     # (e.g. a hardcoded version the bump missed) — never silently publish wrong tags.
     if args.expect_version:
-        mismatched = [(n, pkgs[n]["version"]) for n in order if pkgs[n]["version"] != args.expect_version]
+        mismatched = [
+            (n, pkgs[n]["version"])
+            for n in order
+            if pkgs[n]["version"] != args.expect_version
+        ]
         if mismatched:
             for n, v in mismatched:
-                print(f"::error::crate {n} is at version {v}, expected {args.expect_version} (hardcoded/un-bumped version)", file=sys.stderr)
-            print(f"::error::aborting before publish: {len(mismatched)} crate(s) carry an unexpected version; "
-                  "set 'version.workspace = true' (or fix Cargo.toml) and re-run", file=sys.stderr)
+                print(
+                    f"::error::crate {n} is at version {v}, expected {args.expect_version} (hardcoded/un-bumped version)",
+                    file=sys.stderr,
+                )
+            print(
+                f"::error::aborting before publish: {len(mismatched)} crate(s) carry an unexpected version; "
+                "set 'version.workspace = true' (or fix Cargo.toml) and re-run",
+                file=sys.stderr,
+            )
             return 1
 
     write_cargo_config(root, args.registry, index)
     inject_registry(
         [root / "Cargo.toml", *(Path(pkgs[n]["manifest_path"]) for n in order)],
-        order, args.registry, {n: pkgs[n]["version"] for n in order},
+        order,
+        args.registry,
+        {n: pkgs[n]["version"] for n in order},
     )
     # cargo publish rejects deps without a registry version; drop optional,
     # private git deps from the crates being published (none on current main;
@@ -395,18 +503,33 @@ def main() -> int:
     env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} --cfg tokio_unstable".strip()
     # Only the upload PUT runs on PUBLISH_TOOLCHAIN (--no-verify skips compilation);
     # cargo check/update stay on the workspace's rust-toolchain.toml toolchain.
-    r = subprocess.run(["rustup", "toolchain", "install", "--profile", "minimal",
-                        "--no-self-update", PUBLISH_TOOLCHAIN], env=env)
+    r = subprocess.run(
+        [
+            "rustup",
+            "toolchain",
+            "install",
+            "--profile",
+            "minimal",
+            "--no-self-update",
+            PUBLISH_TOOLCHAIN,
+        ],
+        env=env,
+    )
     if r.returncode != 0:
-        print(f"::error::rustup install of publish toolchain {PUBLISH_TOOLCHAIN} failed",
-              file=sys.stderr)
+        print(
+            f"::error::rustup install of publish toolchain {PUBLISH_TOOLCHAIN} failed",
+            file=sys.stderr,
+        )
         return 1
     # Resync Cargo.lock after the stage-version rewrite; fail loudly here rather
     # than as a confusing publish error later.
     if stage_version:
         r = subprocess.run(["cargo", "update", "--workspace"], cwd=root, env=env)
         if r.returncode != 0:
-            print("::error::cargo update --workspace failed after the stage-version rewrite", file=sys.stderr)
+            print(
+                "::error::cargo update --workspace failed after the stage-version rewrite",
+                file=sys.stderr,
+            )
             return 1
 
     # Fail-soft loop: a failed crate skips its dependents but not the rest.
@@ -417,8 +540,11 @@ def main() -> int:
     staged: list[str] = []
     failed: dict[str, str] = {}
     deps_of = {
-        n: {d["name"] for d in pkgs[n]["dependencies"]
-            if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"}
+        n: {
+            d["name"]
+            for d in pkgs[n]["dependencies"]
+            if d["name"] in pkgs and d["name"] != n and d.get("kind") != "dev"
+        }
         for n in order
     }
     for name in order:
@@ -438,7 +564,12 @@ def main() -> int:
                 staged.append(name)
                 print(f"STAGED_CRATE={name}", flush=True)  # captured by the staging job
                 continue
-            if subprocess.run(["cargo", "check", "--manifest-path", manifest], cwd=root, env=env).returncode != 0:
+            if (
+                subprocess.run(
+                    ["cargo", "check", "--manifest-path", manifest], cwd=root, env=env
+                ).returncode
+                != 0
+            ):
                 raise RuntimeError(f"cargo check failed for {manifest}")
             status = publish(manifest, args.registry, env)
         except RuntimeError as e:
@@ -453,12 +584,17 @@ def main() -> int:
         staged.append(name)
         print(f"STAGED_CRATE={name}", flush=True)  # captured by the staging job
 
-    print(f"Done: {len(order)} crates ({published} published, {already} already present, "
-          f"{len(staged)} staged, {len(failed)} failed).")
+    print(
+        f"Done: {len(order)} crates ({published} published, {already} already present, "
+        f"{len(staged)} staged, {len(failed)} failed)."
+    )
     print(f"STAGED_CRATES={','.join(staged)}")
     if failed:
         print(f"FAILED_CRATES={','.join(failed)}")
-        print(f"::error::{len(failed)} crate(s) not staged: {', '.join(failed)}", file=sys.stderr)
+        print(
+            f"::error::{len(failed)} crate(s) not staged: {', '.join(failed)}",
+            file=sys.stderr,
+        )
         return 1
     return 0
 

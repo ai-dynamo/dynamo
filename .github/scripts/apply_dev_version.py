@@ -62,11 +62,11 @@ SUBCRATE_CARGO_TARGETS = [
 # and stamp_workspace_pin() pins exactly the deps `cargo publish` requires
 # (normal/build deps, relative path, target inherits the workspace version).
 # A new crate is covered by adding it to [workspace] members — nothing here.
-DEP_SECTION_RE = re.compile(
-    r"^\[(?:target\.[^\]]+\.)?(?:build-)?dependencies\]\s*$")
+DEP_SECTION_RE = re.compile(r"^\[(?:target\.[^\]]+\.)?(?:build-)?dependencies\]\s*$")
 WORKSPACE_VERSION_RE = re.compile(
     r"^\s*version\s*(?:\.\s*workspace\s*=\s*true|=\s*\{\s*workspace\s*=\s*true\s*\})",
-    re.MULTILINE)
+    re.MULTILINE,
+)
 PUBLISH_FALSE_RE = re.compile(r"^\s*publish\s*=\s*false\b", re.MULTILINE)
 
 # Helm charts carry the unified version in version / appVersion / dependency
@@ -89,16 +89,31 @@ HELM_CHART_TARGETS = [
 # from its `tag: "" -> .Chart.AppVersion` inheritance. 3rd-party tags (etcd/nats) are
 # never matched (different repositories).
 HELM_IMAGE_TAG_SITES = [
-    ("operator", "platform", "deploy/helm/charts/platform/values.yaml",
-     "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
-    ("operator", "platform", "deploy/helm/charts/platform/components/operator/values.yaml",
-     "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"),
+    (
+        "operator",
+        "platform",
+        "deploy/helm/charts/platform/values.yaml",
+        "nvcr.io/nvidia/ai-dynamo/kubernetes-operator",
+    ),
+    (
+        "operator",
+        "platform",
+        "deploy/helm/charts/platform/components/operator/values.yaml",
+        "nvcr.io/nvidia/ai-dynamo/kubernetes-operator",
+    ),
 ]
 
 # Normalized subset universes for --containers / --helm token validation.
 CONTAINER_TOKENS = {
-    "vllm-runtime", "vllm-efa", "sglang-runtime", "sglang-efa",
-    "trtllm-runtime", "trtllm-efa", "frontend", "operator", "planner",
+    "vllm-runtime",
+    "vllm-efa",
+    "sglang-runtime",
+    "sglang-efa",
+    "trtllm-runtime",
+    "trtllm-efa",
+    "frontend",
+    "operator",
+    "planner",
     "sidecar",
 }
 HELM_TOKENS = {"platform"}
@@ -263,7 +278,9 @@ def _workspace_version(root: Path) -> str:
 def _semver_form(new: str) -> str:
     m = SET_RE.match(new)
     if not m:
-        raise RuntimeError(f"--set-version must be X.Y.Z, X.Y.Z.devN, or X.Y.Z.postN (got '{new}')")
+        raise RuntimeError(
+            f"--set-version must be X.Y.Z, X.Y.Z.devN, or X.Y.Z.postN (got '{new}')"
+        )
     base = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
     suffix = m.group(4)
     if not suffix:
@@ -285,7 +302,9 @@ def set_pyproject(path: Path, old: str, new: str, is_root: bool) -> int:
     text = VERSION_LINE_RE.sub(_set, path.read_text())
     if is_root:
         text = PY_ROOT_PIN_RE.sub(
-            lambda m: f"{m.group(1)}{new}{m.group(3)}" if m.group(2) == old else m.group(0),
+            lambda m: f"{m.group(1)}{new}{m.group(3)}"
+            if m.group(2) == old
+            else m.group(0),
             text,
         )
     path.write_text(text)
@@ -306,7 +325,11 @@ def workspace_pin_manifests(root: Path) -> list[Path]:
     """Publishable members of the root workspace ([workspace] members, globs
     expanded; `publish = false` skipped)."""
     text = (root / "Cargo.toml").read_text()
-    m = re.search(r"^\[workspace\][^\[]*?\bmembers\s*=\s*\[(.*?)\]", text, re.MULTILINE | re.DOTALL)
+    m = re.search(
+        r"^\[workspace\][^\[]*?\bmembers\s*=\s*\[(.*?)\]",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
     if not m:
         return []
     out: list[Path] = []
@@ -334,21 +357,21 @@ def stamp_workspace_pin(path: Path, new: str, inject: bool = True) -> list[str]:
         if line.lstrip().startswith("["):
             in_deps = bool(DEP_SECTION_RE.match(line.strip()))
             continue
-        dm = re.match(r'^(\s*)([A-Za-z0-9_-]+)(\s*=\s*)(\{[^{}]*\})(.*)$', line)
+        dm = re.match(r"^(\s*)([A-Za-z0-9_-]+)(\s*=\s*)(\{[^{}]*\})(.*)$", line)
         if not in_deps or not dm:
             continue
         table = dm.group(4)
         pm = re.search(r'\bpath\s*=\s*"(\.[^"]*)"', table)
         if not pm:
-            continue                           # not a relative path dep
+            continue  # not a relative path dep
         target = (path.parent / pm.group(1) / "Cargo.toml").resolve()
         if not target.is_file() or not WORKSPACE_VERSION_RE.search(target.read_text()):
-            continue                           # target has its own version
+            continue  # target has its own version
         vm = re.search(r'\bversion\s*=\s*"([^"]*)"', table)
         if vm:
-            table = table[: vm.start(1)] + new + table[vm.end(1):]
+            table = table[: vm.start(1)] + new + table[vm.end(1) :]
         elif inject:
-            table = table[: pm.end()] + f', version = "{new}"' + table[pm.end():]
+            table = table[: pm.end()] + f', version = "{new}"' + table[pm.end() :]
         else:
             continue
         lines[i] = f"{dm.group(1)}{dm.group(2)}{dm.group(3)}{table}{dm.group(5)}"
@@ -367,7 +390,8 @@ def set_helm(path: Path, old: str, new: str) -> None:
         re.MULTILINE,
     )
     text, n_top = top.subn(
-        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}", text
+        lambda m: f"{m.group('pre')}{m.group('q')}{new}{m.group('q')}{m.group('post')}",
+        text,
     )
     if n_top == 0:
         raise RuntimeError(f"no top-level version/appVersion in {path}")
@@ -375,8 +399,8 @@ def set_helm(path: Path, old: str, new: str) -> None:
     # dynamo-operator (file:// subchart) pin always rides the workspace version;
     # the hop is bounded to the entry so it can't reach nats/etcd/....
     text = re.sub(
-        r'(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n'
-        r'(?:(?!\s*-\s)[^\n]*\n)*?'
+        r"(?m)^(\s*-\s+name:\s*dynamo-operator\s*\n"
+        r"(?:(?!\s*-\s)[^\n]*\n)*?"
         r'\s*version\s*:\s*)("?)[^"\n]*\2(\s*)$',
         lambda m: f"{m.group(1)}{m.group(2)}{new}{m.group(2)}{m.group(3)}",
         text,
@@ -390,14 +414,18 @@ def set_helm(path: Path, old: str, new: str) -> None:
 
 # Bounds the repository->tag hop at the next `repository:` line, so a block
 # with no tag fails loudly instead of rewriting another image's tag.
-_TAG_HOP = r'(?:(?![^\n]*repository:)[^\n]*\n)*?'
+_TAG_HOP = r"(?:(?![^\n]*repository:)[^\n]*\n)*?"
 
 
 def set_helm_values_tag(path: Path, repo: str, new: str) -> None:
     # Set the `tag:` that follows the image `repository: <repo>` line to `new`,
     # regardless of its current value (the published image tag is the release tag).
     pat = re.compile(
-        r'(repository:\s*"?' + re.escape(repo) + r'"?\s*\n' + _TAG_HOP + r'\s*tag:\s*)"?[^"\n]*"?',
+        r'(repository:\s*"?'
+        + re.escape(repo)
+        + r'"?\s*\n'
+        + _TAG_HOP
+        + r'\s*tag:\s*)"?[^"\n]*"?',
         re.MULTILINE,
     )
     text, n = pat.subn(lambda m: f"{m.group(1)}{new}", path.read_text(), count=1)
@@ -411,15 +439,20 @@ def _current_image_tag(path: Path, repo: str) -> str:
     # an empty tag inherits the chart appVersion at deploy time, so there is no
     # recorded last-published tag to pin to).
     m = re.search(
-        r'repository:\s*"?' + re.escape(repo) + r'"?\s*\n' + _TAG_HOP + r'\s*tag:\s*"?([^"\n]*)"?',
+        r'repository:\s*"?'
+        + re.escape(repo)
+        + r'"?\s*\n'
+        + _TAG_HOP
+        + r'\s*tag:\s*"?([^"\n]*)"?',
         path.read_text(),
     )
     return m.group(1).strip() if m else ""
 
 
 def _tracked_files(root: Path) -> list[Path]:
-    out = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True,
-                         capture_output=True, text=True).stdout
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout
     files = []
     for rel in out.split("\0"):
         if not rel or rel.startswith(".github/"):
@@ -432,8 +465,9 @@ def _tracked_files(root: Path) -> list[Path]:
     return files
 
 
-def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
-                       old_version: str) -> tuple[int, int]:
+def rewrite_image_refs(
+    root: Path, new_version: str, containers: set[str], old_version: str
+) -> tuple[int, int]:
     """Point first-party image references at the GA registry + release version —
     but ONLY for images this release actually publishes.
 
@@ -447,8 +481,10 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
     Returns (files_changed, refs_rewritten)."""
     images = sorted({IMAGE_REF_TOKENS[t] for t in containers if t in IMAGE_REF_TOKENS})
     if not images:
-        print("rewrite_image_refs: no publishable image selected; placeholders left intact",
-              file=sys.stderr)
+        print(
+            "rewrite_image_refs: no publishable image selected; placeholders left intact",
+            file=sys.stderr,
+        )
         return (0, 0)
 
     # old_version comes from Cargo.toml, i.e. the SemVer form (1.3.0+post1,
@@ -468,7 +504,11 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
     # `:1.3.0-cuda13` and `:1.4.0.dev1`, rewriting them to a bare version and
     # silently destroying the variant suffix.
     pats = [
-        (img, re.compile(rf"{reg_alt}/{re.escape(img)}:(?:{tag_alt})(?![\w.-])"), f"{GA_REGISTRY}/{img}:{new_version}")
+        (
+            img,
+            re.compile(rf"{reg_alt}/{re.escape(img)}:(?:{tag_alt})(?![\w.-])"),
+            f"{GA_REGISTRY}/{img}:{new_version}",
+        )
         for img in images
     ]
     # Untagged prose references (`my-registry/vllm-runtime` with no `:tag`) still
@@ -476,7 +516,13 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
     # image is never given a real registry path. Runs after the tagged patterns,
     # which have already consumed the `<reg>/<img>:<tag>` forms.
     pats += [
-        (img, re.compile(rf"{re.escape(PLACEHOLDER_REGISTRY)}/{re.escape(img)}(?![\w.:-])"), f"{GA_REGISTRY}/{img}")
+        (
+            img,
+            re.compile(
+                rf"{re.escape(PLACEHOLDER_REGISTRY)}/{re.escape(img)}(?![\w.:-])"
+            ),
+            f"{GA_REGISTRY}/{img}",
+        )
         for img in images
     ]
 
@@ -495,7 +541,10 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
             continue
         # Fast path — must test every literal the regex can match, including the
         # PEP 440 spelling of the old version and the untagged placeholder registry.
-        if not any(t in text for t in old_literals) and PLACEHOLDER_REGISTRY not in text:
+        if (
+            not any(t in text for t in old_literals)
+            and PLACEHOLDER_REGISTRY not in text
+        ):
             continue
         for _img, pat, repl in pats:
             text, n = pat.subn(repl, text)
@@ -504,13 +553,19 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
             path.write_text(text)
             files_changed += 1
 
-    print(f"rewrite_image_refs: {refs} reference(s) in {files_changed} file(s) -> "
-          f"{GA_REGISTRY}/<image>:{new_version} for {images}", file=sys.stderr)
+    print(
+        f"rewrite_image_refs: {refs} reference(s) in {files_changed} file(s) -> "
+        f"{GA_REGISTRY}/<image>:{new_version} for {images}",
+        file=sys.stderr,
+    )
 
     for rel in skipped_stale:
-        print(f"::warning::{rel} still references {old_version} and was left untouched "
-              f"on purpose (it lists dev-line and nightly releases that must not move). "
-              f"Update the current-release rows to {new_version} by hand.", file=sys.stderr)
+        print(
+            f"::warning::{rel} still references {old_version} and was left untouched "
+            f"on purpose (it lists dev-line and nightly releases that must not move). "
+            f"Update the current-release rows to {new_version} by hand.",
+            file=sys.stderr,
+        )
 
     # Advisory only: a re-cut of a branch that previously shipped a wider selection
     # legitimately still carries those older refs, so warn rather than fail.
@@ -525,8 +580,11 @@ def rewrite_image_refs(root: Path, new_version: str, containers: set[str],
             if f"{GA_REGISTRY}/{img}:{new_version}" in text:
                 stale.append(f"{path.relative_to(root)} -> {img}")
     if stale:
-        print(f"::warning::{len(stale)} reference(s) point at unselected image(s) at "
-              f"{new_version}: {stale[:8]}{' …' if len(stale) > 8 else ''}", file=sys.stderr)
+        print(
+            f"::warning::{len(stale)} reference(s) point at unselected image(s) at "
+            f"{new_version}: {stale[:8]}{' …' if len(stale) > 8 else ''}",
+            file=sys.stderr,
+        )
     return (files_changed, refs)
 
 
@@ -539,12 +597,19 @@ def _parse_subset(spec: str, universe: set[str]) -> set[str]:
     sel = {t.strip() for t in spec.split(",") if t.strip()}
     unknown = sel - universe
     if unknown:
-        raise RuntimeError(f"unknown subset token(s) {sorted(unknown)}; valid: {sorted(universe)}")
+        raise RuntimeError(
+            f"unknown subset token(s) {sorted(unknown)}; valid: {sorted(universe)}"
+        )
     return sel
 
 
-def set_release_version(root: Path, new_version: str, containers: set[str], helm: set[str],
-                        image_refs: bool = False) -> None:
+def set_release_version(
+    root: Path,
+    new_version: str,
+    containers: set[str],
+    helm: set[str],
+    image_refs: bool = False,
+) -> None:
     old = _workspace_version(root)
     semver = _semver_form(new_version)
 
@@ -553,7 +618,10 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
         # a path that doesn't exist there has nothing to stamp.
         if (root / rel).exists():
             return True
-        print(f"set_release_version: skip {rel} (absent at this source ref)", file=sys.stderr)
+        print(
+            f"set_release_version: skip {rel} (absent at this source ref)",
+            file=sys.stderr,
+        )
         return False
 
     # Cargo.toml holds the workspace version in SemVer form ('1.4.2-dev1'),
@@ -565,8 +633,10 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
     # so a zero-hit rewrite is expected for them. Anywhere else, zero hits with
     # the new version also absent means the file holds some third version and
     # the release would ship stale metadata.
-    independent = {"lib/gpu_memory_service/pyproject.toml",
-                   "lib/bindings/python/codegen/Cargo.toml"}
+    independent = {
+        "lib/gpu_memory_service/pyproject.toml",
+        "lib/bindings/python/codegen/Cargo.toml",
+    }
 
     def _require(rel: str, hits: int, want: str) -> None:
         if rel in independent or hits:
@@ -574,7 +644,8 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
         if want not in (root / rel).read_text():
             raise RuntimeError(
                 f"{rel} carries neither the workspace version ('{old}'/'{old_py}') "
-                f"nor '{want}' -- refusing a partial stamp")
+                f"nor '{want}' -- refusing a partial stamp"
+            )
 
     # Package identity -- ALWAYS bumped, regardless of the wheels/crates selection:
     # the containers embed wheels built from this tree, so a container-only release
@@ -582,8 +653,13 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
     # carry the previous version. (wheels/crates are intentionally not passed in.)
     for rel in PYPROJECT_TARGETS:
         if rel == "pyproject.toml" or _exists(rel):
-            _require(rel, set_pyproject(root / rel, old_py, new_version,
-                                        is_root=(rel == "pyproject.toml")), new_version)
+            _require(
+                rel,
+                set_pyproject(
+                    root / rel, old_py, new_version, is_root=(rel == "pyproject.toml")
+                ),
+                new_version,
+            )
     _require("Cargo.toml", set_cargo(root / "Cargo.toml", old, semver), semver)
     for rel in SUBCRATE_CARGO_TARGETS:
         if _exists(rel):
@@ -594,8 +670,10 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
     for p in workspace_pin_manifests(root):
         names = stamp_workspace_pin(p, semver)
         if names:
-            print(f"set_release_version: pinned {p.relative_to(root)}: {', '.join(names)} -> {semver}",
-                  file=sys.stderr)
+            print(
+                f"set_release_version: pinned {p.relative_to(root)}: {', '.join(names)} -> {semver}",
+                file=sys.stderr,
+            )
     # Chart identity -- only for charts in the --helm subset.
     for token, rel in HELM_CHART_TARGETS:
         if token in helm and _exists(rel):
@@ -615,10 +693,14 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
                 raise RuntimeError(
                     f"chart '{htoken}' is selected but its image '{ctoken}' is excluded and "
                     f"{rel} records no previously published tag for {repo}; either add "
-                    f"'{ctoken}' to the container selection or drop '{htoken}' from the helm selection")
+                    f"'{ctoken}' to the container selection or drop '{htoken}' from the helm selection"
+                )
         set_helm_values_tag(path, repo, tag)
-    print(f"set_release_version: {old} -> py={new_version} semver={semver} "
-          f"containers={sorted(containers)} helm={sorted(helm)}", file=sys.stderr)
+    print(
+        f"set_release_version: {old} -> py={new_version} semver={semver} "
+        f"containers={sorted(containers)} helm={sorted(helm)}",
+        file=sys.stderr,
+    )
     # Docs / examples / deploy manifests: selection-gated so the release branch never
     # advertises an image tag this release does not publish.
     if image_refs:
@@ -627,18 +709,33 @@ def set_release_version(root: Path, new_version: str, containers: set[str], helm
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("suffix", nargs="?", default="", help="e.g. .dev20260423 (empty = no-op)")
+    ap.add_argument(
+        "suffix", nargs="?", default="", help="e.g. .dev20260423 (empty = no-op)"
+    )
     ap.add_argument("root", nargs="?", default=".", help="repo root")
-    ap.add_argument("--set-version", dest="set_version", default="",
-                    help="set an absolute release version X.Y.Z[.devN|.postN] instead of appending a suffix")
-    ap.add_argument("--containers", default="all",
-                    help="normalized container subset (all|none|csv) gating image-tag bumps")
-    ap.add_argument("--helm", default="all",
-                    help="helm chart subset (all|none|platform) gating chart bumps")
-    ap.add_argument("--image-refs", action="store_true",
-                    help="also point the my-registry/my-tag placeholders in docs, examples and "
-                         "deploy manifests at the GA registry + release version — only for images "
-                         "in --containers; unselected images keep their placeholder")
+    ap.add_argument(
+        "--set-version",
+        dest="set_version",
+        default="",
+        help="set an absolute release version X.Y.Z[.devN|.postN] instead of appending a suffix",
+    )
+    ap.add_argument(
+        "--containers",
+        default="all",
+        help="normalized container subset (all|none|csv) gating image-tag bumps",
+    )
+    ap.add_argument(
+        "--helm",
+        default="all",
+        help="helm chart subset (all|none|platform) gating chart bumps",
+    )
+    ap.add_argument(
+        "--image-refs",
+        action="store_true",
+        help="also point the my-registry/my-tag placeholders in docs, examples and "
+        "deploy manifests at the GA registry + release version — only for images "
+        "in --containers; unselected images keep their placeholder",
+    )
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
@@ -646,7 +743,9 @@ def main() -> int:
     if args.set_version:
         containers = _parse_subset(args.containers, CONTAINER_TOKENS)
         helm = _parse_subset(args.helm, HELM_TOKENS)
-        set_release_version(root, args.set_version, containers, helm, image_refs=args.image_refs)
+        set_release_version(
+            root, args.set_version, containers, helm, image_refs=args.image_refs
+        )
         return 0
 
     if not args.suffix:
