@@ -550,9 +550,14 @@ impl AnthropicStreamConverter {
                     events.push(make_sse_event("content_block_stop", &block_stop));
                 }
 
-                // Emit content_block_start on first text
-                if !self.text_block_started {
+                // Emit content_block_start on first text, and on any text
+                // after a tool chunk closed the previous text block: the
+                // Anthropic streaming spec requires each block to be closed
+                // before the next starts, so a later fragment must never
+                // resume (delta into) an already-closed block.
+                if !self.text_block_started || self.text_block_closed {
                     self.text_block_started = true;
+                    self.text_block_closed = false;
                     self.text_block_index = self.next_block_index;
                     self.next_block_index += 1;
 
@@ -1088,6 +1093,76 @@ mod tests {
             .filter_map(|line| line.strip_prefix("data: "))
             .map(|data| serde_json::from_str(data).unwrap())
             .collect()
+    }
+
+    /// Text arriving after a tool chunk must open a fresh text block: the
+    /// tool path closes the current text block, and the Anthropic streaming
+    /// spec forbids emitting a `content_block_delta` into a block that
+    /// already received `content_block_stop`.
+    #[tokio::test]
+    async fn test_text_after_tool_opens_fresh_text_block() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 5);
+        let mut events = Vec::new();
+        for chunk in [
+            text_chunk("before"),
+            tool_call_chunk(
+                0,
+                Some("call_1"),
+                Some("read_file"),
+                Some("{\"path\":\"a\"}"),
+            ),
+            text_chunk("after"),
+            finish_chunk(FinishReason::ToolCalls),
+        ] {
+            conv.append_chunk_events(&chunk, &mut events);
+        }
+        conv.append_end_events(&mut events);
+        let values = sse_values(events).await;
+
+        // The two text fragments land in two distinct, consecutively indexed
+        // text blocks.
+        let text_starts: Vec<u64> = values
+            .iter()
+            .filter(|v| v["type"] == "content_block_start" && v["content_block"]["type"] == "text")
+            .map(|v| v["index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(text_starts.len(), 2, "expected two text blocks");
+        assert_eq!(text_starts[1], text_starts[0] + 1);
+
+        let text_deltas: Vec<(u64, String)> = values
+            .iter()
+            .filter_map(|v| {
+                (v["type"] == "content_block_delta" && v["delta"]["type"] == "text_delta").then(
+                    || {
+                        (
+                            v["index"].as_u64().unwrap(),
+                            v["delta"]["text"].as_str().unwrap().into(),
+                        )
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(text_deltas[0], (text_starts[0], "before".into()));
+        assert_eq!(text_deltas[1], (text_starts[1], "after".into()));
+
+        // The first text block was closed (by the tool chunk) before the
+        // second one started, and every block is closed exactly once at its
+        // own index.
+        let stop_positions: Vec<usize> = values
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v["type"] == "content_block_stop" && v["index"] == text_starts[0])
+            .map(|(pos, _)| pos)
+            .collect();
+        let second_start_pos = values
+            .iter()
+            .position(|v| v["type"] == "content_block_start" && v["index"] == text_starts[1])
+            .unwrap();
+        assert_eq!(stop_positions.len(), 1);
+        assert!(
+            stop_positions[0] < second_start_pos,
+            "closed text block must not be resumed by a later text fragment"
+        );
     }
 
     #[rstest::rstest]
