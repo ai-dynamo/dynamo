@@ -447,6 +447,7 @@ def test_tito_adapter_resolves_omitted_max_tokens_from_server_limits():
 )
 def test_json_capability_is_opt_in_and_aggregated_only(enabled, worker_kind, published):
     from unittest.mock import Mock
+
     from dynamo.llm import ModelInput, WorkerType
     from dynamo.vllm.engine_generate import publish_json_multimodal_capability
 

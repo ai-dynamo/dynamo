@@ -2875,6 +2875,7 @@ dependencies = [
 [[package]]
 name = "dynamo-parsers"
 version = "10.0.0"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=31e8a3cfe8b439921d822a4af9e120173a416f23#31e8a3cfe8b439921d822a4af9e120173a416f23"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2913,6 +2914,7 @@ dependencies = [
 [[package]]
 name = "dynamo-protocols"
 version = "7.0.0"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=31e8a3cfe8b439921d822a4af9e120173a416f23#31e8a3cfe8b439921d822a4af9e120173a416f23"
 dependencies = [
  "async-openai",
  "derive_builder",
@@ -2928,6 +2930,7 @@ dependencies = [
 [[package]]
 name = "dynamo-renderer"
 version = "6.0.0"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=31e8a3cfe8b439921d822a4af9e120173a416f23#31e8a3cfe8b439921d822a4af9e120173a416f23"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3105,6 +3108,7 @@ dependencies = [
 [[package]]
 name = "dynamo-tokenizers"
 version = "1.9.2"
+source = "git+https://github.com/pstjohn/frontend-crates.git?rev=31e8a3cfe8b439921d822a4af9e120173a416f23#31e8a3cfe8b439921d822a4af9e120173a416f23"
 dependencies = [
  "aho-corasick",
  "anyhow",

@@ -569,7 +569,7 @@ impl MediaLoader {
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Model does not support image inputs"))?;
 
-                let url = require_image_url(&image_part)?;
+                let url = require_image_url(image_part)?;
                 self.media_fetcher
                     .check_if_url_allowed_with_dns(url)
                     .await?;

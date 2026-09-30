@@ -99,11 +99,13 @@ fn count_request_media(request: &NvCreateChatCompletionRequest) -> (usize, usize
             && let Content::Array(parts) = &user.content
         {
             for part in parts {
-                match part {
-                    Part::ImageUrl(_) => images += 1,
-                    Part::VideoUrl(_) => videos += 1,
-                    Part::AudioUrl(_) => audio += 1,
-                    _ => {}
+                if let Part::Multimodal(part) = part {
+                    match part.kind.as_str() {
+                        "image_url" => images += 1,
+                        "video_url" => videos += 1,
+                        "audio_url" => audio += 1,
+                        _ => {}
+                    }
                 }
             }
         }

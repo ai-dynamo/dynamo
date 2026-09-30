@@ -212,6 +212,8 @@ enum MultimodalContentPart<'a> {
     Tool(&'a ChatCompletionRequestToolMessageContentPart),
 }
 
+type MediaInfo = (&'static str, Option<url::Url>, Option<String>);
+
 impl<'a> MultimodalContentPart<'a> {
     fn as_user(&self) -> Cow<'a, ChatCompletionRequestUserMessageContentPart> {
         match self {
@@ -230,7 +232,7 @@ impl<'a> MultimodalContentPart<'a> {
         }
     }
 
-    fn media_info(&self) -> Result<Option<(&'static str, Option<url::Url>, Option<String>)>> {
+    fn media_info(&self) -> Result<Option<MediaInfo>> {
         let Some(part) = self.generic_part() else {
             return Ok(None);
         };
