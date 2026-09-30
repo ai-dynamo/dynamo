@@ -8,7 +8,9 @@ package lpx
 import (
 	"fmt"
 	"math"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"capnproto.org/go/capnp/v3"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
@@ -19,6 +21,7 @@ const (
 	runtimeIOProtocolHost          uint16 = 0
 	runtimeIOProtocolMultiEndpoint uint16 = 1
 	runtimeIOMaxMode               uint16 = 2
+	hxTopologyFamily                      = "16x8x2x3"
 )
 
 func decodeGbuildManifestV2(data []byte) (manifestcapnpv2.Manifest, error) {
@@ -50,9 +53,14 @@ func buildFromGbuildManifestV2(buildRef string, manifest manifestcapnpv2.Manifes
 	if err != nil {
 		return nil, fmt.Errorf("reading %s deployment: %w", gbuildManifestV2CapnpFile, err)
 	}
-	compilationMode, err := buildCompilationMode(gbuildManifestV2CapnpFile, deployment.CompilationMode().String())
-	if err != nil {
-		return nil, err
+	var compilationMode BuildCompilationMode
+	switch deployment.CompilationMode() {
+	case manifestcapnpv2.CompilationMode_lpuOnly:
+		compilationMode = BuildCompilationModeLPUOnly
+	case manifestcapnpv2.CompilationMode_lpx:
+		compilationMode = BuildCompilationModeHybrid
+	default:
+		return nil, fmt.Errorf("%s deployment.compilationMode %q is not supported", gbuildManifestV2CapnpFile, deployment.CompilationMode().String())
 	}
 	if !deployment.HasProgram() {
 		return nil, fmt.Errorf("%s deployment.program is missing", gbuildManifestV2CapnpFile)
@@ -183,11 +191,12 @@ func selectedPropSyncChainsFromManifestV2(deployment manifestcapnpv2.DeploymentI
 		if err != nil {
 			return nil, fmt.Errorf("reading %s deployment.selectedPropSyncChains[%d].partitionIds: %w", gbuildManifestV2CapnpFile, chainIndex, err)
 		}
-
-		chainPath := fmt.Sprintf("%s deployment.selectedPropSyncChains[%d]", gbuildManifestV2CapnpFile, chainIndex)
-		chain, err := decodePropSyncChain(rawIDs, chainPath)
-		if err != nil {
-			return nil, err
+		if rawIDs.Len() < 2 {
+			return nil, fmt.Errorf("%s deployment.selectedPropSyncChains[%d] must contain at least two partitionIds", gbuildManifestV2CapnpFile, chainIndex)
+		}
+		chain := make([]int, rawIDs.Len())
+		for index := range chain {
+			chain[index] = int(rawIDs.At(index))
 		}
 		chains = append(chains, chain)
 	}
@@ -227,7 +236,7 @@ func addLPUArtifactsFromManifestV2(
 		return fmt.Errorf("%s artifacts contain no LPU partitions", gbuildManifestV2CapnpFile)
 	}
 	partialSelection := artifacts.HasPartSelect()
-	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, partitions, partialSelection)
+	family, packagedNodes, partitionZeroNodes, err := classifyManifestPartitions(partitions, partialSelection)
 	if err == nil && family == BuildFamilyXT {
 		err = validateManifestV2PartSelect(artifacts, partitions)
 	}
@@ -246,7 +255,7 @@ func addLPUArtifactsFromManifestV2(
 	if err != nil {
 		return err
 	}
-	return validateManifestPartitionNodeCount(gbuildManifestV2CapnpFile, want, build, partialSelection, hxDoubleNodeCount, packagedNodes, partitionZeroNodes)
+	return validateManifestPartitionNodeCount(want, build, partialSelection, hxDoubleNodeCount, packagedNodes, partitionZeroNodes)
 }
 
 func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildPartition, bool, error) {
@@ -354,4 +363,183 @@ func runtimeTokenEmbeddingsPathFromManifestV2(artifacts manifestcapnpv2.Artifact
 		fmt.Sprintf("%s artifacts.runtimeAssets.tokenEmbeddingsPath", gbuildManifestV2CapnpFile),
 		rawPath,
 	)
+}
+
+func classifyManifestPartitions(partitions []BuildPartition, partSelect bool) (BuildFamily, int, int, error) {
+	family := BuildFamilyXT
+	packagedNodes, partitionZeroNodes := 0, 0
+	seen := make(map[int]struct{}, len(partitions))
+	for _, partition := range partitions {
+		partitionFamily := BuildFamilyXT
+		if len(partition.HXExtent) != 0 {
+			partitionFamily = BuildFamilyHX
+		}
+		if len(seen) != 0 && family != partitionFamily {
+			return "", 0, 0, fmt.Errorf("%s mixes XT and HX LPU partitions", gbuildManifestV2CapnpFile)
+		}
+		family = partitionFamily
+		if _, duplicate := seen[partition.SourcePartitionID]; duplicate {
+			if family == BuildFamilyHX {
+				return "", 0, 0, fmt.Errorf("V3 %s repeats LPU partition ID %d", gbuildManifestV2CapnpFile, partition.SourcePartitionID)
+			}
+			return "", 0, 0, fmt.Errorf("%s has duplicate LPU partition id %d", gbuildManifestV2CapnpFile, partition.SourcePartitionID)
+		}
+		seen[partition.SourcePartitionID] = struct{}{}
+
+		// Retain both deployment geometries using each partition's manifest device count.
+		nodes := partition.effectiveNodeCount()
+		packagedNodes += nodes
+		if partition.SourcePartitionID == 0 {
+			partitionZeroNodes += nodes
+		}
+	}
+	if family == BuildFamilyHX {
+		if partSelect {
+			return "", 0, 0, fmt.Errorf("V3 %s partSelect builds are not supported", gbuildManifestV2CapnpFile)
+		}
+		return family, packagedNodes, partitionZeroNodes, nil
+	}
+	sort.Slice(partitions, func(i, j int) bool { return partitions[i].SourcePartitionID < partitions[j].SourcePartitionID })
+	return family, packagedNodes, partitionZeroNodes, nil
+}
+
+func buildXTPartition(subject string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, error) {
+	// Read partition geometry directly from the manifest's numeric fields.
+	numChips, err := positiveManifestUInt32ToInt(subject+" numChips", raw.NumChips())
+	if err != nil {
+		return BuildPartition{}, err
+	}
+	devicesPerNode, err := positiveManifestUInt32ToInt(subject+" devicesPerNode", raw.DevicesPerNode())
+	if err != nil {
+		return BuildPartition{}, err
+	}
+
+	// Multi-node partitions must fill whole nodes at the declared device density.
+	if numChips > devicesPerNode && numChips%devicesPerNode != 0 {
+		return BuildPartition{}, fmt.Errorf("%s has %d chips, not divisible by %d LPU devices per node", subject, numChips, devicesPerNode)
+	}
+	return BuildPartition{NumChips: numChips, DevicesPerNode: devicesPerNode}, nil
+}
+
+func buildHXPartition(subject string, raw manifestcapnpv2.LpuPartitionArtifact) (BuildPartition, bool, error) {
+	// Retain device density alongside the HX extent validated below.
+	partition := BuildPartition{
+		NumChips:       int(raw.NumChips()),
+		DevicesPerNode: int(raw.DevicesPerNode()),
+	}
+	if !raw.HasTopologyMetadata() {
+		// The caller selects metadata-less HX only for the 16-chip, 16-device case.
+		partition.HXExtent = []int64{16, 1, 1, 1}
+		return partition, true, nil
+	}
+
+	// Decode HX metadata directly and report read errors at their source.
+	metadata, err := raw.TopologyMetadata()
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("reading V3 %s topologyMetadata: %w", subject, err)
+	}
+	family, err := metadata.TopologyFamily()
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("reading V3 %s topologyMetadata.topologyFamily: %w", subject, err)
+	}
+	if strings.TrimSpace(family) != hxTopologyFamily {
+		return BuildPartition{}, false, fmt.Errorf("V3 %s topologyMetadata.topologyFamily = %q, want %q", subject, strings.TrimSpace(family), hxTopologyFamily)
+	}
+	shape, err := metadata.PartitionShape()
+	if err != nil {
+		return BuildPartition{}, false, fmt.Errorf("reading V3 %s topologyMetadata.partitionShape: %w", subject, err)
+	}
+	extent := make([]int64, shape.Len())
+	for index := range extent {
+		extent[index] = int64(shape.At(index))
+	}
+
+	// Preserve every supported HX shape and its chip/device consistency checks.
+	if len(extent) != 4 || extent[0] != 16 || extent[1] < 1 || extent[1] > 8 ||
+		(!((extent[2] == 1 || extent[2] == 2) && extent[3] == 1) && !(extent[1] == 8 && extent[2] == 2 && extent[3] == 2)) {
+		return BuildPartition{}, false, fmt.Errorf("V3 %s has unsupported HX extent %v", subject, extent)
+	}
+	count := extent[0] * extent[1] * extent[2] * extent[3]
+	if count != int64(raw.NumChips()) {
+		return BuildPartition{}, false, fmt.Errorf("V3 %s topologyMetadata.partitionShape contains %d chips, want numChips %d", subject, count, raw.NumChips())
+	}
+	if extent[0] != int64(raw.DevicesPerNode()) {
+		return BuildPartition{}, false, fmt.Errorf("V3 %s topologyMetadata.partitionShape first dimension %d does not match devicesPerNode %d", subject, extent[0], raw.DevicesPerNode())
+	}
+	partition.HXExtent = extent
+	return partition, false, nil
+}
+
+func cleanManifestRelativeBuildPath(field, rawPath string) (string, error) {
+	if strings.ContainsAny(rawPath, "\x00\r\n") {
+		return "", fmt.Errorf("%s %q must not contain NUL bytes or line breaks", field, rawPath)
+	}
+	assetPath := strings.TrimSpace(rawPath)
+	if assetPath == "" {
+		return "", fmt.Errorf("%s is empty", field)
+	}
+	if filepath.IsAbs(assetPath) {
+		return "", fmt.Errorf("%s %q must be relative and stay within build directory", field, rawPath)
+	}
+	assetPath = filepath.ToSlash(filepath.Clean(assetPath))
+	if assetPath == "." || assetPath == ".." || strings.HasPrefix(assetPath, "../") {
+		return "", fmt.Errorf("%s %q must be relative and stay within build directory", field, rawPath)
+	}
+	return assetPath, nil
+}
+
+func validateManifestPartitionNodeCount(
+	want int,
+	build *Build,
+	partialSelection bool,
+	hxDoubleNodeCount bool,
+	packagedNodes, partitionZeroNodes int,
+) error {
+	// Compare the declaration with the packaged and host-embedding partition inventories.
+	hostEmbeddingNodes := packagedNodes
+	if build.SupportsCPUEmbeddings && build.StandaloneTokenEmbeddings {
+		hostEmbeddingNodes -= partitionZeroNodes
+	}
+	if build.Family == BuildFamilyHX {
+		if want == packagedNodes || (hxDoubleNodeCount && want == 2*packagedNodes) {
+			return nil
+		}
+		return fmt.Errorf("V3 %s deployment.numLpuNodes = %d, but partition extents require %d LPU nodes", gbuildManifestV2CapnpFile, want, packagedNodes)
+	}
+
+	// A host-embedding deployment must retain at least one model partition.
+	if hostEmbeddingNodes == 0 {
+		return fmt.Errorf("%s LPU partitions use 0 LPU nodes, want deployment.numLpuNodes %d", gbuildManifestV2CapnpFile, want)
+	}
+
+	// Accept either supported deployment mode without discarding packaged partitions.
+	if want == packagedNodes || want == hostEmbeddingNodes {
+		return nil
+	}
+
+	// partSelect artifacts contain only the selected partitions, while numLpuNodes
+	// describes the complete deployment geometry.
+	if partialSelection && want >= hostEmbeddingNodes {
+		return nil
+	}
+
+	// Keep the existing error concise when both deployment modes use the same node count.
+	if packagedNodes == hostEmbeddingNodes {
+		return fmt.Errorf("%s LPU partitions use %d LPU nodes, want deployment.numLpuNodes %d", gbuildManifestV2CapnpFile, packagedNodes, want)
+	}
+
+	return fmt.Errorf(
+		"%s LPU partitions use %d packaged LPU nodes or %d with host embeddings, want deployment.numLpuNodes %d",
+		gbuildManifestV2CapnpFile,
+		packagedNodes,
+		hostEmbeddingNodes,
+		want,
+	)
+}
+
+func positiveManifestUInt32ToInt(field string, value uint32) (int, error) {
+	if value == 0 {
+		return 0, fmt.Errorf("%s must be >= 1, got 0", field)
+	}
+	return int(value), nil
 }

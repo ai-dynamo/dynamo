@@ -17,61 +17,39 @@ const (
 	v3CompilerEnvelopeSchema = "dynamo.lpx.v3-capnp/v1"
 	v3ProjectionVersion      = "v3-hx-capnp/v1"
 	v3LPUDevice              = "lpu"
-	v3HXLogicalDeviceCount   = 16
 )
 
-func appendV3ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	runtimeBuild := *intent.BuildSnapshot.build
-	manifestPartitions := runtimeBuild.Partitions
-	selectedPropSyncChains := runtimeBuild.SelectedPropSyncChains
-
-	ioFPGACount, ioFanoutFactor := runtimeBuild.IOFPGACount, runtimeBuild.IOFanoutFactor
-
-	// Selected chains are represented by the allocation metadata and connectors below.
-	runtimeBuild.SelectedPropSyncChains = nil
-
-	allocationMetadata, connectors, err := projectV3PropSync(manifestPartitions, selectedPropSyncChains, intent.Pipeline)
+// projectV3Component derives the HX component shared by every model and writes
+// its model-independent digest fields.
+func projectV3Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
+	configured := *intent.BuildSnapshot.build
+	allocationMetadata, connectors, err := projectV3PropSync(configured.Partitions, configured.SelectedPropSyncChains, intent.Pipeline)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
-
-	// Initialize independent model hashes after validating the shared component geometry.
-	transcripts := newModelProjectionTranscripts(intent, v3ProjectionVersion)
-	for index := range transcripts {
-		transcripts[index].field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
-	}
+	// Selected chains are represented by the allocation metadata and connectors.
+	configured.SelectedPropSyncChains = nil
 
 	// Count runtime endpoints while binding ordered partitions into projection identity.
+	// Manifest validation guarantees NumChips/DevicesPerNode equals the HX extent's node count.
+	fields.field("v3-envelope-schema", []byte(v3CompilerEnvelopeSchema))
 	agentReplicas := 0
-	for index, partition := range manifestPartitions {
-		agentReplicas += int(partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3])
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].intField("ordered-compiler-id-index", int64(index))
-			transcripts[modelIndex].uint32Field("ordered-compiler-id", uint32(partition.SourcePartitionID))
-		}
+	for index, partition := range configured.Partitions {
+		agentReplicas += partition.effectiveNodeCount()
+		fields.intField("ordered-compiler-id-index", int64(index))
+		fields.uint32Field("ordered-compiler-id", uint32(partition.SourcePartitionID))
 	}
+	fields.field("allocation-metadata", allocationMetadata)
+	// Bind the Cyborg runtime contract into hybrid projection identity.
+	bindHybridRuntimeIO(fields, intent.Pipeline, configured.IOFPGACount, configured.IOFanoutFactor)
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-		// Bind the Cyborg runtime contract into hybrid projection identity.
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        runtimeBuild,
-			allocationMetadata:     allocationMetadata,
-			partitions:             manifestPartitions,
-			connectors:             connectors,
-			agentReplicas:          agentReplicas,
-		})
-	}
-	return dst, nil
+	return ModelProjection{
+		configuredBuild:    configured,
+		allocationMetadata: allocationMetadata,
+		partitions:         configured.Partitions,
+		connectors:         connectors,
+		agentReplicas:      agentReplicas,
+	}, nil
 }
 
 func projectV3PropSync(
@@ -104,10 +82,10 @@ func projectV3PropSync(
 	for _, fromPosition := range edgePositions {
 		source := partitions[fromPosition]
 		destinationID := partitions[fromPosition+1].SourcePartitionID
-		endpointCount := source.HXExtent[1] * source.HXExtent[2] * source.HXExtent[3]
-		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, v3HXLogicalDeviceCount)
-		connections := make([][2]int64, v3HXLogicalDeviceCount)
-		sourceOffset := source.HXExtent[0]*endpointCount - v3HXLogicalDeviceCount
+		logicalConnections := make([]lpxv1alpha1.HxLogicalConnection, source.DevicesPerNode)
+		connections := make([][2]int64, source.DevicesPerNode)
+		// Connections leave from the source partition's final node.
+		sourceOffset := int64(source.NumChips - source.DevicesPerNode)
 		for logicalDevice := range logicalConnections {
 			from := sourceOffset + int64(logicalDevice)
 			logicalConnections[logicalDevice] = lpxv1alpha1.HxLogicalConnection{

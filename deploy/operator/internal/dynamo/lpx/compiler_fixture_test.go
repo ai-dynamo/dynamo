@@ -21,12 +21,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-const (
-	otherFixtureValue  = "other"
-	v2TestBuildName    = "v2-test-build"
-	v3HXTopologyFamily = "16x8x2x3"
-	v3OpaqueTopology   = "opaque-v3-topology"
-)
+const v2TestBuildName = "v2-test-build"
 
 type staticBuildSnapshotSource map[string]*BuildSnapshot
 
@@ -95,14 +90,13 @@ func writeV2CompilerFixture(t *testing.T) string {
 }
 
 func newV2CompilerFixture() testV3CapnpFixture {
-	topology := "URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture := newV3CompilerFixture()
 	fixture.buildDirectoryName = v2TestBuildName
 	fixture.numLPUNodes = 4
 	fixture.selectedPropSyncChains = [][]uint32{{7, 8}}
 	fixture.partitions = []testV3CapnpPartition{
-		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
-		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 16, devicesPerNode: 8},
+		{id: 7, deviceType: manifestcapnp.DeviceType_lpu, numChips: 16, devicesPerNode: 8},
+		{id: 8, deviceType: manifestcapnp.DeviceType_lpu, numChips: 16, devicesPerNode: 8},
 	}
 	return fixture
 }
@@ -126,7 +120,6 @@ type testV3CapnpFixture struct {
 type testV3CapnpPartition struct {
 	id             uint32
 	deviceType     manifestcapnp.DeviceType
-	topology       string
 	numChips       uint32
 	devicesPerNode uint32
 	topologyFamily string
@@ -142,7 +135,6 @@ func newV3CompilerFixture() testV3CapnpFixture {
 		partitions: []testV3CapnpPartition{{
 			id:             1,
 			deviceType:     manifestcapnp.DeviceType_lpu,
-			topology:       v3OpaqueTopology,
 			numChips:       16,
 			devicesPerNode: 16,
 		}},
@@ -237,7 +229,6 @@ func writeTestV3CapnpManifest(t *testing.T, buildDir string, fixture testV3Capnp
 			detail, err := partition.Detail().NewLpu()
 			require.NoError(t, err)
 			require.NoError(t, detail.SetPath(fmt.Sprintf("part-%d", fixturePartition.id)))
-			require.NoError(t, detail.SetTopology(fixturePartition.topology))
 			detail.SetNumChips(fixturePartition.numChips)
 			detail.SetDevicesPerNode(fixturePartition.devicesPerNode)
 			if fixturePartition.topologyFamily != "" || fixturePartition.partitionShape != nil {

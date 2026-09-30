@@ -100,17 +100,15 @@ func RenderNodeLocal(
 	var (
 		cyborgConfigMap  *corev1.ConfigMap
 		cyborgConfigHash string
-		extraResources   []client.Object
 	)
+	rendered.Resources = []client.Object{configMap}
 	if v2HybridRuntime {
 		cyborgConfigMap, cyborgConfigHash, err = workload.renderCyborgConfigMap(plan)
 		if err != nil {
 			return nil, err
 		}
 		// Preserve the legacy graph order: Cyborg config first, LPU config last.
-		extraResources = []client.Object{cyborgConfigMap, configMap}
-	} else {
-		extraResources = []client.Object{configMap}
+		rendered.Resources = []client.Object{cyborgConfigMap, configMap}
 	}
 
 	// Consume the independently rendered conductor without copying Agent startup or placement.
@@ -244,7 +242,6 @@ func RenderNodeLocal(
 		clique.Spec.PodSpec.SchedulerName = v1alpha1.LPXSchedulerName
 	}
 
-	rendered.Resources = extraResources
 	return rendered, nil
 }
 
@@ -276,7 +273,11 @@ func roleAnnotations(
 	role string,
 	workloadDigest string,
 ) map[string]string {
-	annotations := workloadAnnotations(base, workloadDigest)
+	annotations := base
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[WorkloadDigestAnnotation] = workloadDigest
 	// Remove controller-owned role metadata before stamping canonical values.
 	for _, key := range []string{
 		WorkloadModeAnnotation,
@@ -289,12 +290,4 @@ func roleAnnotations(
 	}
 	annotations[lpxv1alpha1.PodRoleAnnotation] = role
 	return annotations
-}
-
-func workloadAnnotations(base map[string]string, digest string) map[string]string {
-	if base == nil {
-		base = make(map[string]string)
-	}
-	base[WorkloadDigestAnnotation] = digest
-	return base
 }

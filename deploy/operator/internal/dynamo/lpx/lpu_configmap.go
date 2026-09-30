@@ -28,7 +28,10 @@ func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.
 		Immutable: ptr.To(true),
 		Data:      data,
 	}
-	configHash := LPUConfigMapHash(configMap)
+	// The graph's extra-resource annotation hashes each resource's spec hash.
+	// Apply the same second hash here so LPX can render that annotation directly.
+	contentHash, _ := controllercommon.GetSpecHash(configMap)
+	configHash := fmt.Sprintf("%x", sha256.Sum256([]byte(contentHash)))
 	configMap.Name = fmt.Sprintf("%s-%.16s", namePrefix, configHash)
 
 	// Reject oversized configuration before any caller can publish it.
@@ -45,17 +48,6 @@ func renderRuntimeConfigMap(namePrefix string, data map[string]string) (*corev1.
 		)
 	}
 	return configMap, configHash, nil
-}
-
-// LPUConfigMapHash returns the hash stamped on LPU runtime Pod templates.
-// configMap must be non-nil, with valid native metadata from rendering or Kubernetes.
-// Its concrete content is always serializable; the input is not mutated.
-func LPUConfigMapHash(configMap *corev1.ConfigMap) string {
-	contentHash, _ := controllercommon.GetSpecHash(configMap)
-
-	// The graph's extra-resource annotation hashes each resource's spec hash.
-	// Apply the same second hash here so LPX can render that annotation directly.
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(contentHash)))
 }
 
 func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
@@ -81,56 +73,32 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 }
 
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
-	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
-		"partition_node_offsets", "partition_paths"}
-
-	// Omit model-identity columns that the XT Single runtime never consumes.
-	includeModelColumns := projections[0].configuredBuild.Family != BuildFamilyXT ||
-		projections[0].pipeline != PipelineSingle
-	var columns [len(keys)]strings.Builder
-
-	// Accumulate each projection's runtime partitions into the surviving columns.
+	var nodes, indices, ids, models, offsets, paths []string
 	for _, projection := range projections {
 		// Render runtime partitions, including XT's collapsed prop-sync chains.
-		offset := int64(0)
+		offset := 0
 		for index, partition := range projection.configuredBuild.Partitions {
-			var nodes string
-			var endpointCount int64
-			if projection.configuredBuild.Family == BuildFamilyXT {
-				nodeCount := partition.effectiveNodeCount()
-				nodes, endpointCount = strconv.Itoa(nodeCount), int64(nodeCount)
-			} else {
-				endpointCount = partition.HXExtent[1] * partition.HXExtent[2] * partition.HXExtent[3]
-				nodes = strconv.FormatInt(endpointCount, 10)
-			}
-			// Project one row and populate optional model identity only when consumed.
-			row := [len(keys)]string{nodes, "",
-				strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10), "",
-				strconv.FormatInt(offset, 10), partition.PartPath}
-			if includeModelColumns {
-				row[1] = strconv.Itoa(index)
-				row[3] = projection.model
-			}
-
-			// Write only columns that survive into the ConfigMap.
-			for column := range row {
-				if !includeModelColumns && (column == 1 || column == 3) {
-					continue
-				}
-				columns[column].WriteString(row[column])
-				columns[column].WriteByte('\n')
-			}
-			offset += endpointCount
+			nodeCount := partition.effectiveNodeCount()
+			nodes = append(nodes, strconv.Itoa(nodeCount))
+			indices = append(indices, strconv.Itoa(index))
+			ids = append(ids, strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10))
+			models = append(models, projection.model)
+			offsets = append(offsets, strconv.Itoa(offset))
+			paths = append(paths, partition.PartPath)
+			offset += nodeCount
 		}
 	}
-	data := make(map[string]string, len(keys))
+	data := map[string]string{
+		"nodes_per_partition":    strings.Join(nodes, "\n"),
+		"partition_ids":          strings.Join(ids, "\n"),
+		"partition_node_offsets": strings.Join(offsets, "\n"),
+		"partition_paths":        strings.Join(paths, "\n"),
+	}
 
-	// Materialize only the runtime-visible columns.
-	for column := range keys {
-		if !includeModelColumns && (column == 1 || column == 3) {
-			continue
-		}
-		data[keys[column]] = strings.TrimSuffix(columns[column].String(), "\n")
+	// Omit model-identity columns that the XT Single runtime never consumes.
+	if projections[0].configuredBuild.Family != BuildFamilyXT || projections[0].pipeline != PipelineSingle {
+		data["partition_indices"] = strings.Join(indices, "\n")
+		data["partition_models"] = strings.Join(models, "\n")
 	}
 	return data
 }

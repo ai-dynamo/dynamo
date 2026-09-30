@@ -8,7 +8,6 @@ package lpx
 import (
 	"testing"
 
-	lpxv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/scheduler/v1alpha1"
 	"github.com/stretchr/testify/require"
 )
 
@@ -26,7 +25,6 @@ func TestWorkloadDigestIsIndependentOfBuildLocator(t *testing.T) {
 	secondProjection := projectTestBuild(t, second, PipelineSingle)
 
 	t.Log("Publish the canonical compiler snapshot identity independently of build locator")
-	require.Equal(t, "scheduling.lpu.nvidia.com/compiler-snapshot-digest", lpxv1alpha1.CompilerSnapshotDigestAnnotation)
 	require.Equal(t, first.contentID, firstProjection.CompilerSnapshotDigest())
 	require.Equal(t, second.contentID, secondProjection.CompilerSnapshotDigest())
 

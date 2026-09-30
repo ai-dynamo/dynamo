@@ -17,12 +17,11 @@ import (
 
 func TestProjectModelV2SubHostPartitionUsesWholeHostShape(t *testing.T) {
 	t.Log("Create an immutable V2 compiler build with one two-chip physical partition")
-	topology := "URSA_V2__Q8__2C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture := newV2CompilerFixture()
 	fixture.numLPUNodes = 1
 	fixture.selectedPropSyncChains = nil
 	fixture.partitions = []testV3CapnpPartition{{
-		id: 1, deviceType: manifestcapnp.DeviceType_lpu, topology: topology, numChips: 2, devicesPerNode: 8,
+		id: 1, deviceType: manifestcapnp.DeviceType_lpu, numChips: 2, devicesPerNode: 8,
 	}}
 	buildDir := writeCompilerFixture(t, fixture)
 	snapshot := acquireTestSnapshot(t, buildDir)
@@ -84,7 +83,6 @@ func TestProjectModelV2RejectsUnsupportedDeviceDensity(t *testing.T) {
 			fixture := newV2CompilerFixture()
 			fixture.numLPUNodes = test.numNodes
 			for index := range fixture.partitions {
-				fixture.partitions[index].topology = registryTestTopology
 				fixture.partitions[index].numChips = 8
 				fixture.partitions[index].devicesPerNode = test.devicesPerNode
 			}
@@ -221,10 +219,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Prepare a selected adjacent chain between unselected physical partitions")
-	fixture := newV2CompilerFixture()
-	fixture.partitions[0].topology = "runtime-owned-topology-a"
-	fixture.partitions[1].topology = "runtime-owned-topology-b"
-	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
+	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
 	build := normalized.build
 	prefix, suffix := build.Partitions[0], build.Partitions[1]
 	prefix.SourcePartitionID, prefix.PartPath = 3, "part-3"
@@ -232,7 +227,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	build.Partitions = append([]BuildPartition{prefix}, append(build.Partitions, suffix)...)
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
-	t.Log("Project the manifest-selected chain without interpreting runtime topology names")
+	t.Log("Project the manifest-selected chain")
 	projection := projectTestBuild(t, normalized, PipelineSingle)
 
 	t.Log("Preserve only the source-selected connector and partition identities")
@@ -277,7 +272,6 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, "0\n1", data["partition_indices"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
-	require.NotContains(t, data, "topologies")
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, 17, projection.agentReplicas)
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)

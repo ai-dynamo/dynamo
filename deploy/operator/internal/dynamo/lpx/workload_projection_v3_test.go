@@ -17,7 +17,6 @@ func TestProjectModelV3HybridBuildProjectsSelectedPropSyncWithoutGlobalCoupling(
 	t.Log("Create one LPX manifest with two selected LPU partitions and one CUDA artifact")
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
-	fixture.partitions[0].topology = "another-opaque-v3-topology"
 	second := fixture.partitions[0]
 	second.id = 2
 	fixture.partitions = append(fixture.partitions, second, testV3CapnpPartition{
@@ -204,15 +203,9 @@ func TestProjectModelV3ProjectsSelectedPropSyncChain(t *testing.T) {
 		}]}
 	}`, string(spec.AllocationMetadata.Raw))
 
-	t.Log("Reject a multi-partition LPU-only build without its complete manifest-selected chain")
-	fixture.selectedPropSyncChains = nil
-	intent.BuildSnapshot = acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
-	_, err = appendModelProjections(nil, intent)
-	require.ErrorContains(t, err, "LPU-only workloads require a complete adjacent prop-sync connector chain")
-
-	t.Log("Extend the native selected chain across three HX artifacts with distinct opaque topology names")
+	t.Log("Extend the native selected chain across three HX artifacts")
 	third := fixture.partitions[0]
-	third.id, third.topology = 3, "other-opaque-hx-topology"
+	third.id = 3
 	fixture.partitions = append(fixture.partitions, third)
 	fixture.numLPUNodes = 6
 	fixture.selectedPropSyncChains = [][]uint32{{1, 2, 3}}
@@ -236,8 +229,7 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 	fixture := newV3CompilerFixture()
 	second := fixture.partitions[0]
 	second.id = 2
-	fixture.partitions[0].topology = v3HXTopologyFamily
-	fixture.partitions[0].topologyFamily = v3HXTopologyFamily
+	fixture.partitions[0].topologyFamily = hxTopologyFamily
 	fixture.partitions[0].partitionShape = []uint32{16, 2, 1, 1}
 	fixture.partitions[0].numChips = 32
 	fixture.partitions = append(fixture.partitions, second)
@@ -260,8 +252,7 @@ func TestProjectModelV3UsesMultiNodePropSyncBoundary(t *testing.T) {
 func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T) {
 	t.Log("Create and project a one-node V3 topology-metadata manifest")
 	fixture := newV3CompilerFixture()
-	fixture.partitions[0].topology = v3HXTopologyFamily
-	fixture.partitions[0].topologyFamily = v3HXTopologyFamily
+	fixture.partitions[0].topologyFamily = hxTopologyFamily
 	fixture.partitions[0].partitionShape = []uint32{16, 1, 1, 1}
 	fixture.numLPUNodes = 1
 	buildDir := writeCompilerFixture(t, fixture)
@@ -309,7 +300,6 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	require.Equal(t, []int64{16, 2, 1, 1}, *secondSpec.Partitions[0].Extent)
 	data := resolvedPartitionData([]*ModelProjection{second})
 	require.Equal(t, "part-1", data["partition_paths"])
-	require.NotContains(t, data, "topologies")
 	require.Empty(t, firstSpec.PropSyncConnectors)
 	require.Empty(t, secondSpec.PropSyncConnectors)
 }

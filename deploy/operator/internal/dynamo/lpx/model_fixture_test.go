@@ -19,24 +19,13 @@ import (
 	"google.golang.org/grpc"
 )
 
-const registryTestTopology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
-
 const gbuildManifestJSONFile = "manifest.json"
-
-func normalizeRegistryFixtureBuild(ctx context.Context, registry ModelRegistry, id string) (*Build, error) {
-	snapshot, err := registry.AcquireBuildSnapshot(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return snapshot.build, nil
-}
 
 type fakeModelServiceClient struct {
 	request       *modelpb.ModelDownloadRequest
 	stream        grpc.ServerStreamingClient[modelpb.ModelStatusUpdate]
 	err           error
 	filesRequests []*modelpb.ModelFilesRequest
-	filesContext  context.Context
 	fileStreams   []*fakeModelFileStream
 	filesErr      error
 	listRequests  []*modelpb.ModelFilesRequest
@@ -63,7 +52,6 @@ func (c *fakeModelServiceClient) StreamModelFiles(
 ) (grpc.ServerStreamingClient[modelpb.FileChunk], error) {
 	c.filesRequests = append(c.filesRequests, request)
 	c.metadataContexts = append(c.metadataContexts, ctx)
-	c.filesContext = ctx
 	if c.filesErr != nil {
 		return nil, c.filesErr
 	}
@@ -190,7 +178,6 @@ func setManifestV2LPUArtifact(t *testing.T, partition manifestcapnpv2.PartitionI
 	detail, err := partition.Detail().NewLpu()
 	require.NoError(t, err)
 	require.NoError(t, detail.SetPath("part-0"))
-	require.NoError(t, detail.SetTopology(registryTestTopology))
 	detail.SetNumChips(8)
 	detail.SetDevicesPerNode(8)
 }

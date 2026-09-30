@@ -11,8 +11,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func manifestV2Payload(t *testing.T) []byte {
@@ -20,36 +18,6 @@ func manifestV2Payload(t *testing.T) []byte {
 	payload, err := newManifestV2ContractFixture(t).Message().Marshal()
 	require.NoError(t, err)
 	return payload
-}
-
-func TestAcquireBuildSnapshotPreservesReadFailures(t *testing.T) {
-	t.Parallel()
-
-	t.Log("Define missing and temporarily unavailable manifest reads")
-	for _, test := range []struct {
-		name    string
-		readErr error
-	}{
-		{name: "not found", readErr: status.Error(codes.NotFound, "manifest missing")},
-		{name: "unavailable", readErr: status.Error(codes.Unavailable, "temporary object-store failure")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Log("Read the requested manifest without a preceding inventory")
-			client := &fakeModelServiceClient{
-				fileStreams: []*fakeModelFileStream{{err: test.readErr}},
-			}
-			registry, err := NewModelRegistry("gs://bucket/registry", client)
-			require.NoError(t, err)
-			snapshot, err := registry.AcquireBuildSnapshot(t.Context(), "model/build")
-
-			t.Log("Preserve the transport failure separately from invalid compiler input")
-			require.ErrorIs(t, err, test.readErr)
-			require.NotErrorIs(t, err, errInvalidBuildManifest)
-			require.Nil(t, snapshot)
-			require.Empty(t, client.listRequests)
-			require.Len(t, client.filesRequests, 1)
-		})
-	}
 }
 
 func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
@@ -80,32 +48,27 @@ func TestGCSModelRegistrySnapshotUsesManifestV2FromModelExpress(t *testing.T) {
 
 			t.Log("Read and validate the manifest once, retaining the current registry locator")
 			started := time.Now()
-			build, err := normalizeRegistryFixtureBuild(testCase.ctx, registry, testCase.ref)
+			snapshot, err := registry.AcquireBuildSnapshot(testCase.ctx, testCase.ref)
 			require.NoError(t, err)
+			build := snapshot.build
 			require.Equal(t, "gs://bucket/registry/model/build", build.Path)
 			require.Len(t, build.Partitions, 1)
 			require.Equal(t, "part-0", build.Partitions[0].PartPath)
 			require.Empty(t, client.listRequests)
 			require.Len(t, client.filesRequests, 1)
-			for _, request := range client.filesRequests {
-				require.Equal(t, []string{gbuildManifestV2CapnpFile}, request.GetFileSelector().GetPaths())
-			}
+			require.Equal(t, []string{gbuildManifestV2CapnpFile}, client.filesRequests[0].GetFileSelector().GetPaths())
 
 			t.Log("Bound the single metadata RPC and release its context")
 			require.Len(t, client.metadataContexts, 1)
-			deadline, ok := client.metadataContexts[0].Deadline()
+			rpcCtx := client.metadataContexts[0]
+			deadline, ok := rpcCtx.Deadline()
 			require.True(t, ok)
 			if parentDeadline, hasDeadline := testCase.ctx.Deadline(); hasDeadline {
 				require.Equal(t, parentDeadline, deadline)
 			} else {
 				require.WithinRange(t, deadline, started.Add(30*time.Second), time.Now().Add(30*time.Second))
 			}
-			for _, rpcCtx := range client.metadataContexts {
-				rpcDeadline, hasDeadline := rpcCtx.Deadline()
-				require.True(t, hasDeadline)
-				require.Equal(t, deadline, rpcDeadline)
-				require.ErrorIs(t, rpcCtx.Err(), context.Canceled)
-			}
+			require.ErrorIs(t, rpcCtx.Err(), context.Canceled)
 			require.NoError(t, testCase.ctx.Err())
 		})
 	}

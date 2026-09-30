@@ -81,7 +81,6 @@ func TestRenderHybridPreservesRuntimeEnvironment(t *testing.T) {
 	fixture := newV3CompilerFixture()
 	fixture.compilationMode = manifestcapnp.CompilationMode_lpx
 	fixture.numLPUNodes = 1
-	fixture.partitions[0].topology = "URSA_V2_1__Q8__8C__G_106__KP_FEC__GHZ_1_0__NO_FPGA"
 	fixture.partitions[0].numChips = 8
 	fixture.partitions[0].devicesPerNode = 8
 	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))

@@ -16,18 +16,16 @@ import (
 
 const v2ProjectionVersion = "v2-xt-node-local/v1"
 
-//nolint:gocyclo // V2 projection validates one complete transformation.
-func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInput) ([]*ModelProjection, error) {
-	configured := *intent.BuildSnapshot.build
-	usesResolvedRuntime := intent.Pipeline == PipelineSingle ||
-		intent.Pipeline == PipelineSpecDecode
-	ioFPGACount, ioFanoutFactor := configured.IOFPGACount, configured.IOFanoutFactor
-	connectorBuild := intent.BuildSnapshot.build
+// projectV2Component derives the XT component shared by every model and writes
+// its model-independent digest fields.
+func projectV2Component(intent ModelProjectionInput, fields digestTranscript) (ModelProjection, error) {
+	source := intent.BuildSnapshot.build
+	configured := *source
 
 	// Apply the selected chain and CPU embedding placement before deriving scheduler requests.
-	if usesResolvedRuntime {
+	if intent.Pipeline != PipelineHybrid {
 		if err := configured.consumeRuntimeSelectedPropSyncChain(); err != nil {
-			return nil, fmt.Errorf("resolving configured V2 build: %w", err)
+			return ModelProjection{}, fmt.Errorf("resolving configured V2 build: %w", err)
 		}
 
 		// Omit host-only embeddings by retaining a view of the immutable source partitions.
@@ -37,42 +35,34 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 		}
 	}
 
-	allocationMetadata := json.RawMessage(`{}`)
-
 	// Bind the V2 workload and runtime contract into projection identity before partition validation.
-	transcripts := newModelProjectionTranscripts(intent, v2ProjectionVersion)
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("input-embeddings-on-gpu", []byte{1})
-		bindHybridRuntimeIO(transcript, intent.Pipeline, ioFPGACount, ioFanoutFactor)
-	}
+	fields.field("input-embeddings-on-gpu", []byte{1})
+	bindHybridRuntimeIO(fields, intent.Pipeline, configured.IOFPGACount, configured.IOFanoutFactor)
 
 	// Bind validated physical partitions into projection identity while counting runtime endpoints.
 	partitions := configured.Partitions
 	agentReplicas := 0
 	for index, partition := range partitions {
 		compilerID := uint32(partition.SourcePartitionID)
-		shape, shapeErr := xtShape(partition)
-		if shapeErr != nil {
-			return nil, fmt.Errorf("V2 compiler partition %d: %w", compilerID, shapeErr)
+		shape, err := xtShape(partition)
+		if err != nil {
+			return ModelProjection{}, fmt.Errorf("V2 compiler partition %d: %w", compilerID, err)
 		}
 		endpoints := partition.effectiveNodeCount()
 		agentReplicas += endpoints
-		for modelIndex := range transcripts {
-			transcripts[modelIndex].uint32Field("compiler-partition-id", compilerID)
-			transcripts[modelIndex].uint32Field("model-partition-id", uint32(index))
-			transcripts[modelIndex].intField("endpoint-count", int64(endpoints))
-			transcripts[modelIndex].field("xt-shape", []byte(shape))
-		}
+		fields.uint32Field("compiler-partition-id", compilerID)
+		fields.uint32Field("model-partition-id", uint32(index))
+		fields.intField("endpoint-count", int64(endpoints))
+		fields.field("xt-shape", []byte(shape))
 	}
-	connectors, err := v2Connectors(connectorBuild, partitions)
+	connectors, err := v2Connectors(source, partitions)
 	if err != nil {
-		return nil, err
+		return ModelProjection{}, err
 	}
 	// Preserve physical scheduler partitions while collapsing selected chains only in LPU runtime state.
 	if intent.Pipeline == PipelineHybrid && len(configured.SelectedPropSyncChains) != 0 {
-		runtimeChainByRoot := make(map[int][]int, len(connectorBuild.SelectedPropSyncChains))
-		for _, chain := range connectorBuild.SelectedPropSyncChains {
+		runtimeChainByRoot := make(map[int][]int, len(configured.SelectedPropSyncChains))
+		for _, chain := range configured.SelectedPropSyncChains {
 			runtimeChainByRoot[chain[0]] = chain
 		}
 		collapsed := make([]BuildPartition, 0, len(partitions))
@@ -85,41 +75,27 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 				continue
 			}
 			chainEnd := partitionIndex + len(chain)
-			chainPartition := collapseSelectedPropSyncChain(partitions[partitionIndex:chainEnd])
-			collapsed = append(collapsed, chainPartition)
+			collapsed = append(collapsed, collapseSelectedPropSyncChain(partitions[partitionIndex:chainEnd]))
 			partitionIndex = chainEnd
 		}
 		configured.Partitions = collapsed
 		configured.SelectedPropSyncChains = nil
 	}
 
-	// Encode shared connectors once without changing any model's digest field order.
 	for _, connector := range connectors {
 		encoded, _ := json.Marshal(connector)
-		for index := range transcripts {
-			transcripts[index].field("connector", encoded)
-		}
+		fields.field("connector", encoded)
 	}
+	allocationMetadata := json.RawMessage(`{}`)
+	fields.field("allocation-metadata", allocationMetadata)
 
-	// Publish distinct logical identities backed by the component's immutable configuration.
-	for index := range transcripts {
-		transcript := &transcripts[index]
-		transcript.field("allocation-metadata", allocationMetadata)
-
-		dst = append(dst, &ModelProjection{
-			digest:                 transcript.sum(),
-			compilerSnapshotDigest: intent.BuildSnapshot.contentID,
-			runtimeBuildRef:        intent.RuntimeBuildRef,
-			model:                  intent.Models[index],
-			pipeline:               intent.Pipeline,
-			configuredBuild:        configured,
-			allocationMetadata:     allocationMetadata,
-			partitions:             partitions,
-			connectors:             connectors,
-			agentReplicas:          agentReplicas,
-		})
-	}
-	return dst, nil
+	return ModelProjection{
+		configuredBuild:    configured,
+		allocationMetadata: allocationMetadata,
+		partitions:         partitions,
+		connectors:         connectors,
+		agentReplicas:      agentReplicas,
+	}, nil
 }
 
 func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error) {

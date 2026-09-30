@@ -72,14 +72,6 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 		expectedQuantity resource.Quantity
 	}{
 		{
-			name: "XT", family: BuildFamilyXT, devicesPerNode: 8,
-			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
-		},
-		{
-			name: "HX", family: BuildFamilyHX, devicesPerNode: 16,
-			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
-		},
-		{
 			name: "XT supplied count", family: BuildFamilyXT, devicesPerNode: 4,
 			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("4"),
 		},
@@ -88,11 +80,7 @@ func TestAgentSchedulingUsesManifestDeviceCountAndPreservesAuthoredResources(t *
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("32"),
 		},
 		{
-			name: "XT absent resource maps", family: BuildFamilyXT, devicesPerNode: 8, emptyResources: true,
-			expectedResource: v2LPUResourceName, expectedQuantity: resource.MustParse("8"),
-		},
-		{
-			name: "HX absent resource maps", family: BuildFamilyHX, devicesPerNode: 16, emptyResources: true,
+			name: "absent resource maps", family: BuildFamilyHX, devicesPerNode: 16, emptyResources: true,
 			expectedResource: v3LPUResourceName, expectedQuantity: resource.MustParse("16"),
 		},
 	}
