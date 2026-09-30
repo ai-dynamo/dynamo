@@ -179,12 +179,13 @@ jobs:
   sidecar-build:
     name: dynamo-sidecar
     needs: [config]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true' || needs.config.outputs.run_sglang == 'true'
+    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_vllm == 'true' || needs.config.outputs.run_sglang == 'true' || needs.config.outputs.run_trtllm == 'true'
     permissions:
       actions: read
       contents: read
     uses: $/.github/workflows/shared-build-sidecar.yml
     with:
+      build_timeout_minutes: 90
       builder_name: b-${{ github.run_id }}-${{ github.run_attempt }}
       diff_event_context: push
       diff_current_branch: ${{ github.ref_name }}
@@ -517,6 +518,26 @@ jobs:
       gpu_test_markers: ${{ format('(pre_merge or post_merge) and sidecar and sglang and gpu_{0}', matrix.gpu_count) }}
       gpu_test_timeout_minutes: 45
       sidecar_backend: sglang
+      sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
+    secrets: inherit
+
+  sidecar-trtllm-test:
+    name: sidecar-runtime
+    needs: [trtllm-build, sidecar-build]
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      dd_env: post-merge
+      test_suite_name: trtllm
+      framework: trtllm
+      test_type: Sidecar E2E Test
+      amd_runner: prod-tester-amd-gpu-v2
+      target_tag_plain: ${{ needs.trtllm-build.outputs.target_tag_plain }}
+      cuda_version: '["13.1"]'
+      platform: '["amd64"]'
+      run_sanity_check: false
+      gpu_test_markers: '(pre_merge or post_merge) and sidecar and trtllm and gpu_1'
+      gpu_test_timeout_minutes: 45
+      sidecar_backend: trtllm
       sidecar_binary_artifact: ${{ needs.sidecar-build.outputs.binary_artifact }}
     secrets: inherit
 
@@ -1711,7 +1732,7 @@ jobs:
 
   notify-slack:
     if: always() && github.event_name != 'workflow_dispatch'
-    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test]
+    needs: [deploy-status-check, sidecar-build, sidecar-vllm-test, sidecar-sglang-test, sidecar-trtllm-test]
     permissions:
       contents: read
       actions: read   # grant the reusable notifier read access to list this run's jobs
