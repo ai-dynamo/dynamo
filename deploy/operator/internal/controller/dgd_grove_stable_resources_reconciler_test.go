@@ -229,23 +229,31 @@ func TestGroveStableResourcesReconcilerElasticEPLeaderServiceLifecycle(t *testin
 
 func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *testing.T) {
 	for _, componentType := range []v1beta1.ComponentType{v1beta1.ComponentTypeDecode, v1beta1.ComponentTypePrefill} {
-		for _, legacy := range []bool{false, true} {
-			mode := "native"
-			if legacy {
-				mode = "legacy"
-			}
-			t.Run(string(componentType)+"/"+mode, func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			legacy bool
+			labels map[string]string
+		}{
+			{name: "native"},
+			{name: "legacy", legacy: true},
+			{name: "native-custom", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
+			{name: "legacy-custom", legacy: true, labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: "custom"}},
+			{name: "native-empty", labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: ""}},
+			{name: "legacy-empty", legacy: true, labels: map[string]string{commonconsts.KubeLabelDynamoSubComponentType: ""}},
+		} {
+			t.Run(string(componentType)+"/"+tc.name, func(t *testing.T) {
 				t.Log("Build an elastic-EP leader and its existing workload labels")
 				component := newElasticEPComponent(elasticEPArgs)
 				component.ComponentType = componentType
 				component.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0"
 				component.PodTemplate.Spec.Containers[0].Command = []string{"python3", "-m", "dynamo.vllm"}
 				component.PodTemplate.Spec.Containers[0].Args = []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"}
+				component.PodTemplate.Labels = tc.labels
 				dgd := newElasticEPTestDGD(component)
 				reconciler, kubeClient := newElasticEPTestStableResourcesReconciler(t, dgd)
 				original := dgd.DeepCopy()
 				var previous *grovev1alpha1.PodCliqueSet
-				if legacy {
+				if tc.legacy {
 					previous = &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
 						Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 							Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{Labels: map[string]string{
@@ -270,7 +278,7 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 				t.Log("Verify both Services select the rendered leader without changing the source DGD")
 				podLabels := pcs.Spec.Template.Cliques[0].Labels
 				wantType := string(componentType)
-				if legacy {
+				if tc.legacy {
 					wantType = commonconsts.ComponentTypeWorker
 				}
 				require.Equal(t, wantType, podLabels[commonconsts.KubeLabelDynamoComponentType])
@@ -280,8 +288,13 @@ func TestGroveStableResourcesReconcilerElasticEPServicesSelectRenderedPods(t *te
 					require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKey{Namespace: dgd.Namespace, Name: name}, service))
 					require.True(t, labels.SelectorFromSet(service.Spec.Selector).Matches(labels.Set(podLabels)),
 						"Service %s selector %v does not match rendered pod labels %v", name, service.Spec.Selector, podLabels)
-					for _, key := range []string{commonconsts.KubeLabelDynamoSubComponentType, commonconsts.KubeLabelDynamoWorkerHash} {
-						require.Equal(t, podLabels[key], service.Labels[key], "Service %s label %s", name, key)
+					require.Equal(t, podLabels[commonconsts.KubeLabelDynamoWorkerHash], service.Labels[commonconsts.KubeLabelDynamoWorkerHash])
+					if tc.labels != nil {
+						require.Subset(t, service.Labels, tc.labels)
+					} else if tc.legacy {
+						require.Equal(t, string(componentType), service.Labels[commonconsts.KubeLabelDynamoSubComponentType])
+					} else {
+						require.NotContains(t, service.Labels, commonconsts.KubeLabelDynamoSubComponentType)
 					}
 				}
 				require.Equal(t, original, dgd)

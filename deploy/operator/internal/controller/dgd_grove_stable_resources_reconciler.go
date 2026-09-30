@@ -144,16 +144,17 @@ func groveComponentServiceParams(
 	componentType := string(component.ComponentType)
 	labels := dynamo.GetDGDComponentResourceLabels(dgd, componentName, component)
 	if clique := podCliqueSetCliqueForComponent(podCliqueSet, componentName); clique != nil {
-		if renderedType := clique.Labels[commonconsts.KubeLabelDynamoComponentType]; renderedType != "" {
+		// Preserve only the subcomponent label added by legacy worker conversion.
+		if renderedType := clique.Labels[commonconsts.KubeLabelDynamoComponentType]; renderedType != "" && renderedType != componentType {
+			if _, supplied := dynamo.GetPodTemplateLabels(component)[commonconsts.KubeLabelDynamoSubComponentType]; !supplied {
+				labels[commonconsts.KubeLabelDynamoSubComponentType] = componentType
+			}
 			componentType = renderedType
 		}
-		for _, key := range []string{
-			commonconsts.KubeLabelDynamoSubComponentType,
-			commonconsts.KubeLabelDynamoWorkerHash,
-		} {
-			if value := clique.Labels[key]; value != "" {
-				labels[key] = value
-			}
+
+		// Worker hashes follow the rendered workload in either mode.
+		if value := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]; value != "" {
+			labels[commonconsts.KubeLabelDynamoWorkerHash] = value
 		}
 	}
 	return dynamo.ComponentServiceParams{
