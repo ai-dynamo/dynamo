@@ -51,7 +51,7 @@ func TestProjectModelV2ValidatesPhysicalPartitionsInOrder(t *testing.T) {
 	build := normalized.build
 	build.CompilationMode = BuildCompilationModeHybrid
 	build.SelectedPropSyncChains = [][]int{{100, 101}}
-	build.Partitions[0].Topology = Topology{ChipCount: 9}
+	build.Partitions[0].NumChips = 9
 	build.Partitions[0].SourcePartitionID = 1
 
 	t.Log("Project the invalid physical partition")
@@ -115,7 +115,7 @@ func TestXTShape(t *testing.T) {
 		roundedChipCount := max(chipCount, 8)
 		wantShape, registered := registeredShapes[roundedChipCount]
 		registered = registered && chipCount > 0
-		shape, err := xtShape(BuildPartition{Topology: Topology{ChipCount: chipCount}, DevicesPerNode: 8})
+		shape, err := xtShape(BuildPartition{NumChips: chipCount, DevicesPerNode: 8})
 		if !registered {
 			require.Error(t, err, chipCount)
 			continue
@@ -126,7 +126,7 @@ func TestXTShape(t *testing.T) {
 
 	t.Log("Reject integer extremes without indexing outside the registry")
 	for _, chipCount := range []int{math.MinInt, math.MaxInt} {
-		_, err := xtShape(BuildPartition{Topology: Topology{ChipCount: chipCount}, DevicesPerNode: 8})
+		_, err := xtShape(BuildPartition{NumChips: chipCount, DevicesPerNode: 8})
 		require.Error(t, err, chipCount)
 	}
 }
@@ -221,7 +221,10 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	t.Parallel()
 
 	t.Log("Prepare a selected adjacent chain between unselected physical partitions")
-	normalized := acquireTestSnapshot(t, writeV2CompilerFixture(t))
+	fixture := newV2CompilerFixture()
+	fixture.partitions[0].topology = "runtime-owned-topology-a"
+	fixture.partitions[1].topology = "runtime-owned-topology-b"
+	normalized := acquireTestSnapshot(t, writeCompilerFixture(t, fixture))
 	build := normalized.build
 	prefix, suffix := build.Partitions[0], build.Partitions[1]
 	prefix.SourcePartitionID, prefix.PartPath = 3, "part-3"
@@ -229,7 +232,7 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	build.Partitions = append([]BuildPartition{prefix}, append(build.Partitions, suffix)...)
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
-	t.Log("Project the compiler-selected chain")
+	t.Log("Project the manifest-selected chain without interpreting runtime topology names")
 	projection := projectTestBuild(t, normalized, PipelineSingle)
 
 	t.Log("Preserve only the source-selected connector and partition identities")
@@ -240,15 +243,6 @@ func TestProjectModelV2UsesOnlyTheSourceSelectedAdjacentChain(t *testing.T) {
 	require.Equal(t, int64(8), spec.Partitions[1].CompilerPartitionID)
 	require.Equal(t, spec.Partitions[0].ID, spec.PropSyncConnectors[0].FromPartitionID)
 	require.Equal(t, spec.Partitions[1].ID, spec.PropSyncConnectors[0].ToPartitionID)
-
-	t.Log("Reject a selected XT edge between valid but incompatible physical topologies")
-	topology, err := parse("URSA_V2__Q8__16C__G_97_25__KP_FEC__GHZ_1_0__NO_FPGA")
-	require.NoError(t, err)
-	build.Partitions[2].Topology = topology
-	_, err = appendModelProjections(nil, ModelProjectionInput{
-		Pipeline: PipelineSingle, Models: []string{"default"}, BuildSnapshot: normalized,
-	})
-	require.ErrorContains(t, err, "has incompatible topology at partition ID 8")
 }
 
 func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T) {
@@ -258,12 +252,8 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	build.CompilationMode = BuildCompilationModeHybrid
 
 	t.Log("Use individually schedulable physical shapes whose collapsed runtime total is not a scheduler shape")
-	firstTopology, err := build.Partitions[0].Topology.withChipCount(8)
-	require.NoError(t, err)
-	secondTopology, err := build.Partitions[1].Topology.withChipCount(64)
-	require.NoError(t, err)
-	build.Partitions[0].Topology = firstTopology
-	build.Partitions[1].Topology = secondTopology
+	build.Partitions[0].NumChips = 8
+	build.Partitions[1].NumChips = 64
 	third := build.Partitions[1]
 	third.SourcePartitionID = 11
 	third.PartPath = "part-11"
@@ -287,7 +277,7 @@ func TestProjectModelV2SeparatesPhysicalPartitionsFromRuntimeChain(t *testing.T)
 	require.Equal(t, "0\n1", data["partition_indices"])
 	require.Equal(t, "0\n9", data["partition_node_offsets"])
 	require.Equal(t, "part-7\npart-11", data["partition_paths"])
-	require.Equal(t, projection.configuredBuild.Partitions[0].Topology.Raw+"\n"+projection.configuredBuild.Partitions[1].Topology.Raw, data["topologies"])
+	require.NotContains(t, data, "topologies")
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, 17, projection.agentReplicas)
 	require.Equal(t, [][]int{{7, 8}}, build.SelectedPropSyncChains)
@@ -314,14 +304,12 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	build.CompilationMode = BuildCompilationModeHybrid
 
 	t.Log("Model a selected chain starting at Cyborg's standalone embedding partition")
-	topology, err := build.Partitions[0].Topology.withChipCount(8)
-	require.NoError(t, err)
 	partitions := make([]BuildPartition, 3)
 	for sourceID := range partitions {
 		partitions[sourceID] = build.Partitions[0]
 		partitions[sourceID].SourcePartitionID = sourceID
 		partitions[sourceID].PartPath = fmt.Sprintf("part-%d", sourceID)
-		partitions[sourceID].Topology = topology
+		partitions[sourceID].NumChips = 8
 	}
 	build.Partitions = partitions
 	build.SelectedPropSyncChains = [][]int{{0, 1, 2}}
@@ -343,7 +331,7 @@ func TestProjectModelV2CollapsesSelectedChainIncludingPartitionZero(t *testing.T
 	require.Equal(t, "0", data["partition_ids"])
 	require.Equal(t, "3", data["nodes_per_partition"])
 	require.Equal(t, "part-0", data["partition_paths"])
-	require.Equal(t, 24, projection.configuredBuild.Partitions[0].Topology.ChipCount)
+	require.Equal(t, 24, projection.configuredBuild.Partitions[0].NumChips)
 	require.Empty(t, projection.configuredBuild.SelectedPropSyncChains)
 	require.Equal(t, [][]int{{0, 1, 2}}, build.SelectedPropSyncChains)
 }
@@ -357,9 +345,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	build.CompilationMode = BuildCompilationModeHybrid
 
 	for index := range build.Partitions {
-		topology, err := build.Partitions[index].Topology.withChipCount(2)
-		require.NoError(t, err)
-		build.Partitions[index].Topology = topology
+		build.Partitions[index].NumChips = 2
 	}
 	build.SelectedPropSyncChains = [][]int{{7, 8}}
 
@@ -375,7 +361,7 @@ func TestProjectModelV2PreservesAgentReplicasWhenCollapsingSubHostPartitions(t *
 	require.Equal(t, "2", data["nodes_per_partition"])
 	require.Equal(t, "0", data["partition_node_offsets"])
 	require.Equal(t, 2, projection.configuredBuild.Partitions[0].effectiveNodeCount())
-	require.Equal(t, 4, projection.configuredBuild.Partitions[0].Topology.ChipCount)
+	require.Equal(t, 4, projection.configuredBuild.Partitions[0].NumChips)
 	require.Equal(t, 8, projection.configuredBuild.Partitions[0].DevicesPerNode)
 }
 

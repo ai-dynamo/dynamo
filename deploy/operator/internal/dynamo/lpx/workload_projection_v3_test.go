@@ -309,7 +309,7 @@ func TestProjectModelV3UsesTopologyMetadataAndTracksManifestDigest(t *testing.T)
 	require.Equal(t, []int64{16, 2, 1, 1}, *secondSpec.Partitions[0].Extent)
 	data := resolvedPartitionData([]*ModelProjection{second})
 	require.Equal(t, "part-1", data["partition_paths"])
-	require.Equal(t, v3HXTopologyFamily, data["topologies"])
+	require.NotContains(t, data, "topologies")
 	require.Empty(t, firstSpec.PropSyncConnectors)
 	require.Empty(t, secondSpec.PropSyncConnectors)
 }

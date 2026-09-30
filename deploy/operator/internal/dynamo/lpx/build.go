@@ -63,8 +63,8 @@ type BuildPartition struct {
 	SourcePartitionID int
 	// PartPath is the nonempty relative gas-dir fragment under the build payload.
 	PartPath string
-	// Topology is the scheduler-facing node shape for this partition.
-	Topology Topology
+	// NumChips is the positive LPU chip count declared by the manifest.
+	NumChips int
 	// DevicesPerNode is the positive number of LPU devices per node declared by the manifest.
 	DevicesPerNode int
 	// HXExtent is the scheduler-facing four-dimensional HX allocation.
@@ -85,7 +85,7 @@ func (p BuildPartition) effectiveNodeCount() int {
 	if p.runtimeNodeCount > 0 {
 		return p.runtimeNodeCount
 	}
-	return max(1, p.Topology.ChipCount/p.DevicesPerNode)
+	return max(1, p.NumChips/p.DevicesPerNode)
 }
 
 // buildRuntimePath resolves a snapshot reference to its runtime filesystem path.

@@ -85,13 +85,7 @@ func appendV2ModelProjections(dst []*ModelProjection, intent ModelProjectionInpu
 				continue
 			}
 			chainEnd := partitionIndex + len(chain)
-			chainPartition, collapseErr := collapseSelectedPropSyncChain(
-				chain,
-				partitions[partitionIndex:chainEnd],
-			)
-			if collapseErr != nil {
-				return nil, fmt.Errorf("configuring V2 LPU runtime partitions: %w", collapseErr)
-			}
+			chainPartition := collapseSelectedPropSyncChain(partitions[partitionIndex:chainEnd])
 			collapsed = append(collapsed, chainPartition)
 			partitionIndex = chainEnd
 		}
@@ -135,7 +129,7 @@ func xtShape(partition BuildPartition) (lpxv1alpha1.Xt8888PartitionShape, error)
 	}
 
 	// Reserve one whole physical host for compiler partitions that use fewer than eight chips.
-	chipCount := partition.Topology.ChipCount
+	chipCount := partition.NumChips
 	if chipCount > 0 && chipCount < 8 {
 		return lpxv1alpha1.Xt8888PartitionShapeC8, nil
 	}
@@ -163,7 +157,6 @@ func v2Connectors(
 		build.Partitions,
 		build.SelectedPropSyncChains,
 		"selected prop-sync chain",
-		true,
 	)
 	if err != nil {
 		return nil, err

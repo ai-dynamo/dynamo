@@ -82,7 +82,7 @@ func lpuModelStoragePath(spec corev1.PodSpec) (string, error) {
 
 func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 	keys := [...]string{"nodes_per_partition", "partition_indices", "partition_ids", "partition_models",
-		"partition_node_offsets", "partition_paths", "topologies"}
+		"partition_node_offsets", "partition_paths"}
 
 	// Omit model-identity columns that the XT Single runtime never consumes.
 	includeModelColumns := projections[0].configuredBuild.Family != BuildFamilyXT ||
@@ -106,7 +106,7 @@ func resolvedPartitionData(projections []*ModelProjection) map[string]string {
 			// Project one row and populate optional model identity only when consumed.
 			row := [len(keys)]string{nodes, "",
 				strconv.FormatUint(uint64(uint32(partition.SourcePartitionID)), 10), "",
-				strconv.FormatInt(offset, 10), partition.PartPath, partition.Topology.Raw}
+				strconv.FormatInt(offset, 10), partition.PartPath}
 			if includeModelColumns {
 				row[1] = strconv.Itoa(index)
 				row[3] = projection.model

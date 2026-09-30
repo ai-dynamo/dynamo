@@ -19,14 +19,13 @@ data:
   partition_models: default
   partition_node_offsets: "0"
   partition_paths: part-0
-  topologies: URSA_V2__Q8__32C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-hybrid
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-hybrid-9d06-lpu-355e8ac6768c54e3
+  name: node-local-v2-hybrid-9d06-lpu-54cc4984adeab14a
   namespace: test
 ---
 metadata:
@@ -45,7 +44,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-hybrid
-        nvidia.com/extra-resources-hash: 355e8ac6768c54e3ee778e2044a7498390f64c82034bbc4cc3dafa0ef4031877
+        nvidia.com/extra-resources-hash: 54cc4984adeab14a7040a304caa795d8b89ea4d8be9a2bc7a3a065cb21f7bf2c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:06a49794501980fdaf5348d990cf1000ac8e2fb8f0a44e6192959a266c8f72b0
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:c81421e95f9c131d6e129e9fa1169508c79b10817e84ff04419e3a9dd4654c4c
         scheduling.lpu.nvidia.com/model: default
@@ -199,7 +198,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-hybrid-9d06-lpu-355e8ac6768c54e3
+              name: node-local-v2-hybrid-9d06-lpu-54cc4984adeab14a
             name: config
         replicas: 4
         roleName: agt

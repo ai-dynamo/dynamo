@@ -138,31 +138,13 @@ data:
     part-14
     part-15
     part-16
-  topologies: |-
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
-    URSA_V2_1__Q8__8C__G_96_25__KP_FEC__GHZ_1_0__DRACO_V1_1__G_106
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+  name: dgd-lpx-v2-vllm-94cd-lpu-7effcd795ffc2dde
   namespace: inference-engine
 ---
 metadata:
@@ -181,7 +163,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: dgd-lpx-v2-vllm
-        nvidia.com/extra-resources-hash: e586b76cc8ccd9a1ed2e1b0297032eb1da420881dcfdcb632a4f00f4971308ff
+        nvidia.com/extra-resources-hash: 7effcd795ffc2dde10e3e776990206ef3cf3b2eb88c716b8204a1e7b9572be2b
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:b02bf04396119d729d0ffafc9b8d0b789f0fcf7956417dbce6c84a9b89c2c125
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7fb0201ab11533a0442099325fbe0ad88e09155cdb1834b4d31a4393f15b8a70
         scheduling.lpu.nvidia.com/model: default
@@ -383,7 +365,7 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: dgd-lpx-v2-vllm-94cd-lpu-e586b76cc8ccd9a1
+              name: dgd-lpx-v2-vllm-94cd-lpu-7effcd795ffc2dde
             name: config
         replicas: 17
         roleName: agt

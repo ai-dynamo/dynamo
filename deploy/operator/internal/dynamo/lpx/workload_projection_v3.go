@@ -79,7 +79,7 @@ func projectV3PropSync(
 	chains [][]int,
 	pipeline Pipeline,
 ) (json.RawMessage, []lpxv1alpha1.PropSyncConnectorRequest, error) {
-	edgePositions, err := validateSelectedPropSyncGraph(partitions, chains, "selected V3 prop-sync chain", false)
+	edgePositions, err := validateSelectedPropSyncGraph(partitions, chains, "selected V3 prop-sync chain")
 	if err != nil {
 		return nil, nil, err
 	}

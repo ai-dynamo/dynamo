@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 
 	"capnproto.org/go/capnp/v3"
 	manifestcapnpv2 "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/lpx/manifest/v2"
@@ -268,28 +267,21 @@ func buildPartitionFromManifestV2(raw manifestcapnpv2.PartitionInfo) (BuildParti
 	if err != nil {
 		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d detail: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
-	topology, err := detail.Topology()
-	if err != nil {
-		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d topology: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
-	}
 	path, err := detail.Path()
 	if err != nil {
 		return BuildPartition{}, false, fmt.Errorf("reading %s LPU partition %d path: %w", gbuildManifestV2CapnpFile, ref.PartitionId(), err)
 	}
 
-	// Both families require a safe topology string, even when HX treats it as opaque.
+	// Runtime topology names belong to the manifest and are interpreted by the runtime.
 	subject := fmt.Sprintf("%s LPU partition %d", gbuildManifestV2CapnpFile, ref.PartitionId())
-	if strings.ContainsAny(topology, "\x00\r\n") {
-		return BuildPartition{}, false, fmt.Errorf("%s topology must not contain NUL bytes or line breaks: %q", subject, topology)
-	}
 
 	// Metadata selects HX; only the 16-chip, 16-device HX shape can omit it.
 	var partition BuildPartition
 	var compatible bool
 	if detail.HasTopologyMetadata() || (detail.NumChips() == 16 && detail.DevicesPerNode() == 16) {
-		partition, compatible, err = buildHXPartition(subject, topology, detail)
+		partition, compatible, err = buildHXPartition(subject, detail)
 	} else {
-		partition, err = buildXTPartition(subject, topology, detail)
+		partition, err = buildXTPartition(subject, detail)
 	}
 	if err != nil {
 		return BuildPartition{}, false, err

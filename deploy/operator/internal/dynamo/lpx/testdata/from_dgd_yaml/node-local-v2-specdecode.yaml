@@ -44,20 +44,13 @@ data:
     part-1
     part-0
     part-1
-  topologies: |-
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
-    URSA_V2__Q8__16C__G_96_25__KP_FEC__GHZ_1_0__NO_FPGA
 immutable: true
 metadata:
   annotations:
     lpx.nvidia.com/deployment-name: node-local-v2-specdecode
   labels:
     lpx.nvidia.com/deployment-uid: lpx-render-uid
-  name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+  name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
   namespace: test
 ---
 metadata:
@@ -76,7 +69,7 @@ spec:
     cliques:
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:7dcaf58d5b51d48215b01c203b4a0bf66c7373d090fddb1ea7eff28aba6209af
         scheduling.lpu.nvidia.com/model: draft0
@@ -208,13 +201,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt0
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:f224cc9eb51e154cf07c346de1e3b5cea6c2f9462a24239f09db56220d091a2f
         scheduling.lpu.nvidia.com/model: draft1
@@ -346,13 +339,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt1
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
         scheduling.lpu.nvidia.com/compiler-snapshot-digest: sha256:ca8a265dc6611edc06a7bb351c5ad8323073a36ab30c551da13d7e0c1b6edacd
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:3789bdb0b4020bcf93b235a199257bf1b6aa21406d5ad1018e0fa84527b6d7d6
         scheduling.lpu.nvidia.com/model: target
@@ -484,13 +477,13 @@ spec:
               sizeLimit: 8Gi
             name: shared-memory
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 4
         roleName: agt2
     - annotations:
         lpx.nvidia.com/deployment-name: node-local-v2-specdecode
-        nvidia.com/extra-resources-hash: b6f18b8ea30b38c5323a2f08b0c2aacf50a14ca785ed0d1f4fffdc31805fbe80
+        nvidia.com/extra-resources-hash: 62b617784a6494e7d029e945901f57b06b313149514395965d049fa339d34c8c
         scheduling.lpu.nvidia.com/dynamo-workload-digest: sha256:8343083ec5b673caa86736ba64b6b103e26746de853b2bdd626a0e2b905ad06a
         scheduling.lpu.nvidia.com/role: conductor
       labels:
@@ -660,7 +653,7 @@ spec:
               defaultMode: 384
               secretName: ssh-secret
           - configMap:
-              name: node-local-v2-specdecode-63df-lpu-b6f18b8ea30b38c5
+              name: node-local-v2-specdecode-63df-lpu-62b617784a6494e7
             name: config
         replicas: 1
         roleName: cond

@@ -24,6 +24,8 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		wantCompatible           bool
 		wantErr                  string
 	}{
+		{name: "XT without topology", numChips: 8, devicesPerNode: 8, wantNodes: 1},
+		{name: "XT geometry overrides topology", topology: registryTestTopology, numChips: 16, devicesPerNode: 8, wantNodes: 2},
 		{name: "ordinary XT", topology: registryTestTopology, numChips: 8, devicesPerNode: 8, wantNodes: 1},
 		{name: "multi-node XT", topology: strings.Replace(registryTestTopology, "8C", "16C", 1), numChips: 16, devicesPerNode: 8, wantNodes: 2},
 		{name: "manifest device density", topology: registryTestTopology, numChips: 8, devicesPerNode: 4, wantNodes: 2},
@@ -40,11 +42,11 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 		{name: "missing HX extent", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 16, family: hxTopologyFamily, wantErr: "unsupported HX extent"},
 		{name: "unsupported HX extent", topology: v3OpaqueTopology, numChips: 64, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 1, 2, 2}, wantErr: "unsupported HX extent"},
 		{name: "HX devices per node mismatch", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 8, family: hxTopologyFamily, extent: []uint32{16, 1, 1, 1}, wantErr: "does not match devicesPerNode 8"},
-		{name: "opaque topology needs HX geometry", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 8, wantErr: "parsing"},
-		{name: "metadata-less HX wrong chip count", topology: v3OpaqueTopology, numChips: 8, devicesPerNode: 16, wantErr: "does not match expected pattern"},
-		{name: "metadata-less HX empty topology", topology: " ", numChips: 16, devicesPerNode: 16, wantErr: "topology must not be empty"},
-		{name: "metadata-less HX unsafe topology", topology: v3OpaqueTopology + "\n", numChips: 16, devicesPerNode: 16, wantErr: "must not contain NUL bytes or line breaks"},
-		{name: "metadata HX NUL topology", topology: hxTopologyFamily + "\x00other", numChips: 16, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 1, 1, 1}, wantErr: "topology must not contain NUL bytes or line breaks"},
+		{name: "opaque XT topology", topology: v3OpaqueTopology, numChips: 16, devicesPerNode: 8, wantNodes: 2},
+		{name: "sub-host XT geometry", topology: v3OpaqueTopology, numChips: 8, devicesPerNode: 16, wantNodes: 1},
+		{name: "metadata-less HX empty topology", topology: " ", numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}, wantCompatible: true, wantNodes: 1},
+		{name: "metadata-less HX ignores topology contents", topology: v3OpaqueTopology + "\n", numChips: 16, devicesPerNode: 16, wantExtent: []uint32{16, 1, 1, 1}, wantCompatible: true, wantNodes: 1},
+		{name: "metadata HX ignores topology contents", topology: hxTopologyFamily + "\x00other", numChips: 16, devicesPerNode: 16, family: hxTopologyFamily, extent: []uint32{16, 1, 1, 1}, wantExtent: []uint32{16, 1, 1, 1}, wantNodes: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -84,8 +86,7 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 			require.Equal(t, test.wantCompatible, compatible)
 			require.Equal(t, 7, partition.SourcePartitionID)
 			require.Equal(t, "part-0", partition.PartPath)
-			require.Equal(t, strings.TrimSpace(test.topology), partition.Topology.Raw)
-			require.EqualValues(t, test.numChips, partition.Topology.ChipCount)
+			require.EqualValues(t, test.numChips, partition.NumChips)
 			require.EqualValues(t, test.devicesPerNode, partition.DevicesPerNode)
 			require.Equal(t, test.wantNodes, partition.effectiveNodeCount())
 			require.Len(t, partition.HXExtent, len(test.wantExtent))
@@ -106,8 +107,8 @@ func TestBuildPartitionFromManifestV2SelectsFamily(t *testing.T) {
 func TestManifestPartitionFamilyOrdering(t *testing.T) {
 	t.Log("Classify HX partitions while preserving manifest order")
 	hx := []BuildPartition{
-		{SourcePartitionID: 7, Topology: Topology{ChipCount: 16}, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
-		{SourcePartitionID: 3, Topology: Topology{ChipCount: 16}, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
+		{SourcePartitionID: 7, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
+		{SourcePartitionID: 3, NumChips: 16, DevicesPerNode: 16, HXExtent: []int64{16, 1, 1, 1}},
 	}
 	family, _, _, err := classifyManifestPartitions(gbuildManifestV2CapnpFile, hx, false)
 	require.NoError(t, err)
@@ -116,8 +117,8 @@ func TestManifestPartitionFamilyOrdering(t *testing.T) {
 
 	t.Log("Classify XT partitions while sorting by source partition identity")
 	xt := []BuildPartition{
-		{SourcePartitionID: 7, Topology: Topology{ChipCount: 8}, DevicesPerNode: 8},
-		{SourcePartitionID: 3, Topology: Topology{ChipCount: 8}, DevicesPerNode: 8},
+		{SourcePartitionID: 7, NumChips: 8, DevicesPerNode: 8},
+		{SourcePartitionID: 3, NumChips: 8, DevicesPerNode: 8},
 	}
 	family, _, _, err = classifyManifestPartitions(gbuildManifestV2CapnpFile, xt, false)
 	require.NoError(t, err)

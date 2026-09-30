@@ -217,8 +217,7 @@ func TestBuildFromGbuildManifestV2ValidatesV2OnlyContracts(t *testing.T) {
 		},
 		{name: "missing numChips", geometry: &geometryFixture{devicesPerNode: 8, numNodes: 1}, wantErr: "numChips must be >= 1"},
 		{
-			name: "topology and numChips mismatch", geometry: &geometryFixture{numChips: 16, devicesPerNode: 8, numNodes: 2},
-			wantErr: "topology chip count 8 does not match numChips 16",
+			name: "numChips is authoritative over topology name", geometry: &geometryFixture{numChips: 16, devicesPerNode: 8, numNodes: 2},
 		},
 		{name: "missing devicesPerNode", geometry: &geometryFixture{numChips: 8, numNodes: 1}, wantErr: "devicesPerNode must be >= 1"},
 		{name: "manifest device density", geometry: &geometryFixture{numChips: 8, devicesPerNode: 4, numNodes: 2}},

@@ -17,7 +17,6 @@ func validateSelectedPropSyncGraph(
 	partitions []BuildPartition,
 	chains [][]int,
 	subject string,
-	requireCompatibleTopology bool,
 ) ([]int, error) {
 	// Empty chain sets have no references or edges to validate.
 	if len(chains) == 0 {
@@ -42,18 +41,13 @@ func validateSelectedPropSyncGraph(
 	// Enforce disjoint forward-adjacent chains and record each ordered physical edge by source position.
 	edgePositions := make([]int, 0)
 	for chainIndex, chain := range chains {
-		rootPosition := partitionPositions[chain[0]]
-		previousPosition := rootPosition
+		previousPosition := partitionPositions[chain[0]]
 		for memberIndex, partitionID := range chain {
 			position, unused := partitionPositions[partitionID]
 			if !unused {
 				return nil, fmt.Errorf("%s %d overlaps partition ID %d", subject, chainIndex, partitionID)
 			}
 			delete(partitionPositions, partitionID)
-			if requireCompatibleTopology &&
-				!partitions[rootPosition].Topology.compatibleWith(partitions[position].Topology) {
-				return nil, fmt.Errorf("%s %d has incompatible topology at partition ID %d", subject, chainIndex, partitionID)
-			}
 			if memberIndex == 0 {
 				continue
 			}
@@ -103,26 +97,22 @@ func (b *Build) consumeRuntimeSelectedPropSyncChain() error {
 }
 
 // collapseSelectedPropSyncChain projects validated nonempty contiguous physical partitions onto their runtime root.
-func collapseSelectedPropSyncChain(chain []int, partitions []BuildPartition) (BuildPartition, error) {
+func collapseSelectedPropSyncChain(partitions []BuildPartition) BuildPartition {
 	root := partitions[0]
 	totalChipCount := 0
 	totalNodeCount := 0
 	for _, partition := range partitions {
-		totalChipCount += partition.Topology.ChipCount
+		totalChipCount += partition.NumChips
 		totalNodeCount += partition.effectiveNodeCount()
 	}
 
-	topology, err := root.Topology.withChipCount(totalChipCount)
-	if err != nil {
-		return BuildPartition{}, fmt.Errorf("selected prop-sync chain %s cannot form combined topology: %w", formatPropSyncChain(chain), err)
-	}
 	return BuildPartition{
 		SourcePartitionID: root.SourcePartitionID,
 		PartPath:          root.PartPath,
-		Topology:          topology,
+		NumChips:          totalChipCount,
 		DevicesPerNode:    root.DevicesPerNode,
 		runtimeNodeCount:  totalNodeCount,
-	}, nil
+	}
 }
 
 func formatPropSyncChain(chain []int) string {

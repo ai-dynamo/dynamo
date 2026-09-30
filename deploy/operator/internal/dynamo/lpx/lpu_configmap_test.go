@@ -62,13 +62,13 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 		configuredBuild: Build{
 			Family: BuildFamilyXT,
 			Partitions: []BuildPartition{
-				{SourcePartitionID: 7, PartPath: "part-7", Topology: Topology{ChipCount: 16, Raw: "topology-7"}, DevicesPerNode: 8},
-				{SourcePartitionID: 9, PartPath: "part-9", Topology: Topology{ChipCount: 8, Raw: "topology-9"}, DevicesPerNode: 8},
+				{SourcePartitionID: 7, PartPath: "part-7", NumChips: 16, DevicesPerNode: 8},
+				{SourcePartitionID: 9, PartPath: "part-9", NumChips: 8, DevicesPerNode: 8},
 			},
 		},
 	}
 
-	t.Log("Project only the five columns consumed by the XT Single runtime")
+	t.Log("Project the four placement and artifact columns for the XT Single runtime")
 	data := resolvedPartitionData([]*ModelProjection{projection})
 
 	t.Log("Verify omitted model columns never enter the final map and retained bytes remain exact")
@@ -77,7 +77,6 @@ func TestResolvedPartitionDataOmitsXTModelColumnsBeforeMaterialization(t *testin
 		"partition_ids":          "7\n9",
 		"partition_node_offsets": "0\n2",
 		"partition_paths":        "part-7\npart-9",
-		"topologies":             "topology-7\ntopology-9",
 	}, data)
 }
 
