@@ -335,15 +335,6 @@ def run_trace_replay(
             raise ValueError(
                 "planner_config replay only supports replay_mode='offline'"
             )
-        if trace_format not in (
-            "mooncake",
-            "applied_compute_agentic",
-            "dynamo",
-        ):
-            raise ValueError(
-                "planner_config replay only supports trace_format='mooncake', "
-                "'applied_compute_agentic', or 'dynamo'"
-            )
         if trace_format != "dynamo" and len(trace_files) != 1:
             raise ValueError(
                 f"planner_config replay with trace_format={trace_format!r} "
