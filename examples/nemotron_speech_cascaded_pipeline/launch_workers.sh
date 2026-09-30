@@ -35,7 +35,6 @@ HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
 FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
 GPU_MEM_ARGS="$(build_vllm_gpu_mem_args)"
-export VLLM_USE_FLASHINFER_MOE_FP8="${VLLM_USE_FLASHINFER_MOE_FP8:-1}"
 
 print_launch_banner --no-curl \
   "Launching Blueprint-compatible Dynamo model endpoints" "$LLM_MODEL_NAME" "$HTTP_PORT" \

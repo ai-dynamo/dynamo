@@ -124,7 +124,6 @@ spec:
                 - --use-vllm-tokenizer
               env:
                 - {name: HF_HOME, value: /home/dynamo/.cache/huggingface}
-                - {name: VLLM_USE_FLASHINFER_MOE_FP8, value: "1"}
               envFrom:
                 - secretRef: {name: hf-token-secret}
               resources:
