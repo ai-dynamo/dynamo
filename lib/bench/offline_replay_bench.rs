@@ -226,6 +226,10 @@ struct Args {
     #[arg(long)]
     canonical_reports_jsonl: Option<PathBuf>,
 
+    /// Router policy YAML, e.g. selecting a builtin-catalog worker-selection policy.
+    #[arg(long)]
+    router_policy_config: Option<PathBuf>,
+
     /// Ignored -- passed by cargo bench
     #[arg(long, hide = true)]
     bench: bool,
@@ -334,7 +338,13 @@ fn canonical_metadata(
 ) -> Result<Value> {
     let router_config = match args.router_mode {
         RouterModeArg::RoundRobin => Value::Null,
-        RouterModeArg::KvRouter => serde_json::to_value(KvRouterConfig::default())?,
+        RouterModeArg::KvRouter => serde_json::to_value(router_config(args).unwrap_or_default())?,
+    };
+    let selection = match &args.router_policy_config {
+        None => json!("default_worker_selector_seeded_v1"),
+        Some(path) => json!({
+            "router_policy_config_blake3": blake3::hash(&std::fs::read(path)?).to_hex().to_string(),
+        }),
     };
     Ok(json!({
         "replay_bench": cfg!(feature = "replay-bench"),
@@ -369,7 +379,7 @@ fn canonical_metadata(
         },
         "determinism": {
             "request_ids": "ordinal_u128_v1",
-            "selection": "default_worker_selector_seeded_v1",
+            "selection": selection,
             "seed": 0xd1a0_5eed_u64,
             "candidate_order": ["worker_id", "dp_rank"],
         },
@@ -379,6 +389,14 @@ fn canonical_metadata(
             "ais_forward_pass": false,
         },
     }))
+}
+
+fn router_config(args: &Args) -> Option<KvRouterConfig> {
+    let path = args.router_policy_config.as_ref()?;
+    Some(KvRouterConfig {
+        router_policy_config: Some(path.display().to_string()),
+        ..Default::default()
+    })
 }
 
 fn canonical_report(
@@ -403,6 +421,10 @@ fn main() -> Result<()> {
     anyhow::ensure!(
         args.canonical_reports_jsonl.is_none() || cfg!(feature = "replay-bench"),
         "--canonical-reports-jsonl requires building with --features replay-bench"
+    );
+    anyhow::ensure!(
+        args.router_policy_config.is_none() || matches!(args.router_mode, RouterModeArg::KvRouter),
+        "--router-policy-config requires --router-mode kv-router"
     );
     let engine_args = build_engine_args(&args)?;
     let canonical_workload = if args.canonical_reports_jsonl.is_some() {
@@ -450,7 +472,7 @@ fn main() -> Result<()> {
             ServingModeArg::Aggregated => {
                 simulate_loaded_trace_with_router_mode_and_capture_options(
                     engine_args.clone(),
-                    None,
+                    router_config(&args),
                     None,
                     trace.clone(),
                     args.num_workers,
@@ -473,7 +495,7 @@ fn main() -> Result<()> {
                         num_prefill_workers: args.num_prefill_workers,
                         num_decode_workers: args.num_decode_workers,
                     },
-                    None,
+                    router_config(&args),
                     None,
                     trace.clone(),
                     args.arrival_speedup_ratio,
