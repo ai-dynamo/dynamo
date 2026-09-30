@@ -122,7 +122,13 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
             # (post_merge).
             "agg_router": TopologyConfig(
                 health_check_workers=True,
-                marks=[pytest.mark.pre_merge, pytest.mark.xpu_2],
+                marks=[
+                    pytest.mark.skip(
+                        reason="vLLM XPU v0.29.0 lacks paged decode kernel 8,128,16,false,false,false"
+                    ),
+                    pytest.mark.pre_merge,
+                    pytest.mark.xpu_2,
+                ],
                 gpu_marker="xpu_2",
                 timeout_s=400,
                 profiled_vram_gib=18.7,
