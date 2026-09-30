@@ -9,9 +9,19 @@ import logging
 from typing import TYPE_CHECKING, Type
 
 try:
-    from sglang.srt.arg_groups.overrides import declare_late_resolution
+    # SGLang 0.5.18-0.5.20. setup_gms() is launcher-stage, so it must use the
+    # late variant: declare_resolution() there targets __post_init__ resolvers
+    # and skips the published-config guard.
+    from sglang.srt.arg_groups.overrides import (
+        declare_late_resolution as declare_resolution,
+    )
 except ImportError:
-    declare_late_resolution = None
+    try:
+        # SGLang >=0.5.21 dropped the late variant and folded its
+        # published-config guard into declare_resolution().
+        from sglang.srt.arg_groups.overrides import declare_resolution
+    except ImportError:
+        declare_resolution = None
 
 if TYPE_CHECKING:
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
@@ -55,8 +65,8 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    if declare_late_resolution is not None:
-        declare_late_resolution(server_args, "dynamo.gms", enable_memory_saver=True)
+    if declare_resolution is not None:
+        declare_resolution(server_args, "dynamo.gms", enable_memory_saver=True)
     else:
         # Fallback for SGLang 0.5.17. Remove when the minimum supported version
         # is 0.5.18+.
@@ -64,9 +74,13 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
         if callable(override):
             override("dynamo.gms", enable_memory_saver=True)
         else:
-            # The separately pinned XPU image still uses SGLang 0.5.11, which
-            # predates ServerArgs.override. Remove after that pin reaches 0.5.16+.
-            server_args.enable_memory_saver = True
+            # Assigning the attribute directly is a silent no-op on SGLang
+            # builds that resolve config separately from raw ServerArgs, which
+            # would leave the memory saver disabled and GMS regions inert.
+            raise RuntimeError(
+                "GMS requires an SGLang build exposing declare_resolution() or "
+                "ServerArgs.override(); none found."
+            )
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
