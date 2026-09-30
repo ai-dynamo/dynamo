@@ -3566,44 +3566,30 @@ mod zero_top_logprobs {
 }
 
 mod stream_options {
-    //! Non-streaming options are ignored at HTTP ingress; streaming options are preserved.
-    use dynamo_llm::{
-        http::service::service_v2::HttpService,
-        model_card::ModelDeploymentCard,
-        protocols::{
-            Annotated,
-            openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
-        },
-    };
-    use dynamo_runtime::{
-        CancellationToken,
-        pipeline::{
-            AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
-        },
-    };
-    use serde_json::{Value, json};
-    use std::sync::{Arc, Mutex};
-
-    use super::{http_harness, ports, scripted_chat_engine};
+    use super::*;
+    use dynamo_protocols::types::ChatCompletionStreamOptions;
     use http_harness::{MODEL, load_agent_fixture};
+    use serde_json::{Value, json};
+    use std::sync::Mutex;
 
     #[derive(Default)]
-    struct CompletionEngine(Mutex<Vec<Value>>);
+    struct CompletionEngine(Mutex<Vec<Option<ChatCompletionStreamOptions>>>);
+
     #[async_trait]
     impl
         AsyncEngine<
             SingleIn<NvCreateCompletionRequest>,
             ManyOut<Annotated<NvCreateCompletionResponse>>,
-            anyhow::Error,
+            Error,
         > for CompletionEngine
     {
-        /// Records the dispatched request and returns a completion with fixed token usage.
+        /// Captures stream options and supplies fixed token usage for HTTP assertions.
         async fn generate(
             &self,
             request: SingleIn<NvCreateCompletionRequest>,
-        ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, anyhow::Error> {
+        ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
             let (request, context) = request.transfer(());
-            self.0.lock().unwrap().push(serde_json::to_value(request)?);
+            self.0.lock().unwrap().push(request.inner.stream_options);
             let response = serde_json::from_value(json!({
                 "id": "cmpl-test", "object": "text_completion", "created": 1000000000, "model": MODEL,
                 "choices": [{"index": 0, "text": "Pong.", "finish_reason": "stop", "logprobs": null}],
@@ -3616,56 +3602,102 @@ mod stream_options {
         }
     }
 
-    /// Checks both completion endpoints clear unary options, preserve streaming options,
-    /// and retain token usage in unary responses.
+    /// Checks options at engine dispatch and usage in the HTTP response for both endpoints.
     #[tokio::test]
     async fn normalizes_options_only_for_nonstreaming_requests() {
-        temp_env::async_with_vars([
+        const ENV: [(&str, Option<&str>); 2] = [
             ("DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS", Some("0")),
             ("DYN_ENABLE_FORCE_INCLUDE_USAGE", Some("false")),
-        ], async {
+        ];
+        // Omitted/false stream ignores options; true preserves either usage setting.
+        const CASES: [(Option<bool>, bool); 4] = [
+            (None, true),
+            (Some(false), true),
+            (Some(true), false),
+            (Some(true), true),
+        ];
+        temp_env::async_with_vars(ENV, async {
             let script = load_agent_fixture("text.sse").await.unwrap();
-            let chat = Arc::new(scripted_chat_engine::ScriptedChatEngine::new((0..6).map(|_| Ok(script.clone()))));
+            let chat = Arc::new(scripted_chat_engine::ScriptedChatEngine::new(
+                CASES.iter().map(|_| Ok(script.clone())),
+            ));
             let completion = Arc::new(CompletionEngine::default());
-            let (listener, port) = ports::bind_random_port().await;
-            let service = HttpService::builder().port(port).host("127.0.0.1")
-                .enable_chat_endpoints(true).enable_cmpl_endpoints(true).build().unwrap();
+            let (listener, port) = bind_random_port().await;
+            let service = HttpService::builder()
+                .port(port)
+                .host("127.0.0.1")
+                .enable_chat_endpoints(true)
+                .enable_cmpl_endpoints(true)
+                .build()
+                .unwrap();
             let card = ModelDeploymentCard::with_name_only(MODEL);
-            service.model_manager().add_chat_completions_model(MODEL, card.mdcsum(), chat.clone()).unwrap();
-            service.model_manager().add_completions_model(MODEL, card.mdcsum(), completion.clone()).unwrap();
+            service
+                .model_manager()
+                .add_chat_completions_model(MODEL, card.mdcsum(), chat.clone())
+                .unwrap();
+            service
+                .model_manager()
+                .add_completions_model(MODEL, card.mdcsum(), completion.clone())
+                .unwrap();
             let cancel = CancellationToken::new();
             let task = service.spawn_with_listener(cancel.clone(), listener).await;
-            let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(10)).build().unwrap();
-            let base = format!("http://127.0.0.1:{port}");
-            for endpoint in ["chat/completions", "completions"] {
-                let mut body = json!({"model": MODEL});
-                if endpoint == "chat/completions" { body["messages"] = json!([{"role": "user", "content": "Say hello"}]); }
-                else { body["prompt"] = json!("Say hello"); }
-                for stream in [None, Some(json!(false)), Some(json!(true))] {
-                    body.as_object_mut().unwrap().remove("stream");
-                    if let Some(flag) = &stream { body["stream"] = flag.clone(); }
-                    for include_usage in [false, true] {
-                        let options = json!({"include_usage": include_usage, "continuous_usage_stats": true});
-                        body["stream_options"] = options.clone();
-                        let response = client.post(format!("{base}/v1/{endpoint}")).json(&body).send().await.unwrap();
-                        let streaming = stream == Some(json!(true));
-                        assert_eq!(response.status().as_u16(), 200, "{body}");
-                        if streaming { assert!(response.text().await.unwrap().contains("[DONE]")); }
-                        else {
-                            let output: Value = response.json().await.unwrap();
-                            assert_eq!(output["usage"]["total_tokens"], 7);
-                        }
-                        let captured: Vec<Value> = if endpoint == "chat/completions" {
-                            chat.take_requests().await.iter().map(|r| serde_json::to_value(r).unwrap()).collect()
-                        } else { std::mem::take(&mut *completion.0.lock().unwrap()) };
-                        assert_eq!(captured.len(), 1);
-                        if streaming { assert_eq!(captured[0]["stream_options"], options); }
-                        else { assert!(captured[0].get("stream_options").is_none()); }
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap();
+
+            for (endpoint, input) in [
+                (
+                    "chat/completions",
+                    json!({"messages": [{"role": "user", "content": "Say hello"}]}),
+                ),
+                ("completions", json!({"prompt": "Say hello"})),
+            ] {
+                for (stream, include_usage) in CASES {
+                    let options = ChatCompletionStreamOptions {
+                        include_usage,
+                        continuous_usage_stats: true,
+                    };
+                    let mut body = input.clone();
+                    body["model"] = json!(MODEL);
+                    body["stream_options"] = json!(options);
+                    if let Some(flag) = stream {
+                        body["stream"] = json!(flag);
                     }
+                    let response = client
+                        .post(format!("http://127.0.0.1:{port}/v1/{endpoint}"))
+                        .json(&body)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::OK, "{body}");
+                    if stream == Some(true) {
+                        assert!(response.text().await.unwrap().contains("[DONE]"));
+                    } else {
+                        let output: Value = response.json().await.unwrap();
+                        assert_eq!(output["usage"]["total_tokens"], 7);
+                    }
+                    let captured: Vec<_> = if endpoint == "chat/completions" {
+                        chat.take_requests()
+                            .await
+                            .into_iter()
+                            .map(|r| r.inner.stream_options)
+                            .collect()
+                    } else {
+                        std::mem::take(&mut *completion.0.lock().unwrap())
+                    };
+                    let expected = (stream == Some(true)).then_some(options);
+                    assert_eq!(captured, vec![expected], "{body}");
                 }
             }
             cancel.cancel();
-            tokio::time::timeout(std::time::Duration::from_secs(3), task).await.unwrap().unwrap().unwrap();
-        }).await;
+            timeout(std::time::Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        })
+        .await;
     }
 }
