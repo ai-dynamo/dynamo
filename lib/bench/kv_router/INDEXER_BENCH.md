@@ -192,6 +192,37 @@ Do not interpret overloaded lookup latency as an iso-throughput latency result.
 At a comfortable common load, report scheduler lag, queue wait, and lookup
 service separately and require negligible queue depth and drain.
 
+### Choosing a load for A/B comparisons
+
+An overloaded replay and a keep-up replay measure different things, so choose
+the load by the path a change touches:
+
+- **Write capacity: overloaded replay** (for example the 750 ms command above).
+  Queries finish during the issue window while events drain for several times
+  longer, so `achieved_block_ops_per_sec` mostly measures event application.
+  During that window queries also walk a tree that lags far behind the trace.
+- **Read cost and write latency: keep-up replay.** Use the shortest duration
+  whose runs report `kept_up=true` with negligible drain; the sweep finds it.
+  Compare `query_service` and `update_accepted_to_finished` percentiles.
+  Achieved throughput is pinned to the offered rate there and is not a metric.
+
+A sensitivity check with two deliberately regressed builds shows the difference.
+One walked the read path twice per query and the other added 6 µs to every
+event. Each variant ran five interleaved trials with 128 workers, duplication
+20, length 4, and 4 event workers on 8 cores; values are candidate/control
+median ratios:
+
+| Metric | Load | Read path ×2 | Write +6 µs/event |
+|---|---|---:|---:|
+| `achieved_block_ops_per_sec` | 750 ms (overloaded) | 0.997 (not detected) | 0.728 |
+| `query_service` p50 | 750 ms (overloaded) | 1.086 | 0.952 |
+| `query_service` p50 | 12 s (keep-up) | 1.325 | 1.007 |
+| `update_accepted_to_finished` p50 | 12 s (keep-up) | 1.004 | 5.09 |
+
+Median lookup service was 1.66 µs in the overloaded replay and 3.10 µs at keep-up:
+the overloaded replay understates read cost because its queries run against an
+early, small tree.
+
 ## Active Sequences replay
 
 `active_sequences_bench` uses the same deadline-driven measurement principles

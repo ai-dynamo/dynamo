@@ -24,5 +24,9 @@ before changing locking, versioning, split, remove, or lookup-repair behavior.
 - Bench-only metrics and debug scans must stay behind `feature = "bench"` or
   tests.
 - Preferred CRTC benchmark setup: full Mooncake trace, 128 inference workers,
-  trace duplication factor 20, trace length factor 4, 750 ms duration, 20 runs,
-  and 8 event workers.
+  trace duplication factor 20, trace length factor 4, 8 event workers, and 20
+  fresh-process runs. Measure write-path changes with the 750 ms overloaded
+  replay (`achieved_block_ops_per_sec`). Measure read-path changes with a
+  keep-up replay (`kept_up=true`, negligible drain) and compare
+  `query_service` percentiles; the overloaded headline cannot detect read-path
+  regressions. See `lib/bench/kv_router/INDEXER_BENCH.md`.
