@@ -15,18 +15,12 @@ the `nvidia.com/gpu=true:NoSchedule` taint and requests two GPUs for TP2 serving
 The frontend can run on amd64 CPU nodes. This aggregated deployment uses two
 GPUs on one node and does not request RDMA devices.
 
-Use a namespace with registry pull credentials and a populated
+Use a namespace with a populated
 `shared-model-cache` PVC. Reuse that PVC when it already exists. For a new
 cache on Nscale, set `storageClassName: vast` in
 [`model-cache/model-cache.yaml`](model-cache/model-cache.yaml), then run the
 model-download Job before deploying. The frontend and worker run with
 Hugging Face offline mode enabled.
-
-The base image is hosted on NVCR, so configure credentials with access to that
-image. The optional `registry-credentials/agg` component references
-`acr-token-secret` for an ACR image. To use it, select an ACR image in the base
-or change the component's secret name to one for your image registry, then
-uncomment the component in `kustomize/kustomization.yaml`.
 
 From the repository root, apply the Nscale configuration:
 
@@ -50,11 +44,7 @@ vllm/agg-b200-chat/
 └── kustomize/
     ├── kustomization.yaml
     └── components/
-        ├── scheduling/
-        │   └── agg/
-        │       ├── kustomization.yaml
-        │       └── patch-dgd.yaml
-        └── registry-credentials/
+        └── scheduling/
             └── agg/
                 ├── kustomization.yaml
                 └── patch-dgd.yaml
