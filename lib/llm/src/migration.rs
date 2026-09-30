@@ -342,7 +342,7 @@ where
     /// Length of the client's prompt, before any delivered tokens were replayed onto it.
     prompt_len: usize,
     /// Delivered tokens replayed in the active attempt's prompt. The worker counts them in its
-    /// `prompt_tokens`, and they are already counted as completion tokens.
+    /// `prompt_tokens` although the client received them as completion.
     replayed_tokens: u32,
 }
 
@@ -785,10 +785,10 @@ where
         u32::try_from(replayed).unwrap_or(u32::MAX)
     }
 
-    /// Reports a retried attempt's usage against the client's prompt. The worker counts the
-    /// replayed tokens as prompt, on top of their earlier count as completion tokens. Its
-    /// cached-token count describes the replayed prompt, not the client's, so it is dropped
-    /// rather than reported against the wrong prompt.
+    /// Moves the replayed tokens in a retried attempt's usage from prompt to completion: the
+    /// worker counts them as prompt, and its completion count covers only its own attempt. The
+    /// total is unchanged. Its cached-token count is dropped because it was measured against the
+    /// replayed prompt; the `/generate` metrics then fall back to the router's estimate.
     fn rebase_usage(&self, response: &mut Annotated<Resp>) {
         if self.replayed_tokens == 0 {
             return;
@@ -801,7 +801,7 @@ where
             return;
         };
         usage.prompt_tokens = usage.prompt_tokens.saturating_sub(self.replayed_tokens);
-        usage.total_tokens = usage.total_tokens.saturating_sub(self.replayed_tokens);
+        usage.completion_tokens = usage.completion_tokens.saturating_add(self.replayed_tokens);
         if let Some(details) = usage.prompt_tokens_details.as_mut() {
             details.cached_tokens = None;
         }
@@ -2746,13 +2746,14 @@ mod tests {
         assert!(responses.iter().all(|r| r.error.is_none()));
     }
 
-    /// Streams `tokens` for one attempt and reports usage the way a worker does: against the
-    /// prompt it was sent, with every prompt token a prefix-cache hit. The first attempt
-    /// disconnects after `fail_after` tokens when set.
+    /// Reports usage the way a worker does: against the prompt it was sent, counting only the
+    /// tokens this attempt generated, with every prompt token a prefix-cache hit. The first
+    /// `failing_attempts` attempts disconnect after `fail_after` tokens.
     struct UsageMockEngine {
         calls: Arc<AtomicU32>,
         prompts: Arc<std::sync::Mutex<Vec<Vec<TokenIdType>>>>,
-        fail_after: Option<usize>,
+        fail_after: usize,
+        failing_attempts: u32,
         context_id: String,
     }
 
@@ -2770,13 +2771,17 @@ mod tests {
             let prompt = request.token_ids.to_vec();
             self.prompts.lock().unwrap().push(prompt.clone());
             let remaining = request.stop_conditions.max_tokens.unwrap_or(0) as usize;
-            let fail_after = self.fail_after.filter(|_| call == 0);
-            let generated = fail_after.unwrap_or(remaining).min(remaining);
+            let fails = call < self.failing_attempts;
+            let generated = if fails {
+                self.fail_after.min(remaining)
+            } else {
+                remaining
+            };
             let prompt_tokens = prompt.len() as u32;
             let mut responses: Vec<_> = (0..generated)
                 .map(|i| create_mock_output(100 + prompt.len() as u32 + i as u32))
                 .collect();
-            if fail_after.is_some() {
+            if fails {
                 responses.push(Annotated::from_err(
                     DynamoError::builder()
                         .error_type(ErrorType::Disconnected)
@@ -2801,10 +2806,11 @@ mod tests {
     }
 
     /// Runs one request through a RetryManager over `UsageMockEngine` and returns the prompts
-    /// each attempt was sent and the usage the client would see.
+    /// each attempt was sent and the usage the final attempt reported through it.
     async fn run_usage_request(
         request: PreprocessedRequest,
-        fail_after: Option<usize>,
+        fail_after: usize,
+        failing_attempts: u32,
     ) -> (Vec<Vec<TokenIdType>>, CompletionUsage) {
         dynamo_runtime::logging::init();
         let context_id = uuid::Uuid::new_v4().to_string();
@@ -2814,6 +2820,7 @@ mod tests {
                 calls: Arc::new(AtomicU32::new(0)),
                 prompts: prompts.clone(),
                 fail_after,
+                failing_attempts,
                 context_id: context_id.clone(),
             });
         let mut retry_manager = RetryManager::build(
@@ -2821,7 +2828,7 @@ mod tests {
             BTreeMap::new(),
             request,
             next_generate,
-            1,
+            failing_attempts.max(1),
             None,
             Arc::new(TEST_MODEL.to_string()),
             Arc::new(Metrics::new()),
@@ -2841,12 +2848,19 @@ mod tests {
         (prompts, usage.expect("the final attempt reports usage"))
     }
 
-    /// Regression test for #15255: after a migration the retried worker counts the replayed
-    /// tokens as prompt, and they are already counted as completion tokens, so the client's
-    /// usage must be reported against its own prompt.
+    fn cached_tokens(usage: &CompletionUsage) -> Option<u32> {
+        usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens)
+    }
+
+    /// Regression test for #15255: the retried worker counts the replayed tokens as prompt, and
+    /// its completion count covers only its own attempt, so the replayed tokens must move from
+    /// prompt to completion.
     #[tokio::test]
     async fn test_retry_manager_reports_client_prompt_usage_after_migration() {
-        let (prompts, usage) = run_usage_request(create_mock_request(4), Some(2)).await;
+        let (prompts, usage) = run_usage_request(create_mock_request(4), 2, 1).await;
 
         assert_eq!(prompts.len(), 2);
         assert_eq!(
@@ -2855,55 +2869,51 @@ mod tests {
             "retry replays two tokens"
         );
         assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 4, "2 delivered before, 2 after");
+        assert_eq!(usage.total_tokens, 7);
         assert_eq!(
-            usage.completion_tokens, 2,
-            "the retried attempt's own tokens"
-        );
-        assert_eq!(usage.total_tokens, 5);
-        assert_eq!(
-            usage
-                .prompt_tokens_details
-                .and_then(|details| details.cached_tokens),
+            cached_tokens(&usage),
             None,
-            "a cache hit on the replayed prompt says nothing about the client's prompt"
+            "a cache hit on the replayed prompt is not a count for the client's prompt"
         );
     }
 
     #[tokio::test]
+    async fn test_retry_manager_rebases_usage_across_two_migrations() {
+        let (prompts, usage) = run_usage_request(create_mock_request(6), 2, 2).await;
+
+        assert_eq!(prompts.len(), 3);
+        assert_eq!(prompts[2].len(), 7, "the last retry replays four tokens");
+        assert_eq!(usage.prompt_tokens, 3);
+        assert_eq!(usage.completion_tokens, 6);
+        assert_eq!(usage.total_tokens, 9);
+        assert_eq!(cached_tokens(&usage), None);
+    }
+
+    #[tokio::test]
     async fn test_retry_manager_leaves_usage_alone_without_migration() {
-        let (prompts, usage) = run_usage_request(create_mock_request(4), None).await;
+        let (prompts, usage) = run_usage_request(create_mock_request(4), 0, 0).await;
 
         assert_eq!(prompts.len(), 1);
         assert_eq!(usage.prompt_tokens, 3);
         assert_eq!(usage.completion_tokens, 4);
         assert_eq!(usage.total_tokens, 7);
-        assert_eq!(
-            usage
-                .prompt_tokens_details
-                .and_then(|details| details.cached_tokens),
-            Some(3)
-        );
+        assert_eq!(cached_tokens(&usage), Some(3));
     }
 
-    /// Prompt embeddings take precedence over the replayed token IDs, so the worker's prompt
-    /// count does not include them and must not be reduced.
+    /// Prompt embeddings take precedence over the replayed token IDs, so their usage is left
+    /// exactly as the worker reported it.
     #[tokio::test]
-    async fn test_retry_manager_keeps_embedding_prompt_usage_after_migration() {
+    async fn test_retry_manager_leaves_embedding_prompt_usage_alone_after_migration() {
         let mut request = create_mock_request(4);
         request.prompt_embeds = Some("embeddings".to_string());
-        let (prompts, usage) = run_usage_request(request, Some(2)).await;
+        let (prompts, usage) = run_usage_request(request, 2, 1).await;
 
         assert_eq!(prompts.len(), 2);
-        assert_eq!(
-            usage.prompt_tokens, 5,
-            "the mock's count, passed through unchanged"
-        );
-        assert_eq!(
-            usage
-                .prompt_tokens_details
-                .and_then(|details| details.cached_tokens),
-            Some(5)
-        );
+        assert_eq!(usage.prompt_tokens, 5, "the mock's own count, unchanged");
+        assert_eq!(usage.completion_tokens, 2);
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(cached_tokens(&usage), Some(5));
     }
 
     #[tokio::test]
