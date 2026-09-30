@@ -35,28 +35,25 @@ func configureNodeLocalConductorRuntime(
 
 // applyModelPaths binds nonempty canonical projections into a fresh runtime container.
 func applyModelPaths(container *corev1.Container, projections []*ModelProjection, modelStoragePath string) error {
-	type modelPathBinding struct {
-		name       string
-		projection *ModelProjection
-	}
-	bindings := []modelPathBinding{{"LPX_MODEL_PATH", projections[0]}}
+	// Speculative decoding binds the first draft and final target; other workloads bind one model.
+	names := []string{"LPX_MODEL_PATH"}
 	if projections[0].pipeline == PipelineSpecDecode {
-		bindings[0].name = "LPX_DRAFT_MODEL_PATH"
-		bindings = append(bindings, modelPathBinding{"LPX_TARGET_MODEL_PATH", projections[len(projections)-1]})
+		names = []string{"LPX_DRAFT_MODEL_PATH", "LPX_TARGET_MODEL_PATH"}
+		projections = []*ModelProjection{projections[0], projections[len(projections)-1]}
 	}
 
 	// Resolve all paths before publishing authoritative values ahead of authored references.
-	env := make([]corev1.EnvVar, 0, len(container.Env)+len(bindings))
-	for _, binding := range bindings {
-		projection := binding.projection
+	env := make([]corev1.EnvVar, 0, len(container.Env)+len(names))
+	for index, name := range names {
+		projection := projections[index]
 		path, err := buildRuntimePath(projection.configuredBuild.Path, projection.runtimeBuildRef, modelStoragePath)
 		if err != nil {
-			return fmt.Errorf("resolve %s: %w", binding.name, err)
+			return fmt.Errorf("resolve %s: %w", name, err)
 		}
-		env = append(env, corev1.EnvVar{Name: binding.name, Value: path})
+		env = append(env, corev1.EnvVar{Name: name, Value: path})
 	}
 	for _, variable := range container.Env {
-		if !slices.ContainsFunc(bindings, func(binding modelPathBinding) bool { return binding.name == variable.Name }) {
+		if !slices.Contains(names, variable.Name) {
 			env = append(env, variable)
 		}
 	}
