@@ -145,9 +145,6 @@ impl ConcurrentRadixTreeCompressed {
         }
     }
 
-    // NOTE(perf): `find_match_step` reserves these maps at the first node, whose
-    // coverage bounds the result size. Judge read-path allocation changes by
-    // keep-up lookup latency, not overloaded throughput (see INDEXER_BENCH.md).
     fn record_surviving_details(details: &mut MatchDetails, walk_result: &MatchWalkResult) {
         for worker in &walk_result.active {
             details

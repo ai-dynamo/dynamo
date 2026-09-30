@@ -57,8 +57,6 @@ impl ConcurrentRadixTreeCompressed {
             return Err(KvCacheEventError::BlockNotFound);
         }
 
-        // A group is the resolved node plus the contiguous run of following hashes
-        // in its edge. It is passed as a sub-slice of the event, not copied.
         let block_hashes = op.block_hashes;
         let mut index = 0;
 
