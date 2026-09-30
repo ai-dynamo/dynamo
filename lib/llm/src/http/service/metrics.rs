@@ -4992,6 +4992,41 @@ mod tests {
             assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
         }
 
+        /// A legacy data-less `llm_metrics` annotation frame leading the stream
+        /// (the shape the preflight buffers) is observed identically with
+        /// capture on or off, and the response identity is unaffected.
+        #[tokio::test]
+        async fn test_capture_forwards_legacy_metrics_frame_identically() {
+            let chunks = || {
+                let mut v = vec![
+                    chunk_metrics(1, 1)
+                        .to_annotation::<NvCreateChatCompletionStreamResponse>()
+                        .unwrap(),
+                ];
+                v.extend(production_chunks());
+                v
+            };
+            let (plain_registry, plain) =
+                observe_and_aggregate(futures::stream::iter(chunks())).await;
+            let (captured, _future) = scan_aggregate_with_future(futures::stream::iter(chunks()));
+            let (capture_registry, capture) = observe_and_aggregate(captured).await;
+
+            let expected = MetricSignature {
+                // The legacy frame adds one output token ahead of the content chunks.
+                output_tokens_total: 4,
+                isl: (1, INPUT_TOKENS as u64),
+                osl: (1, 3),
+                cached_tokens: (1, TAIL_CACHED_TOKENS as u64),
+                ttft_samples: 1,
+                itl_samples: 3,
+            };
+            assert_eq!(signature(&plain_registry), expected);
+            assert_eq!(signature(&capture_registry), expected);
+            let (plain, capture) = (ok(plain), ok(capture));
+            assert_eq!(plain, capture);
+            assert_identity(&plain);
+        }
+
         /// A chunk carrying both typed `llm_metrics` and a `payload_usage`
         /// annotation (tool-call jail shape) is observed once, typed form
         /// winning, with capture on or off.
