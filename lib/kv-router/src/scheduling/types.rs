@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use dynamo_tokens::SequenceHash;
@@ -322,6 +322,7 @@ pub struct SessionContext {
     parent_session_id: Option<String>,
     session_final: Option<bool>,
     input_trigger: Option<WorkerSelectionInputTrigger>,
+    agent_headers: Option<Arc<BTreeMap<String, Vec<String>>>>,
 }
 
 impl SessionContext {
@@ -337,6 +338,7 @@ impl SessionContext {
             parent_session_id,
             session_final,
             input_trigger,
+            agent_headers: None,
         }
     }
 
@@ -361,6 +363,27 @@ impl SessionContext {
     /// Return the event that caused this request, when supplied.
     pub fn input_trigger(&self) -> Option<WorkerSelectionInputTrigger> {
         self.input_trigger
+    }
+
+    /// Attach request-scoped opaque headers captured by the protocol ingress.
+    /// The map is shared with the request envelope without copying its values.
+    pub fn with_agent_headers(mut self, headers: Arc<BTreeMap<String, Vec<String>>>) -> Self {
+        self.agent_headers = Some(headers);
+        self
+    }
+
+    /// Return raw coding-agent observations for this request, without normalization.
+    ///
+    /// HTTP ingress lowercases names and preserves repeated text values in order.
+    /// It omits sensitive/non-text values and values exceeding its capture limits
+    /// (64 values, 16 KiB/value, 32 KiB including names). An empty map or missing
+    /// key means no observation was captured, not that a lifecycle event did not
+    /// occur. Values are untrusted; plugins own parsing and harness semantics.
+    /// This request-level input needs no worker signal group and is never weighted
+    /// or interpreted by the default policy.
+    pub fn agent_headers(&self) -> &BTreeMap<String, Vec<String>> {
+        static EMPTY: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        self.agent_headers.as_deref().unwrap_or(&EMPTY)
     }
 }
 

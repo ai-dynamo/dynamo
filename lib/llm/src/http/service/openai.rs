@@ -5918,7 +5918,7 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::extensions::NvExt;
     use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
@@ -6499,10 +6499,11 @@ mod tests {
                 session_id: "session-123".to_string(),
                 parent_session_id: Some("parent-456".to_string()),
                 session_final: Some(true),
-                compaction: Some(AgentCompaction {
-                    trigger: Some("automatic".to_string()),
-                    ..Default::default()
-                }),
+                agent_headers: std::collections::BTreeMap::from([(
+                    "x-claude-code-compaction".into(),
+                    vec!["automatic".into()],
+                )])
+                .into(),
                 input_trigger: None,
             },
         );
@@ -6520,11 +6521,8 @@ mod tests {
         );
         assert_eq!(agent_context.session_final, Some(true));
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.trigger.as_deref()),
-            Some("automatic")
+            agent_context.agent_headers["x-claude-code-compaction"],
+            ["automatic"]
         );
     }
 
@@ -6545,11 +6543,8 @@ mod tests {
             .expect("agent context attached");
         assert_eq!(agent_context.session_id, "codex-thread");
         assert_eq!(
-            agent_context
-                .compaction
-                .as_ref()
-                .and_then(|compaction| compaction.implementation.as_deref()),
-            Some("local")
+            agent_context.agent_headers["x-codex-turn-metadata"],
+            [headers["x-codex-turn-metadata"].to_str().unwrap()]
         );
     }
 
