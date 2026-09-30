@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Riva gRPC clients shared by the ASR and TTS workers."""
+"""Shared Riva authentication, readiness, and request cancellation helpers."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import grpc
-from riva.client import ASRService, Auth, SpeechSynthesisService
+from riva.client import Auth
 
 from dynamo._core import Context
 
@@ -76,13 +76,3 @@ async def wait_for_service_ready(service: Any, timeout_s: float) -> None:
             f"Speech NIM gRPC server {service.auth.uri} was not ready after "
             f"{timeout_s:g} seconds"
         ) from exc
-
-
-def build_tts_service(config: NimConnectionConfig) -> SpeechSynthesisService:
-    """Create a Riva speech synthesis client."""
-    return SpeechSynthesisService(build_auth(config))
-
-
-def build_asr_service(config: NimConnectionConfig) -> ASRService:
-    """Create a Riva ASR client."""
-    return ASRService(build_auth(config))

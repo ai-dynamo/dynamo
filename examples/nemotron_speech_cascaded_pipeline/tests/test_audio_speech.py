@@ -29,8 +29,8 @@ pytest.importorskip(
     "riva.client", reason="NVIDIA Riva client is an example-only dependency"
 )
 
-from nemotron_speech.audio_speech import SpeechNimAudioSpeechBackend  # noqa: E402
-from nemotron_speech.riva_client import wait_for_service_ready  # noqa: E402
+from nemotron_speech.riva import wait_for_service_ready  # noqa: E402
+from nemotron_speech.tts.adapter import SpeechNimAudioSpeechBackend  # noqa: E402
 from riva.client import AudioEncoding  # noqa: E402
 
 from dynamo._core import Context  # noqa: E402

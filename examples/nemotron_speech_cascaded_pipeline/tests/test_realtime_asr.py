@@ -27,7 +27,7 @@ pytest.importorskip(
     "riva.client", reason="NVIDIA Riva client is an example-only dependency"
 )
 
-from nemotron_speech.realtime_asr import (  # noqa: E402
+from nemotron_speech.asr.adapter import (  # noqa: E402
     OPENAI_PCM_SAMPLE_RATE,
     PCM16_BYTES_PER_SAMPLE,
     SpeechNimRealtimeTranscriptionHandler,

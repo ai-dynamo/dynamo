@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Launch Dynamo model endpoints for the Nemotron Voice Agent Blueprint.
+# Launch Dynamo endpoints for a cascaded Nemotron speech pipeline.
 # ASR and TTS NIMs must already be reachable over their gRPC APIs.
 
 set -euo pipefail
@@ -37,15 +37,15 @@ FRONTEND_EXTRA_ARGS="${FRONTEND_EXTRA_ARGS:-}"
 GPU_MEM_ARGS="$(build_vllm_gpu_mem_args)"
 
 print_launch_banner --no-curl \
-  "Launching Blueprint-compatible Dynamo model endpoints" "$LLM_MODEL_NAME" "$HTTP_PORT" \
+  "Launching Dynamo Nemotron speech endpoints" "$LLM_MODEL_NAME" "$HTTP_PORT" \
   "Realtime ASR: ws://localhost:${HTTP_PORT}/v1/realtime" \
   "LLM:          http://localhost:${HTTP_PORT}/v1/chat/completions" \
   "TTS:          http://localhost:${HTTP_PORT}/v1/audio/speech"
 
-python -m nemotron_speech.asr_worker \
+python -m nemotron_speech.asr.worker \
   --nim-server "$ASR_NIM_SERVER" --model-name "$ASR_MODEL_NAME" &
 
-python -m nemotron_speech.tts_worker \
+python -m nemotron_speech.tts.worker \
   --nim-server "$TTS_NIM_SERVER" --model-name "$TTS_MODEL_NAME" \
   --sample-rate-hz 24000 &
 

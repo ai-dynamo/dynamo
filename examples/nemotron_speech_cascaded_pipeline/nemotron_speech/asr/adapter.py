@@ -45,7 +45,7 @@ from dynamo.vllm.realtime.events import (
     session_updated_event,
 )
 
-from .riva_client import cancel_on_context_stop
+from ..riva import cancel_on_context_stop
 
 logger = logging.getLogger(__name__)
 

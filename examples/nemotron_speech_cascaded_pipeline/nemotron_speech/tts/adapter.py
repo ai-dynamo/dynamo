@@ -34,7 +34,7 @@ from dynamo.common.protocols.audio_protocol import (
 )
 from dynamo.runtime import dynamo_endpoint
 
-from .riva_client import cancel_on_context_stop
+from ..riva import cancel_on_context_stop
 
 
 class SpeechNimAudioSpeechBackend:

@@ -36,7 +36,7 @@ spec:
           containers:
             - name: main
               image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.asr_worker]
+              command: [python3, -m, nemotron_speech.asr.worker]
               args:
                 - --nim-server
                 - localhost:50052
@@ -148,7 +148,7 @@ spec:
           containers:
             - name: main
               image: ${CUSTOM_SPEECH_ADAPTER_IMAGE}
-              command: [python3, -m, nemotron_speech.tts_worker]
+              command: [python3, -m, nemotron_speech.tts.worker]
               args:
                 - --nim-server
                 - localhost:50051
