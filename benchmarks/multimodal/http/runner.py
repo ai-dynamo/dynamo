@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Async fetch loop with per-request latency capture.
+"""Async fetch loop that records the latency of each request.
 
-Drives ``dynamo.common.http.fetch_bytes``, which is aiohttp-backed. Calls
-``close_http_client()`` before+after so each run starts from a fresh
-session rather than inheriting a warm pool from the previous one.
-Returns raw samples; aggregation is in ``stats.py``.
+Each request goes through ``dynamo.common.http.fetch_bytes``, which uses
+aiohttp. ``run_one`` calls ``close_http_client()`` before and after each run,
+so that a run does not reuse the warm connection pool of the previous run.
+This module returns raw samples, and ``stats.py`` aggregates them.
 """
 
 from __future__ import annotations

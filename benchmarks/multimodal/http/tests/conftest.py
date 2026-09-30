@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixtures for the HTTP sweep-harness tests.
+"""Shared fixtures for the tests of the HTTP sweep harness.
 
-Autouse fixture closes the process-wide HTTP client singleton after each
-test so no "Unclosed client session" warning bleeds across tests.
+An autouse fixture closes the shared HTTP client after each test. The current
+tests never create that client, so the fixture only guards a future test that
+fetches for real.
 """
 
 from __future__ import annotations

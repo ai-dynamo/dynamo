@@ -3,9 +3,9 @@
 
 """Aggregate ``RunResult`` samples into a ``Summary`` (avg, p50, p90, p99).
 
-Latency stats are computed over success samples only — including timeout
-or status-error latencies would skew the numbers toward client-side wait
-time rather than server work.
+The latency statistics use successful samples only. The latency of a timeout
+or a status error measures how long the client waited, not the work of the
+server. The statistics leave those samples out.
 """
 
 from __future__ import annotations

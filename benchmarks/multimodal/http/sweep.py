@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Sweep the dynamo.common.http fetch path under fan-out.
+"""Measure the dynamo.common.http fetch path under concurrent load.
 
-Rate-limited emitter. For each (request_rate, server-processing-time-mean-ms)
-pair, brings up a local media server with that processing-time-mean and
-issues `--requests` total requests at the target RPS. Reports a
-per-iteration table and a per-(request_rate) cross-iteration grid.
+The sweep sends requests at a fixed rate. For each pair of a request rate and
+a mean server processing time, it starts a local media server with that
+processing time. It then sends `--requests` requests at that rate. It prints
+one table for each pair, and one grid for each request rate that lists all of
+its pairs.
 
 Usage:
   python -m benchmarks.multimodal.http.sweep \\
@@ -33,7 +34,7 @@ DEFAULT_IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Sweep the HTTP fetch path across server delays and request rates."
+        description="Measure the HTTP fetch path across server delays and request rates."
     )
     p.add_argument(
         "--server-processing-time-means-ms",
