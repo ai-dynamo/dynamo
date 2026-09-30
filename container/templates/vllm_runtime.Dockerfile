@@ -22,6 +22,7 @@ ARG VLLM_OMNI_REF
 ARG TRANSFORMERS_VERSION
 ARG TOKENIZERS_VERSION
 ARG NIXL_REF
+ARG MOONCAKE_VERSION
 {% if device == "cuda" %}
 ARG CUDA_MAJOR
 {% endif %}
@@ -408,10 +409,22 @@ RUN set -eu; \
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.vllm.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt && \
+    rm -rf /opt/uv/cache
+
+# Install mooncake as a dedicated step rather than through requirements.vllm.txt:
+# distribution name hardcodes CUDA 13 (it links libcudart for that major and
+# ships the same `mooncake` package as the generic project), so guard the build
+# against a mismatched CUDA major. Refreshes the upstream vllm-openai base's
+# bundled wheel to a current etcd client stack (older wheels vendor a stale Go
+# dependency set inside libetcd_wrapper.so).
+RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
+    export UV_CACHE_DIR=/root/.cache/uv && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: Only mooncake-transfer-engine-cuda13 is supported; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
+    uv pip install {{ pip_target }} --no-deps \
+        "mooncake-transfer-engine-cuda13>=${MOONCAKE_VERSION}" && \
     rm -rf /opt/uv/cache
 {% else %}
 # PyNvVideoCodec decodes on NVDEC through libnvcuvid, so it is inert on a
@@ -424,15 +437,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # PyNvVideoCodec` dlopens libnvcuvid.so.1, which no driverless XPU or CPU
 # builder has, so an import-based check would raise whether or not the wheel is
 # installed and could never fail the build.
-#
-# mooncake goes the same way, for two reasons. The floor names the CUDA 13
-# distribution, and the XPU and CPU bases carry no mooncake at all, so under
-# --no-deps it would arrive here without msgpack, which vLLM does not pull in.
-# The check asserts the distribution is absent rather than the `mooncake` module,
-# so it tests the filter without assuming what a future base may ship. It is
-# written as a positive test with no `!` and no stderr redirect: a broken
-# interpreter then fails the build instead of passing it vacuously.
-#
 # Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
 # middle of a `\`-continued command emits a blank line that ends the command
 # early, and a `#` comment there is joined onto the previous line, commenting
@@ -440,13 +444,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
-    grep -v -e '^PyNvVideoCodec' -e '^mooncake-transfer-engine-cuda13' \
+    grep -v -e '^PyNvVideoCodec' \
         /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
     rm -f /tmp/requirements.vllm.nonvidia.txt && \
     /opt/venv/bin/python -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
-    /opt/venv/bin/python -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)" && \
     rm -rf /opt/uv/cache
 {% endif %}
 
