@@ -32,19 +32,37 @@ settings. Rendered deployments are not checked in.
 | GB200 disaggregated | [disagg-gb200-agentic](vllm/disagg-gb200-agentic/kustomization.yaml) | 8 | 1P1D, TP4 per role | NIXL/UCX; workers in one NVLink clique |
 | H200 aggregated | [agg-h200-agentic](vllm/agg-h200-agentic/kustomization.yaml) | 16 | 4 × TP4 | Not applicable |
 
-The four Blackwell targets use expert parallelism, EPLB with the `torch_gloo`
-communicator, `deep_gemm_mega_moe`, MXFP4 sparse-indexer KV, sparse-indexer
-logits, and the `FLASHMLA_MEGA_ATTN_DSV41` attention backend. DSpark uses three
-draft tokens with adaptive verification disabled. Prefix-cache retention is
-1024. The recipes serve text and configure the `deepseek_v41` reasoning and
-tool-call parsers.
+## Configurations
 
-H200 uses `flashinfer_cutlass` MoE, EPLB, and DSpark-3 block verification,
-with memory utilization 0.92, 8,192 batched tokens, and 1,024 sequences.
+All vLLM targets use TP4 with expert parallelism, EPLB, KV-aware routing,
+and DSpark with three draft tokens, block verification, and adaptive
+verification disabled. They serve text with `deepseek_v41` reasoning and
+tool-call parsers. P/D below means prefill/decode; values apply to each worker.
 
-B200 disaggregation uses the runtime's `nvfp4_ds_mla` KV default; the other
-vLLM targets select `fp8_ds_mla`. See each Kustomization for runtime images
-and engine settings.
+| Setting | B200 / GB200 aggregated | B200 disaggregated | GB200 disaggregated | H200 aggregated |
+| --- | --- | --- | --- | --- |
+| Total GPUs | 8 | 8 | 8 | 16 |
+| Worker layout | 2 × TP4 | 1P1D, TP4 per role | 1P1D, TP4 per role | 4 × TP4 |
+| MoE backend | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `deep_gemm_mega_moe` | `flashinfer_cutlass` |
+| KV cache dtype | `fp8_ds_mla` | Auto → `nvfp4_ds_mla` | `fp8_ds_mla` | `fp8_ds_mla` |
+| Attention backend | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | `FLASHMLA_MEGA_ATTN_DSV41` | Runtime default |
+| Sparse indexer | MXFP4 KV, sparse logits enabled | MXFP4 KV, sparse logits enabled | MXFP4 KV, sparse logits enabled | Runtime default |
+| EPLB communicator | `torch_gloo` | `torch_gloo` | `torch_gloo` | Runtime default |
+| Max context tokens | 1,048,576 | Runtime default | 1,048,576 | Model default (1,048,576) |
+| Max sequences | 1,024 | Runtime default | 1,024 | 1,024 |
+| Max batched tokens | 16,384 | 32,768 P / runtime default D | 16,384 | 8,192 |
+| GPU memory utilization | 0.92 | Runtime default | 0.92 | 0.92 |
+| KV block size | 128 | Runtime default | 128 | Runtime default |
+| Max CUDA graph capture size | 512 | 512 P / 1,024 D | 512 P / 1,024 D | 512 |
+| Long-prefill threshold | Unset | 4,096 P | 4,096 P | Unset |
+| Prefix-cache retention interval | 1,024 | 1,024 | 1,024 | 1,024 |
+| Conditional disaggregation | N/A | `isl_bounding` | Enabled, default policy | N/A |
+| KV transfer | N/A | NIXL/UCX over InfiniBand | NIXL/UCX, one NVLink clique | N/A |
+
+Aggregated routing sets decode-active-request weight to 50. B200 conditional
+routing sets effective-input threshold 2,048, input-ratio threshold 0.70, and
+decode-busy threshold 0.50. Runtime defaults are intentionally left unset;
+see the linked Kustomize sources for exact flags and runtime image pins.
 
 ## Prerequisites
 
