@@ -706,8 +706,7 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                              description: &Option<String>,
                              parameters: &Option<serde_json::Value>,
                              strict: Option<bool>,
-                             namespace: Option<&str>|
-     -> anyhow::Result<()> {
+                             namespace: Option<&str>| {
         converted.push(ChatCompletionTool {
             r#type: ChatCompletionToolType::Function,
             function: FunctionObject {
@@ -717,13 +716,12 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                 strict,
             },
         });
-        Ok(())
     };
 
     for tool in tools {
         match tool {
             Tool::Function(f) => {
-                push_function(&f.name, &f.description, &f.parameters, f.strict, None)?
+                push_function(&f.name, &f.description, &f.parameters, f.strict, None)
             }
             Tool::Namespace(namespace) => {
                 for tool in &namespace.tools {
@@ -734,7 +732,7 @@ fn convert_tools(tools: &[Tool], names: &ToolNameMap) -> anyhow::Result<Vec<Chat
                             &f.parameters,
                             f.strict,
                             Some(&namespace.name),
-                        )?,
+                        ),
                         _ => return unsupported_tool(tool, "tools"),
                     }
                 }
@@ -1115,12 +1113,12 @@ impl ResponseParams {
         }
     }
 
-    /// Check backend names before restoring their client-visible identities.
-    fn function_is_allowed(&self, name: &str, names: &ToolNameMap) -> bool {
+    /// No allowlist means unrestricted; an invalid allowlist permits no calls.
+    fn allowed_backend_names(&self, names: &ToolNameMap) -> Option<HashSet<String>> {
         let Some(ToolChoiceParam::AllowedTools(choice)) = &self.tool_choice else {
-            return true;
+            return None;
         };
-        allowed_function_names(choice, names).is_ok_and(|allowed| allowed.contains(name))
+        Some(allowed_function_names(choice, names).unwrap_or_default())
     }
 }
 
@@ -1178,6 +1176,7 @@ pub fn chat_completion_to_response(
     api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let names = params.tool_name_map();
+    let allowed_names = params.allowed_backend_names(&names);
     let nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
@@ -1210,10 +1209,11 @@ pub fn chat_completion_to_response(
 
         // Handle structured tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            if let Some(disallowed) = tool_calls
-                .iter()
-                .find(|tc| !params.function_is_allowed(&tc.function.name, &names))
-            {
+            if let Some(disallowed) = tool_calls.iter().find(|tc| {
+                allowed_names
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&tc.function.name))
+            }) {
                 anyhow::bail!(
                     "Backend returned function '{}' outside allowed_tools",
                     disallowed.function.name
@@ -2967,8 +2967,9 @@ mod tests {
             tool_names: Some(names.clone()),
             ..Default::default()
         };
-        assert!(params.function_is_allowed(alias, &names));
-        assert!(!params.function_is_allowed(&names.encode(Some("billing"), "lookup"), &names));
+        let allowed_names = params.allowed_backend_names(&names).unwrap();
+        assert!(allowed_names.contains(alias));
+        assert!(!allowed_names.contains(&names.encode(Some("billing"), "lookup")));
         let mut internal_alias = req.clone();
         internal_alias.inner.tool_choice = Some(
             serde_json::from_value(serde_json::json!({

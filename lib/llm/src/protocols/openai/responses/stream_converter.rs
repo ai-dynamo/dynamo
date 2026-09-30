@@ -9,6 +9,7 @@
 //! `response.output_text.done` -> `response.content_part.done` ->
 //! `response.output_item.done` -> `response.completed` -> `[DONE]`
 
+use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::response::sse::Event;
@@ -43,6 +44,7 @@ pub struct ResponseStreamConverter {
     model: String,
     params: ResponseParams,
     tool_names: super::ToolNameMap,
+    allowed_names: Option<HashSet<String>>,
     /// Preserved Responses API-specific request context for faithful response reconstruction.
     api_context: Option<ResponsesContext>,
     created_at: u64,
@@ -117,12 +119,16 @@ impl ResponseStreamConverter {
             .unwrap_or_default()
             .as_secs();
 
+        let tool_names = params.tool_names.take().unwrap_or_else(|| {
+            super::ToolNameMap::new(params.tools.as_deref().unwrap_or_default(), None)
+        });
+        let allowed_names = params.allowed_backend_names(&tool_names);
+
         Self {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
-            tool_names: params.tool_names.take().unwrap_or_else(|| {
-                super::ToolNameMap::new(params.tools.as_deref().unwrap_or_default(), None)
-            }),
+            tool_names,
+            allowed_names,
             params,
             api_context: None,
             created_at,
@@ -531,8 +537,10 @@ impl ResponseStreamConverter {
                     }
                     if let Some(func) = &tc.function {
                         if let Some(name) = &func.name {
-                            self.function_call_items[tc_index].is_allowed =
-                                self.params.function_is_allowed(name, &self.tool_names);
+                            self.function_call_items[tc_index].is_allowed = self
+                                .allowed_names
+                                .as_ref()
+                                .is_none_or(|allowed| allowed.contains(name));
                             let (namespace, original_name) = self.tool_names.decode(name);
                             self.function_call_items[tc_index].name = original_name.to_owned();
                             self.function_call_items[tc_index].namespace =
