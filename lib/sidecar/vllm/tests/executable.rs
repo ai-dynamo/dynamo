@@ -158,24 +158,39 @@ async fn probes_work_before_engine_is_available() {
 
 #[test]
 fn invalid_arguments_fail_before_runtime_configuration() {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"));
-    for (key, _) in std::env::vars().filter(|(key, _)| {
-        key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
-    }) {
-        command.env_remove(key);
+    let overflowing_deadline = u64::MAX.to_string();
+    for (args, message) in [
+        (
+            ["--dyn-tool-call-parser", "hermes"],
+            "vLLM gRPC does not preserve",
+        ),
+        (
+            ["--vllm-http-endpoint", "http://localhost:8000?invalid=true"],
+            "must not include a query or fragment",
+        ),
+        (
+            [
+                "--grpc-startup-deadline-secs",
+                overflowing_deadline.as_str(),
+            ],
+            "exceeds the supported monotonic clock range",
+        ),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dynamo-vllm-sidecar"));
+        for (key, _) in std::env::vars().filter(|(key, _)| {
+            key.starts_with("DYN_") || key.starts_with("ETCD_") || key.starts_with("NATS_")
+        }) {
+            command.env_remove(key);
+        }
+        // A runtime configuration error must not mask a local argument error.
+        let output = command
+            .args(["--grpc-endpoint", "http://127.0.0.1:0"])
+            .args(args)
+            .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?} unexpectedly succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{args:?}: {stderr}");
     }
-    // A runtime configuration error must not mask a local argument error.
-    let output = command
-        .args([
-            "--grpc-endpoint",
-            "http://127.0.0.1:0",
-            "--dyn-tool-call-parser",
-            "hermes",
-        ])
-        .env("DYN_DISCOVERY_BACKEND", "invalid-backend")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("vLLM gRPC does not preserve"), "{stderr}");
 }

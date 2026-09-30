@@ -107,6 +107,13 @@ def test_python_sidecar_probes_during_initialization(
         ),
         (
             "vllm",
+            ["--grpc-startup-deadline-secs", str(2**64 - 1)],
+            "ValueError",
+            "invalid-backend",
+            "exceeds the supported monotonic clock range",
+        ),
+        (
+            "vllm",
             ["--grpc-startup-deadline-secs", "1"],
             "ValueError",
             "mem",

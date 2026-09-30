@@ -101,8 +101,8 @@ impl VllmSidecarEngine {
         DynamoError,
     > {
         let args = <Args as clap::Parser>::parse();
-        Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, vllm_http_url, false))
     }
 
     /// Parse embedded launcher arguments now, then discover metadata after the
@@ -114,20 +114,20 @@ impl VllmSidecarEngine {
         SidecarStartupError,
     > {
         let args = <Args as clap::Parser>::try_parse_from(argv)?;
-        Self::validate_args(&args)?;
-        Ok(Self::from_parsed_async(args, false))
+        let vllm_http_url = Self::validate_args(&args)?;
+        Ok(Self::from_parsed_async(args, vllm_http_url, false))
     }
 
     fn from_parsed(args: Args) -> Result<(Self, WorkerConfig), DynamoError> {
-        Self::validate_args(&args)?;
+        let vllm_http_url = Self::validate_args(&args)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| client::engine_shutdown(format!("bootstrap runtime: {error}")))?;
-        runtime.block_on(Self::from_parsed_async(args, true))
+        runtime.block_on(Self::from_parsed_async(args, vllm_http_url, true))
     }
 
-    fn validate_args(args: &Args) -> Result<(), DynamoError> {
+    fn validate_args(args: &Args) -> Result<Option<RlAdminBaseUrl>, DynamoError> {
         if args.sidecar.common.dyn_tool_call_parser.is_some()
             || args.sidecar.common.dyn_reasoning_parser.is_some()
         {
@@ -135,18 +135,11 @@ impl VllmSidecarEngine {
                 "vLLM gRPC does not preserve the request options required by Dynamo tool-call and reasoning parsers",
             ));
         }
-        Ok(())
-    }
-
-    async fn from_parsed_async(
-        args: Args,
-        bootstrap: bool,
-    ) -> Result<(Self, WorkerConfig), DynamoError> {
-        let endpoint = args.sidecar.grpc_endpoint;
-        let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
-        let vllm_http_url = args
-            .vllm_http_endpoint
+        // Reject overflow before runtime connections, but start the actual
+        // engine deadline only when the bootstrap future is polled.
+        client::startup_deadline(args.sidecar.grpc.config().startup_deadline)?;
+        args.vllm_http_endpoint
+            .as_ref()
             .map(|endpoint| {
                 RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
                     client::invalid_argument(format!(
@@ -154,7 +147,17 @@ impl VllmSidecarEngine {
                     ))
                 })
             })
-            .transpose()?;
+            .transpose()
+    }
+
+    async fn from_parsed_async(
+        args: Args,
+        vllm_http_url: Option<RlAdminBaseUrl>,
+        bootstrap: bool,
+    ) -> Result<(Self, WorkerConfig), DynamoError> {
+        let endpoint = args.sidecar.grpc_endpoint;
+        let enable_rl = args.sidecar.common.enable_rl;
+        let vllm_rl_world_size = args.vllm_rl_world_size.map(|world_size| world_size.get());
         let transport = args.sidecar.grpc.config();
         let bootstrap_deadline = client::startup_deadline(transport.startup_deadline)?;
         if bootstrap {
