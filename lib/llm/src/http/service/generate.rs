@@ -850,7 +850,7 @@ impl Drop for GenerateMetricCollector {
     fn drop(&mut self) {
         // Matching backend usage is authoritative when present. The response
         // collector latches it during streaming; this logical-request router
-        // estimate fills missing or migration-expanded attempt usage.
+        // estimate fills missing or mismatched usage.
         self.response
             .observe_cached_tokens(self.tracker.cached_tokens());
     }
