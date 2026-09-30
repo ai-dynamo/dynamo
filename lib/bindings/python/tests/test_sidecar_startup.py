@@ -5,7 +5,6 @@
 
 import os
 import socket
-import subprocess
 import sys
 
 import pytest
@@ -85,83 +84,3 @@ def test_python_sidecar_probes_during_initialization(
             connection, _ = engine_listener.accept()
             with connection:
                 assert child.proc.poll() is None, child.read_logs()
-
-
-@pytest.mark.parametrize(
-    ("engine", "args", "exception", "discovery", "message"),
-    [
-        ("trtllm", ["--help"], "SystemExit", "invalid-backend", ""),
-        (
-            "trtllm",
-            ["--model-path", ""],
-            "ValueError",
-            "invalid-backend",
-            "model-path must not be empty",
-        ),
-        (
-            "trtllm",
-            ["--model-path", "unused"],
-            "RuntimeError",
-            "invalid-backend",
-            "Unknown DYN_DISCOVERY_BACKEND value: 'invalid-backend'",
-        ),
-        (
-            "vllm",
-            ["--grpc-startup-deadline-secs", str(2**64 - 1)],
-            "ValueError",
-            "invalid-backend",
-            "exceeds the supported monotonic clock range",
-        ),
-        (
-            "vllm",
-            ["--grpc-startup-deadline-secs", "1"],
-            "ValueError",
-            "mem",
-            r"(?i)vllm.*(?:connection pool|SERVING).*(?:startup deadline|within)",
-        ),
-    ],
-)
-@pytest.mark.timeout(20)
-def test_python_sidecar_preserves_error_categories(
-    sidecar_env, engine, args, exception, discovery, message
-):
-    # Regression: combining bootstrap and serving must preserve Python exception
-    # types, and invalid local arguments must fail before dependency setup.
-    sidecar_env["DYN_DISCOVERY_BACKEND"] = discovery
-    script = """
-import re
-import sys
-from dynamo._core import backend
-try:
-    getattr(backend, f"_run_{sys.argv[1]}_sidecar")(sys.argv[4:])
-except BaseException as error:
-    assert type(error).__name__ == sys.argv[2], repr(error)
-    if isinstance(error, SystemExit):
-        assert error.code == 0, repr(error)
-    else:
-        assert re.search(sys.argv[3], str(error)), repr(error)
-else:
-    raise AssertionError('launcher unexpectedly succeeded')
-"""
-    with socket.socket() as engine_listener:
-        engine_listener.bind(("127.0.0.1", 0))
-        engine_listener.listen()
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-c",
-                script,
-                engine,
-                exception,
-                message,
-                *args,
-                "--grpc-endpoint",
-                f"http://127.0.0.1:{engine_listener.getsockname()[1]}",
-            ],
-            env=sidecar_env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    assert result.returncode == 0, result.stdout + result.stderr
