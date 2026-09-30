@@ -52,7 +52,8 @@ func applyModelPaths(container *corev1.Container, projections []*ModelProjection
 	// Resolve all paths before publishing authoritative values ahead of authored references.
 	env := make([]corev1.EnvVar, 0, len(container.Env)+len(bindings))
 	for _, binding := range bindings {
-		path, err := buildRuntimePath(lpuRuntimeBuildRef(binding.projection, modelStoragePath), modelStoragePath)
+		projection := binding.projection
+		path, err := buildRuntimePath(projection.configuredBuild.Path, projection.runtimeBuildRef, modelStoragePath)
 		if err != nil {
 			return fmt.Errorf("resolve %s: %w", binding.name, err)
 		}

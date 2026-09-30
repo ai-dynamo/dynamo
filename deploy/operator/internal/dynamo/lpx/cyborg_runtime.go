@@ -33,7 +33,7 @@ func (w *Workload) ValidateCyborgReplicas(replicas int32) error {
 
 // applyCyborgManifestPath projects an authoritative manifest location into one Cyborg container.
 func applyCyborgManifestPath(container *corev1.Container, projection *ModelProjection, modelStoragePath string) error {
-	buildRoot, err := buildRuntimePath(lpuRuntimeBuildRef(projection, modelStoragePath), modelStoragePath)
+	buildRoot, err := buildRuntimePath(projection.configuredBuild.Path, projection.runtimeBuildRef, modelStoragePath)
 	if err != nil {
 		return fmt.Errorf("resolve GBuild manifest path: %w", err)
 	}

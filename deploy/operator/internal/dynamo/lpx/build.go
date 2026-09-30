@@ -7,6 +7,7 @@ package lpx
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"strings"
 )
@@ -86,7 +87,23 @@ func (p BuildPartition) effectiveNodeCount() int {
 	return p.Topology.Replicas()
 }
 
-func buildRuntimePath(buildPath string, modelStoragePath string) (string, error) {
+// buildRuntimePath resolves a snapshot reference to its runtime filesystem path.
+// A safe relative runtimeRef remaps file-URL snapshots under modelStoragePath;
+// otherwise the snapshot reference remains authoritative.
+func buildRuntimePath(buildPath, runtimeRef, modelStoragePath string) (string, error) {
+	// Remap file snapshots from the operator's cache to the runtime's model mount.
+	snapshotURL, snapshotErr := url.Parse(buildPath)
+	runtimeRef = strings.TrimSpace(runtimeRef)
+	runtimeURL, runtimeErr := url.Parse(runtimeRef)
+	if snapshotErr == nil && runtimeErr == nil && snapshotURL.Scheme == BuildSchemeFile &&
+		runtimeRef != "" && runtimeURL.Scheme == "" && !filepath.IsAbs(runtimeRef) {
+		cleaned := filepath.Clean(runtimeRef)
+		if cleaned != "." && cleaned != ".." && !strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			buildPath = (&url.URL{Scheme: BuildSchemeFile, Path: filepath.Join(modelStoragePath, cleaned)}).String()
+		}
+	}
+
+	// Validate the selected reference before resolving the final filesystem path.
 	buildURL, err := parseBuildRef(buildPath)
 	if err != nil {
 		return "", fmt.Errorf("parse build path %q: %w", buildPath, err)
