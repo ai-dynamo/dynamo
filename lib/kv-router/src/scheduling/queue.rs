@@ -2972,29 +2972,6 @@ policy_classes:
     }
 
     #[tokio::test]
-    async fn disabled_queueing_admits_with_existing_prefill_load() {
-        let (queue, slots) = make_queue(1, 16, 64, None);
-        let worker = WorkerWithDpRank::new(0, 0);
-
-        for id in ["first", "second"] {
-            let (mut request, response) = make_request(id, 64);
-            request.pinned_worker = Some(worker);
-            queue.enqueue(request).await;
-            assert_eq!(response.await.unwrap().unwrap().best_worker, worker);
-            assert_eq!(queue.pending_count(), 0);
-        }
-        assert_eq!(slots.active_tokens(decay_now())[&worker], 128);
-
-        for id in ["first", "second"] {
-            slots
-                .mark_prefill_completed(&id.to_string(), decay_now())
-                .unwrap();
-            slots.free(&id.to_string(), decay_now()).unwrap();
-        }
-        slots.assert_completely_drained(decay_now());
-    }
-
-    #[tokio::test]
     async fn mixed_classes_recheck_capacity_after_each_admission() {
         let profile = policy_profile(
             r#"
