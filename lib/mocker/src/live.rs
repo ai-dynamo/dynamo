@@ -612,7 +612,8 @@ impl LiveEngine {
         );
         let output_length = request.effective_max_output_tokens();
         anyhow::ensure!(
-            self.inner.allow_zero_output || output_length > 0,
+            output_length > 0
+                || (self.inner.allow_zero_output && request.output_token_ids.is_none()),
             "live requests must generate at least one output token"
         );
         request.max_output_tokens = output_length;

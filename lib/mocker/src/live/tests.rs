@@ -846,19 +846,21 @@ async fn full_output_stream_is_cancelled_without_stalling_an_unrelated_request()
 async fn empty_effective_output_is_rejected_before_route_registration() {
     for engine_type in [EngineType::Vllm, EngineType::Sglang] {
         let engine = LiveEngine::start(args(engine_type), 0).unwrap();
-        let error = engine
-            .submit(DirectRequest {
-                tokens: vec![1],
-                max_output_tokens: 4,
-                output_token_ids: Some(Vec::new()),
-                uuid: Some(Uuid::new_v4()),
-                ..Default::default()
-            })
-            .await
-            .err()
-            .expect("empty explicit output plan should be rejected");
-        assert!(error.to_string().contains("at least one output token"));
-        assert_eq!(engine.active_request_count(), 0);
+        for max_output_tokens in [0, 4] {
+            let error = engine
+                .submit(DirectRequest {
+                    tokens: vec![1],
+                    max_output_tokens,
+                    output_token_ids: Some(Vec::new()),
+                    uuid: Some(Uuid::new_v4()),
+                    ..Default::default()
+                })
+                .await
+                .err()
+                .expect("empty explicit output plan should be rejected");
+            assert!(error.to_string().contains("at least one output token"));
+            assert_eq!(engine.active_request_count(), 0);
+        }
     }
 }
 
