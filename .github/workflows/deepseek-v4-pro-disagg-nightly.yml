@@ -72,6 +72,8 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           ACR_HOST: ${{ secrets.AZURE_ACR_HOSTNAME }}
           ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
+          PERF_CLEANUP: |
+            trap 'find "$ARTIFACT_ROOT" -type f -name inputs.json -delete || true' EXIT
         run: |
           image="${ACR_HOST}/${ACR_REPOSITORY}:${IMAGE_TAG}"
           digest=$(skopeo inspect --raw "docker://$image" | jq -er '
@@ -85,7 +87,8 @@ jobs:
           yq 'select(.kind != "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/deploy.yaml"
           yq 'select(.kind == "Job")' "$ARTIFACTS/rendered.yaml" > "$ARTIFACTS/perf.yaml"
           yq -i '(.spec.template.spec.containers[0].env[] | select(.name == "ARTIFACT_ROOT").value) = "/opt/models/perf/" + strenv(RUN_KEY) |
-            .spec.template.spec.containers[0].envFrom[0].secretRef.name = "hf-" + strenv(RUN_KEY)' "$ARTIFACTS/perf.yaml"
+            .spec.template.spec.containers[0].envFrom[0].secretRef.name = "hf-" + strenv(RUN_KEY) |
+            .spec.template.spec.containers[0].command[2] = strenv(PERF_CLEANUP) + "\n" + .spec.template.spec.containers[0].command[2]' "$ARTIFACTS/perf.yaml"
           git rev-parse HEAD > "$ARTIFACTS/source-sha.txt"
       - name: Preflight and create run credentials
         timeout-minutes: 10
@@ -102,14 +105,20 @@ jobs:
             "${k[@]}" delete --request-timeout=0 \
               job/dsv4-pro-disagg-bench dgd/dsv4-pro-disagg computedomain/dsv4-pro-compute-domain \
               --ignore-not-found --cascade=foreground --wait=true --timeout=5m
+            "${k[@]}" delete secret -l ci-workflow=deepseek-v4-pro-disagg-nightly \
+              --ignore-not-found --wait=false
           fi
           [[ "$("${k[@]}" get pvc shared-model-cache -o jsonpath='{.status.phase}')" == Bound ]]
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/deploy.yaml" > "$ARTIFACTS/deploy-dry-run.txt"
           "${k[@]}" create --dry-run=server -f "$ARTIFACTS/perf.yaml" > "$ARTIFACTS/perf-dry-run.txt"
-          "${k[@]}" create secret generic "hf-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
-            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}"
-          "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run="$DRY_RUN" -o name \
-            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD"
+          "${k[@]}" create secret generic "hf-$RUN_KEY" --dry-run=client -o json \
+            --from-literal=HF_TOKEN="${HF_TOKEN:?Missing HF_TOKEN}" |
+            jq '.metadata.labels = {"ci-workflow": "deepseek-v4-pro-disagg-nightly"}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
+          "${k[@]}" create secret docker-registry "acr-$RUN_KEY" --dry-run=client -o json \
+            --docker-server="$ACR_HOST" --docker-username="$ACR_USER" --docker-password="$ACR_PASSWORD" |
+            jq '.metadata.labels = {"ci-workflow": "deepseek-v4-pro-disagg-nightly"}' |
+            "${k[@]}" create --dry-run="$DRY_RUN" -f - -o name
       - name: Deploy and wait for readiness
         if: ${{ !inputs.preflight_only }}
         timeout-minutes: 105
@@ -160,7 +169,11 @@ jobs:
               -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-disagg,nvidia.com/dynamo-component-type=frontend -o json |
               jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
             if [[ -n "$frontend" ]]; then
-              "${k[@]}" cp -c main "$frontend:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
+              # Exclude generated prompts even if cleanup in the benchmark Job failed.
+              mkdir -p "$ARTIFACTS/perf"
+              "${k[@]}" exec -c main "$frontend" -- \
+                tar -C "/opt/models/perf/$RUN_KEY" --exclude=inputs.json -cf - . |
+                tar -C "$ARTIFACTS/perf" -xf -
             fi
           fi
       - name: Verify AIPerf results
