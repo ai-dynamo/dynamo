@@ -55,8 +55,8 @@ jobs:
         run: |
           case "$RECIPE" in
             kimi-k25-agg)
-              dgd=kimi-k25-trtllm-aggregate
-              worker=Worker
+              dgd=kimi-k25-agg-kv-eagle
+              worker=agg
               benchmark=aiperf-synthetic
               container=perf
               multiplier=10

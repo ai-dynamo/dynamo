@@ -4,8 +4,9 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k25-trtllm-aggregate
+  name: kimi-k25-agg-kv-eagle
 spec:
+  backendFramework: trtllm
   priorityClassName: ci-nightly-high-priority
   pvcs:
   - name: shared-model-cache
@@ -53,13 +54,15 @@ spec:
                   matchExpressions:
                   - key: nvidia.com/dynamo-graph-deployment-name
                     operator: Exists
-    Worker:
+    agg:
+      resources:
+        requests:
+          gpu: "4"
+      sharedMemory:
+        size: 179Gi
       extraPodMetadata:
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:

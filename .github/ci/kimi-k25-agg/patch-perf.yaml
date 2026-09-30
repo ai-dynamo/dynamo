@@ -20,7 +20,7 @@ spec:
       - name: perf
         env:
         - name: ENDPOINT
-          value: kimi-k25-trtllm-aggregate-frontend:8000
+          value: kimi-k25-agg-kv-eagle-frontend:8000
         - name: TARGET_MODEL
           value: nvidia/Kimi-K2.5-NVFP4
         - name: TOKENIZER
