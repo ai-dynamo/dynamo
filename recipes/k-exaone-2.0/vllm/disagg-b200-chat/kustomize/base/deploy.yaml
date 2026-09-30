@@ -35,6 +35,8 @@ spec:
     - {name: VLLM_WORKER_MULTIPROC_METHOD, value: spawn}
   components:
     - name: Frontend
+      # the image reference carries no plain semver tag for the operator to parse
+      runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
       type: frontend
@@ -42,8 +44,9 @@ spec:
         spec:
           containers:
             - name: main
-              # CPU-only: routes traffic, loads no weights. Multi-arch.
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1@sha256:7a54b0d601b7b2c50d41c6e683ddc8b6d2b4fa2b17262db1fa2e84ab7ebaf7e2
+              # same runtime image as the workers -- keeps the frontend and worker
+              # Dynamo runtime versions identical and matches the other vLLM recipes
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1@sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
               imagePullPolicy: IfNotPresent
               command: [python3]
               args:
@@ -62,7 +65,7 @@ spec:
               resources:
                 requests: {cpu: "8", memory: 16Gi, ephemeral-storage: 16Gi}
     - name: PrefillWorker
-      # a digest-pinned image exposes no tag for the operator to parse a version from
+      # the image reference carries no plain semver tag for the operator to parse
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1
@@ -139,7 +142,7 @@ spec:
             - name: model-cache
               persistentVolumeClaim: {claimName: shared-model-cache}
     - name: DecodeWorker
-      # a digest-pinned image exposes no tag for the operator to parse a version from
+      # the image reference carries no plain semver tag for the operator to parse
       runtimeVersionOverride: "1.4.1"
       minAvailable: 1
       replicas: 1

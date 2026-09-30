@@ -35,7 +35,7 @@ spec:
           - "8000"
           command:
           - python3
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.1@sha256:7a54b0d601b7b2c50d41c6e683ddc8b6d2b4fa2b17262db1fa2e84ab7ebaf7e2
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.1-k-exaone-2.0-750b-post.1@sha256:671b3f6ed5b94a572ae976cd59344bf26b27121618344a97d978d09737e6c7a2
           imagePullPolicy: IfNotPresent
           name: main
           ports:
@@ -48,6 +48,8 @@ spec:
               ephemeral-storage: 16Gi
               memory: 16Gi
     replicas: 1
+    # the image reference carries no plain semver tag for the operator to parse
+    runtimeVersionOverride: 1.4.1
     type: frontend
   - minAvailable: 1
     name: Worker
@@ -126,7 +128,7 @@ spec:
           persistentVolumeClaim:
             claimName: shared-model-cache
     replicas: 1
-    # a digest-pinned image exposes no tag for the operator to parse a version from
+    # the image reference carries no plain semver tag for the operator to parse
     runtimeVersionOverride: 1.4.1
     sharedMemorySize: 64Gi
     type: worker
