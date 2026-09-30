@@ -110,6 +110,12 @@ link no catalog and reject a configured policy type at startup.
 | `dynamo-default-cost-fn` | The default cost model with configurable scoring and sampling parameters. |
 | `thunderagent` | Honors the paired ThunderAgent classifier's worker/rank preference, then falls back to the least-loaded eligible worker. Enable both roles for program-aware admission and repacking; see [ThunderAgent Program Scheduler](../../../../use-cases/agents/thunderagent-program-scheduler.md#native-frontend-plugin). |
 | `dynamo-two-tier-cost-fn` | Ranks on two tiers instead of one additive cost: active-request load first, then device-KV prefix overlap. Prefers the worker holding the largest prefix overlap unless load is badly imbalanced. Thresholds and selection order ported from the experimental SGLang router's `cache_aware_zmq` policy. Thresholds are tunable; the defaults reproduce it exactly. |
+| `lmetric` | Picks the lowest `new_prefill_tokens × batch_size`, with a hot-spot detector that stops piling a popular prefix onto the few workers holding it. Ported from [LMetric](https://arxiv.org/abs/2603.15202). |
+| `ramjet` | Picks the highest capped prefix affinity minus weighted load, with Ramjet's `relative` affinity basis. Ported from [Ramjet](https://github.com/helixml/ramjet). |
+| `llm-d-optimized-baseline` | Stays on workers caching most of the prompt until their prefill backlog costs more TTFT than a colder worker's, then routes by token load. Ported from llm-d's [optimized baseline](https://llm-d.ai/blog/sticky-until-saturated-token-aware-routing). |
+| `llm-d-precise-prefix` | Weighted sum of prefix, queue, and KV-cache utilization scores (2:1:1), with optional per-policy-class weights. Ported from llm-d's precise prefix-cache profile. |
+| `dualmap` | Maps each prompt prefix to two hashed candidates and takes the one with more cached prefix unless its prefill backlog exceeds a budget. Ported from [DualMap](https://arxiv.org/abs/2602.06502). |
+| `chwbl` | Consistent hashing of the prompt prefix with bounded loads; reads no cache state. Ported from KubeAI and SGLang's `prefix_hash` policy. |
 
 Write the instance into the same YAML file that `--router-policy-config` already points at:
 
@@ -226,6 +232,25 @@ startup, so an out-of-range value or an unknown key fails the process immediatel
 rather than being silently ignored. It selects the least-loaded worker once the active-request spread is greater than 32 and the
 largest count is more than 1.1 times the smallest; otherwise it prefers the worker holding the
 largest device-KV overlap when that overlap covers more than 50% of the request's blocks.
+
+#### Tune a Ported Policy
+
+The ported policies accept these `parameters`. Defaults follow each source, and each policy rejects
+unknown keys and out-of-range values at startup. Offline replay runs the worker-selection policies
+above but not request classifiers, so a policy other than `thunderagent` can be compared with
+`default` on a recorded trace before deployment.
+
+| Policy type | Parameters (defaults) |
+|---|---|
+| `lmetric` | `hotspot_detection` (`true`), `class_prefix_blocks` (`4`) prompt blocks that define a request class, `window_requests` (`1000`) selections over which class shares are measured |
+| `ramjet` | `alpha` (`4.0`) load weight, `affinity_block_tokens` (`512`), `max_affinity_blocks` (`32`), `load_unit_tokens` (`8192`) prefill tokens per load unit, `basis` (`relative`, or `marginal`, `absolute`) |
+| `llm-d-optimized-baseline` | `affinity_threshold` (`0.8`) cached share of the prompt that makes a worker sticky, `max_ttft_penalty_ms` (`18000`), `peak_prefill_tokens_per_second` (`15928`, calibrated by llm-d for Qwen3-32B TP2 on H100), `queue_threshold_tokens` (`4194304`) |
+| `llm-d-precise-prefix` | `weights` (`prefix: 2.0`, `queue: 1.0`, `kv_cache_utilization: 1.0`), `class_weights` mapping a policy class to its own weights, `prefix_match_length_weight` (`0.0`), `prefix_match_length_scale_tokens` (`8192`) |
+| `dualmap` | `hash_prefix_blocks` (`4`), `pending_prefill_token_budget` (`65536`) prefill backlog a worker clears within the TTFT target, `window_requests` (`1000`) |
+| `chwbl` | `prefix_tokens` (`256`), `load_factor` (`1.25`) multiple of the average active requests a worker may carry |
+
+Where the host computes no prompt prefix hashes, such as in disaggregated prefill pools, `dualmap`
+and `chwbl` route to the least-loaded worker and `lmetric` skips hot-spot detection.
 
 #### Override the Selection
 
