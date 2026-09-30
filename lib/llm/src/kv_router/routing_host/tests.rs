@@ -1148,6 +1148,45 @@ async fn router(session_affinity_ttl: Option<Duration>) -> (RoutingHost, Runtime
     router_with_workers(session_affinity_ttl, &[7]).await
 }
 
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_hit_metrics_use_each_attempt_selection() {
+    let (router, runtime) = router(None).await;
+    let tracker = Arc::new(RequestTracker::new());
+    let mut content = request();
+    content.model = "attempt-kv-hit-metrics".to_string();
+    content.token_ids = vec![1; 64];
+    content.tracker = Some(Arc::clone(&tracker));
+    let request = Context::new(content);
+    let budget = CleanupBudget::default();
+
+    for (phase, overlap, expected) in [
+        (RequestPhase::Prefill, 2.0, 0.5),
+        (RequestPhase::Decode, 0.5, 0.125),
+    ] {
+        let _permit = tracker.set_phase(phase).await;
+        let (mut selection, _) = router
+            .select_with_affinity(&request, phase, false, &budget)
+            .await
+            .unwrap();
+        selection.effective_overlap_blocks = overlap;
+        let mut guard = router
+            .track_selection(&request, &mut selection, phase, false, &budget)
+            .await
+            .unwrap();
+
+        let hit_rate = &guard.attempt_metrics().kv_hit_rate;
+        assert_eq!(hit_rate.get_sample_count(), 1);
+        assert_eq!(hit_rate.get_sample_sum(), expected);
+        // Request tracing retains the first selection while each pool reports its own.
+        assert_eq!(tracker.kv_hit_rate(), Some(0.5));
+        guard.abort().await;
+    }
+
+    drop(router);
+    runtime.shutdown();
+}
+
 async fn router_with_workers(
     session_affinity_ttl: Option<Duration>,
     worker_ids: &[u64],

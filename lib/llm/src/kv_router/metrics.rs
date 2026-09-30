@@ -72,7 +72,6 @@ pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
-/// Pool of a routing attempt (`aggregated`, `prefill` or `decode`), from [`RequestPhase`].
 const ROUTER_PHASE_LABEL: &str = "phase";
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
@@ -1087,10 +1086,6 @@ impl RouterRequestMetrics {
             .clone()
     }
 
-    /// Register the router's metrics against any metrics hierarchy.
-    ///
-    /// Split out of [`Self::from_component`] so registration is reachable from
-    /// tests without a live `DistributedRuntime`.
     fn build<H: MetricsHierarchy>(hierarchy: &H, router_id: &str) -> Self {
         let extra_labels: &[(&str, &str)] = &[(labels::ROUTER_ID, router_id)];
         let attempt_labels = &[ROUTER_PHASE_LABEL, labels::MODEL];
@@ -1214,7 +1209,6 @@ impl RouterRequestMetrics {
         }
     }
 
-    /// Resolve the per-attempt histograms for one routing attempt.
     pub(crate) fn attempt(&self, phase: RequestPhase, model: &str) -> AttemptMetrics {
         let phase = phase.to_string();
         let labels = [phase.as_str(), model];

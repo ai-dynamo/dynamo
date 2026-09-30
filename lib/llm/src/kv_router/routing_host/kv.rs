@@ -499,8 +499,11 @@ impl RoutingHost {
                     chooser.worker_type(),
                 );
                 tracker.record_router_queue_depth(chooser.pending_count());
-                if let Some(hit_rate) = tracker.kv_hit_rate() {
-                    guard.attempt_metrics().kv_hit_rate.observe(hit_rate);
+                if isl_blocks > 0 {
+                    guard
+                        .attempt_metrics()
+                        .kv_hit_rate
+                        .observe(selection.effective_overlap_blocks / isl_blocks as f64);
                 }
             }
             guard
