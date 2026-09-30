@@ -12,19 +12,19 @@ spec:
     create: false
   services:
     Frontend:
-      extraPodMetadata:
+      extraPodMetadata: &podMetadata
         annotations:
           nvidia.com/disable-image-pull-secret-discovery: "true"
-      volumeMounts:
+      volumeMounts: &modelVolumeMounts
       - name: shared-model-cache
         mountPoint: /opt/models
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
-        nodeSelector:
+        nodeSelector: &arm64NodeSelector
           kubernetes.io/arch: arm64
-        tolerations:
+        tolerations: &gpuTolerations
         - key: dedicated
           operator: Equal
           value: user-workload
@@ -37,7 +37,7 @@ spec:
           value: arm64
           effect: NoSchedule
         affinity:
-          nodeAffinity:
+          nodeAffinity: &gb200NodeAffinity
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
               - matchExpressions:
@@ -45,42 +45,20 @@ spec:
                   operator: In
                   values: [customer-gpu-o7v, customer-gpu-w0e]
     prefill:
-      extraPodMetadata:
-        annotations:
-          nvidia.com/disable-image-pull-secret-discovery: "true"
-      envs:
+      extraPodMetadata: *podMetadata
+      envs: &workerEnvs
       - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
         value: "1200"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
+      volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-        tolerations:
-        - key: dedicated
-          operator: Equal
-          value: user-workload
-          effect: NoExecute
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        - key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-          effect: NoSchedule
+        nodeSelector: *arm64NodeSelector
+        tolerations: *gpuTolerations
         affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: cloud.google.com/gke-nodepool
-                  operator: In
-                  values: [customer-gpu-o7v, customer-gpu-w0e]
-          podAffinity:
+          nodeAffinity: *gb200NodeAffinity
+          podAffinity: &workerPodAffinity
             requiredDuringSchedulingIgnoredDuringExecution:
             - topologyKey: nvidia.com/gpu.clique
               matchLabelKeys: [nvidia.com/dynamo-graph-deployment-name]
@@ -90,47 +68,15 @@ spec:
                   operator: In
                   values: [prefill, decode]
     decode:
-      extraPodMetadata:
-        annotations:
-          nvidia.com/disable-image-pull-secret-discovery: "true"
-      envs:
-      - name: DYN_HEALTH_CHECK_REQUEST_TIMEOUT
-        value: "1200"
-      volumeMounts:
-      - name: shared-model-cache
-        mountPoint: /opt/models
+      extraPodMetadata: *podMetadata
+      envs: *workerEnvs
+      volumeMounts: *modelVolumeMounts
       extraPodSpec:
         priorityClassName: ci-nightly-high-priority
         imagePullSecrets:
         - name: acr-token-secret
-        nodeSelector:
-          kubernetes.io/arch: arm64
-        tolerations:
-        - key: dedicated
-          operator: Equal
-          value: user-workload
-          effect: NoExecute
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        - key: kubernetes.io/arch
-          operator: Equal
-          value: arm64
-          effect: NoSchedule
+        nodeSelector: *arm64NodeSelector
+        tolerations: *gpuTolerations
         affinity:
-          nodeAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-              nodeSelectorTerms:
-              - matchExpressions:
-                - key: cloud.google.com/gke-nodepool
-                  operator: In
-                  values: [customer-gpu-o7v, customer-gpu-w0e]
-          podAffinity:
-            requiredDuringSchedulingIgnoredDuringExecution:
-            - topologyKey: nvidia.com/gpu.clique
-              matchLabelKeys: [nvidia.com/dynamo-graph-deployment-name]
-              labelSelector:
-                matchExpressions:
-                - key: nvidia.com/dynamo-component-type
-                  operator: In
-                  values: [prefill, decode]
+          nodeAffinity: *gb200NodeAffinity
+          podAffinity: *workerPodAffinity

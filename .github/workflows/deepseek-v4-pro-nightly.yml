@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   perf:
+    name: DeepSeek V4 Pro aggregated perf
     runs-on: prod-deploy-tester-v1
     # Allow the 12-hour benchmark plus deployment, diagnostics, and cleanup.
     timeout-minutes: 900
