@@ -23,8 +23,8 @@ except ModuleNotFoundError:
         allow_module_level=True,
     )
 
-from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 from _fake_vmm import FakeVMM
+from gpu_memory_service.snapshot.backends.pinned_host import PinnedCopySlot
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -143,7 +143,9 @@ def test_pinned_copy_slot_skips_unsupported_host_register():
             )
 
         def host_unregister(self, ptr):
-            raise AssertionError("host_unregister should be skipped when registration is unsupported")
+            raise AssertionError(
+                "host_unregister should be skipped when registration is unsupported"
+            )
 
     slot = PinnedCopySlot(HostRegisterUnsupportedVMM())
 
