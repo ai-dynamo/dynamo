@@ -207,10 +207,13 @@ the load by the path a change touches:
   Achieved throughput is pinned to the offered rate there and is not a metric.
 
 A sensitivity check with two deliberately regressed builds shows the difference.
-One walked the read path twice per query and the other added 6 µs to every
-event. Each variant ran five interleaved trials with 128 workers, duplication
-20, length 4, and 4 event workers on 8 cores; values are candidate/control
-median ratios:
+Both were throwaway patches to the CRTC at `2de120f6a3`. The read variant ran
+`walk_match_path` twice in `find_matches_impl` and kept the second result, and
+the write variant busy-waited 6 µs at the start of `apply_event`. Each variant
+ran the documented CRTC command at 750 ms and at 12 s, with 128 workers,
+duplication 20, length 4, and 4 event workers, as five interleaved
+fresh-process pairs against an unpatched build on 8 cores. Values are
+candidate/control median ratios:
 
 | Metric | Load | Read path ×2 | Write +6 µs/event |
 |---|---|---:|---:|
