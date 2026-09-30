@@ -97,7 +97,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: agent
+            name: main
             readinessProbe:
               failureThreshold: 3
               initialDelaySeconds: 10
@@ -279,7 +279,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.uid
             image: example.invalid/lpu-runtime:test
-            name: conductor
+            name: main
             readinessProbe:
               failureThreshold: 3
               httpGet:

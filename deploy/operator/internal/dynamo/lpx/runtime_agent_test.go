@@ -10,11 +10,9 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/utils/ptr"
 )
 
@@ -103,8 +101,6 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				configureAgentScheduling(&pod, role.family)
 				if role.conductor {
 					configureNodeLocalConductorRuntime(&pod, "allocation")
-				} else {
-					configureAgentIdentity(&pod)
 				}
 
 				t.Log("Retain the sidecar and bind only the authored main runtime")
@@ -113,11 +109,9 @@ func TestRuntimePreservesAuthoredStartup(t *testing.T) {
 				container, authored := pod.Containers[1], before.Containers[1]
 				require.Equal(t, authored.Command, container.Command)
 				require.Equal(t, authored.Args, container.Args)
+				require.Equal(t, authored.Name, container.Name)
 				if role.conductor {
-					require.Equal(t, "conductor", container.Name)
 					require.Equal(t, "allocation", testContainerEnvValue(container.Env, "LPX_ALLOCATION"))
-				} else {
-					require.Equal(t, lpuAgentContainerName, container.Name)
 				}
 				require.Equal(t, authored.SecurityContext, container.SecurityContext)
 
@@ -165,7 +159,6 @@ func TestAllocationPrecedesAuthoredReferences(t *testing.T) {
 				Env: append(slices.Clone(authored), test.bindings...),
 			}}}
 			want := pod.Containers[0].DeepCopy()
-			want.Name = v1beta1.ComponentRoleLPXConductor
 			want.Env = append([]corev1.EnvVar{{Name: allocationEnvVar, Value: "agt0:agt1"}}, authored...)
 
 			t.Log("Publish exactly one authoritative allocation before references without changing startup or other environment")
@@ -273,55 +266,6 @@ func TestModelPathsRejectInvalidReferences(t *testing.T) {
 	}
 }
 
-func TestConfigureNodeLocalRuntimeBindings(t *testing.T) {
-	for _, role := range []string{"conductor", "agent"} {
-		t.Run(role, func(t *testing.T) {
-			t.Log("Author main-container references and resource requirements")
-			pod := corev1.PodSpec{
-				Containers: []corev1.Container{{
-					Name: commonconsts.MainContainerName,
-					Env: []corev1.EnvVar{
-						{Name: "CONTAINER_NAME", Value: commonconsts.MainContainerName},
-						{Name: "MAIN_CPU", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
-							ContainerName: commonconsts.MainContainerName, Resource: "limits.cpu",
-						}}},
-					},
-					Resources: corev1.ResourceRequirements{
-						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
-						Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
-					},
-				}},
-				Volumes: []corev1.Volume{{Name: "resources", VolumeSource: corev1.VolumeSource{
-					DownwardAPI: &corev1.DownwardAPIVolumeSource{Items: []corev1.DownwardAPIVolumeFile{{
-						Path: "main-memory", ResourceFieldRef: &corev1.ResourceFieldSelector{
-							ContainerName: commonconsts.MainContainerName, Resource: "limits.memory",
-						},
-					}}},
-				}}},
-			}
-			before := pod.DeepCopy()
-
-			t.Log("Bind the selected role and retarget every authored main-container reference")
-			if role == "conductor" {
-				configureNodeLocalConductorRuntime(&pod, "agt")
-			} else {
-				configureAgentIdentity(&pod)
-			}
-			container := pod.Containers[0]
-			require.Equal(t, role, container.Name)
-			require.Equal(t, role, testContainerEnvValue(container.Env, "CONTAINER_NAME"))
-			require.Equal(t, role, testContainerEnvSource(container.Env, "MAIN_CPU").ResourceFieldRef.ContainerName)
-			require.Equal(t, role, pod.Volumes[0].DownwardAPI.Items[0].ResourceFieldRef.ContainerName)
-			require.Equal(t, before.Containers[0].Resources, container.Resources)
-
-			t.Log("Bind placement only to the conductor")
-			if role == "conductor" {
-				require.Equal(t, "agt", testContainerEnvValue(container.Env, "LPX_ALLOCATION"))
-			}
-		})
-	}
-}
-
 func testExecProbe(command string) *corev1.Probe {
 	return &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{command}}},
@@ -334,12 +278,4 @@ func testContainerEnvValue(env []corev1.EnvVar, name string) string {
 		return ""
 	}
 	return env[index].Value
-}
-
-func testContainerEnvSource(env []corev1.EnvVar, name string) *corev1.EnvVarSource {
-	index := slices.IndexFunc(env, func(value corev1.EnvVar) bool { return value.Name == name })
-	if index < 0 {
-		return nil
-	}
-	return env[index].ValueFrom
 }
