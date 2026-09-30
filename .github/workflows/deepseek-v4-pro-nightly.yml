@@ -161,6 +161,9 @@ jobs:
               -l nvidia.com/dynamo-graph-deployment-name=dsv4-pro-agg,nvidia.com/dynamo-component-type=frontend -o json |
               jq -r 'first(.items[] | select(.metadata.deletionTimestamp == null and .status.phase == "Running")) | .metadata.name // empty')
             if [[ -n "$frontend" ]]; then
+              # Synthetic prompts are large and reproducible from the benchmark seed.
+              "${k[@]}" exec -c main "$frontend" -- \
+                find "/opt/models/perf/$RUN_KEY" -type f -name inputs.json -delete
               "${k[@]}" cp -c main "$frontend:/opt/models/perf/$RUN_KEY/." "$ARTIFACTS/perf"
             fi
           fi
