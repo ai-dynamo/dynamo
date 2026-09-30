@@ -844,6 +844,10 @@ def render_release_artifacts(data: dict) -> str:
     if data.get("NIGHTLY_BUILDS"):
         parts.append("**Recent nightly wheel builds**")
         parts.append(nightlies_table(data))
+    # The note covers the channel itself, not the rows: it holds the install
+    # pattern and the container tags, so it stays whether or not this run
+    # resolved ledger rows. releases-machine-readable.mdx already does this.
+    if data.get("NIGHTLIES_NOTE"):
         parts.append(data["NIGHTLIES_NOTE"])
 
     parts.append("**Crates: first published version on crates.io**")
@@ -1337,11 +1341,17 @@ def main(argv: list[str]) -> int:
 
     try:
         data = parse_data_module(DATA_TS)
-        if args.nightly_data:
-            data["NIGHTLY_BUILDS"] = load_nightly_builds(args.nightly_data)
     except TSParseError as exc:
         print(f"error: failed to parse {DATA_TS}: {exc}", file=sys.stderr)
         return 2
+    if args.nightly_data:
+        # Its own handler: the generated nightly module is a separate input, and
+        # blaming releases.data.ts for it sends the reader to the wrong file.
+        try:
+            data["NIGHTLY_BUILDS"] = load_nightly_builds(args.nightly_data)
+        except TSParseError as exc:
+            print(f"error: failed to parse {args.nightly_data}: {exc}", file=sys.stderr)
+            return 2
 
     # Render every selected output up front so a rendering failure emits nothing.
     try:

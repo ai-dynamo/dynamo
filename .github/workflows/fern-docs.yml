@@ -373,6 +373,9 @@ jobs:
             sync_assets
             exit 0
           fi
+          # Same nightly rows as "Generate nightly ledger tables" above, which
+          # already rewrote releases.json and releases-atom.xml as a side
+          # effect. It runs again so this asset step stands on its own.
           python3 "$gen_script" --assets-only \
             --nightly-data source-checkout/docs/fern/components/nightly-selector-data.generated.ts
 
