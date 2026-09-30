@@ -287,6 +287,177 @@ async def test_cache_hit_skips_fetch(loader: ImageLoader) -> None:
     assert result is img
 
 
+def _png_bytes_of(color: tuple[int, int, int]) -> bytes:
+    buf = BytesIO()
+    Image.new("RGB", (2, 2), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def test_case_differing_paths_do_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """Path case is part of the origin resource identity."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "Cat" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/Cat.png")
+        second = await loader.load_image("https://example.com/cat.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_trailing_semicolon_path_does_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """A trailing semicolon must survive URL parsing in the cache key."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if url.endswith(";") else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/img.png;")
+        second = await loader.load_image("https://example.com/img.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_trailing_semicolon_path_does_not_dedupe_inflight() -> None:
+    """Disabling the LRU isolates the in-flight key from cache eviction behavior."""
+
+    # cache_size=0 turns caching off, leaving _inflight as the only dedup, so
+    # this covers the concurrent path independently of the LRU.
+    uncached_loader = ImageLoader(
+        cache_size=0, http_timeout=30.0, url_policy=_permissive_policy()
+    )
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        await asyncio.sleep(0.05)
+        return _png_bytes_of((255, 0, 0) if url.endswith(";") else (0, 0, 255))
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first, second = await asyncio.gather(
+            uncached_loader.load_image("https://example.com/img.png;"),
+            uncached_loader.load_image("https://example.com/img.png"),
+        )
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_case_differing_queries_do_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """Query case can select different origin resources."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "v=A" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/img.png?v=A")
+        second = await loader.load_image("https://example.com/img.png?v=a")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_case_differing_userinfo_do_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """HTTP credentials are case-sensitive and must not be folded."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "User:Token@" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://User:Token@example.com/img.png")
+        second = await loader.load_image("https://user:token@example.com/img.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_case_differing_ipv6_zone_ids_do_not_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """IPv6 zone identifiers are case-sensitive interface names."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "%25ETH0" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://[fe80::1%25ETH0]/img.png")
+        second = await loader.load_image("https://[fe80::1%25eth0]/img.png")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
+async def test_scheme_and_host_case_still_share_cache_entry(
+    loader: ImageLoader,
+) -> None:
+    """Only scheme and host case are normalized for equivalent origins."""
+
+    mock_fetch = _mock_fetch_bytes()
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://EXAMPLE.com/img.png")
+        second = await loader.load_image("https://example.com/img.png")
+
+    assert mock_fetch.call_count == 1
+    assert first is second
+
+
+async def test_fragment_is_excluded_from_cache_key(loader: ImageLoader) -> None:
+    """Fragments are not sent to the origin and therefore share an entry."""
+
+    mock_fetch = _mock_fetch_bytes()
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.com/img.png#A")
+        second = await loader.load_image("https://example.com/img.png#a")
+
+    assert mock_fetch.call_count == 1
+    assert first is second
+
+
+async def test_leading_whitespace_does_not_collide_with_other_host(
+    loader: ImageLoader,
+) -> None:
+    """Parser-stripped leading controls must not shift host boundaries."""
+
+    async def _fetch(url: str, *args, **kwargs) -> bytes:
+        color = (255, 0, 0) if "example.comm" in url else (0, 0, 255)
+        return _png_bytes_of(color)
+
+    mock_fetch = AsyncMock(side_effect=_fetch)
+    with patch(_FETCH_BYTES_PATH, mock_fetch):
+        first = await loader.load_image("https://example.comm/A")
+        second = await loader.load_image("\nhttps://example.com/A")
+
+    assert mock_fetch.call_count == 2
+    assert first.getpixel((0, 0)) == (255, 0, 0)
+    assert second.getpixel((0, 0)) == (0, 0, 255)
+
+
 def _make_svg_bytes() -> bytes:
     return b"<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'/>"
 
